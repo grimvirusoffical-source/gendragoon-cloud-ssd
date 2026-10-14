@@ -1,0 +1,128 @@
+{
+  "schemaVersion": 2,
+  "currency": "USD",
+  "status": "proposed-prelaunch",
+  "annualBillingMonthsCharged": 10,
+  "free": {
+    "storageGb": 2,
+    "transferWorkers": 1,
+    "priceCents": 0,
+    "adSupported": true,
+    "maxFreeWorkspaces": 1
+  },
+  "workspace": {
+    "monthlyCents": 500,
+    "yearlyCents": 5000,
+    "requiredForManagedStorage": true,
+    "storageSubscriptionIncludesFee": true
+  },
+  "storage": [
+    {
+      "id": "100GB",
+      "gb": 100,
+      "monthlyCents": 640,
+      "yearlyCents": 6400
+    },
+    {
+      "id": "200GB",
+      "gb": 200,
+      "monthlyCents": 960,
+      "yearlyCents": 9600
+    },
+    {
+      "id": "300GB",
+      "gb": 300,
+      "monthlyCents": 1280,
+      "yearlyCents": 12800
+    },
+    {
+      "id": "500GB",
+      "gb": 500,
+      "monthlyCents": 2000,
+      "yearlyCents": 20000
+    },
+    {
+      "id": "1TB",
+      "gb": 1000,
+      "monthlyCents": 3600,
+      "yearlyCents": 36000
+    },
+    {
+      "id": "2TB",
+      "gb": 2000,
+      "monthlyCents": 7200,
+      "yearlyCents": 72000
+    },
+    {
+      "id": "3TB",
+      "gb": 3000,
+      "monthlyCents": 10400,
+      "yearlyCents": 104000
+    },
+    {
+      "id": "4TB",
+      "gb": 4000,
+      "monthlyCents": 13600,
+      "yearlyCents": 136000
+    },
+    {
+      "id": "5TB",
+      "gb": 5000,
+      "monthlyCents": 16800,
+      "yearlyCents": 168000
+    },
+    {
+      "id": "6TB",
+      "gb": 6000,
+      "monthlyCents": 20000,
+      "yearlyCents": 200000
+    }
+  ],
+  "performance": [
+    {
+      "id": "lite",
+      "workers": 2,
+      "monthlyCents": 300,
+      "yearlyCents": 3000
+    },
+    {
+      "id": "boost",
+      "workers": 4,
+      "monthlyCents": 600,
+      "yearlyCents": 6000
+    },
+    {
+      "id": "turbo",
+      "workers": 8,
+      "monthlyCents": 900,
+      "yearlyCents": 9000
+    },
+    {
+      "id": "ultra",
+      "workers": 12,
+      "monthlyCents": 1400,
+      "yearlyCents": 14000
+    },
+    {
+      "id": "max",
+      "workers": 20,
+      "monthlyCents": 1900,
+      "yearlyCents": 19000
+    }
+  ],
+  "removeAds": {
+    "oneTimeCents": 499,
+    "lifetimeForAccount": true
+  },
+  "perWorkspaceSubscriptions": {
+    "maxRecurring": 2,
+    "required": [
+      "storage"
+    ],
+    "optional": [
+      "performance"
+    ],
+    "freeModeMutuallyExclusiveWithPaid": true
+  },
+  "disclaimer": "Prices are proposed until fulfillment, refunds, regional taxes, compliance, and margins are validated. Performance tiers change concurrent transfer workers, not guaranteed Mbps."
+}
