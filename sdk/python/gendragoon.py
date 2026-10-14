@@ -4,12 +4,14 @@ Never embed API keys in public web/mobile client code.
 """
 import json
 import os
+import ssl
 from pathlib import Path
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError
 
 DEFAULT_URL = "https://gendragoon-free-10068843866.us-central1.run.app"
 CHUNK_SIZE = 8388608
+TLS_CONTEXT = ssl.create_default_context(cafile='/etc/ssl/cert.pem') if os.path.isfile('/etc/ssl/cert.pem') else ssl.create_default_context()
 
 class GenDragoon:
     def __init__(self, api_key=None, base_url=DEFAULT_URL):
@@ -32,7 +34,7 @@ class GenDragoon:
                 headers["Content-Type"] = "application/json"
         req = Request(self.base + path, data=body, headers=headers, method=method)
         try:
-            with urlopen(req, timeout=240) as response:
+            with urlopen(req, timeout=240, context=TLS_CONTEXT) as response:
                 data = response.read()
                 if response.headers.get("Content-Type", "").startswith("application/json"):
                     return json.loads(data)
@@ -70,7 +72,7 @@ class GenDragoon:
         # Never overwrite existing paths or hold the entire download in memory.
         with out.open("xb") as fd:
             try:
-                with urlopen(req, timeout=240) as response:
+                with urlopen(req, timeout=240, context=TLS_CONTEXT) as response:
                     while True:
                         block = response.read(1024 * 1024)
                         if not block:
