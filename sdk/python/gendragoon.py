@@ -62,11 +62,24 @@ class GenDragoon:
         return self._request("POST", "/v1/uploads/%s/finalize" % uid, {})
 
     def download(self, file_id, destination):
-        data = self._request("GET", "/v1/files/%s/download" % file_id)
+        from uuid import UUID
+        fid = str(UUID(str(file_id)))
         out = Path(destination)
-        if out.exists():
-            raise FileExistsError(out)
-        out.write_bytes(data)
+        headers = {"Authorization": "Bearer " + self.key}
+        req = Request(self.base + "/v1/files/" + fid + "/download", headers=headers)
+        # Never overwrite existing paths or hold the entire download in memory.
+        with out.open("xb") as fd:
+            try:
+                with urlopen(req, timeout=240) as response:
+                    while True:
+                        block = response.read(1024 * 1024)
+                        if not block:
+                            break
+                        fd.write(block)
+            except Exception:
+                fd.close()
+                out.unlink(missing_ok=True)
+                raise
         return out
 
     def delete(self, file_id):
