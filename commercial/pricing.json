@@ -1,0 +1,84 @@
+{
+  "currency": "USD",
+  "yearly_discount_months": 2,
+  "transfer_policy": "Included monthly outbound GB; excess requires plan/transfer upgrade",
+  "tiers": [
+    {
+      "id": "100gb",
+      "storage_gb": 100,
+      "monthly_usd": 5,
+      "yearly_usd": 50,
+      "download_gb_month": 10
+    },
+    {
+      "id": "200gb",
+      "storage_gb": 200,
+      "monthly_usd": 10,
+      "yearly_usd": 100,
+      "download_gb_month": 20
+    },
+    {
+      "id": "300gb",
+      "storage_gb": 300,
+      "monthly_usd": 15,
+      "yearly_usd": 150,
+      "download_gb_month": 30
+    },
+    {
+      "id": "500gb",
+      "storage_gb": 500,
+      "monthly_usd": 25,
+      "yearly_usd": 250,
+      "download_gb_month": 50
+    },
+    {
+      "id": "1tb",
+      "storage_gb": 1000,
+      "monthly_usd": 49,
+      "yearly_usd": 490,
+      "download_gb_month": 100
+    },
+    {
+      "id": "2tb",
+      "storage_gb": 2000,
+      "monthly_usd": 95,
+      "yearly_usd": 950,
+      "download_gb_month": 200
+    },
+    {
+      "id": "3tb",
+      "storage_gb": 3000,
+      "monthly_usd": 139,
+      "yearly_usd": 1390,
+      "download_gb_month": 300
+    },
+    {
+      "id": "4tb",
+      "storage_gb": 4000,
+      "monthly_usd": 179,
+      "yearly_usd": 1790,
+      "download_gb_month": 400
+    },
+    {
+      "id": "5tb",
+      "storage_gb": 5000,
+      "monthly_usd": 219,
+      "yearly_usd": 2190,
+      "download_gb_month": 500
+    },
+    {
+      "id": "6tb",
+      "storage_gb": 6000,
+      "monthly_usd": 259,
+      "yearly_usd": 2590,
+      "download_gb_month": 600
+    },
+    {
+      "id": "byo",
+      "storage_gb": 0,
+      "monthly_usd": 10,
+      "yearly_usd": 100,
+      "download_gb_month": 0
+    }
+  ]
+}
