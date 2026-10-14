@@ -1,0 +1,207 @@
+openapi: 3.0.3
+info:
+  title: GenDragoonSSD Free Workspace API
+  version: 0.13.0-preview
+  description: |
+    HTTPS API for customers who have completed Google sign-in, accepted Terms,
+    and created a free 2 GB workspace. API keys are account-scoped and cannot
+    reveal or access cloud-provider bucket credentials. Paid workspace access is NOT enabled.
+servers:
+  - url: https://gendragoon-free-10068843866.us-central1.run.app
+security:
+  - bearerAuth: []
+tags:
+  - name: Workspace
+  - name: Files
+  - name: Uploads
+  - name: API keys
+paths:
+  /health:
+    get:
+      security: []
+      tags: [Workspace]
+      summary: Server health
+      responses:
+        '200': {description: Service is responding}
+  /v1/me:
+    get:
+      tags: [Workspace]
+      summary: Authenticated account and free workspace status
+      responses:
+        '200': {description: Account status and quota}
+        '401': {description: Invalid or missing credentials}
+  /v1/free:
+    post:
+      tags: [Workspace]
+      summary: Create one free account workspace (Google login required for first-time creation)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name: {type: string, example: My Free Cloud}
+      responses:
+        '201': {description: Free workspace created}
+        '409': {description: Workspace already exists}
+  /v1/files:
+    get:
+      tags: [Files]
+      summary: List private files (files:read)
+      responses:
+        '200':
+          description: Private file list and quota
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  quotaBytes: {type: integer, format: int64}
+                  usedBytes: {type: integer, format: int64}
+                  files:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/File'
+  /v1/files/{fileId}/download:
+    parameters:
+      - $ref: '#/components/parameters/fileId'
+    get:
+      tags: [Files]
+      summary: Download own file as binary stream (files:read)
+      responses:
+        '200':
+          description: File bytes
+          content:
+            application/octet-stream:
+              schema: {type: string, format: binary}
+  /v1/files/{fileId}:
+    parameters:
+      - $ref: '#/components/parameters/fileId'
+    delete:
+      tags: [Files]
+      summary: Delete own cloud copy (files:write)
+      responses:
+        '200': {description: File deleted}
+  /v1/uploads:
+    post:
+      tags: [Uploads]
+      summary: Reserve free quota and initiate resumable upload (files:write)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, sizeBytes]
+              properties:
+                name: {type: string}
+                sizeBytes: {type: integer, format: int64, minimum: 1, maximum: 2000000000}
+      responses:
+        '201':
+          description: Upload session
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  uploadId: {type: string, format: uuid}
+                  chunkBytes: {type: integer}
+                  totalChunks: {type: integer}
+        '413': {description: Quota exhausted}
+  /v1/uploads/{uploadId}:
+    parameters:
+      - $ref: '#/components/parameters/uploadId'
+    get:
+      tags: [Uploads]
+      summary: Query resumable-upload offset (files:read)
+      responses:
+        '200': {description: Upload state and nextIndex}
+  /v1/uploads/{uploadId}/chunks/{index}:
+    parameters:
+      - $ref: '#/components/parameters/uploadId'
+      - name: index
+        in: path
+        required: true
+        schema: {type: integer, minimum: 0}
+    put:
+      tags: [Uploads]
+      summary: Upload exact binary chunk in sequential order (files:write)
+      description: Every chunk must match its expected size, up to 8388608 bytes. Resume from nextIndex.
+      requestBody:
+        required: true
+        content:
+          application/octet-stream:
+            schema: {type: string, format: binary}
+      responses:
+        '200': {description: Chunk verified}
+        '409': {description: Out of order; query nextIndex and resume}
+  /v1/uploads/{uploadId}/finalize:
+    parameters:
+      - $ref: '#/components/parameters/uploadId'
+    post:
+      tags: [Uploads]
+      summary: Compose and verify cloud object (files:write)
+      responses:
+        '200': {description: Verified file saved}
+        '409': {description: Missing chunks}
+  /v1/keys:
+    get:
+      tags: [API keys]
+      summary: List own API-key metadata (Firebase Google token only)
+      responses:
+        '200': {description: Key metadata; never returns secrets}
+    post:
+      tags: [API keys]
+      summary: Generate scoped key (Google token only; returned exactly once)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, scopes]
+              properties:
+                name: {type: string}
+                scopes:
+                  type: array
+                  uniqueItems: true
+                  items: {type: string, enum: ['files:read', 'files:write']}
+      responses:
+        '201': {description: New opaque API key returned only once}
+        '409': {description: Free workspace missing or five active keys reached}
+  /v1/keys/{keyId}:
+    parameters:
+      - name: keyId
+        in: path
+        required: true
+        schema: {type: string}
+    delete:
+      tags: [API keys]
+      summary: Revoke own key immediately (Firebase Google token only)
+      responses:
+        '200': {description: Key revoked}
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: API key obtained after verified Google login and Terms acceptance. Keep secret server-side. Key routes require a Firebase ID token.
+  parameters:
+    fileId:
+      name: fileId
+      in: path
+      required: true
+      schema: {type: string, format: uuid}
+    uploadId:
+      name: uploadId
+      in: path
+      required: true
+      schema: {type: string, format: uuid}
+  schemas:
+    File:
+      type: object
+      properties:
+        id: {type: string, format: uuid}
+        name: {type: string}
+        sizeBytes: {type: integer, format: int64}
