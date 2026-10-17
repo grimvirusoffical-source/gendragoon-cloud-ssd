@@ -19,6 +19,44 @@
 - [Python 3 standard-library client](./python/gendragoon.py) — status, list, chunked upload, download, delete.
 - [Node.js client](./javascript/gendragoon.mjs) — status, list, chunked upload, streamed download, delete.
 
+Both download methods keep the existing **no-overwrite** contract. They stream
+into a private sibling staging directory, validate `Content-Length` when
+provided, and publish a complete file atomically. An existing destination,
+including a symlink or a file created during the transfer, causes failure and
+is preserved. Network, disk, HTTP and integrity failures remove only that
+request's staging files. Concurrent downloads to one destination produce one
+complete winner; the other request fails without replacing it.
+API file identifiers are UUIDs; Python validates download/delete IDs before
+requesting them, and Node encodes IDs as a single URL path component.
+
+Publication requires same-filesystem hard-link support. FAT/exFAT and other
+filesystems without that support fail safely; choose a supported local volume.
+No partial-file copy fallback is used. Downloads request identity encoding and
+reject encoded responses so the byte-count check applies to the stored file.
+Without a server length or trusted checksum, a client cannot prove that a
+cleanly terminated response contains all the intended remote bytes.
+
+All Python and Node requests reject redirects, including same-origin redirects.
+API credentials are never replayed to a redirect destination or a downgraded
+HTTP URL. Use the documented HTTPS endpoint that serves file bytes directly;
+redirected/signed external download URLs need a separate explicit integration.
+TLS certificate verification remains enabled. The Node transport has a
+240-second request/body abort deadline; Python uses a 240-second socket timeout.
+
+Run the local SDK regression suites from the repository root:
+
+~~~bash
+python3 -B -m unittest discover -s sdk/python/tests -v
+node --test sdk/javascript/tests/gendragoon.test.mjs
+~~~
+
+The tests require OpenSSL to generate disposable local TLS identities. They
+exercise trusted HTTPS, rejection of an untrusted certificate, blocked
+cross-origin and HTTP downgrade redirects, truncated streams, asynchronous disk
+errors, private staging cleanup and concurrent destination preservation. They
+use fixture credentials and local servers; passing them does not establish
+live backend availability, account isolation, billing or full app readiness.
+
 ### Universal HTTPS example
 
 ~~~bash

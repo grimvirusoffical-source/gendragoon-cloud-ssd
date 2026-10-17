@@ -1,0 +1,32 @@
+GENDRAGOON CLOUD SSD — PRIVACY NOTICE
+Updated October 15, 2026
+
+Operator: Joshua Franklin. Contact: grimvirusoffical@gmail.com.
+This notice describes GenDragoon's current cloud-file service and iOS companion.
+
+ACCOUNT INFORMATION
+Google Sign-In and Firebase Authentication verify your identity. Google/Firebase process your account profile, email address and identifiers. GenDragoon uses your verified user ID, email address and authentication tokens to identify your account and authorize access. Your Google password is entered with Google, not GenDragoon. The iOS app stores its refresh credential in the device Keychain; signing out removes the app's saved credential. Desktop sessions are held in memory.
+
+GOOGLE SIGN-IN SDK
+The included Google Sign-In SDK declares collection of name, email address, phone number, coarse location, user ID, device ID, usage information and other data. Its privacy manifest lists app functionality and/or analytics purposes, depending on the data type, and declares no tracking. These are provider/SDK disclosures; GenDragoon does not request device GPS access or a phone number in its own sign-in form.
+
+FILES AND SERVICE RECORDS
+Files you choose to upload, including documents, images, video or audio, are stored in Google Cloud Storage. The service records file names, sizes, checksums, upload progress, workspace identifiers, storage usage and plan entitlements in its backend. Terms acceptance records include your user ID, acceptance version, acknowledgments and timestamp. These records support storage, restoration, resumable transfers, integrity checks and account administration. Your files are not made public by the app; restoring and sharing through the operating-system share sheet sends selected files to destinations you choose.
+
+PAYMENTS
+Stripe processes purchases made through the web and desktop checkout. GenDragoon records billing customer identifiers and subscription/payment status to provide the purchased features. GenDragoon does not collect full card numbers in its own forms. The current iOS companion has no in-app payment form.
+
+LOCAL FILES
+The iOS app uses local temporary data for transfers and keeps exported files in its Documents/Exports directory. Exported files remain on your device until you remove them. Signing out does not delete exports or originals. Manual desktop cloud-provider connections use separate locally configured credentials and the provider you choose.
+
+SERVICE PROVIDERS AND SECURITY
+Google/Firebase supply authentication, database and storage services; Stripe supplies payment processing. These providers process the information needed to deliver their services. Hosting infrastructure may record network requests, IP addresses, timestamps and operational errors for service operation and security. GenDragoon uses HTTPS, authenticated per-account authorization and provider-managed storage encryption. It is not an end-to-end encrypted storage service. We may disclose information when legally required or to investigate abuse and protect service security.
+
+IOS ADVERTISING AND TRACKING
+The current iOS companion contains no advertising interface and does not implement cross-app advertising tracking. Web or desktop features may differ; this notice does not represent a promise that every GenDragoon interface is ad-free.
+
+RETENTION AND YOUR CHOICES
+Use the app to delete cloud copies of individual files. Local originals and exports are separate and are not deleted by that action. Provider backups, soft-deletion retention and operational records may remain after deletion according to the providers' retention mechanisms. Account, billing and security records may be retained as necessary to operate the service, resolve disputes, prevent fraud or meet legal obligations. To request account access, correction or deletion, contact grimvirusoffical@gmail.com from the account email. Identity verification may be needed. The current iOS build does not yet offer an in-app account-deletion control. Canceling a paid subscription and deleting files or an account are separate actions; contact support for help with both. Do not email passwords, API keys or card details.
+
+UPDATES
+This notice may change as the service changes. Material changes will be reflected in the dated notice available in the app. Contact the operator with privacy questions.

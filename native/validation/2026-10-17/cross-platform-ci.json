@@ -1,0 +1,37 @@
+{
+  "sourceCommit": "18b54fcd21698239e7ca2775cd8e3b3c41d3ae38",
+  "observedAtUtc": "2026-10-17T10:12:22Z",
+  "runs": [
+    {
+      "id": 39023761715,
+      "event": "push",
+      "conclusion": "success",
+      "url": "https://github.com/grimvirusoffical-source/gendragoon-cloud-ssd/actions/runs/39023761715",
+      "jobs": [
+        {"id": 117370585484, "name": "macos-compile", "conclusion": "success"},
+        {"id": 117370585614, "name": "desktop (windows-latest)", "conclusion": "success", "tests": 36, "passed": 32, "skipped": 4, "seconds": 39.188},
+        {"id": 117370585616, "name": "desktop (ubuntu-latest)", "conclusion": "success", "tests": 36, "passed": 35, "skipped": 1, "seconds": 4.411},
+        {"id": 117370585622, "name": "backend", "conclusion": "success"},
+        {"id": 117370585639, "name": "android", "conclusion": "success"},
+        {"id": 117370585705, "name": "native-helpers", "conclusion": "success"},
+        {"id": 117370585712, "name": "ios", "conclusion": "success"}
+      ]
+    },
+    {
+      "id": 39023766003,
+      "event": "pull_request",
+      "conclusion": "success",
+      "url": "https://github.com/grimvirusoffical-source/gendragoon-cloud-ssd/actions/runs/39023766003",
+      "jobs": [
+        {"id": 117370597542, "name": "ios", "conclusion": "success"},
+        {"id": 117370597550, "name": "desktop (ubuntu-latest)", "conclusion": "success"},
+        {"id": 117370597552, "name": "backend", "conclusion": "success"},
+        {"id": 117370597576, "name": "macos-compile", "conclusion": "success"},
+        {"id": 117370597587, "name": "native-helpers", "conclusion": "success"},
+        {"id": 117370597607, "name": "desktop (windows-latest)", "conclusion": "success", "tests": 36, "passed": 32, "skipped": 4, "seconds": 40.390},
+        {"id": 117370597619, "name": "android", "conclusion": "success"}
+      ]
+    }
+  ],
+  "scope": "Automated native/backend/desktop fixtures and macOS/iOS/Android compilation; not full authenticated app, payment, physical-device, distribution, or penetration-test acceptance."
+}
