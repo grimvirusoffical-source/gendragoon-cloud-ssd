@@ -38,7 +38,7 @@ class SignedResourceBytecodeTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory(prefix="gd-bytecode-fixture-")
         self.addCleanup(self.temporary.cleanup)
-        self.root = Path(self.temporary.name)
+        self.root = Path(self.temporary.name).resolve()
         self.app = self.root / "Fixture.app"
         self.resources = self.app / "Contents/Resources"
         self.resources.mkdir(parents=True)
