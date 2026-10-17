@@ -1,0 +1,7 @@
+node_modules/
+customer-storage.json
+.env
+.env.*
+!.env.example
+*.log
+__pycache__/

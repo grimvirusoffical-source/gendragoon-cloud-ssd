@@ -1,0 +1,46 @@
+{
+  "project_info": {
+    "project_number": "866943946690",
+    "project_id": "gendragoonssd",
+    "storage_bucket": "gendragoonssd.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:866943946690:android:18e378749252a61a4ed05b",
+        "android_client_info": {
+          "package_name": "app.gendragoon.cloudssd.mobile"
+        }
+      },
+      "oauth_client": [
+        {
+          "client_id": "866943946690-ttfvn0mn91v35ii5pq4n3fu0258j8f18.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
+      "api_key": [
+        {
+          "current_key": "AIzaSyBxVMf-w7_E0msomCoaWYu2TFLCXgoGDC0"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": [
+            {
+              "client_id": "866943946690-ttfvn0mn91v35ii5pq4n3fu0258j8f18.apps.googleusercontent.com",
+              "client_type": 3
+            },
+            {
+              "client_id": "866943946690-d4trhq2179rulkul36uase49pk4m6mht.apps.googleusercontent.com",
+              "client_type": 2,
+              "ios_info": {
+                "bundle_id": "app.gendragoon.cloudssd.mobile"
+              }
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

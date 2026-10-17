@@ -1,0 +1,98 @@
+name: Native integration validation
+
+on:
+  push:
+    branches: [codex/native-integration-20261017]
+  pull_request:
+    paths: ['native/**', '.github/workflows/native-validation.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: native-validation-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  native-helpers:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: '3.13'
+      - run: python -m unittest discover -s native/Tests -p 'test_integrated_*.py'
+        env:
+          PYTHONPATH: native/Resources
+      - run: python -m unittest discover -s native/Tests -p test_app_launch.py
+      - run: python -m unittest discover -s native/Tests -p test_preload.py
+      - run: python native/Tests/stress_native.py
+
+  desktop:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: '3.13'
+      - run: python -m unittest discover -s native/Desktop/tests
+
+  backend:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: native/Backend
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: native/Backend/package-lock.json
+      - run: npm ci --ignore-scripts
+      - run: npm test
+      - run: npm audit --omit=dev --audit-level=high
+
+  macos-compile:
+    runs-on: macos-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - name: Compile all active native sources
+        run: xcrun swiftc -parse-as-library -target arm64-apple-macosx14.0 -framework SwiftUI -framework AppKit -o "$RUNNER_TEMP/GenDragoon" native/Sources/*.swift
+
+  android:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@07d1f8453baaff67fb503883367f8b13e6158a54 # v6
+        with:
+          gradle-version: '8.13'
+      - run: gradle :app:assembleDebug :app:testDebugUnitTest --no-daemon
+        working-directory: native/Mobile/Android
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: Android-debug-candidate
+          path: native/Mobile/Android/app/build/outputs/apk/debug/*.apk
+          retention-days: 7
+
+  ios:
+    runs-on: macos-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - name: Build iOS Simulator client
+        run: xcodebuild -project native/Mobile/iOS/GenDragoonMobile.xcodeproj -scheme GenDragoonMobile -sdk iphonesimulator -destination 'generic/platform=iOS Simulator' -derivedDataPath "$RUNNER_TEMP/GenDragoon-iOS" CODE_SIGNING_ALLOWED=NO build
