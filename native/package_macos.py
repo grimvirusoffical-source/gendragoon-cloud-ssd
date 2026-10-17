@@ -18,9 +18,16 @@ ROOT=Path(__file__).resolve().parent
 
 def package(app,output,candidate=False):
     if sys.platform!="darwin":raise RuntimeError("Package on macOS to preserve bundle metadata")
-    subprocess.run(["/usr/bin/codesign","--verify","--deep","--strict",str(app)],check=True)
+    requirement=('anchor apple generic and identifier "app.gendragoon.cloudssd"'
+        ' and certificate leaf[subject.OU] = "NZPU8H843J"'
+        ' and certificate 1[field.1.2.840.113635.100.6.2.6] exists'
+        ' and certificate leaf[field.1.2.840.113635.100.6.1.13] exists')
+    subprocess.run(["/usr/bin/codesign","--verify","--deep","--strict",
+                    "-R","="+requirement,str(app)],check=True)
     gate=subprocess.run(["/usr/sbin/spctl","--assess","--type","execute",str(app)],capture_output=True)
-    if gate.returncode and not candidate:raise RuntimeError("Notarize and staple this build before release packaging")
+    staple=subprocess.run(["/usr/bin/xcrun","stapler","validate",str(app)],capture_output=True)
+    if (gate.returncode or staple.returncode) and not candidate:
+        raise RuntimeError("Release packaging requires a trusted Developer ID signature, accepted Gatekeeper assessment and a stapled Apple notarization ticket")
     with (app/"Contents/Info.plist").open("rb") as handle:info=plistlib.load(handle)
     if info.get("CFBundleIdentifier")!="app.gendragoon.cloudssd":raise RuntimeError("Bundle ID mismatch")
     version=info["CFBundleShortVersionString"];build=info["CFBundleVersion"]
@@ -37,10 +44,19 @@ def package(app,output,candidate=False):
     template=template.replace("The pinned v"+version+" release is a draft; checksum verification alone does NOT make\nit installable.",
         "Checksum verification alone does not make a package installable.")
     (output/"install-macos.py").write_text(template)
-    (output/"Install.command").write_text('#!/bin/sh\nset -eu\ncd -- "$(dirname -- "$0")"\nexec /Library/Frameworks/Python.framework/Versions/3.13/bin/python3 ./install-macos.py --archive ./'+archive.name+' --reinstall --restart\n')
+    # Do not assume every customer has the developer's Python.org 3.13 path.
+    command=('#!/bin/sh\nset -eu\ncd -- "$(dirname -- "$0")"\n'
+        'if [ -x /Library/Frameworks/Python.framework/Versions/3.13/bin/python3 ]; then\n'
+        '  PYTHON=/Library/Frameworks/Python.framework/Versions/3.13/bin/python3\n'
+        'elif command -v python3 >/dev/null 2>&1; then\n'
+        '  PYTHON="$(command -v python3)"\n'
+        'else\n  echo "Python 3.9 or newer is required for this verified installer." >&2\n  exit 1\nfi\n'
+        'exec "$PYTHON" ./install-macos.py --archive "./'+archive.name+'" --reinstall --restart\n')
+    (output/"Install.command").write_text(command)
     (output/"Install.command").chmod(0o755)
     report={"version":version,"build":build,"sha256":digest,"archiveBytes":archive.stat().st_size,
-        "gatekeeperAccepted":gate.returncode==0,"candidate":candidate,"automaticUpdateEligible":not candidate and gate.returncode==0}
+        "gatekeeperAccepted":gate.returncode==0,"stapledTicketValidated":staple.returncode==0,
+        "candidate":candidate,"automaticUpdateEligible":not candidate and gate.returncode==0 and staple.returncode==0}
     (output/"package-status.json").write_text(json.dumps(report,indent=2)+"\n")
     print(json.dumps(report),flush=True)
 

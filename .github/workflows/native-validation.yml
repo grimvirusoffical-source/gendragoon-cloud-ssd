@@ -33,6 +33,8 @@ jobs:
         env:
           PYTHONPATH: native/Resources
       - run: python native/Tests/stress_native.py
+      - name: Test Mac notarization guardrails without Apple credentials
+        run: python -m unittest discover -s native/Tests -p test_notarize_macos.py
       - name: Verify the Mac installer and reference update helpers
         run: python -m unittest discover -s macos/tests -p 'test_*.py'
 

@@ -288,6 +288,9 @@ def verify_app(app):
         raise InstallError("Extracted executable architecture mismatch")
     run_checked(["/usr/sbin/spctl", "--assess", "--type", "execute", "--verbose=4", str(app)],
                 timeout=120)
+    # Gatekeeper may accept an online ticket; distribution requires an
+    # actual stapled ticket for reliable offline first launch.
+    run_checked(["/usr/bin/xcrun", "stapler", "validate", str(app)], timeout=120)
 
 
 def unescape_mount(value):

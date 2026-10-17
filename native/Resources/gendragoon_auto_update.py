@@ -285,6 +285,9 @@ def validate_app(app,version):
         raise RuntimeError("Release lacks the required Apple Developer ID team signature")
     # Gatekeeper assessment blocks unnotarized or untrusted app builds.
     subprocess_ok(["/usr/sbin/spctl","--assess","--type","execute","--verbose",str(app)],timeout=70)
+    # Do not auto-replace an installed app using only an online notarization
+    # lookup; the release app must carry its own valid stapled ticket.
+    subprocess_ok(["/usr/bin/xcrun","stapler","validate",str(app)],timeout=70)
     return True
 
 def staged_valid(strict=False):
