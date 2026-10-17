@@ -66,6 +66,14 @@ class InstallerTests(unittest.TestCase):
                 archive.extractall(arguments[-1])
                 for entry in archive.infolist():
                     (Path(arguments[-1]) / entry.filename).chmod((entry.external_attr >> 16) & 0o777)
+        if arguments[0] == "/usr/bin/codesign" and "--verify" in arguments:
+            expected = ('=anchor apple generic and identifier "' + installer.BUNDLE_ID
+                        + '" and certificate leaf[subject.OU] = "' + installer.TEAM_ID
+                        + '" and certificate 1[field.1.2.840.113635.100.6.2.6] exists'
+                        + ' and certificate leaf[field.1.2.840.113635.100.6.1.13] exists')
+            self.assertEqual(arguments[arguments.index("-R") + 1], expected)
+            self.assertIn("--deep", arguments)
+            self.assertIn("--strict", arguments)
         if arguments[0] == "/usr/bin/codesign" and "-dv" in arguments:
             return ("Identifier=" + installer.BUNDLE_ID + "\nTeamIdentifier=" + installer.TEAM_ID
                     + "\nAuthority=Developer ID Application: Example (" + installer.TEAM_ID + ")\n")

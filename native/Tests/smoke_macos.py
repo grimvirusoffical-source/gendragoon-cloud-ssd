@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Disposable real-macOS app lifecycle smoke test, with a 55-second wall limit.
+"""Disposable real-macOS app lifecycle smoke test, with a 120-second wall limit.
 
 Run with the installed Python 3.10+ runtime. Only local fixture apps are compiled,
 ad hoc signed, opened, and removed. The production helpers are loaded unchanged;
@@ -25,7 +25,11 @@ import tempfile
 import time
 import uuid
 
-MAX_SECONDS = 55
+MAX_SECONDS = 120
+PREPARATION_SECONDS = 20
+CASE_SECONDS = 30
+FINAL_CHECK_SECONDS = 5
+CLEANUP_SECONDS = 5
 MAX_FIXTURE_BYTES = 5 * 1024 * 1024
 PROJECT = "fixture-project"
 BUCKET = "fixture-bucket"
@@ -85,6 +89,55 @@ int main(void) {
 def require(condition, message):
     if not condition:
         raise AssertionError(message)
+
+
+class SmokeDeadline(BaseException):
+    """Do not let production helpers' ordinary Exception handlers swallow a harness deadline."""
+
+
+class SmokeBudget:
+    def __init__(self, timings, clock=None, timer=None):
+        self.clock = clock or time.monotonic
+        self.timer = timer or (lambda seconds: signal.setitimer(signal.ITIMER_REAL, seconds))
+        self.started = self.clock()
+        self.deadline = self.started + MAX_SECONDS
+        self.timings = timings
+        self.active_phase = "total"
+        self.active_deadline = self.deadline
+
+    def expire(self, _signum=None, _frame=None):
+        phase = "total" if self.clock() >= self.deadline else self.active_phase
+        raise SmokeDeadline("Disposable macOS smoke deadline reached: " + phase)
+
+    @contextlib.contextmanager
+    def phase(self, name, seconds):
+        started = self.clock()
+        deadline = min(started + seconds, self.deadline)
+        if started >= deadline:
+            self.expire()
+        self.active_phase, self.active_deadline = name, deadline
+        record = {"limitSeconds": seconds, "availableSeconds": round(deadline - started, 3),
+                  "startedOffsetSeconds": round(started - self.started, 3), "completed": False}
+        self.timings[name] = record
+        self.timer(deadline - started)
+        try:
+            yield deadline
+            if self.clock() >= deadline:
+                self.expire()
+            record["completed"] = True
+        finally:
+            record["seconds"] = round(self.clock() - started, 3)
+            self.active_phase, self.active_deadline = "total", self.deadline
+            self.timer(max(.001, self.deadline - self.clock()))
+
+
+@contextlib.contextmanager
+def measured_step(timings, name):
+    started = time.monotonic()
+    try:
+        yield
+    finally:
+        timings[name] = round(time.monotonic() - started, 3)
 
 
 def helper_modules(resources, fixture_home):
@@ -197,10 +250,13 @@ def stage_case(home, library, launcher, binary, token, case, deadline):
             "key": key, "id": identifier, "entry": entry}
 
 
-def observe_and_finish(case, launcher, process, deadline):
+def observe_and_finish(case, launcher, process, deadline, diagnostics=None):
+    diagnostics = diagnostics if diagnostics is not None else {}
+    started = time.monotonic()
     observed = None
     while time.monotonic() < deadline:
         receipt = launcher.read(case["id"])
+        diagnostics["state"] = receipt["state"]
         if receipt["state"] == "running":
             pid = receipt.get("pid")
             identity = launcher.process_identity(pid)
@@ -211,6 +267,7 @@ def observe_and_finish(case, launcher, process, deadline):
                 require(pid in launcher.resource_pids(case["target"]), "lsof did not observe the fixture's open bundle resources")
                 observed = {"pidPathVerified": True, "startTimeVerified": bool(identity["started"]),
                             "openResourceVerified": True, "watcherIdentityVerified": True}
+                diagnostics["observedAfterSeconds"] = round(time.monotonic() - started, 3)
                 break
         if receipt["state"] in launcher.TERMINAL or process.poll() is not None:
             raise AssertionError("Fixture exited before real process/resource checks: " + str(receipt.get("message", receipt["state"])))
@@ -218,17 +275,15 @@ def observe_and_finish(case, launcher, process, deadline):
     require(observed is not None, "Timed out observing the locally signed fixture")
     while time.monotonic() < deadline:
         receipt = launcher.read(case["id"])
+        diagnostics["state"] = receipt["state"]
         if receipt["state"] in launcher.TERMINAL and process.poll() is not None:
             require(process.returncode == 0, "Fixture monitor worker failed")
+            diagnostics["terminalAfterSeconds"] = round(time.monotonic() - started, 3)
             return receipt, observed
         if process.poll() is not None and receipt["state"] not in launcher.TERMINAL:
             raise AssertionError("Fixture monitor exited without completing its lifecycle")
         time.sleep(.1)
-    raise TimeoutError("Fixture monitor did not complete before the smoke deadline")
-
-
-def timeout_handler(_signum, _frame):
-    raise TimeoutError("The disposable macOS smoke test reached its 55-second wall limit")
+    raise TimeoutError("Fixture monitor did not complete before its independent case deadline")
 
 
 def main(args):
@@ -236,74 +291,96 @@ def main(args):
     require(sys.version_info >= (3, 10), "Python 3.10 or newer is required")
     if args.worker:
         return worker(args.resources, args.fixture_home, args.token, args.session)
-    started = time.monotonic()
-    deadline = started + MAX_SECONDS
-    signal.signal(signal.SIGALRM, timeout_handler)
-    signal.setitimer(signal.ITIMER_REAL, MAX_SECONDS)
-    home = Path(tempfile.mkdtemp(prefix="gd-macos-smoke-")).resolve(strict=True)
-    home.chmod(0o700)
-    token = uuid.uuid4().hex
-    marker = home / MARKER
-    marker.write_text(json.dumps({"token": token, "uid": os.getuid()}))
-    marker.chmod(0o600)
     processes = []
-    output = {"ok": False, "cases": []}
+    output = {"ok": False, "cases": [], "timings": {}, "preparationStepSeconds": {},
+              "limits": {"totalSeconds": MAX_SECONDS, "preparationSeconds": PREPARATION_SECONDS,
+                         "caseSeconds": CASE_SECONDS, "caseCount": 3, "finalCheckSeconds": FINAL_CHECK_SECONDS,
+                         "cleanupSeconds": CLEANUP_SECONDS, "fixtureBytes": MAX_FIXTURE_BYTES,
+                         "fixtureSelfExitSeconds": 4, "productionQuietChecks": 5},
+              "signing": "local ad hoc", "cloudOperations": 0, "securityPolicyChanges": False}
+    budget = SmokeBudget(output["timings"])
+    previous_alarm = signal.signal(signal.SIGALRM, budget.expire)
+    signal.setitimer(signal.ITIMER_REAL, MAX_SECONDS)
+    home = None
     success = False
     try:
-        library, launcher = helper_modules(args.resources, home)
-        library.prepare_cache()
-        library.CONFIG.write_text("[fixture]\ntype = memory\n")
-        library.CONFIG.chmod(0o600)
-        binary = compile_fixture(home, deadline)
-        staged = [stage_case(home, library, launcher, binary, token, case, deadline)
-                  for case in ("cleanup", "keep", "dirty")]
-        output["fixtureBytes"] = directory_bytes(home)
-        require(output["fixtureBytes"] < MAX_FIXTURE_BYTES, "Fixture data exceeds the 5 MiB budget")
-        initial_index = library.load()
+        with budget.phase("preparation", PREPARATION_SECONDS) as preparation_deadline:
+            home = Path(tempfile.mkdtemp(prefix="gd-macos-smoke-")).resolve(strict=True)
+            home.chmod(0o700)
+            token = uuid.uuid4().hex
+            marker = home / MARKER
+            marker.write_text(json.dumps({"token": token, "uid": os.getuid()}))
+            marker.chmod(0o600)
+            library, launcher = helper_modules(args.resources, home)
+            library.prepare_cache()
+            library.CONFIG.write_text("[fixture]\ntype = memory\n")
+            library.CONFIG.chmod(0o600)
+            with measured_step(output["preparationStepSeconds"], "compile"):
+                binary = compile_fixture(home, preparation_deadline)
+            staged = []
+            for name in ("cleanup", "keep", "dirty"):
+                with measured_step(output["preparationStepSeconds"], "stage_" + name):
+                    staged.append(stage_case(home, library, launcher, binary, token, name, preparation_deadline))
+            output["fixtureBytes"] = directory_bytes(home)
+            require(output["fixtureBytes"] < MAX_FIXTURE_BYTES, "Fixture data exceeds the 5 MiB budget")
+            initial_index = library.load()
         for case in staged:
-            log = home / (case["case"] + "-worker.log")
-            with log.open("wb") as errors:
-                log.chmod(0o600)
-                process = subprocess.Popen([sys.executable, str(Path(__file__).resolve()), "--worker",
-                    "--resources", str(args.resources.resolve()), "--fixture-home", str(home), "--token", token,
-                    "--session", case["id"]], stdin=subprocess.DEVNULL, stdout=errors, stderr=errors)
-            processes.append(process)
-            receipt, observed = observe_and_finish(case, launcher, process, deadline)
-            expected = {"cleanup": "exited-cleaned", "keep": "exited-retained", "dirty": "failed-retained"}[case["case"]]
-            require(receipt["state"] == expected, case["case"] + " ended in " + receipt["state"] + ": " + str(receipt.get("message", "")))
-            require(case["target"].exists() == (case["case"] != "cleanup"), "Incorrect cache retention for " + case["case"])
-            if case["case"] == "dirty":
-                require("Restored content" in receipt.get("message", ""), "Dirty cache was retained for an unexpected reason")
-                require((case["target"] / "Contents/Resources/fixture.dat").read_bytes() == b"fixture changed itself while running\n",
-                        "Changed fixture content was not preserved")
-            elif case["case"] == "keep":
-                library.verify_restored(case["target"], case["manifest"])
-            library.verify_restored(case["source"], case["manifest"])
-            require(library.load() == initial_index, "A launch or cleanup changed the cloud library index")
-            require(not launcher.watcher_alive(receipt), "Finished fixture left its monitor process running")
-            output["cases"].append({"case": case["case"], "state": receipt["state"],
-                                    "cacheRetained": case["target"].exists(), "sourcePreserved": True, **observed})
-        require(not launcher.sessions()["busy"], "A fixture session is still active after its worker exited")
-        require(directory_bytes(home) < MAX_FIXTURE_BYTES, "Fixture data grew beyond its 5 MiB budget")
-        output.update(ok=True, seconds=round(time.monotonic() - started, 3),
-                      signing="local ad hoc", cloudOperations=0, securityPolicyChanges=False)
+            diagnostics = {"case": case["case"], "ok": False, "state": "launching"}
+            output["cases"].append(diagnostics)
+            with budget.phase("case_" + case["case"], CASE_SECONDS) as case_deadline:
+                log = home / (case["case"] + "-worker.log")
+                with log.open("wb") as errors:
+                    log.chmod(0o600)
+                    process = subprocess.Popen([sys.executable, str(Path(__file__).resolve()), "--worker",
+                        "--resources", str(args.resources.resolve()), "--fixture-home", str(home), "--token", token,
+                        "--session", case["id"]], stdin=subprocess.DEVNULL, stdout=errors, stderr=errors)
+                processes.append(process)
+                receipt, observed = observe_and_finish(case, launcher, process, case_deadline, diagnostics)
+                expected = {"cleanup": "exited-cleaned", "keep": "exited-retained", "dirty": "failed-retained"}[case["case"]]
+                require(receipt["state"] == expected, case["case"] + " ended in " + receipt["state"] + ": " + str(receipt.get("message", "")))
+                require(case["target"].exists() == (case["case"] != "cleanup"), "Incorrect cache retention for " + case["case"])
+                if case["case"] == "dirty":
+                    require("Restored content" in receipt.get("message", ""), "Dirty cache was retained for an unexpected reason")
+                    require((case["target"] / "Contents/Resources/fixture.dat").read_bytes() == b"fixture changed itself while running\n",
+                            "Changed fixture content was not preserved")
+                elif case["case"] == "keep":
+                    library.verify_restored(case["target"], case["manifest"])
+                library.verify_restored(case["source"], case["manifest"])
+                require(library.load() == initial_index, "A launch or cleanup changed the cloud library index")
+                require(not launcher.watcher_alive(receipt), "Finished fixture left its monitor process running")
+                diagnostics.update(state=receipt["state"], cacheRetained=case["target"].exists(),
+                                   sourcePreserved=True, **observed)
+            diagnostics["ok"] = True
+        with budget.phase("final_checks", FINAL_CHECK_SECONDS):
+            require(not launcher.sessions()["busy"], "A fixture session is still active after its worker exited")
+            require(directory_bytes(home) < MAX_FIXTURE_BYTES, "Fixture data grew beyond its 5 MiB budget")
         success = True
-    except Exception as error:
-        output.update(error=str(error), seconds=round(time.monotonic() - started, 3), fixtureRetained=str(home))
+    except (Exception, SmokeDeadline) as error:
+        output.update(error=str(error))
     finally:
-        signal.setitimer(signal.ITIMER_REAL, 0)
         # Only terminate harness workers this test itself created. Fixture apps
         # exit themselves; no existing app or unrelated process is signaled.
-        for process in processes:
-            if process.poll() is None:
-                process.terminate()
-                try:
-                    process.wait(timeout=.5)
-                except subprocess.TimeoutExpired:
-                    process.kill()
-                    process.wait(timeout=.5)
-        if success:
-            shutil.rmtree(home)
+        try:
+            with budget.phase("harness_cleanup", CLEANUP_SECONDS):
+                for process in processes:
+                    if process.poll() is None:
+                        process.terminate()
+                        try:
+                            process.wait(timeout=.5)
+                        except subprocess.TimeoutExpired:
+                            process.kill()
+                            process.wait(timeout=.5)
+                if success:
+                    shutil.rmtree(home)
+        except (Exception, SmokeDeadline) as error:
+            success = False
+            output["cleanupError"] = str(error)
+        finally:
+            signal.setitimer(signal.ITIMER_REAL, 0)
+            signal.signal(signal.SIGALRM, previous_alarm)
+        output.update(ok=success, seconds=round(time.monotonic() - budget.started, 3))
+        if not success and home is not None:
+            output["fixtureRetained"] = str(home)
         print(json.dumps(output, sort_keys=True), flush=True)
     return 0 if success else 1
 

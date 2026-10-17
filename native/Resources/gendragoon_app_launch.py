@@ -314,6 +314,12 @@ def prepare_stream(data, record):
     raw = lib.pathpart(raw)
     if raw.split("/")[0] != record["bucket"] or Path(raw).name != data["name"]:
         raise ValueError("Stream does not match the selected cloud application")
+    # Recheck older indexes too: a raw byte check never establishes that NFS
+    # can preserve resource forks, quarantine, FinderInfo, or other attributes.
+    reason = lib.stream_metadata_reason(data.get("manifest"))
+    if reason:
+        record["streamIneligibleReason"] = reason
+        return None
     lib.require_space(128 * 1024 ** 2)
     root = ROOT / record["id"]
     root.mkdir(mode=0o700)

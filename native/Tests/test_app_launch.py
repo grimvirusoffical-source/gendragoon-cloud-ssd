@@ -405,6 +405,139 @@ class AppLaunchTests(unittest.TestCase):
         self.spawn.assert_not_called()
         self.assert_original_intact()
 
+    def test_existing_byte_verified_stream_with_metadata_or_unknown_metadata_uses_local_copy(self):
+        record, app = self.fixture()
+        raw = "bucket-one/Streamable/Fixture.app"
+        manifests = [None, [], [{"path": ".", "type": "directory"}]]
+        for name in ("com.apple.ResourceFork", "com.apple.quarantine", "com.apple.FinderInfo", "app.example.empty"):
+            manifests.append([{"path": ".", "type": "directory", "xattrs": {}},
+                              {"path": "Contents/resource", "type": "file", "xattrs": {name: {"size": 0}}}])
+        with patch.object(library, "require_space") as capacity:
+            for manifest in manifests:
+                with self.subTest(manifest=manifest):
+                    data = {"name": "Fixture.app", "streamVerified": True, "streamPath": raw, "manifest": manifest}
+                    self.assertIsNone(launch.prepare_stream(data, record))
+                    self.assertEqual(record["mode"], "managed-local")
+                    self.assertIn("metadata", record["streamIneligibleReason"])
+            capacity.assert_not_called()
+        self.spawn.assert_not_called()
+        self.assertTrue(app.exists())
+        self.assertFalse((launch.ROOT / record["id"]).exists())
+        self.assert_original_intact()
+
+    def test_known_metadata_free_stream_reaches_the_existing_capacity_guard(self):
+        record, _ = self.fixture()
+        manifest = [{"path": ".", "type": "directory", "xattrs": {}},
+                    {"path": "Contents/main", "type": "file", "xattrs": {}},
+                    {"path": "link", "type": "symlink", "target": "Contents/main"}]
+        data = {"name": "Fixture.app", "streamVerified": True,
+                "streamPath": "bucket-one/Streamable/Fixture.app", "manifest": manifest}
+        with patch.object(library, "require_space", side_effect=RuntimeError("fixture capacity guard")):
+            with self.assertRaisesRegex(RuntimeError, "fixture capacity guard"):
+                launch.prepare_stream(data, record)
+        self.assertNotIn("streamIneligibleReason", record)
+        self.spawn.assert_not_called()
+        self.assert_original_intact()
+
+    def test_managed_local_eviction_retains_unexpected_sibling_files_folders_and_links(self):
+        record, app = self.fixture()
+        for kind in ("file", "folder", "link"):
+            sibling = app.parent / ("user-created-" + kind)
+            if kind == "folder":
+                sibling.mkdir()
+                (sibling / "saved.txt").write_text("Preserve user-created sibling data")
+            elif kind == "link":
+                sibling.symlink_to(self.original)
+            else:
+                sibling.write_text("Preserve user-created sibling data")
+            for action in (lambda: launch.cleanup(record),
+                           lambda: launch.evict(record["key"], record["project"], record["bucket"], record["remote"]),
+                           lambda: library.clear_cache(record["key"], record["project"], record["bucket"], record["remote"])):
+                with self.subTest(kind=kind), self.assertRaisesRegex(RuntimeError, "unexpected files"):
+                    action()
+                self.assertTrue(app.exists())
+                self.assertTrue(sibling.exists())
+                self.assertEqual((sibling / "saved.txt" if kind == "folder" else sibling).read_text(),
+                                 "Preserve original user data" if kind == "link" else "Preserve user-created sibling data")
+                self.assertIn(record["key"], library.load())
+                self.assert_original_intact()
+            if kind == "folder":
+                shutil.rmtree(sibling)
+            else:
+                sibling.unlink()
+
+    def test_sibling_created_during_cache_verification_is_not_recursively_deleted(self):
+        record, app = self.fixture()
+        sibling = app.parent / "saved-during-verification.txt"
+        verify = library.verify_restored
+        def create_sibling(path, manifest):
+            verified = verify(path, manifest)
+            sibling.write_text("Preserve concurrently created sibling data")
+            return verified
+        with patch.object(library, "verify_restored", side_effect=create_sibling):
+            with self.assertRaisesRegex(RuntimeError, "unexpected files were retained"):
+                launch.cleanup(record)
+        self.assertEqual(sibling.read_text(), "Preserve concurrently created sibling data")
+        self.assertFalse(app.exists())
+        self.assertIn(record["key"], library.load())
+        self.assert_original_intact()
+
+    def test_nested_file_created_after_verification_survives_manifest_bounded_cleanup(self):
+        record, app = self.fixture()
+        nested = app / "Contents/MacOS/user-created-data.txt"
+        manifest_path = app.parent / "cache-manifest.json"
+        metadata = manifest_path.read_bytes()
+        verify = library.verify_restored
+        def create_nested(path, manifest):
+            verified = verify(path, manifest)
+            nested.write_text("Preserve nested user data created after verification")
+            return verified
+        with patch.object(library, "verify_restored", side_effect=create_nested):
+            with self.assertRaisesRegex(RuntimeError, "unverified content retained"):
+                launch.cleanup(record)
+        self.assertEqual(nested.read_text(), "Preserve nested user data created after verification")
+        self.assertEqual(manifest_path.read_bytes(), metadata)
+        self.assertIn(record["key"], library.load())
+        self.assert_original_intact()
+
+    def test_changed_manifest_leaf_is_retained_after_verification(self):
+        record, app = self.fixture()
+        leaf = app / "Contents/Info.plist"
+        verify = library.verify_restored
+        def change_leaf(path, manifest):
+            verified = verify(path, manifest)
+            leaf.write_text("User replacement created after verification")
+            return verified
+        with patch.object(library, "verify_restored", side_effect=change_leaf):
+            with self.assertRaisesRegex(RuntimeError, "item changed"):
+                launch.cleanup(record)
+        self.assertEqual(leaf.read_text(), "User replacement created after verification")
+        self.assertTrue((app / "Contents/MacOS/Fixture").exists())
+        self.assertTrue((app.parent / "cache-manifest.json").exists())
+        self.assertIn(record["key"], library.load())
+        self.assert_original_intact()
+
+    def test_replaced_parent_symlink_cannot_redirect_manifest_leaf_deletion(self):
+        record, app = self.fixture()
+        outside = self.home / "outside-user-directory"
+        outside.mkdir()
+        original = outside / "Info.plist"
+        original.write_text("Preserve outside user data")
+        verify = library.verify_restored
+        def swap_parent(path, manifest):
+            verified = verify(path, manifest)
+            (app / "Contents").rename(app / "SavedContents")
+            (app / "Contents").symlink_to(outside, target_is_directory=True)
+            return verified
+        with patch.object(library, "verify_restored", side_effect=swap_parent):
+            with self.assertRaises(OSError):
+                launch.cleanup(record)
+        self.assertEqual(original.read_text(), "Preserve outside user data")
+        self.assertTrue((app / "SavedContents/Info.plist").exists())
+        self.assertTrue((app.parent / "cache-manifest.json").exists())
+        self.assertIn(record["key"], library.load())
+        self.assert_original_intact()
+
 
 if __name__ == "__main__":
     unittest.main()

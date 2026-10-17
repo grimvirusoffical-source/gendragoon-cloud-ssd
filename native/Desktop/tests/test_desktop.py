@@ -150,6 +150,137 @@ class PackageTests(unittest.TestCase):
         (cache.entry(key)/"Selection/empty-file").write_bytes(b"unexpected")
         with self.assertRaises(ValueError):cache.verify(key)
 
+    def staged_cache(self):
+        archive, _ = self.package()
+        cache = gd.ManagedCache(self.root/"cache")
+        key = str(uuid.uuid4())
+        cache.stage(archive, key, "free")
+        return cache, key, cache.entry(key)
+
+    def test_evict_retains_changed_payload_before_deleting_any_files(self):
+        cache, key, entry = self.staged_cache()
+        changed = entry/"Selection/empty-file"
+        changed.write_text("new application settings", encoding="utf-8")
+        before = gd.snapshot(entry)
+        with self.assertRaisesRegex(ValueError, "changed"):
+            cache.evict(key)
+        self.assertEqual(gd.snapshot(entry), before)
+        self.assertEqual(changed.read_text(encoding="utf-8"), "new application settings")
+
+    def test_evict_retains_unexpected_siblings_before_deleting_any_files(self):
+        for kind in ("file", "folder"):
+            with self.subTest(kind=kind):
+                cache, key, entry = self.staged_cache()
+                extra = entry/"user-notes"
+                if kind == "folder":
+                    extra.mkdir(); (extra/"keep.txt").write_text("keep")
+                else:
+                    extra.write_text("keep")
+                before = gd.snapshot(entry)
+                with self.assertRaisesRegex(ValueError, "Unexpected cache content"):
+                    cache.evict(key)
+                self.assertEqual(gd.snapshot(entry), before)
+
+    def test_evict_retains_new_nested_content_before_deleting_any_files(self):
+        cache, key, entry = self.staged_cache()
+        (entry/"Selection/empty-folder/user-notes.txt").write_text("keep")
+        before = gd.snapshot(entry)
+        with self.assertRaisesRegex(ValueError, "changed"):
+            cache.evict(key)
+        self.assertEqual(gd.snapshot(entry), before)
+
+    def test_evict_preserves_sibling_created_during_leaf_cleanup(self):
+        cache, key, entry = self.staged_cache()
+        extra = entry/"user-notes.txt"
+        original = gd.remove_cache_file
+        def arriving(path, *args):
+            extra.write_text("arrived after verification")
+            return original(path, *args)
+        with patch.object(gd, "remove_cache_file", side_effect=arriving):
+            with self.assertRaisesRegex(ValueError, "retained"):
+                cache.evict(key)
+        self.assertEqual(extra.read_text(), "arrived after verification")
+        self.assertTrue((entry/".gendragoon-entry").is_file())
+        self.assertFalse((entry/".lease").exists())
+
+    def test_evict_preserves_nested_file_created_during_leaf_cleanup(self):
+        cache, key, entry = self.staged_cache()
+        extra = entry/"Selection/empty-folder/user-notes.txt"
+        original = gd.remove_cache_file
+        def arriving(path, *args):
+            extra.write_text("arrived after verification")
+            return original(path, *args)
+        with patch.object(gd, "remove_cache_file", side_effect=arriving):
+            with self.assertRaisesRegex(ValueError, "retained"):
+                cache.evict(key)
+        self.assertEqual(extra.read_text(), "arrived after verification")
+        self.assertTrue((entry/".gendragoon-entry").is_file())
+
+    def test_evict_rechecks_existing_file_before_unlink(self):
+        cache, key, entry = self.staged_cache()
+        original = gd.remove_cache_file
+        changed = []
+        def changing(path, *args):
+            path.write_text("new user content")
+            changed.append(path)
+            return original(path, *args)
+        with patch.object(gd, "remove_cache_file", side_effect=changing):
+            with self.assertRaisesRegex(ValueError, "changed"):
+                cache.evict(key)
+        self.assertEqual(len(changed), 1)
+        self.assertEqual(changed[0].read_text(), "new user content")
+        self.assertTrue((entry/".gendragoon-entry").is_file())
+
+    def test_evict_rejects_hardlinked_leaf(self):
+        cache, key, entry = self.staged_cache()
+        leaf = entry/"Selection/empty-file"
+        outside = self.root/"outside-link"
+        os.link(leaf, outside)
+        before = gd.snapshot(entry)
+        with self.assertRaisesRegex(ValueError, "linked node"):
+            cache.evict(key)
+        self.assertEqual(gd.snapshot(entry), before)
+        self.assertTrue(outside.is_file())
+
+    def test_evict_preserves_replaced_directory(self):
+        cache, key, entry = self.staged_cache()
+        original = gd.remove_cache_file
+        saved = self.root/"saved-payload"
+        replacement = entry/"Selection"
+        first = True
+        def replacing(path, *args):
+            nonlocal first
+            if first:
+                first = False
+                replacement.rename(saved)
+                replacement.mkdir()
+                (replacement/"empty-file").write_text("new user content")
+            return original(path, *args)
+        with patch.object(gd, "remove_cache_file", side_effect=replacing):
+            with self.assertRaisesRegex(ValueError, "changed"):
+                cache.evict(key)
+        self.assertEqual((replacement/"empty-file").read_text(), "new user content")
+        self.assertTrue((saved/"empty-file").is_file())
+
+    @unittest.skipUnless(sys.platform.startswith("linux") and shutil.which("cc"), "Linux C compiler required for changed-data lifecycle fixture")
+    def test_native_launch_reports_retained_changed_application_data(self):
+        app_dir = self.root/"PortableApp"; app_dir.mkdir()
+        code = self.root/"writes-data.c"; executable = app_dir/"app"
+        code.write_text('#include <stdio.h>\nint main(void){FILE *f=fopen("settings.txt","w");if(!f)return 1;fputs("user preferences",f);return fclose(f);}\n')
+        subprocess.run([shutil.which("cc"), str(code), "-o", str(executable)], check=True, capture_output=True)
+        (app_dir/"settings.txt").write_text("defaults")
+        archive = self.root/"writes-data.zip"; gd.make_package(app_dir, archive, application="app")
+        cache = gd.ManagedCache(self.root/"cache"); key = str(uuid.uuid4()); cache.stage(archive, key, "free")
+        with contextlib.redirect_stdout(io.StringIO()):
+            result = cache.launch(key)
+        self.assertEqual(result["exitCode"], 0)
+        self.assertFalse(result["cacheRemoved"])
+        self.assertTrue(result["cloudRetained"])
+        self.assertIn("changed", result["cacheRetainedReason"])
+        self.assertEqual((cache.entry(key)/"PortableApp/settings.txt").read_text(), "user preferences")
+        self.assertEqual((app_dir/"settings.txt").read_text(), "defaults")
+        self.assertTrue(archive.is_file())
+
     @unittest.skipIf(sys.platform == "win32", "Requires a Linux ELF executable")
     def test_native_launch_waits_then_evicts_only_managed_cache(self):
         app=self.root/"true";shutil.copy2("/bin/true",app);archive=self.root/"native.zip";gd.make_package(app,archive,application="true")

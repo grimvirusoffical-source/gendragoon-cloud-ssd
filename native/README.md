@@ -70,6 +70,14 @@ All `Sources/*.swift` are compiled. Resource helpers come from this checkout.
 The script signs with the existing Developer ID identity. Private signing keys
 and owner API credentials are not copied into the app or repository.
 
+Refresh the copied vendor Node runtime in the stopped staging bundle before
+notarization and packaging, following [VENDOR_REFRESH.md](VENDOR_REFRESH.md):
+
+```sh
+python3 native/update_vendor_macos.py \
+  --staged-app '/path/to/fresh-build-directory/GenDragoon Cloud SSD.app'
+```
+
 After successful validation, notarize and staple the bundle through Apple's
 notary service, then generate the release archive and its installation script:
 

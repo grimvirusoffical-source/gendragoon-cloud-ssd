@@ -276,7 +276,7 @@ def verify_app(app):
                    + '" and certificate 1[field.1.2.840.113635.100.6.2.6] exists'
                    + ' and certificate leaf[field.1.2.840.113635.100.6.1.13] exists')
     run_checked(["/usr/bin/codesign", "--verify", "--deep", "--strict", "--verbose=2",
-                 "-R", requirement, str(app)], timeout=120)
+                 "-R", "=" + requirement, str(app)], timeout=120)
     signature = run_checked(["/usr/bin/codesign", "-dv", "--verbose=4", str(app)])
     if (not re.search(r"(?m)^TeamIdentifier=" + re.escape(TEAM_ID) + r"$", signature)
             or not re.search(r"(?m)^Identifier=" + re.escape(BUNDLE_ID) + r"$", signature)

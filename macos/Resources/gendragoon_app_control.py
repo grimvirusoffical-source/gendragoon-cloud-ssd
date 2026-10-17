@@ -247,7 +247,7 @@ def trusted_bundle(app):
     requirement = ('anchor apple generic and identifier "' + BUNDLE_ID + '" and certificate leaf[subject.OU] = "' + TEAM_ID
                    + '" and certificate 1[field.1.2.840.113635.100.6.2.6] exists and certificate leaf[field.1.2.840.113635.100.6.1.13] exists')
     for args in (
-        ["/usr/bin/codesign", "--verify", "--deep", "--strict", "-R", requirement, str(app)],
+        ["/usr/bin/codesign", "--verify", "--deep", "--strict", "-R", "=" + requirement, str(app)],
         ["/usr/sbin/spctl", "--assess", "--type", "execute", str(app)],
     ):
         if command(args, timeout=30).returncode:

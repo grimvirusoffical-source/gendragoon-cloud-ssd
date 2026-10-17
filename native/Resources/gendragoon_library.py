@@ -17,6 +17,7 @@ CACHE=SUPPORT/"AppLibrary"
 INDEX=SUPPORT/"app-library.json"
 DEFAULT_ROOT="gen-dragoon-ssd"
 ARCHIVE_DIR="GenDragoon-App-Library"
+STREAM_MIN_BYTES=512*1024**2
 def reply(**v): print(json.dumps(dict(ok=True,**v)),flush=True)
 def fail(e): print(json.dumps(dict(ok=False,message=str(e)[-650:])),flush=True);sys.exit(1)
 def run(cmd,timeout=1800):
@@ -350,18 +351,42 @@ def snapshot(source):
 def unchanged(source,baseline):
     if snapshot(source)!=baseline:raise RuntimeError("Source changed since the verified archive; original retained")
 def verify_restored(path,manifest):
-    actual=snapshot(path)["manifest"]
+    verified=snapshot(path);actual=verified["manifest"]
     # Older library manifests predate xattr recording. Do not fabricate it for
     # those backups, but enforce it whenever the original included metadata.
     expected={x["path"]:x for x in manifest}
     for entry in actual:
         if "xattrs" not in expected.get(entry["path"],{}):entry.pop("xattrs",None)
     if actual!=manifest:raise RuntimeError("Restored content or metadata differs from the source; original retained")
+    return verified
 def require_space(extra,root=None):
     free=shutil.disk_usage(root or CACHE).free
     reserve=10*1024**3
     if extra<0 or free<reserve+extra:
         raise RuntimeError("Not enough local space for a verified restore while retaining 10 GiB free. Original and cloud copies were preserved.")
+def package(source,archive):
+    """Put exactly one named source at ZIP root, preserving Darwin metadata."""
+    source=Path(source)
+    if source.is_symlink() or not (source.is_file() or source.is_dir()):
+        raise ValueError("Select an actual regular file, folder, or app")
+    command=["/usr/bin/ditto","-c","-k","--sequesterRsrc"]
+    # For a file, --keepParent adds its containing directory to the ZIP. For
+    # directories/apps it retains the selected directory itself, as required by
+    # zip-root validation and restoration. Both forms preserve AppleDouble.
+    if source.is_dir():command.append("--keepParent")
+    run([*command,source,archive],timeout=900)
+def stream_metadata_reason(manifest):
+    """Raw object/NFS layouts cannot represent preserved macOS xattrs."""
+    unknown="The original macOS metadata was not recorded; use a verified local copy."
+    if not isinstance(manifest,list) or not manifest:return unknown
+    for item in manifest:
+        if not isinstance(item,dict):return unknown
+        attributes=item.get("xattrs")
+        if attributes is None and item.get("type")=="symlink":continue
+        if not isinstance(attributes,dict):return unknown
+        if any(name!="com.apple.provenance" for name in attributes):
+            return "This application needs a verified local copy to preserve its macOS metadata."
+    return None
 def validate_archive(path,name):
     """Reject traversal, escaping links and writes through archive symlink parents."""
     check_name(name)
@@ -431,7 +456,7 @@ def _upload(source,remote,folder,offload=False,project=None,bucket=None):
     with tempfile.TemporaryDirectory(prefix="gd-upload-",dir=CACHE) as tmp:
         archive=Path(tmp)/fname
         if zipped:
-            run(["/usr/bin/ditto","-c","-k","--sequesterRsrc","--keepParent",src,archive],timeout=900)
+            package(src,archive)
         else:shutil.copy2(src,archive)
         unchanged(src,baseline)
         if zipped:validate_archive(archive,src.name)
@@ -455,15 +480,19 @@ def _upload(source,remote,folder,offload=False,project=None,bucket=None):
             verify_restored(verified,baseline["manifest"])
         unchanged(src,baseline)
     entry={"name":src.name,"kind":typ,"format":"archive","archiveLayout":"zip-root" if zipped else "flat","remote":remote,"folder":folder,"file":fname,"sha256":original_hash,"source":str(src),"offloaded":False,"verified":True,"verifiedAt":time.time(),"manifest":baseline["manifest"],"sizeBytes":total_bytes,**(context or {})}
-    # Large macOS apps also receive an immutable directory layout for bounded
-    # VFS preloading. The verified archival restore remains the recovery copy.
-    if typ=="app" and context and total_bytes>=512*1024**2:
-        raw_path=folder+"/Streamable/"+key+"-"+original_hash+"/"+src.name
-        target=cloud(remote,raw_path)
-        run([RCLONE,"--config",CONFIG,"copy",src,target,"--links","--create-empty-src-dirs","--immutable"],timeout=7200)
-        run([RCLONE,"--config",CONFIG,"check",src,target,"--links","--download"],timeout=7200)
-        unchanged(src,baseline)
-        entry["streamPath"]=raw_path;entry["streamVerified"]=True
+    # Raw copy/check validates data bytes, not Darwin resource forks or xattrs.
+    # Only metadata-compatible apps receive this optional streaming layout;
+    # every app retains its fully verified metadata-preserving archive.
+    if typ=="app" and context and total_bytes>=STREAM_MIN_BYTES:
+        reason=stream_metadata_reason(baseline["manifest"])
+        if reason:entry["streamIneligibleReason"]=reason
+        else:
+            raw_path=folder+"/Streamable/"+key+"-"+original_hash+"/"+src.name
+            target=cloud(remote,raw_path)
+            run([RCLONE,"--config",CONFIG,"copy",src,target,"--links","--create-empty-src-dirs","--immutable"],timeout=7200)
+            run([RCLONE,"--config",CONFIG,"check",src,target,"--links","--download"],timeout=7200)
+            unchanged(src,baseline)
+            entry["streamPath"]=raw_path;entry["streamVerified"]=True
     if previous:
         entry["previousVersions"]=[*previous.get("previousVersions",[]),{k:v for k,v in previous.items() if k!="previousVersions"}]
     store_revision(key,entry,previous)
@@ -552,6 +581,49 @@ def stage_item(key,open_after=False,project=None,bucket=None,remote="gendragoon"
         run(["/usr/bin/open",str(dest)],timeout=35)
         reply(message=f"Opened local cached {name}; app uses local storage while running.",localPath=str(dest))
     else:reply(message=f"Restored {name} into local cache.",localPath=str(dest))
+def _remove_verified_cache_item(path,verified):
+    """Remove only verified entries, retaining late arrivals at every depth."""
+    flags=os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW
+    parent=os.open(path.parent,flags)
+    guards=verified["guard"]
+    entries=verified["manifest"]
+    def same_directory(info,relative):
+        expected=guards[relative]
+        # Removing our children changes directory times/size, but never identity
+        # or type. Leaf guards below still compare every mutation field.
+        if not stat.S_ISDIR(info.st_mode) or (info.st_dev,info.st_ino,info.st_mode)!=expected[:3]:
+            raise RuntimeError("Managed cache directory changed; remaining content retained")
+    @contextmanager
+    def entry_parent(relative):
+        parts=[path.name]+([] if relative=="." else relative.split("/"))
+        descriptor=os.dup(parent)
+        try:
+            for index,part in enumerate(parts[:-1]):
+                child=os.open(part,flags,dir_fd=descriptor)
+                try:same_directory(os.fstat(child),"." if index==0 else "/".join(parts[1:index+1]))
+                except BaseException:os.close(child);raise
+                os.close(descriptor);descriptor=child
+            yield descriptor,parts[-1]
+        finally:os.close(descriptor)
+    try:
+        for entry in entries:
+            if entry["type"]=="directory":continue
+            relative=entry["path"]
+            with entry_parent(relative) as (descriptor,name):
+                current=os.stat(name,dir_fd=descriptor,follow_symlinks=False)
+                if _fingerprint(current)!=guards[relative]:
+                    raise RuntimeError("Managed cache item changed; remaining content retained")
+                os.unlink(name,dir_fd=descriptor)
+        directories=sorted((entry for entry in entries if entry["type"]=="directory"),
+                           key=lambda entry:0 if entry["path"]=="." else len(entry["path"].split("/")),reverse=True)
+        for entry in directories:
+            with entry_parent(entry["path"]) as (descriptor,name):
+                same_directory(os.stat(name,dir_fd=descriptor,follow_symlinks=False),entry["path"])
+                try:os.rmdir(name,dir_fd=descriptor)
+                except OSError as error:
+                    if error.errno!=errno.ENOTEMPTY:raise
+                    raise RuntimeError("Managed cache contains new files; unverified content retained for review") from None
+    finally:os.close(parent)
 def clear_cache(key,project=None,bucket=None,remote="gendragoon"):
     data=selected_entry(key,project,bucket,remote)
     prepare_cache()
@@ -565,8 +637,19 @@ def clear_cache(key,project=None,bucket=None,remote="gendragoon"):
     if loc.parent.resolve()!=CACHE.resolve():raise RuntimeError("Unsafe cache path")
     record=safe_path(loc/"cache-manifest.json")
     if not record.is_file():raise RuntimeError("Legacy cache has no ownership/integrity record; retained for manual review")
-    verify_restored(child,json.loads(record.read_text()))
-    shutil.rmtree(loc)
+    # The manifest covers the selected item, not new siblings beside it. Never
+    # recursively remove user-created files, folders or links with the cache.
+    if any(sibling.name not in {data["name"],"cache-manifest.json"} for sibling in loc.iterdir()):
+        raise RuntimeError("Managed cache contains unexpected files; retained for review")
+    verified=verify_restored(child,json.loads(record.read_text()))
+    # Unexpected nested arrivals must survive too; never recursively delete
+    # the item after a point-in-time verification of its manifest.
+    _remove_verified_cache_item(child,verified)
+    record.unlink()
+    try:loc.rmdir()
+    except OSError as error:
+        if error.errno!=errno.ENOTEMPTY:raise
+        raise RuntimeError("Application cache removed; unexpected files were retained for review") from None
     reply(message=f"Deleted local cached copy of {data['name']}; cloud copy remains.")
 def main():
     p=argparse.ArgumentParser()

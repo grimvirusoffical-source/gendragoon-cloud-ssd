@@ -266,7 +266,7 @@ def validate_app(app,version):
     if not isinstance(name,str) or not name or name in (".","..") or "/" in name or "\\" in name:
         raise RuntimeError("Release executable name is invalid")
     requirement='anchor apple generic and identifier "'+BUNDLE_ID+'" and certificate leaf[subject.OU] = "'+TEAM_ID+'" and certificate 1[field.1.2.840.113635.100.6.2.6] exists and certificate leaf[field.1.2.840.113635.100.6.1.13] exists'
-    subprocess_ok(["/usr/bin/codesign","--verify","--deep","--strict","--verbose=2","-R",requirement,str(app)],timeout=100)
+    subprocess_ok(["/usr/bin/codesign","--verify","--deep","--strict","--verbose=2","-R","="+requirement,str(app)],timeout=100)
     minimum=info.get("LSMinimumSystemVersion")
     if minimum:
         required=tuple(int(x) for x in str(minimum).split("."))

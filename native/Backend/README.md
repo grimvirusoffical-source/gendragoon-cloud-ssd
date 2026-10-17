@@ -77,13 +77,25 @@ Before promotion, use the existing delegated Google application-default credenti
 
 `GET /health?deep=1`, `GET /v3/capabilities`, and `GET /v2/pricing` are read-only HTTP smoke checks against the tag URL. The existing service's health endpoints are public; do not send an ADC access token to the application URL. ADC authenticates the Cloud Run control-plane reads. The deploy helper neither grants public invocation nor changes the service's IAM policy.
 
+Run the bounded candidate verifier after staging:
+
+```sh
+python3 native/Backend/verify_candidate.py --project gendragood-ssd --region us-central1 --service gendragoon-free --tag review-0170-20261017a --report /tmp/GenDragoon-Candidate-Verification-v0.17.0.json
+```
+
+The verifier obtains the tag URL and revisions from the Cloud Run v2 API using the existing application-default credentials. It refuses non-HTTPS or non-`.run.app` targets and redirects, requires a Ready candidate with zero production traffic, and compares literal environment settings, secret bindings, container count, and service identity with every currently serving revision. Configuration values stay in memory; the JSON report contains comparison booleans only. Certificate and hostname checks remain enabled. On macOS, `/etc/ssl/cert.pem` supplies the trusted CA bundle when present; `--ca-file` can select another trusted bundle.
+
+The application requests carry no bearer token. After the three smoke checks, five protected GET routes must reject anonymous access with HTTP 401 or 403. A separate process then sends at most 256 requests with 16 workers across `/health`, `/v3/capabilities`, and `/v2/pricing`. Defaults are a five-second request timeout, a 45-second load deadline, and a 180-second overall deadline, with at most two seconds to terminate the load process. The report gives attempted/completed/success counts, HTTP/error counts, and p50/p95 latency over completed attempts, including failures. A final control-plane read confirms that the same tagged revision still receives zero production traffic. Exit code 0 means all required checks passed; exit code 2 means a check failed or did not complete. These limits are a bounded regression check, not sustained saturation testing or a penetration test.
+
+Load diagnostics also separate each public path and record response-header, body-read, and JSON-decode timing. Header timing includes DNS, connection setup, TLS, and waiting for response headers; it is not a measurement of backend handler time alone. The transport opens a fresh HTTPS connection for every request and performs no retries. Up to 32 failed-request samples include the request index, start offset, body byte counts, and failure phase. HTTP 200 headers received after the total request budget still count as a timeout; `request_deadline_before_body` distinguishes that case from a timeout during `response_body`. Do not change timeouts or concurrency merely to turn a failed report into a passing one.
+
 No-traffic staging provides **traffic isolation, not data isolation**. The tagged candidate retains the existing database, bucket, runtime identity, and live secrets. `GET /v2/billing/status` deliberately triggers the existing live bootstrap and is therefore a controlled activation check, not a strictly read-only check: it can create a missing portal configuration, create/expire unpaid validation Checkout sessions when catalog verification changes, and write/delete readiness markers. Existing Stripe webhooks and Checkout return URLs remain bound to the canonical service URL until promotion, so a tagged Checkout test alone does not verify delivery to the candidate's webhook handler.
 
-Run the deployment-helper tests locally; they mock every external process call and never authenticate or deploy:
+Run the deployment-helper and verifier tests locally; they mock external process and HTTP calls and never authenticate, deploy, or contact the candidate:
 
 ```sh
 cd native/Backend
-python3 -m unittest -v test_deploy_free.py
+python3 -m unittest -v test_deploy_free.py test_verify_candidate.py
 ```
 
 ### Runtime tests

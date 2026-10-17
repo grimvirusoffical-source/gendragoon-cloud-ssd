@@ -44,9 +44,12 @@ class AutoUpdateTests(unittest.TestCase):
  def test_gatekeeper_failure_cannot_be_skipped(self):
   (self.app/'Contents').mkdir(parents=True)
   (self.app/'Contents/Info.plist').write_bytes(plistlib.dumps({'CFBundleIdentifier':auto.BUNDLE_ID,'CFBundleShortVersionString':'0.17.0','CFBundleExecutable':'App'}))
+  (self.app/'Contents/MacOS').mkdir()
+  executable=self.app/'Contents/MacOS/App';executable.write_bytes(b'fixture, never executed');executable.chmod(0o755)
   def command(args,**kw):
    if args[0].endswith('spctl'):raise RuntimeError('Not notarized')
    if args[0].endswith('lipo'):return auto.platform.machine()
-   return 'TeamIdentifier='+auto.TEAM_ID+'\nAuthority=Developer ID Application'
+   if '--verify' in args:self.assertTrue(args[args.index('-R')+1].startswith('=anchor apple generic and identifier '))
+   return 'Identifier='+auto.BUNDLE_ID+'\nTeamIdentifier='+auto.TEAM_ID+'\nAuthority=Developer ID Application: Fixture'
   with patch.object(auto,'subprocess_ok',side_effect=command):self.assertRaisesRegex(RuntimeError,'Not notarized',auto.validate_app,self.app,'v0.17.0')
 if __name__=='__main__':unittest.main()

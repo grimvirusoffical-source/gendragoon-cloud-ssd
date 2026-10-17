@@ -4,7 +4,7 @@ on:
   push:
     branches: [codex/native-integration-20261017]
   pull_request:
-    paths: ['native/**', '.github/workflows/native-validation.yml']
+    paths: ['native/**', 'macos/**', '.github/workflows/native-validation.yml']
   workflow_dispatch:
 
 permissions:
@@ -28,10 +28,13 @@ jobs:
           PYTHONPATH: native/Resources
       - run: python -m unittest discover -s native/Tests -p test_app_launch.py
       - run: python -m unittest discover -s native/Tests -p test_preload.py
+      - run: python -m unittest discover -s native/Tests -p test_smoke_macos_budget.py
       - run: python -m unittest discover -s native/Tests -p test_library_metadata.py
         env:
           PYTHONPATH: native/Resources
       - run: python native/Tests/stress_native.py
+      - name: Verify the Mac installer and reference update helpers
+        run: python -m unittest discover -s macos/tests -p 'test_*.py'
 
   desktop:
     strategy:
@@ -74,7 +77,7 @@ jobs:
       - run: npm ci --ignore-scripts
       - run: npm test
       - run: npm audit --omit=dev --audit-level=high
-      - run: python3 -m unittest test_deploy_free.py
+      - run: python3 -m unittest discover -p 'test_*.py'
 
   macos-compile:
     runs-on: macos-latest

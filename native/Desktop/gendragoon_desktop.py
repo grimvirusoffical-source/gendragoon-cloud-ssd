@@ -394,6 +394,43 @@ def default_cache():
     return Path(os.environ.get("XDG_CACHE_HOME", str(Path.home()/".cache")))/"gendragoon/managed"
 
 
+def cache_node_state(path: Path, directory=False):
+    """Identity for managed nodes; never accept links or Windows reparse points."""
+    info = path.lstat()
+    if (not (stat.S_ISDIR(info.st_mode) if directory else stat.S_ISREG(info.st_mode))
+            or getattr(info, "st_file_attributes", 0) & 0x400
+            or (not directory and info.st_nlink != 1)):
+        raise ValueError("Cache contains an unsafe or linked node; it was retained for inspection")
+    identity = (info.st_dev, info.st_ino, info.st_mode)
+    return identity if directory else identity + (info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+
+
+def remove_cache_file(path: Path, record: dict, expected_state: tuple):
+    """Remove one unchanged manifest leaf, never a directory or its contents."""
+    if cache_node_state(path) != expected_state:
+        raise ValueError("A cached file changed during cleanup; remaining cache was retained")
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0)
+    with os.fdopen(os.open(path, flags), "rb") as stream:
+        info = os.fstat(stream.fileno())
+        opened = (info.st_dev, info.st_ino, info.st_mode, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or opened != expected_state:
+            raise ValueError("A cached file was replaced during cleanup; remaining cache was retained")
+        h = hashlib.sha256(); size = 0
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            size += len(block)
+            if size > record["size"]:
+                raise ValueError("A cached file grew during cleanup; remaining cache was retained")
+            h.update(block)
+        if (size != record["size"] or h.hexdigest() != record["sha256"]
+                or cache_node_state(path) != expected_state):
+            raise ValueError("A cached file changed during cleanup; remaining cache was retained")
+    # All paths come from the verified manifest. New children are never enumerated
+    # for deletion, and non-recursive rmdir below preserves late-arriving files.
+    if cache_node_state(path) != expected_state:
+        raise ValueError("A cached file changed during cleanup; remaining cache was retained")
+    path.unlink()
+
+
 class ManagedCache:
     def __init__(self, root=None):
         self.root = Path(root or default_cache()).absolute()
@@ -440,7 +477,10 @@ class ManagedCache:
     def verify(self, key):
         metadata = self.metadata(key)
         package = metadata["package"]
-        actual = snapshot(self.entry(key)/safe_path(package["name"]))
+        name = safe_path(package["name"])
+        if "/" in name or name in ("_gendragoon", ".gendragoon-entry", ".lease"):
+            raise ValueError("Invalid managed package root; cache was retained")
+        actual = snapshot(self.entry(key)/name)
         if actual != package["entries"]:
             raise ValueError("The managed application changed. Restore a fresh verified cloud copy before launching.")
         return package
@@ -449,10 +489,76 @@ class ManagedCache:
         path = self.entry(key)
         if not path.exists():
             return False
-        self.metadata(key)
-        if (path/".lease").exists() or running_from(path):
-            raise ValueError("This cache is in use, or an interrupted launch needs inspection. No cache files removed.")
-        shutil.rmtree(path)
+        root_state = cache_node_state(self.root, directory=True)
+        entry_state = cache_node_state(path, directory=True)
+        lease = path/".lease"
+        try:
+            descriptor = os.open(lease, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        except FileExistsError:
+            raise ValueError("This cache is in use, or an interrupted launch needs inspection. No cache files removed.") from None
+        with os.fdopen(descriptor, "w") as handle:
+            json.dump({"pid": os.getpid(), "operation": "evict", "created": time.time()}, handle)
+        lease_state = cache_node_state(lease)
+        try:
+            if running_from(path):
+                raise ValueError("This cache is in use. No cache files removed.")
+            marker = path/".gendragoon-entry"
+            marker_state = cache_node_state(marker)
+            marker_record = {"size": marker_state[3], "sha256": digest(marker)}
+            package = self.verify(key)
+            if cache_node_state(marker) != marker_state or digest(marker) != marker_record["sha256"]:
+                raise ValueError("Cache ownership metadata changed; cache was retained")
+            expected_children = {package["name"], ".gendragoon-entry", ".lease"}
+            if {child.name for child in path.iterdir()} != expected_children:
+                raise ValueError("Unexpected cache content was retained for inspection")
+            entries = package["entries"]
+            states = {name: cache_node_state(path/name, record["type"] == "directory")
+                      for name, record in entries.items()}
+
+            def check_parents(name=None):
+                if (cache_node_state(self.root, True) != root_state
+                        or cache_node_state(path, True) != entry_state):
+                    raise ValueError("Cache directory was replaced; remaining cache was retained")
+                if name:
+                    for parent in PurePosixPath(name).parents:
+                        if str(parent) != "." and cache_node_state(path/str(parent), True) != states[str(parent)]:
+                            raise ValueError("A cache directory changed; remaining cache was retained")
+
+            check_parents()
+            if (cache_node_state(lease) != lease_state or running_from(path)
+                    or {child.name for child in path.iterdir()} != expected_children):
+                raise ValueError("Cache changed or became active; it was retained for inspection")
+            # Use only the manifest, never rmtree(entry) or rmtree(payload). This
+            # preserves new user files even if they arrive after verification.
+            for name, record in sorted(entries.items()):
+                if record["type"] == "file":
+                    check_parents(name)
+                    remove_cache_file(path/name, record, states[name])
+            for name in sorted((n for n, record in entries.items() if record["type"] == "directory"),
+                               key=lambda n: (n.count("/"), n), reverse=True):
+                check_parents(name)
+                if cache_node_state(path/name, True) != states[name]:
+                    raise ValueError("A cache directory was replaced; remaining cache was retained")
+                (path/name).rmdir()
+            check_parents()
+            if {child.name for child in path.iterdir()} != {".gendragoon-entry", ".lease"}:
+                raise ValueError("New cache content was retained for inspection")
+            remove_cache_file(marker, marker_record, marker_state)
+        except OSError as error:
+            raise ValueError("Cache cleanup stopped; remaining content was retained for inspection: " + str(error)) from error
+        finally:
+            # Remove only our unchanged lock; a replaced lock is retained too.
+            with contextlib.suppress(OSError, ValueError):
+                if (cache_node_state(self.root, True) == root_state
+                        and cache_node_state(path, True) == entry_state
+                        and cache_node_state(lease) == lease_state):
+                    lease.unlink()
+        try:
+            if cache_node_state(self.root, True) != root_state or cache_node_state(path, True) != entry_state:
+                raise ValueError("Cache directory was replaced; remaining cache was retained")
+            path.rmdir()
+        except OSError as error:
+            raise ValueError("New cache content was retained for inspection: " + str(error)) from error
         return True
 
     def launch(self, key, cleanup=True):
@@ -467,6 +573,7 @@ class ManagedCache:
         descriptor = os.open(lease, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         with os.fdopen(descriptor, "w") as handle:
             json.dump({"pid": os.getpid(), "created": time.time()}, handle)
+        lease_state = cache_node_state(lease)
         completed = False
         try:
             executable.chmod(executable.stat().st_mode | 0o100)
@@ -484,10 +591,16 @@ class ManagedCache:
         finally:
             # An interrupted monitor deliberately retains the lease and cache.
             if completed:
-                lease.unlink()
+                with contextlib.suppress(OSError, ValueError):
+                    if cache_node_state(lease) == lease_state:
+                        lease.unlink()
+        result = {"exitCode": exitcode, "cacheRemoved": False, "cloudRetained": True}
         if cleanup:
-            self.evict(key)
-        return {"exitCode": exitcode, "cacheRemoved": cleanup, "cloudRetained": True}
+            try:
+                result["cacheRemoved"] = self.evict(key)
+            except (ValueError, OSError, KeyError, TypeError) as error:
+                result["cacheRetainedReason"] = str(error)
+        return result
 
 
 def preload(executable: Path, budget=16*1024*1024, seconds=2.0):

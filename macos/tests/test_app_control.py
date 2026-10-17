@@ -135,9 +135,17 @@ class AppControlTests(unittest.TestCase):
             return subprocess.CompletedProcess(arguments, 0, "arm64\n" if arguments[0].endswith("lipo") else "", "")
         with patch.object(control, "command", side_effect=success) as checked:
             self.assertEqual(control.trusted_bundle(self.app), self.executable)
-        self.assertIn(control.TEAM_ID, checked.call_args_list[0].args[0][-2])
+        expected = ('=anchor apple generic and identifier "' + control.BUNDLE_ID
+                    + '" and certificate leaf[subject.OU] = "' + control.TEAM_ID
+                    + '" and certificate 1[field.1.2.840.113635.100.6.2.6] exists'
+                    + ' and certificate leaf[field.1.2.840.113635.100.6.1.13] exists')
+        self.assertEqual(checked.call_args_list[0].args[0][-2], expected)
         self.assertIn("/usr/sbin/spctl", checked.call_args_list[1].args[0])
         with patch.object(control, "command", return_value=subprocess.CompletedProcess([], 1, "", "private diagnostic omitted")):
+            self.assertCode("untrusted_app", control.trusted_bundle, self.app)
+        def denied_gatekeeper(arguments, timeout=12):
+            return subprocess.CompletedProcess(arguments, 1, "", "") if arguments[0].endswith("spctl") else success(arguments, timeout)
+        with patch.object(control, "command", side_effect=denied_gatekeeper):
             self.assertCode("untrusted_app", control.trusted_bundle, self.app)
 
     def test_worker_failure_before_ready_never_acknowledges_scheduled(self):

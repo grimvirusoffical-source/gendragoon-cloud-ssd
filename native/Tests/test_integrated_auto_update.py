@@ -15,6 +15,7 @@ import ssl
 import subprocess
 import sys
 import tempfile
+import types
 import unittest
 from unittest import mock
 import zipfile
@@ -46,7 +47,9 @@ class AutoUpdateTests(unittest.TestCase):
     def setUp(self):
         # Session inspection is a separate dependency; these fixtures model the
         # updater transaction without touching the machine's real app library.
-        active = mock.patch("gendragoon_app_launch.sessions", return_value={"active": False})
+        launcher = types.ModuleType("gendragoon_app_launch")
+        launcher.sessions = mock.Mock(return_value={"active": False})
+        active = mock.patch.dict(sys.modules, {"gendragoon_app_launch": launcher})
         active.start(); self.addCleanup(active.stop)
         temporary = tempfile.TemporaryDirectory(prefix="gendragoon-auto-update-test-")
         self.addCleanup(temporary.cleanup)
@@ -88,7 +91,11 @@ class AutoUpdateTests(unittest.TestCase):
                     raise RuntimeError("fixture signed-resource tampering detected")
                 self.assertIn("--deep", arguments)
                 self.assertIn("--strict", arguments)
-                self.assertIn(updater.TEAM_ID, arguments[arguments.index("-R") + 1])
+                expected = ('=anchor apple generic and identifier "' + updater.BUNDLE_ID
+                            + '" and certificate leaf[subject.OU] = "' + updater.TEAM_ID
+                            + '" and certificate 1[field.1.2.840.113635.100.6.2.6] exists'
+                            + ' and certificate leaf[field.1.2.840.113635.100.6.1.13] exists')
+                self.assertEqual(arguments[arguments.index("-R") + 1], expected)
             if "-dv" in arguments:
                 return ("Identifier=" + updater.BUNDLE_ID + "\nTeamIdentifier=" + updater.TEAM_ID
                         + "\nAuthority=Developer ID Application: Fixture (" + updater.TEAM_ID + ")")

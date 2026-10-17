@@ -84,7 +84,11 @@ class AutoUpdateTests(unittest.TestCase):
                     raise RuntimeError("fixture signed-resource tampering detected")
                 self.assertIn("--deep", arguments)
                 self.assertIn("--strict", arguments)
-                self.assertIn(updater.TEAM_ID, arguments[arguments.index("-R") + 1])
+                expected = ('=anchor apple generic and identifier "' + updater.BUNDLE_ID
+                            + '" and certificate leaf[subject.OU] = "' + updater.TEAM_ID
+                            + '" and certificate 1[field.1.2.840.113635.100.6.2.6] exists'
+                            + ' and certificate leaf[field.1.2.840.113635.100.6.1.13] exists')
+                self.assertEqual(arguments[arguments.index("-R") + 1], expected)
             if "-dv" in arguments:
                 return ("Identifier=" + updater.BUNDLE_ID + "\nTeamIdentifier=" + updater.TEAM_ID
                         + "\nAuthority=Developer ID Application: Fixture (" + updater.TEAM_ID + ")")

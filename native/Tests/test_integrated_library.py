@@ -43,7 +43,10 @@ class LibraryTests(unittest.TestCase):
                 source,destination=map(Path,args[-2:])
                 with zipfile.ZipFile(destination,"w") as archive:
                     for path in [source,*sorted(source.rglob("*"))]:
-                        name=str(path.relative_to(source.parent));info=path.lstat()
+                        # Actual Darwin ditto retains a file's containing
+                        # directory when --keepParent is passed for that file.
+                        root=source.parent.parent if source.is_file() and "--keepParent" in args else source.parent
+                        name=str(path.relative_to(root));info=path.lstat()
                         if stat.S_ISDIR(info.st_mode):name+="/"
                         entry=zipfile.ZipInfo(name);entry.create_system=3;entry.external_attr=info.st_mode<<16
                         content=os.readlink(path).encode() if path.is_symlink() else (path.read_bytes() if path.is_file() else b"")

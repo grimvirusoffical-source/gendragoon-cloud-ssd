@@ -201,6 +201,26 @@ class ArchiveMetadataTests(unittest.TestCase):
         self.fixture.mock_trash.assert_not_called()
         self.assertEqual(os.getxattr(source, "user.gendragoon.fixture"), b"changed after verification")
 
+    def test_large_app_metadata_keeps_verified_archive_without_claiming_raw_stream_integrity(self):
+        source = self.fixture.source("app")
+        os.setxattr(source / "nested/payload", "user.gendragoon.fixture", b"required application metadata")
+        baseline = library.snapshot(source)["manifest"]
+        # Exercise the production large-app branch with a tiny real archive.
+        # The disk-reserve and verification functions remain unchanged.
+        with patch.object(library, "STREAM_MIN_BYTES", 1):
+            result = self.fixture.upload(source, True)
+        entry = library.load()[result["key"]]
+        self.assertTrue(entry["verified"])
+        self.assertNotIn("streamVerified", entry)
+        self.assertNotIn("streamPath", entry)
+        self.assertIn("metadata", entry["streamIneligibleReason"])
+        self.fixture.mock_trash.assert_called_once_with(source)
+        library.stage_item(result["key"], False, "project-one", "bucket-one")
+        restored = Path(self.fixture.mock_reply.call_args.kwargs["localPath"])
+        library.verify_restored(restored, baseline)
+        self.assertEqual(os.getxattr(restored / "nested/payload", "user.gendragoon.fixture"),
+                         b"required application metadata")
+
     def test_legacy_flat_file_manifest_restores_without_fabricated_metadata(self):
         source = self.fixture.source("file")
         result = self.fixture.upload(source)

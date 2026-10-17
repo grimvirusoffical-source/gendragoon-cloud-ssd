@@ -1,0 +1,18 @@
+{
+  "schema": 1,
+  "vendor": "Node.js",
+  "version": "24.22.0",
+  "platform": "darwin",
+  "architecture": "arm64",
+  "archive_url": "https://nodejs.org/dist/v24.22.0/node-v24.22.0-darwin-arm64.tar.gz",
+  "archive_sha256": "6a9724d9b50a5f22b4816cded441b5a8d9ddae546191a5e5b7efa5a5e2ee26d5",
+  "checksum_source": "https://nodejs.org/en/blog/release/v24.22.0#shasums",
+  "source_binary_sha256": "b468fb9c67427c9d3aec07ee1105e63020923a631a9a2a00beb71a7ba3768bfd",
+  "signed_binary_sha256": "ba7a8287d99432ff827fd520d720fecb7338d563926626af40557f121eea5826",
+  "license": "gendragoon_node.LICENSE",
+  "developer_id": "Developer ID Application: Joshua Franklin (NZPU8H843J)",
+  "team": "NZPU8H843J",
+  "refreshed_at_utc": "2026-10-17T09:20:54Z",
+  "security_notice": "https://nodejs.org/en/blog/vulnerability/october-2026-security-releases",
+  "security_limit": "As of 2026-10-17, HIGH-severity fixes for Node 24.x are announced for on/after 2026-10-21; this refresh does not claim those unreleased fixes."
+}

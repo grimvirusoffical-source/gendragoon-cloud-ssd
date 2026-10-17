@@ -67,9 +67,15 @@ application package. Existing destination files are never overwritten. A restore
 GenDragoon package has its original root folder and empty directories preserved.
 
 `launch --keep-cache` retains the verified managed copy after exit. Normal launch
-removes only its generated cache directory; uploaded cloud files and the user's
-original application remain unchanged. An app that changes its packaged files
-must be uploaded again or restored fresh before another verified launch.
+removes an unchanged managed copy after comparing it with its saved manifest.
+Changed application data, unexpected files and interrupted launches retain the
+cache for inspection; the launch result reports `cacheRemoved: false` and a
+`cacheRetainedReason`. Cleanup only removes verified manifest files and empty
+directories, so new sibling or nested files that arrive during cleanup are
+retained. Such a late change can leave a partially cleaned cache, with remaining
+content preserved for recovery. Uploaded cloud files and the user's original
+application remain unchanged. Save changed application data before restoring a
+fresh verified copy for another launch.
 
 ## Validation and limits
 
