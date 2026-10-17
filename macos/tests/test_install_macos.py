@@ -255,6 +255,53 @@ class InstallerTests(unittest.TestCase):
             installer.install(self.archive, self.app.parent)
         self.assert_old_preserved()
 
+    def test_unmounted_bundled_helper_blocks_replacement_without_quit_or_kill(self):
+        def processes(app, *, include_helpers=False):
+            return [74542] if include_helpers else []
+        with self.fake_mac(), mock.patch.object(installer, "running_pids", side_effect=processes), \
+                mock.patch.object(installer.os, "replace", wraps=installer.os.replace) as moves, \
+                mock.patch.object(installer.os, "kill") as kill, \
+                self.assertRaisesRegex(installer.InstallError, "bundled helper is still running"):
+            installer.install(self.archive, self.app.parent, restart=True)
+        self.assert_old_preserved()
+        moves.assert_not_called()
+        kill.assert_not_called()
+        self.assertFalse(any(command[0] in ("/usr/bin/osascript", "/usr/bin/open") for command in self.calls))
+
+    def test_helper_remaining_after_graceful_main_exit_preserves_old_app(self):
+        main_running = True
+        def processes(app, *, include_helpers=False):
+            if include_helpers:
+                return [74542]
+            return [100] if main_running else []
+        def quit_main(arguments, timeout=90):
+            nonlocal main_running
+            if arguments[0] == "/usr/bin/osascript":
+                main_running = False
+            return self.fake_command(arguments, timeout)
+        with self.fake_mac(quit_main), mock.patch.object(installer, "running_pids", side_effect=processes), \
+                mock.patch.object(installer.os, "replace", wraps=installer.os.replace) as moves, \
+                mock.patch.object(installer.os, "kill") as kill, \
+                self.assertRaisesRegex(installer.InstallError, "bundled helper is still running"):
+            installer.install(self.archive, self.app.parent, restart=True)
+        self.assertFalse(main_running)
+        self.assert_old_preserved()
+        moves.assert_not_called()
+        kill.assert_not_called()
+        self.assertTrue(any(command[0] == "/usr/bin/osascript" for command in self.calls))
+
+    def test_failed_bundle_process_inspection_preserves_old_app(self):
+        inspect = installer.running_pids
+        def processes(app, *, include_helpers=False):
+            return inspect(app, include_helpers=True) if include_helpers else []
+        with self.fake_mac(), mock.patch.object(installer, "running_pids", side_effect=processes), \
+                mock.patch.object(installer.ctypes, "CDLL", side_effect=OSError("libproc unavailable")), \
+                mock.patch.object(installer.os, "replace", wraps=installer.os.replace) as moves, \
+                self.assertRaisesRegex(installer.InstallError, "Cannot inspect executable paths"):
+            installer.install(self.archive, self.app.parent)
+        self.assert_old_preserved()
+        moves.assert_not_called()
+
     def test_success_keeps_old_backup_and_user_data_without_launching(self):
         data = self.root / "user-library"
         data.mkdir()
@@ -336,6 +383,80 @@ class InstallerTests(unittest.TestCase):
         with mock.patch.object(installer, "run_checked", return_value="100\n101\n102\n"), \
                 mock.patch.object(installer.ctypes, "CDLL", return_value=library):
             self.assertEqual(installer.running_pids(self.app), [100])
+
+    def test_bundle_process_detection_includes_helpers_but_excludes_sibling_app(self):
+        paths = {
+            100: str(self.app / "Contents/MacOS" / installer.EXECUTABLE),
+            101: str(self.app / "Contents/Resources/rclone"),
+            102: str(self.app / "Contents/Resources/gendragoon_node"),
+            103: str(self.app / "Contents/Helpers/Nested.app/Contents/MacOS/Nested"),
+            104: str(self.app) + ".previous/Contents/Resources/rclone",
+            105: "/another/app/Contents/MacOS/" + installer.EXECUTABLE,
+        }
+        def proc_pidpath(pid, buffer, length):
+            buffer.value = os.fsencode(paths[pid])
+            return len(buffer.value)
+        library = mock.Mock()
+        library.proc_pidpath = mock.Mock(side_effect=proc_pidpath)
+        with mock.patch.object(installer, "run_checked", return_value="100\n101\n102\n103\n104\n105\n"), \
+                mock.patch.object(installer.ctypes, "CDLL", return_value=library):
+            self.assertEqual(installer.running_pids(self.app), [100])
+            self.assertEqual(installer.running_pids(self.app, include_helpers=True), [100, 101, 102, 103])
+
+    def test_helper_only_process_does_not_confirm_main_app_launch(self):
+        def proc_pidpath(pid, buffer, length):
+            buffer.value = os.fsencode(self.app / "Contents/Resources/gendragoon_node")
+            return len(buffer.value)
+        library = mock.Mock()
+        library.proc_pidpath = mock.Mock(side_effect=proc_pidpath)
+        def commands(arguments, timeout=90):
+            return "74542\n" if arguments[0] == "/bin/ps" else ""
+        with mock.patch.object(installer, "run_checked", side_effect=commands), \
+                mock.patch.object(installer.ctypes, "CDLL", return_value=library), \
+                mock.patch.object(installer.time, "sleep"), \
+                mock.patch.object(installer.time, "monotonic", side_effect=[0, 1, 21]), \
+                self.assertRaisesRegex(installer.InstallError, "exact executable path"):
+            installer.launch_app(self.app)
+
+    def test_failed_launch_with_surviving_candidate_helper_retains_both_bundles(self):
+        launch_attempted = False
+        def fail_open(arguments, timeout=90):
+            nonlocal launch_attempted
+            if arguments[0] == "/usr/bin/open":
+                launch_attempted = True
+                raise installer.InstallError("simulated main launch failure")
+            return self.fake_command(arguments, timeout)
+        def processes(app, *, include_helpers=False):
+            return [74542] if include_helpers and launch_attempted and app == self.app else []
+        with self.fake_mac(fail_open), mock.patch.object(installer, "running_pids", side_effect=processes), \
+                mock.patch.object(installer.os, "kill") as kill, \
+                self.assertRaisesRegex(installer.InstallError, "retained backup") as failure:
+            installer.install(self.archive, self.app.parent, restart=True)
+        backups = list(self.app.parent.glob("GenDragoon Cloud SSD.previous-*.app"))
+        self.assertEqual(len(backups), 1)
+        self.assertEqual((backups[0] / "Contents/old-marker").read_text(), "original application")
+        self.assertEqual((self.app / "Contents/new-marker").read_text(), "new application")
+        self.assertIn(str(backups[0]), str(failure.exception))
+        self.assertIn("bundled helper is still running", str(failure.exception))
+        kill.assert_not_called()
+
+    def test_failed_launch_with_surviving_backup_helper_retains_both_bundles(self):
+        launch_attempted = False
+        def fail_open(arguments, timeout=90):
+            nonlocal launch_attempted
+            if arguments[0] == "/usr/bin/open":
+                launch_attempted = True
+                raise installer.InstallError("simulated main launch failure")
+            return self.fake_command(arguments, timeout)
+        def processes(app, *, include_helpers=False):
+            return [74542] if include_helpers and launch_attempted and ".previous-" in app.name else []
+        with self.fake_mac(fail_open), mock.patch.object(installer, "running_pids", side_effect=processes), \
+                self.assertRaisesRegex(installer.InstallError, "retained backup"):
+            installer.install(self.archive, self.app.parent, restart=True)
+        backups = list(self.app.parent.glob("GenDragoon Cloud SSD.previous-*.app"))
+        self.assertEqual(len(backups), 1)
+        self.assertEqual((backups[0] / "Contents/old-marker").read_text(), "original application")
+        self.assertEqual((self.app / "Contents/new-marker").read_text(), "new application")
 
     def test_failed_rollback_retains_backup_and_reports_its_location(self):
         real_replace = installer.os.replace

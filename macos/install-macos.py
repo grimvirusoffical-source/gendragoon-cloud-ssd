@@ -314,8 +314,13 @@ def ensure_no_active_mount(extra_paths=()):
             raise InstallError("Active GenDragoon cloud mount detected; safely disconnect it in the app first")
 
 
-def running_pids(app):
-    """Use the kernel's executable path, not a process name or command arguments."""
+def running_pids(app, *, include_helpers=False):
+    """Inspect kernel executable paths; launch confirmation remains main-only.
+
+    Bundle replacement additionally checks every executable beneath the app,
+    including rclone, Node and nested helper applications. Matching the bundle
+    path with its separator excludes similarly named sibling applications.
+    """
     output = run_checked(["/bin/ps", "-axo", "pid="], timeout=10)
     try:
         library = ctypes.CDLL("/usr/lib/libproc.dylib", use_errno=True)
@@ -325,6 +330,7 @@ def running_pids(app):
     except (OSError, AttributeError) as exc:
         raise InstallError("Cannot inspect executable paths; app replacement is blocked") from exc
     wanted = str((app / "Contents/MacOS" / EXECUTABLE).resolve())
+    bundle_prefix = str(app.resolve()) + os.sep
     found = []
     for line in output.splitlines():
         if not line.strip().isdecimal():
@@ -332,9 +338,16 @@ def running_pids(app):
         pid = int(line.strip())
         buffer = ctypes.create_string_buffer(4096)
         length = proc_pidpath(pid, buffer, len(buffer))
-        if length > 0 and os.path.realpath(os.fsdecode(buffer.value)) == wanted:
-            found.append(pid)
+        if length > 0:
+            executable = os.path.realpath(os.fsdecode(buffer.value))
+            if executable == wanted or (include_helpers and executable.startswith(bundle_prefix)):
+                found.append(pid)
     return found
+
+
+def ensure_bundle_stopped(app):
+    if running_pids(app, include_helpers=True):
+        raise InstallError("Application or bundled helper is still running; replacement is postponed")
 
 
 def graceful_quit(app, timeout=45):
@@ -443,6 +456,9 @@ def install(archive, directory, reinstall=False, restart=False, mount_paths=()):
             ensure_no_active_mount(mount_paths)
             check_installed_version(app, reinstall)
             verify_app(staged)
+            # A prior app can leave rclone or another bundled helper running
+            # even after its main process and cloud mount have stopped.
+            ensure_bundle_stopped(app)
             backup = None
             installed = False
             launched = []
@@ -461,6 +477,12 @@ def install(archive, directory, reinstall=False, restart=False, mount_paths=()):
                 try:
                     if installed:
                         graceful_quit(app)
+                        ensure_bundle_stopped(app)
+                    if backup is not None and backup.exists():
+                        ensure_bundle_stopped(backup)
+                    # Check both bundles before moving either one. A surviving
+                    # helper must leave the candidate and rollback copy intact.
+                    if installed:
                         failed = work / "failed.app"
                         os.replace(app, failed)
                     if backup is not None and backup.exists():
