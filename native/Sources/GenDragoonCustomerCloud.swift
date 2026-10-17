@@ -3,256 +3,689 @@ import AppKit
 import Foundation
 import CryptoKit
 
-struct GDWorkspaceChoice:Decodable,Identifiable {
-    let id:String
-    let name:String
-    let kind:String
-    let storageActive:Bool
-    let provisioned:Bool
+struct GDWorkspaceChoice: Decodable, Identifiable {
+    let id: String
+    let name: String
+    let kind: String
+    let storageActive: Bool
+    let provisioned: Bool
+    let projectStatus: String?
+    let projectFeeStatus: String?
+    let hasContinuingBilling: Bool?
+    var archived: Bool { projectStatus == "archived" }
+    var pendingPayment: Bool { projectStatus == "pending_payment" }
+    var pendingCapacity: Bool { projectStatus == "payment_confirmed_pending_capacity" }
 }
-@MainActor final class GDFreeCustomerModel:ObservableObject {
-    @Published var choices:[GDWorkspaceChoice]=[]
-    @Published var selectedWorkspace="free" { didSet {
-        guard !connectedID.isEmpty else { return }
-        UserDefaults.standard.set(selectedWorkspace, forKey: workspacePreference)
-    } }
-    @Published private(set) var workspaceName:String?
-    @Published private(set) var usedBytes:Int64=0
-    @Published private(set) var reservedBytes:Int64=0
-    @Published private(set) var quotaBytes:Int64=2_000_000_000
-    @Published private(set) var workerCount=1
-    @Published private(set) var files:[GDCloudItem]=[]
-    @Published var status="Checking your private cloud…"
-    @Published var busy=false { didSet { GDUpdateActivity.shared.set(self, key: "busy", active: busy) } }
-    @Published var uploadProgress=0.0
-    @Published var transferDetail=""
-    @Published var dataSaver=false
-    private var client:GDTransferClient?
-    private var connectedID=""
-    private var workspacePreference:String {
-        let account=SHA256.hash(data:Data(connectedID.utf8)).map{String(format:"%02x",$0)}.joined()
-        return "gd.customer.workspace."+account
+struct GDProjectFolderEntry: Decodable, Identifiable {
+    let path: String
+    let kind: String
+    let sizeBytes: Int64
+    var id: String { path }
+}
+struct GDProjectFolderPreview: Decodable, Identifiable {
+    let name: String
+    let kind: String
+    let entries: [GDProjectFolderEntry]
+    let entryCount: Int
+    let truncated: Bool
+    var id: String { name }
+}
+private struct GDPreparedProjectFile: Decodable, Sendable {
+    let key: String
+    let path: String
+    let name: String
+    let kind: String
+    let logicalBytes: Int64
+    let sizeBytes: Int64
+    let archiveFormat: String
+    let manifestSHA256: String
+    let entryCount: Int
+    var metadata: GDCloudUploadMetadata {
+        .init(kind: kind, originalName: name, archiveFormat: archiveFormat,
+              manifestSHA256: manifestSHA256, logicalBytes: logicalBytes)
     }
-    private var operation:Task<Void,Never>?
-    func connect(_ login:GDLoginSession) {
-        guard !busy,!GDUpdateActivity.shared.isMaintenancePending else{return}
-        if connectedID != login.userID {
-            files=[];workspaceName=nil;choices=[];connectedID="";selectedWorkspace="free";client=nil
+}
+
+private struct GDProjectUploadedFile: Sendable {
+    let prepared: GDPreparedProjectFile
+    let saved: GDCloudItem
+    let downloaded: URL
+}
+
+@MainActor private final class GDProjectBatchProgress {
+    private let total: Int64
+    private let count: Int
+    private let started = ProcessInfo.processInfo.systemUptime
+    private var received: [String: Int64] = [:]
+    private let report: @MainActor (GDTransferProgress) -> Void
+    init(items: [GDPreparedProjectFile], report: @escaping @MainActor (GDTransferProgress) -> Void) {
+        total = items.reduce(0) { $0 + $1.sizeBytes * 2 }
+        count = items.count; self.report = report
+    }
+    func update(key: String, size: Int64, restoring: Bool, progress: GDTransferProgress) {
+        let done = (restoring ? size : 0) + min(size, max(0, progress.completed))
+        received[key] = max(received[key] ?? 0, done)
+        let completed = received.values.reduce(0, +)
+        let phase = count == 1 ? progress.phase : "Uploading and checking \(count) files"
+        report(GDTransferProgress(completed: completed, total: total,
+            bytesPerSecond: Double(completed) / max(0.001, ProcessInfo.processInfo.systemUptime - started), phase: phase))
+    }
+}
+
+enum GDProjectContent: String { case files, applications }
+
+@MainActor final class GDFreeCustomerModel: ObservableObject {
+    @Published private(set) var choices: [GDWorkspaceChoice] = []
+    @Published var selectedWorkspace = "free" {
+        didSet {
+            guard selectedWorkspace != oldValue, !connectedID.isEmpty else { return }
+            GDProjectPreferences.select(selectedWorkspace, accountID: connectedID)
+            loadPreferences()
+            configurePerformance()
         }
-        guard !login.userID.isEmpty else {status="Sign in with Google first.";return}
-        do {
-            if client==nil {
-                guard let file=Bundle.main.url(forResource:"gendragoon_free_api",withExtension:"json"),
-                    let cfg=(try JSONSerialization.jsonObject(with:Data(contentsOf:file))) as? [String:Any],
-                    let endpointText=cfg["endpoint"] as? String,let endpoint=URL(string:endpointText),
-                    endpoint.host?.hasSuffix(".run.app")==true else {throw GDTransferError(message:"Cloud service configuration missing.",status:0)}
-                let expectedID=login.userID
-                client=try GDTransferClient(endpoint:endpoint,accountID:expectedID){[weak login] force in
-                    guard let login,await login.userID==expectedID else {throw GDTransferError(message:"Your account changed. Sign in again.",status:401)}
-                    return try await login.tokenForTransfer(forceRefresh:force)
-                }
-                connectedID=expectedID
-                selectedWorkspace=UserDefaults.standard.string(forKey:workspacePreference) ?? "free"
-            }
+    }
+    @Published private(set) var workspaceName: String?
+    @Published private(set) var usedBytes: Int64 = 0
+    @Published private(set) var reservedBytes: Int64 = 0
+    @Published private(set) var quotaBytes: Int64 = 2_000_000_000
+    @Published private(set) var workerCount = 1
+    @Published private(set) var files: [GDCloudItem] = []
+    @Published private(set) var projectLimit: Int?
+    @Published private(set) var projectCount: Int?
+    @Published private(set) var nextProjectCents: Int?
+    @Published var status = "Checking your projects…"
+    @Published var busy = false { didSet { GDUpdateActivity.shared.set(self, key: "busy", active: busy) } }
+    @Published var uploadProgress = 0.0
+    @Published var transferDetail = ""
+    @Published var activityTitle = "Loading project"
+    @Published var canPause = false
+    @Published var dataSaver = false { didSet { savePreference(dataSaver, "dataSaver"); configurePerformance() } }
+    @Published var offloadOriginal = false { didSet { savePreference(offloadOriginal, "offloadOriginal") } }
+    @Published var grid = false { didSet { savePreference(grid, "grid") } }
+    @Published var order = "name" { didSet { savePreference(order, "order") } }
+    @Published var category = "all" { didSet { savePreference(category, "category") } }
+    @Published var preview: GDProjectFolderPreview?
+    private var client: GDTransferClient?
+    private var connectedID = ""
+    private weak var login: GDLoginSession?
+    private var restoringPreferences = false
+    private var operation: Task<Void, Never>?
+    private var pendingSelection: String?
+    var selectedProject: GDWorkspaceChoice? { choices.first { $0.id == selectedWorkspace } }
+    var available: Bool { workspaceName != nil && selectedProject?.archived != true && selectedProject?.pendingPayment != true }
+    var activeProjects: [GDWorkspaceChoice] { choices.filter { !$0.archived } }
+    var archivedProjects: [GDWorkspaceChoice] { choices.filter { $0.archived } }
+    var accountID: String { connectedID }
+    private var transferScope: String { GDTransferClient.digest(Data((connectedID + "\n" + selectedWorkspace).utf8)) }
+    private func preference(_ setting: String) -> String {
+        GDProjectPreferences.key(accountID: connectedID, workspaceID: selectedWorkspace, setting: setting)
+    }
+    private func savePreference(_ value: Any, _ setting: String) {
+        guard !restoringPreferences, !connectedID.isEmpty else { return }
+        UserDefaults.standard.set(value, forKey: preference(setting))
+    }
+    private func loadPreferences() {
+        restoringPreferences = true
+        defer { restoringPreferences = false }
+        dataSaver = UserDefaults.standard.bool(forKey: preference("dataSaver"))
+        offloadOriginal = UserDefaults.standard.bool(forKey: preference("offloadOriginal"))
+        grid = UserDefaults.standard.bool(forKey: preference("grid"))
+        order = UserDefaults.standard.string(forKey: preference("order")) ?? "name"
+        category = UserDefaults.standard.string(forKey: preference("category")) ?? "all"
+    }
+    private func configurePerformance() {
+        guard let login, !connectedID.isEmpty, login.userID == connectedID else { return }
+        GDNativePerformance.shared.configure(login: login, workspaceID: selectedWorkspace, constrained: dataSaver)
+    }
+    func selectionChanged(_ notification: Notification) {
+        guard notification.userInfo?["accountID"] as? String == connectedID,
+              let id = notification.userInfo?["workspaceID"] as? String, id != selectedWorkspace else { return }
+        if busy { pendingSelection = id; return }
+        selectedWorkspace = id
+        refresh()
+    }
+    private func finishOperation() {
+        busy = false; canPause = false
+        if let pendingSelection {
+            self.pendingSelection = nil
+            selectedWorkspace = pendingSelection
             refresh()
-        }catch{status=error.localizedDescription}
+        }
+    }
+    func connect(_ login: GDLoginSession) {
+        guard !busy, !GDUpdateActivity.shared.isMaintenancePending else { return }
+        self.login = login
+        if connectedID != login.userID {
+            files = []; workspaceName = nil; choices = []; connectedID = ""; selectedWorkspace = "free"; client = nil
+            GDNativePerformance.shared.clear()
+        }
+        guard !login.userID.isEmpty else { status = "Sign in with Google to load your projects."; return }
+        do {
+            if client == nil {
+                guard let file = Bundle.main.url(forResource: "gendragoon_free_api", withExtension: "json"),
+                      let config = try JSONSerialization.jsonObject(with: Data(contentsOf: file)) as? [String: Any],
+                      let text = config["endpoint"] as? String, let endpoint = URL(string: text),
+                      endpoint.host?.hasSuffix(".run.app") == true else {
+                    throw GDTransferError(message: "Cloud service configuration is missing from this installation.", status: 0)
+                }
+                let expected = login.userID
+                client = try GDTransferClient(endpoint: endpoint, accountID: expected) { [weak login] force in
+                    guard let login, await login.userID == expected else {
+                        throw GDTransferError(message: "Your account changed. Sign in again.", status: 401)
+                    }
+                    return try await login.tokenForTransfer(forceRefresh: force)
+                }
+                connectedID = expected
+                selectedWorkspace = GDProjectPreferences.selected(accountID: expected)
+                loadPreferences()
+            }
+            configurePerformance()
+            refresh()
+        } catch { status = GDNativeMessage.safe(error.localizedDescription) }
     }
     private func load() async throws {
-        guard let client else{throw GDTransferError(message:"Sign in first.",status:401)}
-        let data=try await client.json("v2/workspaces")
-        struct Response:Decodable{let workspaces:[GDWorkspaceChoice]}
-        choices=try JSONDecoder().decode(Response.self,from:data).workspaces.filter{$0.kind=="paid" && $0.storageActive && $0.provisioned}
-        if selectedWorkspace != "free" && !choices.contains(where:{$0.id==selectedWorkspace}){selectedWorkspace="free"}
+        guard let client else { throw GDTransferError(message: "Sign in first.", status: 401) }
+        let data = try await client.jsonData("v2/projects", query: [URLQueryItem(name: "includeArchived", value: "true")])
+        struct Response: Decodable { let projects: [GDWorkspaceChoice] }
+        choices = try JSONDecoder().decode(Response.self, from: data).projects
+        if let root = try JSONSerialization.jsonObject(with: data) as? [String: Any], let policy = root["policy"] as? [String: Any] {
+            projectLimit = policy["projectLimit"] as? Int
+            projectCount = policy["usedProjectSlots"] as? Int
+            let free = policy["freeProjectAvailable"] as? Bool == true || policy["ownerFeeWaived"] as? Bool == true
+            nextProjectCents = free ? 0 : policy["newProjectOneTimeCents"] as? Int
+        }
+        files = []; workspaceName = nil
+        if let selected = selectedProject {
+            if selected.archived { status = "This project is archived. Its cloud files are retained; restore the project to access them."; return }
+            if selected.pendingPayment { status = "This project is awaiting its one-time project payment. Complete checkout before uploading."; return }
+            if selected.pendingCapacity { status = "Payment is confirmed. Free a project slot, then activate this project; no new project fee is required."; return }
+            if !selected.provisioned { status = "This project is being prepared. Refresh to check its storage activation."; return }
+        } else if selectedWorkspace != "free" {
+            status = "Your saved project is unavailable. Choose an existing project or create a new one."
+            return
+        }
         do {
-            let c=try await client.configuration(workspace:selectedWorkspace)
-            workspaceName=c.name;usedBytes=c.usedBytes;reservedBytes=c.reservedBytes;quotaBytes=c.quotaBytes;workerCount=c.transfer.workers
-            files=try await client.list(workspace:selectedWorkspace)
-            status="Cloud ready · \(workerCount) verified transfer worker\(workerCount==1 ? "":"s")."
-        }catch let failure as GDTransferError where failure.status==404 && selectedWorkspace=="free" {
-            workspaceName=nil;files=[];status="Create your free private 2 GB cloud workspace."
+            let config = try await client.configuration(workspace: selectedWorkspace)
+            workspaceName = config.name; usedBytes = config.usedBytes; reservedBytes = config.reservedBytes
+            quotaBytes = config.quotaBytes; workerCount = config.transfer.workers
+            files = try await client.list(workspace: selectedWorkspace)
+            status = "Project ready · \(files.count) item\(files.count == 1 ? "" : "s") · \(workerCount) transfer worker\(workerCount == 1 ? "" : "s")."
+        } catch let error as GDTransferError where error.status == 404 && selectedWorkspace == "free" {
+            status = "Create your first project to get started."
         }
     }
-    func refresh(){
-        guard !busy,!GDUpdateActivity.shared.isMaintenancePending,client != nil else{return};busy=true
-        operation=Task {defer{busy=false};do{try await load()}catch{status=error.localizedDescription}}
+    func refresh() {
+        guard !busy, !GDUpdateActivity.shared.isMaintenancePending, client != nil else { return }
+        busy = true; activityTitle = "Refreshing project"; transferDetail = "Loading the current cloud file index."; canPause = false
+        operation = Task { defer { finishOperation() }; do { try await load() } catch { status = GDNativeMessage.safe(error.localizedDescription) } }
     }
-    func create(){
-        guard !busy,GDUpdateActivity.shared.canStart(excluding:self),let client else{return};busy=true
-        operation=Task {defer{busy=false};do{
-            do{_=try await client.json("v1/free",method:"POST",payload:["name":"My Free Cloud"])}
-            catch let e as GDTransferError where e.status==409 {}
+    func select(_ id: String) { guard !busy else { return }; selectedWorkspace = id; refresh() }
+    func create(name: String) {
+        let name = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty, !busy, GDUpdateActivity.shared.canStart(excluding: self), let client else { return }
+        let key = GDProjectPreferences.key(accountID: connectedID, setting: "createIntent")
+        let savedName = UserDefaults.standard.string(forKey: key + ".name")
+        let intent = savedName == name ? (UserDefaults.standard.string(forKey: key) ?? UUID().uuidString.lowercased()) : UUID().uuidString.lowercased()
+        UserDefaults.standard.set(intent, forKey: key); UserDefaults.standard.set(name, forKey: key + ".name")
+        busy = true; activityTitle = "Creating project"; canPause = false
+        operation = Task { defer { finishOperation() }; do {
+            let data = try await client.json("v2/projects", method: "POST", payload: ["name": name, "intentId": intent])
+            let result = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+            if let id = result?["workspaceId"] as? String { selectedWorkspace = id }
             try await load()
-        }catch{status=error.localizedDescription}}
+            if let text = result?["url"] as? String, let url = URL(string: text), url.scheme == "https", url.host == "checkout.stripe.com" {
+                NSWorkspace.shared.open(url)
+                status = "Project selected. Complete its one-time payment in Stripe, then refresh."
+            } else {
+                UserDefaults.standard.removeObject(forKey: key); UserDefaults.standard.removeObject(forKey: key + ".name")
+            }
+        } catch { status = GDNativeMessage.safe(error.localizedDescription) } }
     }
-    private func update(_ p:GDTransferProgress){
-        uploadProgress=p.fraction
-        let rate=String(format:"%.1f MB/s",p.bytesPerSecond/1_000_000)
-        let eta=p.secondsRemaining.map{String(format:" · about %.0fs remaining",$0)} ?? ""
-        transferDetail=p.phase+" · "+rate+eta
+    func archiveSelected() {
+        guard !busy, GDUpdateActivity.shared.canStart(excluding: self), let client, let project = selectedProject, !project.archived else { return }
+        let alert = NSAlert(); alert.messageText = "Archive \(project.name)?"
+        alert.informativeText = "The project will leave your active projects. Its files and Google Cloud resources are retained. " + (project.hasContinuingBilling == true ? "Its paid subscriptions continue until cancelled through billing. " : "") + "Type the project name to confirm."
+        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 330, height: 24)); field.placeholderString = project.name; alert.accessoryView = field
+        alert.addButton(withTitle: "Archive Project"); alert.addButton(withTitle: "Cancel")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        guard field.stringValue == project.name else { status = "Project name did not match. Nothing was changed."; return }
+        busy = true; activityTitle = "Archiving project"; canPause = false
+        operation = Task { defer { finishOperation() }; do {
+            let payload = try JSONSerialization.data(withJSONObject: ["confirmName": project.name, "acknowledgeBillingContinues": true])
+            _ = try await client.jsonData("v2/projects/" + project.id + "/archive", method: "POST", payload: payload)
+            try await load()
+        } catch { status = GDNativeMessage.safe(error.localizedDescription) } }
     }
-    func upload(){
-        guard !busy,GDUpdateActivity.shared.canStart(excluding:self),workspaceName != nil,client != nil else{return}
-        let panel=NSOpenPanel();panel.canChooseFiles=true;panel.canChooseDirectories=false;panel.allowsMultipleSelection=true
-        panel.message="Select files for this workspace. Interrupted uploads resume when the same unchanged files are selected again. Originals are retained."
-        guard panel.runModal() == .OK else{return}
-        uploadFiles(panel.urls)
+    func restoreProject(_ project: GDWorkspaceChoice) {
+        guard !busy, GDUpdateActivity.shared.canStart(excluding: self), let client else { return }
+        busy = true; activityTitle = "Restoring project"; canPause = false
+        operation = Task { defer { finishOperation() }; do {
+            _ = try await client.json("v2/projects/" + project.id + "/restore", method: "POST", payload: [:])
+            selectedWorkspace = project.id; try await load()
+        } catch { status = GDNativeMessage.safe(error.localizedDescription) } }
     }
-    func uploadFiles(_ urls:[URL]) {
-        guard !busy,GDUpdateActivity.shared.canStart(excluding:self),workspaceName != nil,let client,!urls.isEmpty else{return}
-        guard urls.allSatisfy({$0.isFileURL && (try? $0.resourceValues(forKeys:[.isRegularFileKey]).isRegularFile)==true}) else {
-            status="Choose regular files, or archive folders and app bundles first. Nothing was uploaded.";return
+    private func update(_ progress: GDTransferProgress) {
+        uploadProgress = progress.fraction
+        let rate = progress.bytesPerSecond > 0 ? String(format: " · %.1f MB/s", progress.bytesPerSecond / 1_000_000) : ""
+        let eta = progress.secondsRemaining.map { String(format: " · about %.0fs remaining", $0) } ?? ""
+        transferDetail = progress.phase + rate + eta
+    }
+    func chooseUpload(content: GDProjectContent, replacing: GDCloudItem? = nil) {
+        guard !busy, available, GDUpdateActivity.shared.canStart(excluding: self) else { return }
+        let panel = NSOpenPanel(); panel.canChooseFiles = true; panel.canChooseDirectories = true
+        panel.allowsMultipleSelection = replacing == nil; panel.treatsFilePackagesAsDirectories = false
+        panel.title = content == .applications ? "Choose complete applications" : "Choose files or complete folders"
+        panel.message = replacing.map { "Choose the updated \($0.displayName). Its old cloud copy stays until the new upload and restore are verified." }
+            ?? "Complete folders are scanned and packaged automatically, including empty files, nested folders and Mac metadata."
+        guard panel.runModal() == .OK else { return }
+        uploadFiles(panel.urls, content: content, replacing: replacing)
+    }
+    func uploadFiles(_ urls: [URL], content: GDProjectContent, replacing: GDCloudItem? = nil) {
+        guard !busy, available, GDUpdateActivity.shared.canStart(excluding: self), let client, !urls.isEmpty else { return }
+        guard urls.allSatisfy({ $0.isFileURL }) else { status = "Drop files or folders from this Mac."; return }
+        var seen = Set<String>()
+        let unique = urls.filter { seen.insert($0.standardizedFileURL.path).inserted }
+        let selected = unique.filter { candidate in !unique.contains { parent in parent != candidate && candidate.standardizedFileURL.path.hasPrefix(parent.standardizedFileURL.path + "/") } }
+        if content == .applications && !selected.allSatisfy({ $0.pathExtension.lowercased() == "app" }) {
+            status = "Choose complete .app bundles for Applications. Other files and folders belong in Files."; return
         }
-        let workspace=selectedWorkspace,constrained=dataSaver
-        busy=true;uploadProgress=0
-        operation=Task {defer{busy=false};do{
-            for url in urls {
+        if let replacing, selected.count != 1 || selected.first?.lastPathComponent != replacing.displayName {
+            status = "Choose one updated item named \(replacing.displayName). The existing cloud copy is unchanged."; return
+        }
+        let workspace = selectedWorkspace, scope = transferScope, constrained = dataSaver, offload = offloadOriginal
+        let account = connectedID
+        busy = true; uploadProgress = 0; canPause = true
+        operation = Task { defer { finishOperation() }; do {
+            let fresh = try await client.configuration(workspace: workspace)
+            workerCount = fresh.transfer.workers
+            let verifiedWorkers = constrained ? 1 : fresh.transfer.workers
+            let maximumBatch = max(1, min(8, verifiedWorkers))
+            var completed = 0, next = 0
+            // Directory/app preparation stays sequential. Small regular files
+            // share a bounded batch, and every network operation reserves part
+            // of the client's single authenticated worker allowance.
+            func isSmallFile(_ url: URL) -> Bool {
+                guard let values = try? FileManager.default.attributesOfItem(atPath: url.path),
+                      values[.type] as? FileAttributeType == .typeRegular,
+                      let size = values[.size] as? NSNumber else { return false }
+                return size.int64Value >= 0 && size.int64Value <= 8 * 1024 * 1024
+            }
+            while next < selected.count {
                 try Task.checkCancellation()
-                let scoped=url.startAccessingSecurityScopedResource();defer{if scoped{url.stopAccessingSecurityScopedResource()}}
-                status="Uploading \(url.lastPathComponent)…"
-                try await client.upload(source:url,workspace:workspace,constrained:constrained){[weak model=self] p in await model?.update(p)}
+                var batch = [selected[next]]; next += 1
+                if isSmallFile(batch[0]) {
+                    while next < selected.count && batch.count < maximumBatch && isSmallFile(selected[next]) {
+                        batch.append(selected[next]); next += 1
+                    }
+                }
+                let accessed = batch.filter { $0.startAccessingSecurityScopedResource() }
+                defer { for url in accessed { url.stopAccessingSecurityScopedResource() } }
+                var prepared: [GDPreparedProjectFile] = []
+                // The private archive helper holds an account/project lock;
+                // do not overlap prepare or final verification subprocesses.
+                for url in batch {
+                    try Task.checkCancellation()
+                    activityTitle = "Scanning \(url.lastPathComponent)"
+                    transferDetail = "Reading every file and preserving folder structure and macOS metadata."
+                    status = "Preparing item \(completed + prepared.count + 1) of \(selected.count)…"
+                    let result = try await GDNativeHelper.invoke("gendragoon_project_files", arguments: ["prepare", "--source", url.path, "--scope", scope])
+                    prepared.append(try JSONDecoder().decode(GDPreparedProjectFile.self, from: JSONSerialization.data(withJSONObject: result)))
+                }
+                let ready = prepared, perFileWorkers = max(1, verifiedWorkers / batch.count)
+                let monitor = GDProjectBatchProgress(items: ready) { [weak self] progress in self?.update(progress) }
+                activityTitle = ready.count == 1 ? "Uploading \(ready[0].name)" : "Uploading \(ready.count) files together"
+                var copies: [GDProjectUploadedFile] = []
+                defer { for copy in copies { try? FileManager.default.removeItem(at: copy.downloaded) } }
+                try await withThrowingTaskGroup(of: GDProjectUploadedFile.self) { group in
+                    for item in ready {
+                        group.addTask {
+                            try Task.checkCancellation()
+                            let saved = try await client.upload(source: URL(fileURLWithPath: item.path), workspace: workspace,
+                                constrained: constrained, metadata: item.metadata, maximumWorkers: perFileWorkers) { progress in
+                                    await monitor.update(key: item.key, size: item.sizeBytes, restoring: false, progress: progress)
+                                }
+                            try Task.checkCancellation()
+                            let downloaded = try await client.download(file: saved, workspace: workspace,
+                                constrained: constrained, maximumWorkers: perFileWorkers) { progress in
+                                    await monitor.update(key: item.key, size: item.sizeBytes, restoring: true, progress: progress)
+                                }
+                            return GDProjectUploadedFile(prepared: item, saved: saved, downloaded: downloaded)
+                        }
+                    }
+                    while let copy = try await group.next() { copies.append(copy) }
+                }
+                try Task.checkCancellation()
+                canPause = false
+                for copy in copies {
+                    try Task.checkCancellation()
+                    guard login?.userID == account else {
+                        throw GDTransferError(message: "Your account changed. Original files are retained until you sign in again and resume verification.", status: 401)
+                    }
+                    activityTitle = "Verifying complete restore · \(copy.prepared.name)"
+                    transferDetail = "Checking restored bytes, complete folder structure and metadata."
+                    var arguments = ["verify-remote", "--package", copy.downloaded.path, "--scope", scope, "--key", copy.prepared.key]
+                    if offload { arguments.append("--offload") }
+                    let verified = try await GDNativeHelper.invoke("gendragoon_project_files", arguments: arguments)
+                    await client.acknowledgeUpload(fileID: copy.saved.id)
+                    if let replacing, replacing.id != copy.saved.id {
+                        // The explicit Update action replaces only after roundtrip verification.
+                        try await client.delete(fileID: replacing.id, workspace: workspace)
+                    }
+                    completed += 1
+                    status = verified["message"] as? String ?? "Cloud upload and complete restore verified."
+                }
+                canPause = true
             }
-            try await load();status="Files verified and saved. Your originals were retained."
-        }catch is CancellationError{status="Paused. Select the same files to resume without restarting completed chunks."}
-         catch{status="Upload stopped: "+error.localizedDescription}}
+            let summary = status
+            try await load()
+            status = "\(completed) item\(completed == 1 ? "" : "s") saved. " + summary
+        } catch is CancellationError {
+            status = "Paused. Select the same unchanged source to resume the prepared upload or restore check."
+        } catch { status = "Upload stopped: " + GDNativeMessage.safe(error.localizedDescription) } }
     }
-    func download(file:GDCloudItem){
-        guard !busy,GDUpdateActivity.shared.canStart(excluding:self),let client else{return}
-        let panel=NSSavePanel();panel.nameFieldStringValue=file.name;panel.message="Restore this file. Interrupted downloads resume from verified byte ranges."
-        guard panel.runModal() == .OK,let destination=panel.url else{return}
-        let workspace=selectedWorkspace,constrained=dataSaver
-        busy=true;uploadProgress=0
-        operation=Task {defer{busy=false};do{
-            let scoped=destination.startAccessingSecurityScopedResource();defer{if scoped{destination.stopAccessingSecurityScopedResource()}}
-            let source=try await client.download(file:file,workspace:workspace,constrained:constrained){[weak model=self] p in await model?.update(p)}
-            let staged=destination.deletingLastPathComponent().appendingPathComponent(".gendragoon-"+UUID().uuidString)
-            defer{try? FileManager.default.removeItem(at:staged)}
-            try FileManager.default.copyItem(at:source,to:staged)
-            if FileManager.default.fileExists(atPath:destination.path){_=try FileManager.default.replaceItemAt(destination,withItemAt:staged)}
-            else{try FileManager.default.moveItem(at:staged,to:destination)}
-            try? FileManager.default.removeItem(at:source)
-            status="Restored \(file.name) to your chosen location."
-        }catch is CancellationError{status="Paused. Restore this file again to resume the download."}
-         catch{status=error.localizedDescription}}
+    func download(file: GDCloudItem) {
+        guard !busy, available, GDUpdateActivity.shared.canStart(excluding: self), let client else { return }
+        let panel = NSSavePanel(); panel.nameFieldStringValue = file.displayName
+        panel.canCreateDirectories = true; panel.message = file.isPackage ? "Restore the original item, including its complete folders and Mac metadata. Choose a new name if it already exists." : "Download a verified local copy. The cloud copy stays available."
+        guard panel.runModal() == .OK, let destination = panel.url else { return }
+        if file.isPackage && FileManager.default.fileExists(atPath: destination.path) {
+            status = "That destination already exists. Choose a new name to retain both copies."; return
+        }
+        let workspace = selectedWorkspace, constrained = dataSaver
+        busy = true; uploadProgress = 0; canPause = true; activityTitle = "Downloading \(file.displayName)"
+        operation = Task { defer { finishOperation() }; do {
+            let access = destination.startAccessingSecurityScopedResource(); defer { if access { destination.stopAccessingSecurityScopedResource() } }
+            let downloaded = try await client.download(file: file, workspace: workspace, constrained: constrained) { [weak self] progress in await self?.update(progress) }
+            defer { try? FileManager.default.removeItem(at: downloaded) }
+            try Task.checkCancellation()
+            if file.isPackage {
+                guard let digest = file.manifestSHA256 else { throw GDTransferError(message: "Folder checksum is missing. Refresh this project.", status: 0) }
+                transferDetail = "Restoring and checking original folder metadata."
+                canPause = false
+                _ = try await GDNativeHelper.invoke("gendragoon_project_files", arguments: ["restore", "--package", downloaded.path, "--destination", destination.path, "--manifest-sha256", digest])
+            } else {
+                let staged = destination.deletingLastPathComponent().appendingPathComponent(".gendragoon-" + UUID().uuidString)
+                defer { try? FileManager.default.removeItem(at: staged) }
+                try FileManager.default.copyItem(at: downloaded, to: staged)
+                if FileManager.default.fileExists(atPath: destination.path) { _ = try FileManager.default.replaceItemAt(destination, withItemAt: staged) }
+                else { try FileManager.default.moveItem(at: staged, to: destination) }
+            }
+            status = "Restored \(file.displayName) to your chosen location."
+            NSWorkspace.shared.activateFileViewerSelecting([destination])
+        } catch is CancellationError { status = "Download paused. Choose Download again to resume its verified ranges." }
+        catch { status = GDNativeMessage.safe(error.localizedDescription) } }
     }
-    func delete(file:GDCloudItem){
-        guard !busy,GDUpdateActivity.shared.canStart(excluding:self),let client else{return}
-        let alert=NSAlert();alert.messageText="Delete \(file.name) from cloud?"
-        alert.informativeText="This removes the cloud copy. Local copies are not affected."
-        alert.addButton(withTitle:"Delete Cloud Copy");alert.addButton(withTitle:"Cancel")
-        guard alert.runModal() == .alertFirstButtonReturn else{return}
-        let workspace=selectedWorkspace;busy=true
-        operation=Task {defer{busy=false};do{try await client.delete(fileID:file.id,workspace:workspace);try await load()}catch{status=error.localizedDescription}}
+    func inspect(file: GDCloudItem) {
+        guard file.isPackage, let digest = file.manifestSHA256, !busy, available,
+              GDUpdateActivity.shared.canStart(excluding: self), let client else { return }
+        let workspace = selectedWorkspace, constrained = dataSaver
+        busy = true; activityTitle = "Reading \(file.displayName)"; uploadProgress = 0; canPause = true
+        operation = Task { defer { finishOperation() }; do {
+            let downloaded = try await client.download(file: file, workspace: workspace, constrained: constrained) { [weak self] progress in await self?.update(progress) }
+            defer { try? FileManager.default.removeItem(at: downloaded) }
+            let result = try await GDNativeHelper.invoke("gendragoon_project_files", arguments: ["inspect", "--package", downloaded.path, "--manifest-sha256", digest])
+            preview = try JSONDecoder().decode(GDProjectFolderPreview.self, from: JSONSerialization.data(withJSONObject: result))
+            status = "Folder contents loaded from its checksum-verified cloud package."
+        } catch is CancellationError { status = "Folder preview paused." }
+        catch { status = GDNativeMessage.safe(error.localizedDescription) } }
     }
-    func pause(){operation?.cancel()}
+    func delete(file: GDCloudItem) {
+        guard !busy, GDUpdateActivity.shared.canStart(excluding: self), let client else { return }
+        let alert = NSAlert(); alert.messageText = "Delete \(file.displayName) from this project?"
+        alert.informativeText = "This permanently removes this cloud copy. Your local copies and other project items are unaffected."
+        alert.addButton(withTitle: "Delete Cloud Copy"); alert.addButton(withTitle: "Cancel")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        let workspace = selectedWorkspace; busy = true; activityTitle = "Deleting cloud copy"; canPause = false
+        operation = Task { defer { finishOperation() }; do { try await client.delete(fileID: file.id, workspace: workspace); try await load() } catch { status = GDNativeMessage.safe(error.localizedDescription) } }
+    }
+    func pause() { operation?.cancel() }
 }
-struct GenDragoonFreeCloudPanel:View {
-    @EnvironmentObject var login:GDLoginSession
-    @StateObject private var customer=GDFreeCustomerModel()
-    @State private var search=""
-    @State private var order="name"
-    @State private var kind="all"
-    @State private var dropTarget=false
-    @AppStorage("gd.library.grid") private var grid=false
-    private let accent=Color(red:0.72,green:0.55,blue:0.96)
-    private func size(_ n:Int64)->String{ByteCountFormatter.string(fromByteCount:n,countStyle:.file)}
-    private func category(_ file:GDCloudItem)->String{
-        let ext=(file.name as NSString).pathExtension.lowercased()
-        if ["wav","mp3","aiff","aac","m4a","flac","ogg"].contains(ext){return "audio"}
-        if ["png","jpg","jpeg","webp","gif","heic","svg"].contains(ext){return "images"}
-        if ["zip","dmg","7z","tar","gz","ipa","apk","aab"].contains(ext){return "archives"}
-        return "documents"
+
+struct GenDragoonFreeCloudPanel: View {
+    @EnvironmentObject var login: GDLoginSession
+    @ObservedObject var customer: GDFreeCustomerModel
+    var content: GDProjectContent = .files
+    var showProjectControls = true
+    var onStorage: () -> Void
+    @ObservedObject private var activity = GDUpdateActivity.shared
+    @State private var search = ""
+    @State private var dropTarget = false
+    @State private var showCreate = false
+    @State private var projectName = ""
+    private let accent = Color(red: 0.72, green: 0.55, blue: 0.96)
+    private func size(_ count: Int64) -> String { ByteCountFormatter.string(fromByteCount: count, countStyle: .file) }
+    private func category(_ file: GDCloudItem) -> String {
+        if file.itemKind == "app" { return "applications" }
+        if file.itemKind == "folder" { return "folders" }
+        let ext = (file.displayName as NSString).pathExtension.lowercased()
+        if ["mov", "mp4", "m4v", "mkv", "avi", "webm", "mpeg", "mpg", "3gp"].contains(ext) { return "videos" }
+        if ["wav", "mp3", "aiff", "aac", "m4a", "flac", "ogg", "aif"].contains(ext) { return "audio" }
+        if ["png", "jpg", "jpeg", "webp", "gif", "heic", "heif", "tif", "tiff", "svg", "raw"].contains(ext) { return "pictures" }
+        return "files"
     }
-    private func icon(_ file:GDCloudItem)->String{
-        switch category(file){case "audio":return "waveform";case "images":return "photo";case "archives":return "archivebox";default:return "doc.text"}
-    }
-    private var visible:[GDCloudItem]{
-        customer.files.filter{(search.isEmpty || $0.name.localizedCaseInsensitiveContains(search))&&(kind=="all" || category($0)==kind)}.sorted{
-            if order=="largest"{return $0.sizeBytes>$1.sizeBytes}
-            if order=="smallest"{return $0.sizeBytes<$1.sizeBytes}
-            return $0.name.localizedStandardCompare($1.name) == .orderedAscending
+    private func icon(_ file: GDCloudItem) -> String {
+        switch category(file) {
+        case "applications": return "app.badge.fill"
+        case "folders": return "folder.fill"
+        case "videos": return "play.rectangle.fill"
+        case "audio": return "waveform"
+        case "pictures": return "photo.fill"
+        default: return "doc.fill"
         }
     }
-    private func metric(_ title:String,_ value:String,_ symbol:String)->some View{
-        VStack(alignment:.leading,spacing:12){
-            Label(title,systemImage:symbol).font(.system(size:11,weight:.medium)).foregroundStyle(.white.opacity(0.60))
-            Text(value).font(.system(size:24,weight:.bold,design:.rounded)).tracking(-0.5).lineLimit(1).minimumScaleFactor(0.6)
-        }.frame(maxWidth:.infinity,alignment:.leading).padding(19)
-         .background(accent.opacity(0.075),in:RoundedRectangle(cornerRadius:15))
-         .overlay(RoundedRectangle(cornerRadius:15).stroke(accent.opacity(0.18)))
+    private var sourceFiles: [GDCloudItem] { customer.files.filter { content == .applications ? $0.itemKind == "app" : $0.itemKind != "app" } }
+    private var visible: [GDCloudItem] {
+        sourceFiles.filter { (search.isEmpty || $0.displayName.localizedCaseInsensitiveContains(search)) && (content == .applications || customer.category == "all" || category($0) == customer.category) }.sorted {
+            if customer.order == "largest" { return $0.displaySize > $1.displaySize }
+            if customer.order == "smallest" { return $0.displaySize < $1.displaySize }
+            return $0.displayName.localizedStandardCompare($1.displayName) == .orderedAscending
+        }
     }
-    private func fileIcon(_ file:GDCloudItem)->some View{
-        Image(systemName:icon(file)).font(.system(size:21,weight:.medium)).foregroundStyle(accent)
-            .frame(width:44,height:50).background(accent.opacity(0.11),in:RoundedRectangle(cornerRadius:12))
+    private var locked: Bool { customer.busy || !GDUpdateActivity.shared.canStart(excluding: customer) }
+    private func metric(_ title: String, _ value: String, _ symbol: String) -> some View {
+        VStack(alignment: .leading, spacing: 11) {
+            Label(title, systemImage: symbol).font(.system(size: 11, weight: .medium)).foregroundStyle(.white.opacity(0.60))
+            Text(value).font(.system(size: 24, weight: .bold, design: .rounded)).lineLimit(1).minimumScaleFactor(0.6)
+        }.frame(maxWidth: .infinity, alignment: .leading).padding(18)
+            .background(accent.opacity(0.075), in: RoundedRectangle(cornerRadius: 15))
+            .overlay(RoundedRectangle(cornerRadius: 15).stroke(accent.opacity(0.18)))
     }
-    private func actions(_ file:GDCloudItem)->some View{
-        HStack(spacing:9){
-            Button{customer.download(file:file)}label:{Label("Restore",systemImage:"arrow.down.to.line")}
-                .buttonStyle(.bordered).tint(accent).help("Restore a local copy; the cloud copy remains.")
-            Button(role:.destructive){customer.delete(file:file)}label:{Image(systemName:"trash")}
-                .buttonStyle(.borderless).help("Delete the cloud copy").accessibilityLabel("Delete "+file.name)
-        }.disabled(customer.busy).font(.system(size:11,weight:.medium))
-    }
-    private func row(_ file:GDCloudItem)->some View{
-        HStack(spacing:14){fileIcon(file)
-            VStack(alignment:.leading,spacing:6){Text(file.name).font(.system(size:13,weight:.semibold)).lineLimit(2);Text(size(file.sizeBytes)).font(.system(size:11)).foregroundStyle(.secondary)}
-            Spacer(minLength:12);actions(file)
-        }.padding(.vertical,13).padding(.horizontal,8)
-         .contextMenu{Button("Restore a local copy"){customer.download(file:file)};Button("Delete cloud copy",role:.destructive){customer.delete(file:file)}}
-    }
-    private func tile(_ file:GDCloudItem)->some View{
-        VStack(alignment:.leading,spacing:14){
-            HStack{fileIcon(file);Spacer();Text(size(file.sizeBytes)).font(.system(size:10)).foregroundStyle(.secondary)}
-            Text(file.name).font(.system(size:13,weight:.semibold)).lineLimit(2).frame(height:36,alignment:.topLeading)
-            HStack{Spacer();actions(file)}
-        }.padding(17).background(.white.opacity(0.035),in:RoundedRectangle(cornerRadius:16))
-         .overlay(RoundedRectangle(cornerRadius:16).stroke(.white.opacity(0.09)))
-    }
-    var body:some View{
-        VStack(alignment:.leading,spacing:20){
-            HStack(alignment:.center){
-                VStack(alignment:.leading,spacing:6){Text("PRIVATE WORKSPACE").font(.system(size:9,weight:.bold,design:.monospaced)).tracking(2).foregroundStyle(accent);Text(customer.workspaceName ?? "Your private storage").font(.system(size:23,weight:.bold,design:.rounded))}
-                Spacer();Button{customer.refresh();login.checkAdEntitlement()}label:{Label("Refresh",systemImage:"arrow.clockwise")}.disabled(customer.busy)
+    private var projectHeader: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(content == .applications ? "PROJECT APPLICATION BACKUPS" : "PROJECT FILES").font(.system(size: 9, weight: .bold, design: .monospaced)).tracking(2).foregroundStyle(accent)
+                    Text(customer.workspaceName ?? customer.selectedProject?.name ?? "Your projects").font(.system(size: 23, weight: .bold, design: .rounded))
+                }
+                Spacer()
+                Button { customer.refresh(); login.checkAdEntitlement() } label: { Label("Refresh", systemImage: "arrow.clockwise") }.disabled(customer.busy)
+                if showProjectControls { Button { showCreate = true } label: { Label("New Project", systemImage: "plus") }.disabled(locked) }
             }
-            HStack(spacing:14){
-                Picker("Workspace",selection:$customer.selectedWorkspace){Text("Free · 2 GB").tag("free");ForEach(customer.choices){Text($0.name).tag($0.id)}}
-                    .labelsHidden().controlSize(.large).disabled(customer.busy)
-                Spacer();Label(login.email,systemImage:"checkmark.shield").font(.system(size:11)).foregroundStyle(.secondary).lineLimit(1)
-            }.onChange(of:customer.selectedWorkspace){_,_ in customer.refresh()}
-            if customer.workspaceName != nil {
-                HStack(spacing:12){metric("Storage used",size(customer.usedBytes),"externaldrive");metric("Available",size(max(0,customer.quotaBytes-customer.usedBytes-customer.reservedBytes)),"cloud");metric("Parallel transfers",String(customer.workerCount),"bolt")}
-                ProgressView(value:min(1,Double(customer.usedBytes+customer.reservedBytes)/Double(max(1,customer.quotaBytes)))).tint(accent)
-                HStack(spacing:12){
-                    Button{customer.upload()}label:{Label("Upload files",systemImage:"plus")}.buttonStyle(.borderedProminent).tint(accent).controlSize(.large).disabled(customer.busy)
-                    Text("or drop files here").font(.system(size:11)).foregroundStyle(.secondary)
-                    Spacer();Toggle("Data saver",isOn:$customer.dataSaver).toggleStyle(.switch).font(.system(size:11)).disabled(customer.busy)
+            HStack {
+                Picker("Project", selection: Binding(get: { customer.selectedWorkspace }, set: { customer.select($0) })) {
+                    if !customer.choices.contains(where: { $0.id == customer.selectedWorkspace }) { Text(customer.selectedWorkspace == "free" ? "First project" : "Saved project unavailable").tag(customer.selectedWorkspace) }
+                    ForEach(customer.choices) { project in Text(project.name + (project.archived ? " · Archived" : project.pendingPayment ? " · Awaiting payment" : "")).tag(project.id) }
+                }.controlSize(.large).disabled(customer.busy)
+                Spacer()
+                if showProjectControls, customer.selectedProject != nil, customer.selectedProject?.archived != true {
+                    Menu { Button("Storage & plans", action: onStorage); Button("Archive project…", role: .destructive) { customer.archiveSelected() } } label: { Image(systemName: "ellipsis.circle") }.disabled(locked)
                 }
-                if customer.busy{
-                    VStack(alignment:.leading,spacing:11){HStack{Label("Transfer in progress",systemImage:"arrow.up.arrow.down").font(.system(size:12,weight:.semibold));Spacer();Button("Pause"){customer.pause()}};ProgressView(value:customer.uploadProgress).tint(accent);Text(customer.transferDetail).font(.system(size:11,design:.monospaced)).foregroundStyle(.secondary)}
-                        .padding(16).background(accent.opacity(0.12),in:RoundedRectangle(cornerRadius:14))
-                }
-                HStack(spacing:11){
-                    HStack{Image(systemName:"magnifyingglass").foregroundStyle(.secondary);TextField("Find a file…",text:$search).textFieldStyle(.plain)}.padding(11).background(.black.opacity(0.18),in:RoundedRectangle(cornerRadius:10))
-                    Picker("Sort",selection:$order){Text("Name A–Z").tag("name");Text("Largest first").tag("largest");Text("Smallest first").tag("smallest")}.labelsHidden().frame(width:135)
-                    Button{grid.toggle()}label:{Image(systemName:grid ? "list.bullet":"square.grid.2x2")}.help(grid ? "List view":"Grid view").accessibilityLabel(grid ? "List view":"Grid view")
-                }.padding(.top,8)
-                HStack{
-                    Picker("File type",selection:$kind){Text("All files").tag("all");Text("Audio").tag("audio");Text("Images").tag("images");Text("Documents").tag("documents");Text("Archives").tag("archives")}.pickerStyle(.segmented).labelsHidden().frame(maxWidth:475)
-                    Spacer();Text("\(visible.count) files").font(.system(size:10)).foregroundStyle(.secondary)
-                }
-                if visible.isEmpty{
-                    VStack(spacing:12){Image(systemName:customer.files.isEmpty ? "tray.and.arrow.up":"magnifyingglass").font(.system(size:33,weight:.light)).foregroundStyle(accent);Text(customer.files.isEmpty ? "Make room for what matters.":"No matching files.").font(.system(size:16,weight:.semibold));Text(customer.files.isEmpty ? "Upload your first file. The original stays on your Mac.":"Try another search or file type.").font(.system(size:12)).foregroundStyle(.secondary)}.frame(maxWidth:.infinity).padding(.vertical,38)
-                }else if grid{LazyVGrid(columns:[GridItem(.adaptive(minimum:245),spacing:13)],spacing:13){ForEach(visible){tile($0)}}}
-                else{LazyVStack(spacing:0){ForEach(visible){file in row(file);Divider().opacity(0.22)}}}
-            }else{
-                VStack(spacing:14){Image(systemName:"cloud.badge.plus").font(.system(size:40,weight:.light)).foregroundStyle(accent);Text("Start with 2 GB, on us.").font(.system(size:22,weight:.bold,design:.rounded));Text("Private storage with resumable uploads and integrity checks. No payment required.").font(.system(size:12)).foregroundStyle(.secondary);Button("Create my free workspace"){customer.create()}.buttonStyle(.borderedProminent).tint(accent).controlSize(.large).disabled(customer.busy)}.frame(maxWidth:.infinity).padding(.vertical,30)
             }
-            Label(customer.status,systemImage:"info.circle").font(.system(size:11)).foregroundStyle(.white.opacity(0.66)).textSelection(.enabled).frame(maxWidth:.infinity,alignment:.leading).padding(13).background(.white.opacity(0.035),in:RoundedRectangle(cornerRadius:10))
-            DisclosureGroup("Transfer details"){
-                Text("All plans include resume, integrity checks and partial downloads. Paid performance increases parallel transfers, not your internet connection speed. Data saver uses one transfer at a time. Archive folders and app bundles before uploading here; the owner library below supports compatible Mac app streaming.").font(.system(size:11)).foregroundStyle(.secondary).padding(.top,7)
-            }.font(.system(size:11)).tint(accent)
-        }.padding(24).background(.white.opacity(0.035),in:RoundedRectangle(cornerRadius:21))
-         .overlay(RoundedRectangle(cornerRadius:21).stroke(dropTarget ? accent:.white.opacity(0.08),lineWidth:dropTarget ? 2:1))
-         .dropDestination(for:URL.self){urls,_ in guard !customer.busy,customer.workspaceName != nil else{return false};customer.uploadFiles(urls);return true}isTargeted:{dropTarget=$0}
-         .onAppear{customer.connect(login)}.onChange(of:login.userID){_,_ in customer.connect(login)}
+            Text("Project ID: " + customer.selectedWorkspace).font(.system(size: 10, design: .monospaced)).foregroundStyle(.secondary).textSelection(.enabled)
+        }
+    }
+    private var uploadControls: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 12) {
+                Button { customer.chooseUpload(content: content) } label: { Label(content == .applications ? "Upload Applications" : "Upload Files or Folders", systemImage: "plus") }
+                    .buttonStyle(.borderedProminent).tint(accent).controlSize(.large).disabled(locked)
+                Text(content == .applications ? "or drop complete .app bundles" : "or drop any files and complete folders").font(.system(size: 11)).foregroundStyle(.secondary)
+                Spacer()
+                Toggle("Data saver", isOn: $customer.dataSaver).toggleStyle(.switch).font(.system(size: 11)).disabled(customer.busy)
+            }
+            Toggle("Move originals to Trash after cloud upload and a verified restore", isOn: $customer.offloadOriginal)
+                .toggleStyle(.checkbox).font(.system(size: 11)).disabled(customer.busy)
+            Text(content == .applications ? "Project application backups restore complete app bundles. Launch, preloading and automatic managed-cache cleanup are available in the connected Mac application library." : "Folders keep their nested files, empty folders, relative links and macOS metadata. Originals move only when the checkbox is selected and the restored copy matches.")
+                .font(.system(size: 11)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+        }
+    }
+    private var transferProgress: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack { Label(customer.activityTitle, systemImage: "arrow.up.arrow.down").font(.system(size: 12, weight: .semibold)); Spacer(); if customer.canPause { Button("Pause") { customer.pause() } } }
+            if customer.canPause { ProgressView(value: customer.uploadProgress).tint(accent) } else { ProgressView().controlSize(.small) }
+            Text(customer.transferDetail).font(.system(size: 11)).foregroundStyle(.secondary)
+        }.padding(16).background(accent.opacity(0.12), in: RoundedRectangle(cornerRadius: 14))
+    }
+    private var filters: some View {
+        VStack(spacing: 12) {
+            HStack(spacing: 11) {
+                HStack { Image(systemName: "magnifyingglass").foregroundStyle(.secondary); TextField(content == .applications ? "Find an application…" : "Find a file or folder…", text: $search).textFieldStyle(.plain) }
+                    .padding(11).background(.black.opacity(0.18), in: RoundedRectangle(cornerRadius: 10))
+                Picker("Sort", selection: $customer.order) { Text("Name A–Z").tag("name"); Text("Largest first").tag("largest"); Text("Smallest first").tag("smallest") }.labelsHidden().frame(width: 135)
+                Button { customer.grid.toggle() } label: { Image(systemName: customer.grid ? "list.bullet" : "square.grid.2x2") }.help(customer.grid ? "List view" : "Grid view")
+            }
+            if content == .files {
+                Picker("Content", selection: $customer.category) {
+                    Text("All").tag("all"); Text("Files").tag("files"); Text("Folders").tag("folders"); Text("Videos").tag("videos"); Text("Audio").tag("audio"); Text("Pictures").tag("pictures")
+                }.pickerStyle(.segmented).labelsHidden()
+            }
+        }
+    }
+    private func actions(_ file: GDCloudItem) -> some View {
+        HStack(spacing: 9) {
+            Button { customer.download(file: file) } label: { Label("Download", systemImage: "arrow.down.to.line") }.buttonStyle(.bordered).tint(accent)
+            Menu {
+                if file.itemKind == "folder" || file.itemKind == "app" { Button("View contents") { customer.inspect(file: file) } }
+                Button("Upload an update…") { customer.chooseUpload(content: content, replacing: file) }
+                Button("Delete cloud copy…", role: .destructive) { customer.delete(file: file) }
+            } label: { Image(systemName: "ellipsis") }.menuStyle(.borderlessButton).frame(width: 22)
+        }.font(.system(size: 11, weight: .medium)).disabled(locked)
+    }
+    private func fileIcon(_ file: GDCloudItem) -> some View {
+        Image(systemName: icon(file)).font(.system(size: 22, weight: .medium)).foregroundStyle(accent)
+            .frame(width: 48, height: 52).background(accent.opacity(0.11), in: RoundedRectangle(cornerRadius: 12))
+    }
+    private func row(_ file: GDCloudItem) -> some View {
+        HStack(spacing: 14) {
+            fileIcon(file)
+            VStack(alignment: .leading, spacing: 6) {
+                Text(file.displayName).font(.system(size: 13, weight: .semibold)).lineLimit(2)
+                Text(size(file.displaySize) + (file.itemKind == "folder" ? " · Complete folder" : file.itemKind == "app" ? " · Application bundle" : ""))
+                    .font(.system(size: 11)).foregroundStyle(.secondary)
+            }
+            Spacer(minLength: 12); actions(file)
+        }.padding(.vertical, 13).padding(.horizontal, 8)
+    }
+    private func tile(_ file: GDCloudItem) -> some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack { fileIcon(file); Spacer(); Text(size(file.displaySize)).font(.system(size: 10)).foregroundStyle(.secondary) }
+            Text(file.displayName).font(.system(size: 13, weight: .semibold)).lineLimit(2).frame(height: 36, alignment: .topLeading)
+            HStack { Spacer(); actions(file) }
+        }.padding(17).background(.white.opacity(0.035), in: RoundedRectangle(cornerRadius: 16)).overlay(RoundedRectangle(cornerRadius: 16).stroke(.white.opacity(0.09)))
+    }
+    private var emptyState: some View {
+        VStack(spacing: 12) {
+            Image(systemName: sourceFiles.isEmpty ? (content == .applications ? "app.badge.fill" : "folder.badge.plus") : "magnifyingglass").font(.system(size: 34, weight: .light)).foregroundStyle(accent)
+            Text(sourceFiles.isEmpty ? (content == .applications ? "Your application backups belong here." : "A place for every file and folder.") : "No matching items.").font(.system(size: 16, weight: .semibold))
+            Text(sourceFiles.isEmpty ? "Upload to the selected project to keep a verified cloud copy." : "Try another search or category.").font(.system(size: 12)).foregroundStyle(.secondary)
+        }.frame(maxWidth: .infinity).padding(.vertical, 34)
+    }
+    private var unavailable: some View {
+        VStack(spacing: 14) {
+            Image(systemName: "cloud.badge.plus").font(.system(size: 38, weight: .light)).foregroundStyle(accent)
+            if let project = customer.selectedProject, project.archived {
+                Text("Your project and files are retained.").font(.system(size: 18, weight: .semibold))
+                Button("Restore Project") { customer.restoreProject(project) }.buttonStyle(.borderedProminent).tint(accent).disabled(locked)
+            } else if let project = customer.selectedProject, project.pendingCapacity {
+                Text("Payment received. A project slot is needed.").font(.system(size: 17, weight: .semibold))
+                Button("Activate Project") { customer.restoreProject(project) }.buttonStyle(.borderedProminent).tint(accent).disabled(locked)
+            } else if customer.selectedProject?.pendingPayment == true {
+                Text("Complete this project's payment to activate it.").font(.system(size: 17, weight: .semibold))
+                Button("Storage & project plans", action: onStorage).buttonStyle(.borderedProminent).tint(accent)
+            } else if customer.selectedProject != nil {
+                Text("Your selected project is being prepared.").font(.system(size: 17, weight: .semibold))
+                Button("Refresh activation") { customer.refresh() }.disabled(customer.busy)
+            } else {
+                Text("Create your first project.").font(.system(size: 21, weight: .bold, design: .rounded))
+                Text("Each project keeps its files, storage choice and performance settings together.").font(.system(size: 12)).foregroundStyle(.secondary)
+                Button("Create Project") { showCreate = true }.buttonStyle(.borderedProminent).tint(accent).disabled(locked)
+            }
+        }.frame(maxWidth: .infinity).padding(.vertical, 28)
+    }
+    private var createSheet: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            Text("New project").font(.system(size: 24, weight: .bold, design: .rounded))
+            TextField("Project name", text: $projectName).textFieldStyle(.roundedBorder)
+            if let fee = customer.nextProjectCents {
+                Text(fee == 0 ? "Your first project is free." : String(format: "This new project costs $%.2f once. Storage and performance subscriptions are separate.", Double(fee) / 100)).font(.system(size: 12)).foregroundStyle(.secondary)
+            } else { Text("Your first project is free. Additional new projects require a one-time $5 payment, confirmed in Stripe before activation.").font(.system(size: 12)).foregroundStyle(.secondary) }
+            if let limit = customer.projectLimit { Text("\(customer.projectCount ?? customer.activeProjects.count) of \(limit) project slots used.").font(.caption).foregroundStyle(.secondary) }
+            HStack { Button("Cancel") { showCreate = false }; Spacer(); Button("Create Project") { customer.create(name: projectName); showCreate = false; projectName = "" }.buttonStyle(.borderedProminent).disabled(projectName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty) }
+        }.padding(28).frame(width: 440)
+    }
+    var body: some View {
+        VStack(alignment: .leading, spacing: 20) {
+            projectHeader
+            if customer.available {
+                HStack(spacing: 12) { metric("Storage used", size(customer.usedBytes), "externaldrive"); metric("Available", size(max(0, customer.quotaBytes - customer.usedBytes - customer.reservedBytes)), "cloud"); metric("Parallel transfers", String(customer.workerCount), "bolt") }
+                ProgressView(value: min(1, Double(customer.usedBytes + customer.reservedBytes) / Double(max(1, customer.quotaBytes)))).tint(accent)
+                uploadControls
+                if customer.busy { transferProgress }
+                filters
+                HStack { Text("\(visible.count) item\(visible.count == 1 ? "" : "s")").font(.caption).foregroundStyle(.secondary); Spacer(); if content == .files { Button("Storage & performance", action: onStorage).font(.caption) } }
+                if visible.isEmpty { emptyState }
+                else if customer.grid { LazyVGrid(columns: [GridItem(.adaptive(minimum: 245), spacing: 13)], spacing: 13) { ForEach(visible) { tile($0) } } }
+                else { LazyVStack(spacing: 0) { ForEach(visible) { file in row(file); Divider().opacity(0.22) } } }
+            } else { if customer.busy { transferProgress }; unavailable }
+            Label(customer.status, systemImage: "info.circle").font(.system(size: 11)).foregroundStyle(.white.opacity(0.66)).textSelection(.enabled)
+                .frame(maxWidth: .infinity, alignment: .leading).padding(13).background(.white.opacity(0.035), in: RoundedRectangle(cornerRadius: 10))
+            if showProjectControls, !customer.archivedProjects.isEmpty {
+                DisclosureGroup("Archived projects · files retained") {
+                    ForEach(customer.archivedProjects) { project in HStack { Text(project.name); Spacer(); Button("Restore") { customer.restoreProject(project) }.disabled(locked) }.padding(.vertical, 5) }
+                }.font(.caption)
+            }
+            DisclosureGroup("Transfer details") {
+                Text("Complete folders are scanned locally, then uploaded with byte checksums, a folder manifest and a full restore check. Interrupted transfers resume from their prepared copy. Data saver limits transfers to one worker. Verified staging keeps at least 10 GiB free on this Mac. Project files are separate from any connected Google Cloud bucket library shown below.")
+                    .font(.system(size: 11)).foregroundStyle(.secondary).padding(.top, 7)
+            }.font(.system(size: 11)).tint(accent)
+        }.padding(24).background(.white.opacity(0.035), in: RoundedRectangle(cornerRadius: 21))
+            .overlay(RoundedRectangle(cornerRadius: 21).stroke(dropTarget ? accent : .white.opacity(0.08), lineWidth: dropTarget ? 2 : 1))
+            .dropDestination(for: URL.self) { urls, _ in
+                guard !locked, customer.available else { return false }
+                customer.uploadFiles(urls, content: content); return true
+            } isTargeted: { dropTarget = $0 }
+            .sheet(isPresented: $showCreate) { createSheet }
+            .sheet(item: $customer.preview) { preview in GDProjectFolderBrowser(preview: preview) }
+    }
+}
+
+private struct GDProjectFolderBrowser: View {
+    let preview: GDProjectFolderPreview
+    @Environment(\.dismiss) private var dismiss
+    @State private var path = ""
+    @State private var query = ""
+    private var children: [GDProjectFolderEntry] {
+        preview.entries.filter { entry in
+            let parent = (entry.path as NSString).deletingLastPathComponent
+            return parent == path && (query.isEmpty || (entry.path as NSString).lastPathComponent.localizedCaseInsensitiveContains(query))
+        }.sorted { left, right in
+            if (left.kind == "directory") != (right.kind == "directory") { return left.kind == "directory" }
+            return left.path.localizedStandardCompare(right.path) == .orderedAscending
+        }
+    }
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack { Label(preview.name, systemImage: preview.kind == "app" ? "app.fill" : "folder.fill").font(.title2.bold()); Spacer(); Button("Done") { dismiss() } }
+            HStack { Button { path = (path as NSString).deletingLastPathComponent; query = "" } label: { Image(systemName: "chevron.left") }.disabled(path.isEmpty); Text(path.isEmpty ? preview.name : path).font(.caption.monospaced()).textSelection(.enabled); Spacer(); TextField("Find in folder", text: $query).frame(width: 190) }
+            List(children) { entry in
+                HStack {
+                    Image(systemName: entry.kind == "directory" ? "folder.fill" : entry.kind == "symlink" ? "link" : "doc.fill").foregroundStyle(.purple)
+                    Text((entry.path as NSString).lastPathComponent); Spacer()
+                    if entry.kind == "directory" { Button("Open") { path = entry.path; query = "" } }
+                    else { Text(ByteCountFormatter.string(fromByteCount: entry.sizeBytes, countStyle: .file)).foregroundStyle(.secondary).font(.caption) }
+                }.padding(.vertical, 4)
+            }
+            Text(preview.truncated ? "Showing the first 20,000 manifest entries. Download restores the full folder." : "\(preview.entryCount) entries in the verified cloud package. Download the parent item to restore its complete structure.").font(.caption).foregroundStyle(.secondary)
+        }.padding(24).frame(width: 650, height: 510)
     }
 }

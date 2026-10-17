@@ -1,13 +1,13 @@
 "use strict";
 /* Customer-paid logical workspaces in a private Google Cloud bucket.
-   Access is denied unless Stripe-verified storageActive + provisioned and
-   authenticated Google account own the workspace. Each project has its own
+   Access requires an activated project (basic2GB or verified storage upgrade)
+   and its authenticated Google account. Each project has its own
    isolated object prefix and independent quota/transfer governor.
 */
 const crypto=require("node:crypto");
 const express=require("express");
 const {pipeline}=require("node:stream/promises");
-const {STORAGE}=require("./catalog");
+const {effectiveStorageQuota}=require("./projects");
 const {TransferGovernor}=require("./performance");
 const CHUNK=8*1024*1024,MAX_SINGLE_FILE=2_000_000_000,MAX_CHUNKS=Math.ceil(MAX_SINGLE_FILE/CHUNK);
 const UUID=/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
@@ -19,11 +19,10 @@ function safeName(name){
 }
 function scopeFromWorkspace(workspace,accountHash,id){
  if(!UUID.test(id)||workspace?.kind!=="paid"||workspace.accountHash!==accountHash||
-    workspace.storageActive!==true||workspace.provisioned!==true||
-    !STORAGE[workspace.storageTier])return null;
+    effectiveStorageQuota(workspace)<=0)return null;
  return {
   prefix:"customer/"+accountHash+"/managed/"+id,
-  limit:STORAGE[workspace.storageTier].gb*1_000_000_000,
+  limit:effectiveStorageQuota(workspace),
   workers:workspace.performanceActive?workspace.performanceTier:null
  };
 }
@@ -57,7 +56,7 @@ function registerPaidStorage({app,db,bucket,firebaseAuth,accountKey,FieldValue,a
    const snap=await ref.get();
    if(!snap.exists)return res.status(404).json({error:"Workspace not found"});
    const info=scopeFromWorkspace(snap.data(),userHash,id);
-   if(!info)return res.status(403).json({error:"Active provisioned storage subscription required"});
+   if(!info)return res.status(403).json({error:"An active, provisioned project is required"});
    req.paid={ref,workspace:snap.data(),...info};
    next();
   }catch(_){res.status(503).json({error:"Paid workspace unavailable"})}
@@ -99,9 +98,10 @@ function registerPaidStorage({app,db,bucket,firebaseAuth,accountKey,FieldValue,a
    const docs=await w(req).collection("files").orderBy("createdAt","desc").limit(150).get();
    const fresh=await w(req).get();
    const d=fresh.data();
-   if(d.storageActive!==true)return res.status(403).json({error:"Storage subscription inactive"});
+   const current=scopeFromWorkspace(d,accountKey(req.user.uid),req.params.workspaceId);
+   if(!current)return res.status(403).json({error:"Project is not active"});
    res.json({files:docs.docs.map(x=>({id:x.id,name:x.data().name,sizeBytes:x.data().sizeBytes})),
-     quotaBytes:req.paid.limit,usedBytes:d.usedBytes||0,
+     quotaBytes:current.limit,usedBytes:d.usedBytes||0,
      workers:require("./billing_v2").effectiveWorkers(d)});
   }catch(_){res.status(503).json({error:"Paid file listing unavailable"})}
  });

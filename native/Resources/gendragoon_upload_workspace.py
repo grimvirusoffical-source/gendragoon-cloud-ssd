@@ -28,6 +28,8 @@ import sys
 import time
 import uuid
 
+_performance_input = None
+
 DEFAULT_PREFIX = "GenDragoon-App-Library"
 MAX_STATE_BYTES = 3 * 1024 * 1024
 MAX_RESPONSE_BYTES = 4 * 1024 * 1024
@@ -458,6 +460,11 @@ def child_result(command, maintenance_fd=None):
                "encoding": "utf8", "errors": "strict", "check": False}
     if maintenance_fd is not None:
         options["pass_fds"] = (maintenance_fd,)
+    credential = _performance_input
+    if credential is not None and len(command)>2 and Path(command[2]).name == "gendragoon_library.py":
+        command = [*command, "--performance-stdin"]
+        options.pop("stdin")
+        options["input"] = credential.decode("utf8")
     try:
         result = subprocess.run(command, **options)
         if result.returncode != 0 or len(result.stdout.encode()) > MAX_RESPONSE_BYTES:
@@ -668,7 +675,9 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="action", required=True)
     for name in ("state", "jobs", "run-next"):
-        sub.add_parser(name)
+        command = sub.add_parser(name)
+        if name == "run-next":
+            command.add_argument("--performance-stdin", action="store_true")
     browse = sub.add_parser("tree")
     browse.add_argument("--path")
     destination = sub.add_parser("select-destination")
@@ -686,6 +695,11 @@ def main(argv=None):
     for command in (destination, add, remove, clear, queue):
         command.add_argument("--expected-revision", type=int, required=True)
     args = parser.parse_args(argv)
+    if getattr(args, "performance_stdin", False):
+        import gendragoon_performance as performance
+        global _performance_input
+        performance.configure_from_stdin()
+        _performance_input = performance.forwarded_input()
     try:
         extra = {}
         if args.action in ("state", "jobs"):

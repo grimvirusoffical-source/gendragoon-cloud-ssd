@@ -12,7 +12,9 @@ Owner complimentary storage, performance, BYO, and ad-free access are resolved f
 
 ## Billing contract
 
-The established live catalog contains 55 price keys: monthly and annual workspace fees; ten standard and ten bundled storage plans in both intervals; five independent performance tiers in both intervals; monthly/annual BYO; and one-time ad removal. `billing_bootstrap.js` verifies the configured Stripe account, active products, exact USD prices, intervals, webhook destination, and runtime storage before enabling Checkout. The bundled tier's worker entitlement follows storage capacity; independent performance subscriptions can be added to managed storage or an active BYO workspace.
+The established live catalog contains 55 legacy price keys: monthly and annual workspace fees; ten standard and ten bundled storage plans in both intervals; five independent performance tiers in both intervals; monthly/annual BYO; and one-time ad removal. Project policy version2 adds a separately configured **one-time USD $5 project activation Price**. `billing_bootstrap.js` verifies the configured Stripe account, active products, exact USD prices, intervals, webhook destination, and runtime storage before enabling Checkout. Missing new-project pricing does not invalidate existing subscriptions; additional paid project creation remains disabled until its own price and event coverage are ready.
+
+One project is free for the lifetime of an account. Each additional new project costs $5 once and starts with2GB basic storage and one worker, without requiring a storage subscription. Existing projects can receive optional storage, performance, and BYO subscriptions. Active plus payment-pending projects count against a transaction-enforced10-project limit. The limit becomes20 when the same active, provisioned project has **at least2TB storage and Turbo performance (8 workers)**, or an equivalent2TB-or-larger bundle. This is the sixth of the ten storage capacities and the third of the five independent performance tiers. Intentions saved by a client never qualify an account; only verified entitlements do. A downgrade retains existing projects and data but blocks new reservations or restores above the applicable cap. If a paid activation settles after capacity is reduced, its payment is retained and access waits in `payment_confirmed_pending_capacity` until a slot is available; it is not charged a second time.
 
 Native and mobile clients use the existing versioned endpoints:
 
@@ -20,9 +22,15 @@ Native and mobile clients use the existing versioned endpoints:
 | --- | --- |
 | `GET /v2/billing/status` | Availability, Stripe environment, webhook and storage readiness |
 | `GET /v2/pricing` | Server-owned display prices, fee breakdown, capacities, and worker limits |
+| `GET /v2/projects?includeArchived=true` | Owned active, pending and archived projects, verified entitlements, intended selections and current account policy |
+| `POST /v2/projects` | `{name,intentId}`; reserves one project atomically and returns its free/owner activation or one-time Checkout URL |
+| `POST /v2/projects/:id/checkout` | Resume or start the reserved project's one-time activation Checkout |
+| `PUT /v2/projects/:id/selection` | Persist validated intended storage/performance tier, mode and interval without granting entitlement |
+| `POST /v2/projects/:id/archive` | Exact `{confirmName}` plus `acknowledgeBillingContinues:true` when applicable; preserves cloud data |
+| `POST /v2/projects/:id/restore` | Restore the same retained project with a fresh cap check and no new-project fee |
 | `GET /v2/workspaces` | Current account's workspaces and server-verified owner benefits |
-| `POST /v2/workspaces/draft` | Create a selected storage/BYO draft; optional UUIDv4 `intentId` safely deduplicates retries |
-| `POST /v2/workspaces/:id/checkout/storage` | Checkout for the exact tier, interval, and standard/bundle selection stored on that draft |
+| `POST /v2/workspaces/draft` | Compatibility adapter into the same project policy; optional UUIDv4 `intentId` deduplicates retries |
+| `POST /v2/workspaces/:id/checkout/storage` | `{tier,interval,mode}` applies the chosen subscription to this existing project |
 | `POST /v2/workspaces/:id/manual-provider` | Register local BYO connection verification without transmitting provider credentials |
 | `POST /v2/workspaces/:id/checkout/byo` | Checkout for the configured BYO workspace |
 | `POST /v2/workspaces/:id/checkout/performance` | Exact selected performance tier/interval for an eligible workspace |
@@ -31,11 +39,17 @@ Native and mobile clients use the existing versioned endpoints:
 | `POST /billing/customer-portal` | Customer-owned Stripe billing management |
 | `POST /billing/stripe-webhook` | Raw-body signature-verified fulfillment and subscription reconciliation |
 
-Storage totals include the existing workspace fee. Do not infer prices from the historical `commercial/pricing.json` proposal or from native UI constants. Live readiness is reported by the service, not by the `checkoutEnabled` field in the archived catalog snapshot.
+New version2 storage subscriptions contain only their storage or bundle Price. Existing subscriptions retain their original recurring workspace-fee item and billing interval. The one-time activation is a separate payment and is never represented by the old recurring $5 Price. Do not infer prices from the historical `commercial/pricing.json` proposal or from native UI constants. Live readiness is reported by the service, not by the `checkoutEnabled` field in an archived catalog snapshot.
 
-Repeated draft requests carrying the same intent ID and exact selection return the same workspace. Reusing an intent with a different plan fails with HTTP 409. Changing a performance selection expires only the account's previous unpaid open checkout; the new session then uses the newly selected price. Completed payments must reconcile before another plan can be chosen. Checkout URLs and success redirects do not themselves grant access.
+Repeated creation requests carrying the same intent ID and exact selection return the same project. Reusing an intent for a different creation selection fails with HTTP409. Changing an unpaid open storage/performance selection expires only the owned previous Checkout; the new session uses the selected exact Price. Completed payments must reconcile before another plan can be chosen. An existing active subscription is not duplicated by the purchase button; the current billing portal supports review and cancellation. Customer tier-change acceptance/configuration for an existing active subscription remains a separate billing-management gate. Checkout URLs and success redirects do not grant access.
 
-Webhook processing retrieves current Stripe objects, verifies ownership, exact price IDs and quantities, and reconciles storage provisioning and performance limits. Permanent ad removal additionally checks successful payment and refund/dispute state. API and webhook credentials remain in Secret Manager or runtime environment configuration, never in the native app, mobile assets, repository, or log output. Existing live Stripe API compatibility is pinned to `2025-06-30.basil`; upgrading that boundary and webhook version is a separate migration requiring regression validation.
+Archiving is the application's safe removal operation. It removes the logical project from the active list and denies transfers, while preserving its records, objects, Google Cloud project and bucket. Exact-name confirmation is required. Reserved bytes, active/assembling uploads, a Checkout preparation lease, or an unsettled payment block archiving. Existing subscriptions continue; the user must acknowledge that fact and use Manage Billing to cancel if desired. Restoring the same project never consumes a new free allowance or charges the project fee again. No endpoint in this lifecycle deletes a GCP project or bulk-deletes its cloud data.
+
+The historical free project's identifier is `free` and its records remain under `tenants/{accountHash}/workspaces/free`. New projects have UUIDs under `gd_accounts/{accountHash}/workspaces/{UUID}` and use `kind:paid` even at basic2GB. Both can receive verified upgrades. New `projectStatus:active` plus `projectFeeStatus:free|paid|owner` and `provisioned:true` grant the basic quota. Archived, pending and revoked states grant no storage access. Storage and performance entitlements are persisted separately from `intendedSelection`; the native picker also saves drafts per account, project and purchase section.
+
+Webhook processing retrieves current Stripe objects, verifies ownership, exact price IDs and quantities, and reconciles storage provisioning and performance limits. One-time project activation additionally verifies `payment_status:paid`, the stored Checkout binding, exact USD500-cent payment, current charge/refund/dispute state, and an idempotent payment ledger in the same account-cap transaction. Asynchronous success and failure are handled, and a refund/dispute arriving before completion cannot be undone by a later paid-event replay. Permanent ad removal retains its separate499-cent contract.
+
+The runtime pins Stripe Node23.0.0 and API `2026-09-30.endive`, verified on2026-10-17 from the [official versioning page](https://docs.stripe.com/api/versioning) and [Stripe Node releases](https://github.com/stripe/stripe-node/releases). Both normal and Secret Manager bootstrap constructors use the same pin. Checkout uses dynamic payment methods and omits the parameter removed in Endive. Signed snapshot webhooks from the previous Basil version are re-fetched before reconciliation; local tests cover that compatibility. Source changes do not change the live account's default version or webhook destination/version. A sandbox payment and delivery regression against the new API remains required before payment acceptance can be claimed. API and webhook credentials stay in Secret Manager or runtime configuration, never in clients, source or log output.
 
 Stripe Tax requires actual active registrations before enabling `automatic_tax`; this release does not silently enable tax or claim registration coverage. See [Stripe recurring tax setup](https://docs.stripe.com/billing/taxes/collect-taxes) and [webhook fulfillment](https://docs.stripe.com/checkout/fulfillment).
 
@@ -53,6 +67,19 @@ Required runtime settings:
 
 The live bootstrap uses the existing `gendragoon-stripe-live-api` and `gendragoon-stripe-live-webhook` secret resources. Direct test configuration supports `STRIPE_ENVIRONMENT`, `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `STRIPE_PRICE_CATALOG_JSON`, `PUBLIC_URL`, and `STRIPE_CHECKOUT_ENABLED`. Production also requires `PAID_STORAGE_READY=approved`; runtime probing uses `STRIPE_RUNTIME_PROBE=true`. Never place values of API/webhook secrets in checked-in environment files. Prefer a restricted API key with the minimum verified server permissions.
 
+### One-time project payment setup and rollout
+
+1. Use an isolated Stripe sandbox with a separate test database/bucket for real payment, asynchronous outcome, refund, replay and cap/downgrade acceptance. The local suites use deterministic fixtures and do not submit a real payment. A working live key or owner complimentary access does not substitute for this sandbox test.
+2. On the intended account, configure a distinct Price with `currency:usd`, `unit_amount:500`, `billing_scheme:per_unit`, active product, and **no recurring interval**. Identify it with `STRIPE_PROJECT_CREATION_PRICE_ID`, or metadata `service:GenDragoonSSD`, `catalogKey:one_time|project_creation` and lookup key `gdssd_one_time_project_creation_v2`. The existing recurring workspace Price must stay unchanged. No project Price is created automatically by this source.
+3. Retain existing webhook subscriptions and include `checkout.session.completed`, `checkout.session.async_payment_succeeded`, `checkout.session.async_payment_failed`, `charge.refunded`, and `charge.dispute.created`. The handler also accepts `checkout.session.expired`. The live bootstrap checks this event coverage and derives `STRIPE_PROJECT_CHECKOUT_READY`; direct sandbox/runtime configuration requires `STRIPE_PROJECT_CHECKOUT_READY=true` only after the Price and signed webhook delivery are verified.
+4. Deploy the current source as a unique no-traffic candidate using the staging commands below. Perform the read-only verifier first. Do not open project Checkout on the tagged candidate: existing live webhooks still target the serving revision, which may not understand project activation yet.
+5. A controlled candidate `GET /v2/billing/status` can then validate the existing vault bindings and account configuration. It is stateful: the existing bootstrap can create/update readiness records and create/expire unpaid validation Checkout sessions. Inspect readiness and `projectCreationEnabled`; no candidate Checkout or card submission is necessary for that configuration check.
+6. Record the serving revision and its source mapping before promotion. Verify that the canonical webhook reaches the reviewed handler before enabling customer project payments. Do not split traffic across pre-v0.18 and v0.18 policy implementations. Remove obsolete public revision tags on promotion: a tagged revision remains directly callable at zero production traffic. Keep its revision/image as evidence, not as an active alternate API. If signed sandbox delivery acceptance is unavailable, record that limitation explicitly; unpaid template validation is not paid purchase acceptance.
+
+An unmodified pre-v0.18 revision is not a safe rollback after v2 project records or payments exist. Its webhook can ignore and mark project payment events processed, revoke new one-item storage contracts, ignore archive state, and bypass new project limits. After adoption, recovery must preserve the new billing-version, project-state, event-ledger and transfer-authorization semantics through a compatibility-aware correction. Existing legacy drafts can still resume with their exact old selection; unsupported old-client project creation is rejected before any new project or payment is created.
+
+Tax collection remains a separate merchant configuration. Do not enable `automatic_tax` without appropriate active registrations; this source keeps the agreed $5 exact amount and does not silently add tax settings.
+
 `deploy_free.py` now builds from the directory containing the script, not a Downloads path or stale `deploy-free` snapshot. Its allowlist contains runtime modules, the exact lockfile, and current mobile assets. It excludes local storage configuration, tests, dependencies, and credentials. Existing Cloud Run environment variables, service identity, scaling settings, and Secret Manager bindings are retained unless explicitly overridden.
 
 ```sh
@@ -69,18 +96,18 @@ The deployment command uses the active Google application-default account throug
 Use a new, unique tag for each review. These commands stage the current checkout without changing production traffic; the helper refuses a tag that already exists, and `--tag` requires `--no-traffic`.
 
 ```sh
-python3 native/Backend/deploy_free.py --no-traffic --tag review-0170-20261017a --dry-run
-python3 native/Backend/deploy_free.py --project gendragood-ssd --region us-central1 --service gendragoon-free --no-traffic --tag review-0170-20261017a
+python3 native/Backend/deploy_free.py --no-traffic --tag review-0180-20261017a --dry-run
+python3 native/Backend/deploy_free.py --project gendragood-ssd --region us-central1 --service gendragoon-free --no-traffic --tag review-0180-20261017a
 ```
 
-Before promotion, use the existing delegated Google application-default credentials to read the service's `status.traffic` and the tagged revision's `status.conditions`. Verify that the tag resolves to the intended new revision, that `Ready` is true, and that the sum of production traffic percentages for that revision is zero. Use the tag URL returned by Cloud Run; do not construct its hostname. Record the currently serving revision and percentage for rollback. Promote a reviewed revision by its exact revision name, not a mutable `latest` alias.
+Before promotion, use the existing delegated Google application-default credentials to read the service's `status.traffic` and the tagged revision's `status.conditions`. Verify that the tag resolves to the intended new revision, that `Ready` is true, and that the sum of production traffic percentages for that revision is zero. Use the tag URL returned by Cloud Run; do not construct its hostname. Record the currently serving revision and percentage as the pre-adoption baseline. Promote the reviewed revision by its exact revision name and retire incompatible public tags. Apply the compatibility boundary above to any later recovery.
 
 `GET /health?deep=1`, `GET /v3/capabilities`, and `GET /v2/pricing` are read-only HTTP smoke checks against the tag URL. The existing service's health endpoints are public; do not send an ADC access token to the application URL. ADC authenticates the Cloud Run control-plane reads. The deploy helper neither grants public invocation nor changes the service's IAM policy.
 
 Run the bounded candidate verifier after staging:
 
 ```sh
-python3 native/Backend/verify_candidate.py --project gendragood-ssd --region us-central1 --service gendragoon-free --tag review-0170-20261017a --report /tmp/GenDragoon-Candidate-Verification-v0.17.0.json
+python3 native/Backend/verify_candidate.py --project gendragood-ssd --region us-central1 --service gendragoon-free --tag review-0180-20261017a --report /tmp/GenDragoon-Candidate-Verification-v0.18.0.json
 ```
 
 The verifier obtains the tag URL and revisions from the Cloud Run v2 API using the existing application-default credentials. It refuses non-HTTPS or non-`.run.app` targets and redirects, requires a Ready candidate with zero production traffic, and compares literal environment settings, secret bindings, container count, and service identity with every currently serving revision. Configuration values stay in memory; the JSON report contains comparison booleans only. Certificate and hostname checks remain enabled. On macOS, `/etc/ssl/cert.pem` supplies the trusted CA bundle when present; `--ca-file` can select another trusted bundle.

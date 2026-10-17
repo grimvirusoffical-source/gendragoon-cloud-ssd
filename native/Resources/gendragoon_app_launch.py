@@ -333,9 +333,7 @@ def prepare_stream(data, record):
     target = lib.cloud(record["remote"], str(Path(raw).parent))
     process = subprocess.Popen([str(lib.RCLONE), "--config", str(lib.CONFIG), "nfsmount", target, str(mount),
         "--read-only", "--vfs-cache-mode=full", "--cache-dir=" + str(root / "vfs"),
-        "--vfs-cache-max-size=2G", "--vfs-cache-min-free-space=10G", "--vfs-cache-max-age=1h",
-        "--buffer-size=1M", "--vfs-read-ahead=2M", "--vfs-read-chunk-size=1M",
-        "--vfs-read-chunk-size-limit=16M", "--vfs-read-chunk-streams=2", "--vfs-links",
+        *lib.performance.stream_arguments(), "--vfs-links",
         "--file-perms=0755", "--dir-perms=0755"], stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
     record.update(mode="streamed", mountPid=process.pid, mountIdentity=process_identity(process.pid),
@@ -372,6 +370,7 @@ def launch(key, project, bucket, remote, keep_cache=False):
               "bucket": bucket, "remote": remote, "state": "preparing", "mode": "managed-local",
               "keepCache": bool(keep_cache), "createdAt": time.time(),
               "launcherPid": os.getpid(), "launcherIdentity": process_identity(os.getpid()),
+              "performance": lib.performance.current(),
               "cachePath": str(lib.CACHE / key / data["name"])}
     if not record["launcherIdentity"]:
         raise RuntimeError("Launch process identity could not be verified")
@@ -386,7 +385,7 @@ def launch(key, project, bucket, remote, keep_cache=False):
             compatible(path)
         try:
             result = lib.run([sys.executable, "-B", RESOURCE / "gendragoon_preload.py", "--app", path,
-                              "--budget-mb", "24", "--seconds", "0.75", "--workers", "2"], timeout=4)
+                              *lib.performance.preload_arguments()], timeout=5)
             record["preload"] = json.loads(result)
         except Exception:
             record["preload"] = {"ok": False, "message": "Preload unavailable; normal launch continues"}
@@ -528,7 +527,10 @@ def main():
     parser.add_argument("--prefix")
     parser.add_argument("--session")
     parser.add_argument("--keep-cache", action="store_true")
+    parser.add_argument("--performance-stdin", action="store_true")
     args = parser.parse_args()
+    if args.performance_stdin:
+        lib.performance.configure_from_stdin()
     if args.action == "watch":
         return watch(args.session)
     if args.action == "status":

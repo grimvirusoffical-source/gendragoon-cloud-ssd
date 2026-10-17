@@ -7,10 +7,13 @@ const crypto=require("node:crypto");
 const express=require("express");
 const {registerBillingV2}=require("./billing_v2");
 const TERMS_VERSION="terms-2026-10-14-v1";
+// Verified against Stripe's current stable versioning page, 2026-10-17.
+const STRIPE_API_VERSION="2026-09-30.endive";
 const RELEVANT=new Set([
  "customer.subscription.created","customer.subscription.updated","customer.subscription.deleted","customer.subscription.paused","customer.subscription.resumed",
  "invoice.paid","invoice.payment_failed","checkout.session.completed",
- "checkout.session.async_payment_succeeded","charge.refunded","charge.dispute.created"
+ "checkout.session.async_payment_succeeded","checkout.session.async_payment_failed","checkout.session.expired",
+ "charge.refunded","charge.dispute.created"
 ]);
 function parsePrices(raw){
  let prices;
@@ -40,7 +43,7 @@ function environmentGuard(env){
 function installedBilling({app,db,bucket,admin,firebaseAuth,accountKey,env=process.env,stripeOverride}){
  const state=environmentGuard(env);
  const Stripe=state.hasSecret&&!stripeOverride?require("stripe"):null;
- const stripe=stripeOverride||(Stripe?new Stripe(env.STRIPE_SECRET_KEY,{apiVersion:"2025-06-30.basil",maxNetworkRetries:2,timeout:25000}):{
+ const stripe=stripeOverride||(Stripe?new Stripe(env.STRIPE_SECRET_KEY,{apiVersion:STRIPE_API_VERSION,maxNetworkRetries:2,timeout:25000}):{
   customers:{create:async()=>{throw Error("Stripe not configured")}},
   checkout:{sessions:{create:async()=>{throw Error("Stripe not configured")}}},
  });
@@ -48,17 +51,21 @@ function installedBilling({app,db,bucket,admin,firebaseAuth,accountKey,env=proce
    if(!bucket||sub.metadata?.kind!=="storage")return;
    const {accountHash,workspaceId}=sub.metadata||{};
    if(!/^[0-9a-f]{64}$/.test(accountHash||"") ||
-      !/^[0-9a-f-]{36}$/.test(workspaceId||""))return;
-   const ref=db.collection("gd_accounts").doc(accountHash)
-     .collection("workspaces").doc(workspaceId);
+      !require("./projects").safeProjectId(workspaceId))return;
+   const ref=workspaceId==="free"?db.collection("tenants").doc(accountHash).collection("workspaces").doc("free"):
+     db.collection("gd_accounts").doc(accountHash).collection("workspaces").doc(workspaceId);
    const snap=await ref.get();
-   if(!snap.exists||snap.data().accountHash!==accountHash)return;
+   if(!snap.exists||(workspaceId==="free"?snap.data().accountKey:snap.data().accountHash)!==accountHash)return;
    const active=snap.data().storageActive===true;
    if(!active){
-     if(snap.data().provisioned)await ref.update({provisioned:false});
+     // Version2 project activation includes basic2GB independently of optional
+     // storage renewal. A downgrade retains data; uploads enforce the lower quota.
+     const basic=require("./projects").activatedBasicProject(snap.data())||workspaceId==="free";
+     await ref.update({provisioned:basic,quotaBytes:basic?2_000_000_000:0});
      return;
    }
-   const prefix="customer/"+accountHash+"/managed/"+workspaceId+"/";
+   if(require("./projects").projectStatus(snap.data())==="archived")return;
+   const prefix="customer/"+accountHash+(workspaceId==="free"?"/free/":"/managed/"+workspaceId+"/");
    const marker=bucket.file(prefix+"internal-provisioning-marker");
    // Only a validated paid subscription triggers a server-side write. Customer
    // never obtains Google Cloud bucket credentials.
@@ -67,7 +74,9 @@ function installedBilling({app,db,bucket,admin,firebaseAuth,accountKey,env=proce
    });
    await db.runTransaction(async tx=>{
      const fresh=await tx.get(ref);
-     if(!fresh.exists||fresh.data().storageActive!==true||fresh.data().storageSubscriptionId!==sub.id)return;
+     if(!fresh.exists||fresh.data().storageActive!==true||fresh.data().storageSubscriptionId!==sub.id||
+        require("./projects").projectStatus(fresh.data())==="archived"||
+        fresh.data().projectBillingVersion===2&&!["free","paid","owner"].includes(fresh.data().projectFeeStatus))return;
      // Do not overwrite counters from a stale webhook snapshot while transfers are active.
      const data=fresh.data(),patch={provisioned:true,quotaBytes:require("./catalog").STORAGE[data.storageTier].gb*1_000_000_000,
        provisionedAt:admin.firestore.FieldValue.serverTimestamp()};
@@ -97,7 +106,7 @@ function installedBilling({app,db,bucket,admin,firebaseAuth,accountKey,env=proce
    })();
  }
  app.use("/v2",(req,res,next)=>{
-   if(req.method==="POST"&&req.path.includes("/checkout")&&state.enabled&&!readiness.ok)
+   if(req.method==="POST"&&(req.path.includes("/checkout")||req.path==="/projects")&&state.enabled&&!readiness.ok)
       return res.status(503).json({error:"Cloud payment readiness check is still pending"});
    next();
  });
@@ -106,7 +115,8 @@ function installedBilling({app,db,bucket,admin,firebaseAuth,accountKey,env=proce
  app.get("/v2/billing/status",(_req,res)=>{
   res.json({checkoutEnabled:state.enabled&&readiness.ok,
     stripeMode:env.STRIPE_ENVIRONMENT==="test"?"test":env.STRIPE_ENVIRONMENT==="live"?"live":"unconfigured",
-    availableKinds:["storage","performance","bundle","bring-your-own-cloud","remove-ads"],
+    availableKinds:["storage","performance","bundle","bring-your-own-cloud","remove-ads",...(billing.projects.paymentAvailable()?["project-creation"]:[])],
+    projectCreationEnabled:billing.projects.paymentAvailable()&&readiness.ok,
     webhookConfigured:state.hasHook,runtimeStorageVerified:readiness.checked,
     liveStorageProvisioned:env.PAID_STORAGE_READY==="approved",
     message:state.enabled?"Stripe Checkout available":"Purchases disabled until billing and provisioning are verified"});
@@ -149,11 +159,14 @@ function installedBilling({app,db,bucket,admin,firebaseAuth,accountKey,env=proce
       const latest=await stripe.subscriptions.retrieve(id);
       if(await billing.reconcileSubscription(latest))await provisionIfPaid(latest);
     }
-   } else if(event.type==="checkout.session.completed"||event.type==="checkout.session.async_payment_succeeded"){
-    if(object.metadata?.kind==="remove_ads"){
+   } else if(event.type.startsWith("checkout.session.")){
+    if(object.metadata?.kind==="project_creation"){
+      const latest=await stripe.checkout.sessions.retrieve(object.id);
+      await billing.projects.reconcilePayment(latest,{failed:event.type==="checkout.session.async_payment_failed"});
+    } else if(object.metadata?.kind==="remove_ads"&&["checkout.session.completed","checkout.session.async_payment_succeeded"].includes(event.type)){
       const latest=await stripe.checkout.sessions.retrieve(object.id);
       await billing.reconcileAds(latest);
-    } else if(object.subscription){
+    } else if(object.subscription&&["checkout.session.completed","checkout.session.async_payment_succeeded"].includes(event.type)){
       const id=typeof object.subscription==="string"?object.subscription:object.subscription.id;
       if(id){
       const latest=await stripe.subscriptions.retrieve(id);
@@ -171,6 +184,8 @@ function installedBilling({app,db,bucket,admin,firebaseAuth,accountKey,env=proce
         revokedReason:event.type,revokedAt:admin.firestore.FieldValue.serverTimestamp()});
       if(!records.empty)await batch.commit();
     }
+    if(charge.payment_intent&&(event.type==="charge.dispute.created"||charge.refunded||(charge.amount_refunded||0)>0))
+      await billing.projects.revokePayment(charge.payment_intent,event.type);
    }
    await evt.set({processed:true,type:event.type,processedAt:admin.firestore.FieldValue.serverTimestamp()});
    res.json({received:true});
@@ -181,4 +196,4 @@ function installedBilling({app,db,bucket,admin,firebaseAuth,accountKey,env=proce
  });
  return {...state,stripe,billing};
 }
-module.exports={installedBilling,environmentGuard,parsePrices,RELEVANT};
+module.exports={installedBilling,environmentGuard,parsePrices,RELEVANT,STRIPE_API_VERSION};

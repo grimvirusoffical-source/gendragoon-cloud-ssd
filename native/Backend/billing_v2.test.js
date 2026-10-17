@@ -10,7 +10,7 @@ test("free tier is weakest and provides 2GB/1 worker",()=>{
  assert.deepEqual(rcloneLimits({kind:"free",provisioned:true}),[
  "--transfers","1","--checkers","1","--multi-thread-streams","1"]);
 });
-test("storage subscriptions include exactly the $5 workspace fee",()=>{
+test("legacy storage subscriptions include exactly the original $5 workspace fee",()=>{
  const q=storageQuote("100GB","month");
  assert.equal(q.storageCents,640);assert.equal(q.workspaceFeeCents,500);
  assert.equal(q.totalCents,1140);
@@ -29,11 +29,11 @@ test("unpaid storage does not grant transfer workers",()=>{
  assert.throws(()=>rcloneLimits({kind:"paid",storageActive:false}));
 });
 test("paid storage without performance receives only the free 1-worker class",()=>{
- assert.equal(effectiveWorkers({kind:"paid",storageActive:true,performanceTier:"max",performanceActive:false}),1);
+ assert.equal(effectiveWorkers({kind:"paid",storageActive:true,storageTier:"100GB",provisioned:true,performanceTier:"max",performanceActive:false}),1);
 });
 test("verified performance tier directly determines actual rclone concurrency",()=>{
  for(const [tier,worker] of [["lite",2],["boost",4],["turbo",8],["ultra",12],["max",20]]){
-  const record={kind:"paid",storageActive:true,performanceActive:true,performanceTier:tier};
+  const record={kind:"paid",storageActive:true,storageTier:"100GB",provisioned:true,performanceActive:true,performanceTier:tier};
   assert.equal(effectiveWorkers(record),worker);
   assert.equal(rcloneLimits(record)[1],String(worker));
  }
@@ -58,7 +58,7 @@ test("transfer governor enforces 1 worker for free",async()=>{
 });
 test("transfer governor scales to verified 4 worker Boost tier",async()=>{
  const gov=new TransferGovernor();let current=0,maximum=0;
- const ws={kind:"paid",provisioned:true,storageActive:true,performanceActive:true,performanceTier:"boost"};
+ const ws={kind:"paid",provisioned:true,storageActive:true,storageTier:"100GB",performanceActive:true,performanceTier:"boost"};
  await Promise.all(Array.from({length:12},()=>gov.run("b",ws,async()=>{
    current++;maximum=Math.max(maximum,current);
    await new Promise(resolve=>setTimeout(resolve,4));current--;

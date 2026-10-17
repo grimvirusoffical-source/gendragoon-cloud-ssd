@@ -2,17 +2,19 @@
 const crypto=require("node:crypto");
 const {STORAGE,PERFORMANCE,validateWorkspaceName}=require("./catalog");
 const {GPU,GPU_READY,gpuQuote,tripleBundleQuote}=require("./gpu_catalog");
+const {createProjectService,ProjectError,projectStatus,activatedBasicProject,effectiveStorageQuota,safeProjectId,hasContinuingBilling}=require("./projects");
 const FREE_GB=2,FREE_WORKERS=1,REMOVE_ADS_CENTS=499;
 const VALID_INTERVALS=new Set(["month","year"]);
 const ACTIVE_STATUSES=new Set(["active","trialing"]);
 function yearFactor(period){return period==="year"?10:1}
-function storageQuote(tier,interval,mode="standard"){
+function storageQuote(tier,interval,mode="standard",billingVersion=1){
  if(typeof tier!=="string"||!Object.hasOwn(STORAGE,tier)||!VALID_INTERVALS.has(interval))throw Error("Invalid storage plan");
  if(!["standard","bundle"].includes(mode))throw Error("Invalid storage mode");
  const monthly=STORAGE[tier][mode];
- const recurringFee=500;
+ const recurringFee=billingVersion>=2?0:500;
  return {tier,interval,mode,storageGB:STORAGE[tier].gb,storageCents:monthly*yearFactor(interval),
-  workspaceFeeCents:recurringFee*yearFactor(interval),totalCents:(monthly+recurringFee)*yearFactor(interval)};
+  workspaceFeeCents:recurringFee*yearFactor(interval),totalCents:(monthly+recurringFee)*yearFactor(interval),
+  ...(billingVersion>=2?{billingVersion:2}:{})};
 }
 function byoQuote(interval){
  if(!VALID_INTERVALS.has(interval))throw Error("Invalid BYO interval");
@@ -23,7 +25,7 @@ function performanceQuote(tier,interval){
  return {tier,interval,workerLimit:PERFORMANCE[tier].workers,
   totalCents:PERFORMANCE[tier].cents*yearFactor(interval)};
 }
-function priceKeysStorage(plan){return ["workspace|"+plan.interval,
+function priceKeysStorage(plan){return [...(plan.workspaceFeeCents>0?["workspace|"+plan.interval]:[]),
  "storage|"+plan.mode+"|"+plan.tier+"|"+plan.interval]}
 function priceKeysBYO(plan){return ["byo|"+plan.interval]}
 function priceKeysPerformance(plan){return ["performance|"+plan.tier+"|"+plan.interval]}
@@ -39,14 +41,14 @@ function bundleWorkers(tier){
   return Math.min(24,Math.max(2,Math.floor(STORAGE[tier].gb/250)));
 }
 function effectiveWorkers(workspace){
- if(workspace.kind==="free")return FREE_WORKERS;
+ if(!workspace||["archived","pending_payment","payment_revoked","payment_confirmed_pending_capacity"].includes(projectStatus(workspace)))return 0;
  if(workspace.kind==="byo"){
    if(!workspace.byoActive||!workspace.manualProviderConfigured)return 0;
    return workspace.performanceActive===true && PERFORMANCE[workspace.performanceTier] ?
      PERFORMANCE[workspace.performanceTier].workers:FREE_WORKERS;
  }
- if(!workspace.storageActive)return 0;
- const base=workspace.storageMode==="bundle" ? bundleWorkers(workspace.storageTier):FREE_WORKERS;
+ if(effectiveStorageQuota(workspace)<=0)return 0;
+ const base=workspace.storageActive&&workspace.storageMode==="bundle" ? bundleWorkers(workspace.storageTier):FREE_WORKERS;
  return workspace.performanceActive===true && PERFORMANCE[workspace.performanceTier] ?
   Math.max(base,PERFORMANCE[workspace.performanceTier].workers):base;
 }
@@ -55,26 +57,27 @@ function registerBillingV2({app,db,stripe,admin,auth,agreed,hash,prices,env=proc
  const accounts=db.collection("gd_accounts");
  const accRef=req=>accounts.doc(hash(req.user.uid));
  const coll=req=>accRef(req).collection("workspaces");
- function safeWorkspaceId(id){
-   return typeof id==="string"&&/^[a-f0-9-]{36}$/.test(id);
- }
+ const safeWorkspaceId=safeProjectId;
+ const projects=createProjectService({db,stamp,hash,stripe,env,prices,ensureCustomer});
+ function projectError(res,error){return res.status(error instanceof ProjectError?error.status:503).json({
+   error:error instanceof ProjectError?error.message:"Project service temporarily unavailable",code:error instanceof ProjectError?error.code:"PROJECT_UNAVAILABLE"});}
  async function getWorkspace(req,res){
-   if(!safeWorkspaceId(req.params.id)){res.status(400).json({error:"Invalid workspace identifier"});return null}
-   const ref=coll(req).doc(req.params.id);
-   const snap=await ref.get();
-   if(!snap.exists){res.status(404).json({error:"Workspace not found"});return null}
-   const data=snap.data();
-   if(data.accountHash!==hash(req.user.uid)){res.status(403).json({error:"Access denied"});return null}
-   return {ref,data,id:req.params.id};
+   try{return await projects.get(req,req.params.id);}catch(error){projectError(res,error);return null;}
  }
  function publicWorkspace(w){
    return {id:w.id,name:w.data.name,kind:w.data.kind,storageMode:w.data.storageMode||null,
    byoActive:!!w.data.byoActive,manualProviderConfigured:!!w.data.manualProviderConfigured,
    storageTier:w.data.storageTier||null,
+   storageInterval:w.data.storageInterval||null,storageBillingVersion:w.data.storageBillingVersion||1,
    storageActive:!!w.data.storageActive,performanceTier:w.data.performanceTier||null,
+   performanceInterval:w.data.performanceInterval||null,
    performanceActive:!!w.data.performanceActive,workers:effectiveWorkers(w.data),
-   quotaGB:w.data.kind==="free"?FREE_GB:(w.data.storageActive?STORAGE[w.data.storageTier]?.gb||0:0),
-   provisioned:w.data.provisioned===true};
+   quotaGB:effectiveStorageQuota(w.data)/1e9,usedBytes:w.data.usedBytes||0,reservedBytes:w.data.reservedBytes||0,
+   provisioned:w.data.provisioned===true||(w.data.kind==="free"&&w.data.provisioned!==false),
+   projectStatus:projectStatus(w.data),projectBillingVersion:w.data.projectBillingVersion||1,
+   projectFeeStatus:w.data.projectFeeStatus||"legacy",projectFeeCents:w.data.projectFeeCents||0,
+   intendedSelection:w.data.intendedSelection||{},dataRetained:w.data.dataRetained===true,
+   hasContinuingBilling:hasContinuingBilling(w.data),transferEligible:effectiveStorageQuota(w.data)>0};
  }
  async function ensureCustomer(req){
    const ref=accRef(req), snap=await ref.get();
@@ -107,9 +110,13 @@ function registerBillingV2({app,db,stripe,admin,auth,agreed,hash,prices,env=proc
    return session;
  }
  app.get("/v2/pricing",(_req,res)=>res.json({
-   currency:"usd",catalogVersion:1,
+   currency:"usd",catalogVersion:2,
    free:{storageGB:FREE_GB,workers:FREE_WORKERS,monthlyCents:0},
-   workspaceFeeMonthlyCents:500,
+   workspaceFeeMonthlyCents:0,legacyWorkspaceFeeMonthlyCents:500,
+   projects:{firstFree:true,additionalOneTimeCents:500,defaultLimit:10,qualifiedLimit:20,
+     qualifyingStorageTier:"2TB",qualifyingPerformanceTier:"turbo",qualifyingWorkers:8,
+     qualificationLabel:"2 TB storage AND Turbo (8 workers) or higher on the same active project; equivalent bundles qualify",
+     paymentAvailable:projects.paymentAvailable(),archiveRetainsData:true},
    byo:{monthlyCents:1000,yearlyCents:10000,providerFeesExtra:true,manualSetupRequired:true},
    purchasesEnabled:env.STRIPE_CHECKOUT_ENABLED==="true",
    storage:Object.fromEntries(Object.keys(STORAGE).map(t=>[t,{
@@ -133,23 +140,45 @@ function registerBillingV2({app,db,stripe,admin,auth,agreed,hash,prices,env=proc
  app.post("/v2/gpu/checkout",auth,agreed,(_req,res)=>res.status(503).json({error:"GPU checkout unavailable until dedicated workers, isolation, metering and provider costs are verified"}));
  app.get("/v2/workspaces",auth,agreed,async(req,res)=>{
    try{
-     const docs=await coll(req).orderBy("createdAt","desc").limit(100).get();
-     res.json({ownerBenefits:req.ownerBenefits===true,workspaces:docs.docs.map(d=>publicWorkspace({id:d.id,data:d.data()}))});
+     const result=await projects.inventory(req);
+     res.json({ownerBenefits:req.ownerBenefits===true,workspaces:result.records.filter(w=>projectStatus(w.data)!=="archived").map(publicWorkspace),policy:result.policy});
    }catch(_){res.status(503).json({error:"Workspaces unavailable"})}
+ });
+ app.get("/v2/projects",auth,agreed,async(req,res)=>{
+   try{const result=await projects.inventory(req);res.json({ownerBenefits:req.ownerBenefits===true,policy:result.policy,
+     projects:result.records.filter(w=>req.query.includeArchived==="true"||projectStatus(w.data)!=="archived").map(publicWorkspace)});}
+   catch(error){projectError(res,error);}
+ });
+ app.post("/v2/projects",auth,agreed,async(req,res)=>{
+   try{
+     const result=await projects.create(req,{name:req.body?.name,intentId:req.body?.intentId});
+     let payment={};
+     if(result.project.data.projectFeeStatus==="pending")payment=await projects.checkout(req,result.project.id);
+     res.status(result.resumed?200:201).json({project:publicWorkspace(result.project),workspaceId:result.project.id,
+       policy:result.policy,resumed:result.resumed,oneTimeCents:result.project.data.projectFeeStatus==="pending"?500:0,...payment});
+   }catch(error){projectError(res,error);}
+ });
+ app.get("/v2/projects/:id",auth,agreed,async(req,res)=>{
+   try{res.json(publicWorkspace(await projects.get(req,req.params.id)));}catch(error){projectError(res,error);}
+ });
+ app.post("/v2/projects/:id/checkout",auth,agreed,async(req,res)=>{
+   try{res.json(await projects.checkout(req,req.params.id));}catch(error){projectError(res,error);}
+ });
+ app.put("/v2/projects/:id/selection",auth,agreed,async(req,res)=>{
+   try{res.json({workspaceId:req.params.id,intendedSelection:await projects.setSelection(req,req.params.id,req.body)});}catch(error){projectError(res,error);}
+ });
+ app.post("/v2/projects/:id/archive",auth,agreed,async(req,res)=>{
+   try{res.json(await projects.archive(req,req.params.id,req.body));}catch(error){projectError(res,error);}
+ });
+ app.post("/v2/projects/:id/restore",auth,agreed,async(req,res)=>{
+   try{res.json(await projects.restore(req,req.params.id));}catch(error){projectError(res,error);}
  });
  app.post("/v2/workspaces/free",auth,agreed,async(req,res)=>{
    try{
-     const name=validateWorkspaceName(req.body?.name||"Free Workspace");
-     // Deterministic per-account free ID; Firestore create() atomically enforces one free workspace.
-     const id="00000000-0000-4000-8000-"+hash(req.user.uid).slice(0,12);
-     const ref=coll(req).doc(id);
-     await ref.create({name,kind:"free",accountHash:hash(req.user.uid),
-       storageTier:null,storageActive:false,performanceTier:null,performanceActive:false,
-       provisioned:false,freeLimitBytes:FREE_GB*1000*1000*1000,
-       createdAt:stamp()});
-     return res.status(201).json({workspaceId:id,plan:"free",workers:FREE_WORKERS,
-       storageGB:FREE_GB,provisioned:false});
-   }catch(_){return res.status(400).json({error:"Cannot create free workspace"})}
+     const result=await projects.create(req,{name:req.body?.name||"Free Workspace",legacyFree:true});
+     return res.status(201).json({workspaceId:result.project.id,plan:"free",workers:FREE_WORKERS,
+       storageGB:FREE_GB,provisioned:true,policy:result.policy});
+   }catch(error){projectError(res,error);}
  });
  app.post("/v2/workspaces/draft",auth,agreed,async(req,res)=>{
    try{
@@ -161,23 +190,25 @@ function registerBillingV2({app,db,stripe,admin,auth,agreed,hash,prices,env=proc
      const intent=req.body?.intentId;
      if(intent!==undefined&&(typeof intent!=="string"||!(/^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i).test(intent)))
        return res.status(400).json({error:"Invalid checkout intent"});
-     const id=intent?intent.toLowerCase():crypto.randomUUID();
-     const ref=coll(req).doc(id);
-     const record={
-       name,kind,accountHash:hash(req.user.uid),
-       storageTier:plan.tier||null,storageMode:plan.mode||null,storageInterval:plan.interval,
-       byoActive:false,manualProviderConfigured:false,
-       storageActive:false,performanceTier:null,performanceActive:false,
-       provisioned:false,createdAt:stamp()};
-     try{await ref.create(record)}catch(error){
-       if(!intent||![6,"6","ALREADY_EXISTS"].includes(error.code))throw error;
-       const previous=await ref.get(),saved=previous.data();
-       if(!previous.exists||["name","kind","accountHash","storageTier","storageMode","storageInterval"].some(key=>saved[key]!==record[key]))
-         return res.status(409).json({error:"This checkout intent belongs to a different selection. Choose the plan again."});
-       return res.json({workspaceId:id,quote:plan,provisioned:saved.provisioned===true,resumed:true});
-     }
-     res.status(201).json({workspaceId:id,quote:plan,provisioned:false});
-   }catch(_){res.status(400).json({error:"Invalid workspace or storage plan"})}
+     const updateRequired=()=>res.status(426).json({code:"CLIENT_UPDATE_REQUIRED",projectFlow:"/v2/projects",
+       error:"Update GenDragoon to create a project in Cloud, then choose it for storage or performance. Each new project after your first costs $5 once."});
+     // Older clients cannot complete the separate project-activation flow. This
+     // compatibility endpoint may resume an existing legacy intent, but never
+     // creates a new project or switches a storage purchase into a project fee.
+     if(!intent)return updateRequired();
+     let w;
+     try{w=await projects.get(req,intent.toLowerCase());}
+     catch(error){if(error instanceof ProjectError&&error.code==="PROJECT_NOT_FOUND")return updateRequired();throw error;}
+     if(w.data.projectBillingVersion===2)return updateRequired();
+     const expected={name,kind,accountHash:hash(req.user.uid),storageTier:plan.tier||null,
+       storageMode:plan.mode||null,storageInterval:interval};
+     if(Object.keys(expected).some(key=>w.data[key]!==expected[key]))
+       return res.status(409).json({code:"INTENT_CONFLICT",error:"This checkout intent belongs to a different selection. Choose the plan again."});
+     if(projectStatus(w.data)==="archived")return res.status(409).json({code:"PROJECT_ARCHIVED",error:"Restore this project in Cloud before continuing its purchase."});
+     const quote=kind==="byo"?plan:storageQuote(plan.tier,interval,mode,w.data.storageBillingVersion||1);
+     res.json({workspaceId:w.id,quote,provisioned:w.data.provisioned===true,
+       projectStatus:projectStatus(w.data),projectActivationRequired:false,oneTimeProjectCents:0,resumed:true});
+   }catch(error){if(error instanceof ProjectError)return projectError(res,error);res.status(400).json({error:"Invalid workspace or storage plan"})}
  });
  app.get("/v2/workspaces/:id",auth,agreed,async(req,res)=>{
    try{const w=await getWorkspace(req,res);if(w)res.json(publicWorkspace(w))}
@@ -191,9 +222,11 @@ function registerBillingV2({app,db,stripe,admin,auth,agreed,hash,prices,env=proc
    // An old open performance checkout must not silently override the card the
    // customer just selected. Expire only that owned unpaid session, then create
    // a session for the new server-validated selection.
-   if(kind==="performance"&&selection&&(w.data.pendingPerformanceTier!==selection.tier||w.data.pendingPerformanceInterval!==selection.interval)){
+   const oldSelection=kind==="performance"?{tier:w.data.pendingPerformanceTier,interval:w.data.pendingPerformanceInterval}:
+     kind==="storage"?{tier:w.data.pendingStorageTier||w.data.storageTier,interval:w.data.pendingStorageInterval||w.data.storageInterval,mode:w.data.pendingStorageMode||w.data.storageMode}:null;
+   if(oldSelection&&selection&&Object.keys(oldSelection).some(k=>oldSelection[k]!==selection[k])){
      if(previous.status==="open"){await stripe.checkout.sessions.expire(id);return false;}
-     if(previous.status!=="expired"){res.status(409).json({error:"The previous performance payment is being verified. Refresh before changing plans."});return true;}
+     if(previous.status!=="expired"){res.status(409).json({error:"The previous payment is being verified. Refresh before changing plans."});return true;}
    }
    if(previous.status==="open"&&previous.url){res.json({url:previous.url,resumed:true});return true;}
    if(previous.status!=="expired"){res.status(409).json({error:"Payment is being verified. Refresh your workspace before trying again."});return true;}
@@ -202,22 +235,33 @@ function registerBillingV2({app,db,stripe,admin,auth,agreed,hash,prices,env=proc
  app.post("/v2/workspaces/:id/checkout/storage",auth,agreed,async(req,res)=>{
    try{
      const w=await getWorkspace(req,res);if(!w)return;
-     if(w.data.kind!=="paid")return res.status(409).json({error:"Managed storage workspace required"});
-     const plan=storageQuote(w.data.storageTier,w.data.storageInterval,w.data.storageMode||"standard");
-     if(req.ownerBenefits===true){
-       await w.ref.update({storageActive:true,provisioned:true,entitlementSource:"owner",updatedAt:stamp()});
-       return res.json({complimentary:true,workspaceId:w.id,quote:{...plan,totalCents:0},message:"Owner storage activated at no charge."});
-     }
-     if(await existingCheckout(w,"storage",res))return;
-     const session=await checkoutSession(req,"storage",w,priceKeysStorage(plan));
-     await w.ref.update({storageCheckoutSessionId:session.id,updatedAt:stamp()});
-     res.json({url:session.url,quote:plan});
-   }catch(_){res.status(503).json({error:"Storage checkout unavailable; verify Stripe price configuration"})}
+     if(!["paid","free"].includes(w.data.kind))return res.status(409).json({error:"Managed storage project required"});
+     if(w.data.projectBillingVersion===2&&!activatedBasicProject(w.data))return res.status(409).json({code:"PROJECT_ACTIVATION_REQUIRED",
+       error:"Activate or restore this project in Cloud before choosing a storage plan.",workspaceId:w.id});
+     await projects.withLease(req,w.id,async fresh=>{
+       const intent=fresh.data.intendedSelection||{};
+       const plan=storageQuote(req.body?.tier||intent.storageTier||fresh.data.storageTier,
+         req.body?.interval||intent.storageInterval||fresh.data.storageInterval||"month",
+         req.body?.mode||intent.storageMode||fresh.data.storageMode||"standard",
+         req.body?.tier||fresh.id==="free"?2:fresh.data.storageBillingVersion||1);
+       const retained={...(fresh.data.intendedSelection||{}),storageTier:plan.tier,storageMode:plan.mode,storageInterval:plan.interval};
+       if(req.ownerBenefits===true){
+         await fresh.ref.update({storageTier:plan.tier,storageMode:plan.mode,storageInterval:plan.interval,storageBillingVersion:2,
+           storageActive:true,provisioned:true,entitlementSource:"owner",intendedSelection:retained,updatedAt:stamp()});
+         return res.json({complimentary:true,workspaceId:fresh.id,quote:{...plan,totalCents:0},message:"Owner storage activated at no charge."});
+       }
+       if(await existingCheckout(fresh,"storage",res,plan))return;
+       const session=await checkoutSession(req,"storage",fresh,priceKeysStorage(plan));
+       await fresh.ref.update({storageCheckoutSessionId:session.id,pendingStorageTier:plan.tier,pendingStorageMode:plan.mode,
+         pendingStorageInterval:plan.interval,pendingStorageBillingVersion:plan.billingVersion||1,intendedSelection:retained,updatedAt:stamp()});
+       res.json({url:session.url,quote:plan});
+     });
+   }catch(error){if(error instanceof ProjectError)return projectError(res,error);res.status(503).json({error:"Storage checkout unavailable; verify the selected plan and Stripe price configuration"})}
  });
  app.post("/v2/workspaces/:id/manual-provider",auth,agreed,async(req,res)=>{
    try{
      const w=await getWorkspace(req,res);if(!w)return;
-     if(w.data.kind!=="byo")return res.status(409).json({error:"BYO workspace required"});
+     if(!["byo","paid","free"].includes(w.data.kind)||projectStatus(w.data)==="archived")return res.status(409).json({error:"An available project is required"});
      const provider=String(req.body?.provider||"").trim().toLowerCase();
      const label=String(req.body?.label||"").trim();
      if(!["s3","gcs","r2","b2","sftp","webdav","google-drive","onedrive","other"].includes(provider)||
@@ -232,36 +276,44 @@ function registerBillingV2({app,db,stripe,admin,auth,agreed,hash,prices,env=proc
  app.post("/v2/workspaces/:id/checkout/byo",auth,agreed,async(req,res)=>{
    try{
      const w=await getWorkspace(req,res);if(!w)return;
-     if(w.data.kind!=="byo"||!w.data.manualProviderConfigured)
+     if(!w.data.manualProviderConfigured)
        return res.status(409).json({error:"Complete and test a manual cloud configuration first"});
-     if(req.ownerBenefits===true){
-       await w.ref.update({byoActive:true,entitlementSource:"owner",updatedAt:stamp()});
-       return res.json({complimentary:true,workspaceId:w.id,message:"Owner BYO access activated. Your provider's own charges still apply."});
-     }
-     if(await existingCheckout(w,"byo",res))return;
-     const plan=byoQuote(w.data.storageInterval);
-     const session=await checkoutSession(req,"byo",w,priceKeysBYO(plan));
-     await w.ref.update({byoCheckoutSessionId:session.id,updatedAt:stamp()});
-     res.json({url:session.url,quote:plan});
-   }catch(_){res.status(503).json({error:"BYO checkout unavailable"})}
+     if(w.data.projectBillingVersion===2&&!activatedBasicProject(w.data))return res.status(409).json({code:"PROJECT_ACTIVATION_REQUIRED",
+       error:"Activate or restore this project in Cloud before choosing a cloud connection plan.",workspaceId:w.id});
+     await projects.withLease(req,w.id,async fresh=>{
+       const plan=byoQuote(req.body?.interval||fresh.data.intendedSelection?.byoInterval||fresh.data.byoInterval||fresh.data.storageInterval||"month");
+       if(req.ownerBenefits===true){
+         await fresh.ref.update({byoActive:true,byoInterval:plan.interval,entitlementSource:"owner",updatedAt:stamp()});
+         return res.json({complimentary:true,workspaceId:fresh.id,message:"Owner BYO access activated. Your provider's own charges still apply."});
+       }
+       if(await existingCheckout(fresh,"byo",res))return;
+       const session=await checkoutSession(req,"byo",fresh,priceKeysBYO(plan));
+       await fresh.ref.update({byoCheckoutSessionId:session.id,pendingByoInterval:plan.interval,updatedAt:stamp()});
+       res.json({url:session.url,quote:plan});
+     });
+   }catch(error){if(error instanceof ProjectError)return projectError(res,error);res.status(503).json({error:"BYO checkout unavailable"})}
  });
  app.post("/v2/workspaces/:id/checkout/performance",auth,agreed,async(req,res)=>{
    try{
      const w=await getWorkspace(req,res);if(!w)return;
-     if(!((w.data.kind==="paid"&&w.data.storageActive&&w.data.provisioned)||
+     if(!((effectiveStorageQuota(w.data)>0)||
             (w.data.kind==="byo"&&w.data.byoActive&&w.data.manualProviderConfigured)))
        return res.status(409).json({error:"Active provisioned storage required before performance upgrade"});
      const plan=performanceQuote(req.body?.tier,req.body?.interval||"month");
-     if(req.ownerBenefits===true){
-       await w.ref.update({performanceActive:true,performanceTier:plan.tier,entitlementSource:"owner",updatedAt:stamp()});
-       return res.json({complimentary:true,workspaceId:w.id,quote:{...plan,totalCents:0},message:"Owner performance activated at no charge."});
-     }
-     if(await existingCheckout(w,"performance",res,plan))return;
-     const session=await checkoutSession(req,"performance",w,priceKeysPerformance(plan));
-     await w.ref.update({performanceCheckoutSessionId:session.id,
-       pendingPerformanceTier:plan.tier,pendingPerformanceInterval:plan.interval,updatedAt:stamp()});
-     res.json({url:session.url,quote:plan});
-   }catch(_){res.status(503).json({error:"Performance checkout unavailable"})}
+     await projects.withLease(req,w.id,async fresh=>{
+       const retained={...(fresh.data.intendedSelection||{}),performanceTier:plan.tier,performanceInterval:plan.interval};
+       if(req.ownerBenefits===true){
+         await fresh.ref.update({performanceActive:true,performanceTier:plan.tier,performanceInterval:plan.interval,
+           entitlementSource:"owner",intendedSelection:retained,updatedAt:stamp()});
+         return res.json({complimentary:true,workspaceId:fresh.id,quote:{...plan,totalCents:0},message:"Owner performance activated at no charge."});
+       }
+       if(await existingCheckout(fresh,"performance",res,plan))return;
+       const session=await checkoutSession(req,"performance",fresh,priceKeysPerformance(plan));
+       await fresh.ref.update({performanceCheckoutSessionId:session.id,intendedSelection:retained,
+         pendingPerformanceTier:plan.tier,pendingPerformanceInterval:plan.interval,updatedAt:stamp()});
+       res.json({url:session.url,quote:plan});
+     });
+   }catch(error){if(error instanceof ProjectError)return projectError(res,error);res.status(503).json({error:"Performance checkout unavailable"})}
  });
  app.get("/v2/account/entitlements",auth,agreed,async(req,res)=>{
    try{const ads=await db.collection("ad_purchases").doc(req.user.uid).get();
@@ -299,27 +351,33 @@ function registerBillingV2({app,db,stripe,admin,auth,agreed,hash,prices,env=proc
    const m=sub.metadata||{},kind=m.kind,owner=m.accountHash,id=m.workspaceId;
    if(!["storage","performance","byo"].includes(kind)||typeof owner!=="string"||
       !/^[a-f0-9]{64}$/.test(owner)||!safeWorkspaceId(id))return false;
-   const aRef=accounts.doc(owner),wRef=aRef.collection("workspaces").doc(id);
+   const aRef=accounts.doc(owner),wRef=projects.refFor(owner,id);
    const [a,w]=await Promise.all([aRef.get(),wRef.get()]);
-   if(!a.exists||!w.exists||w.data().accountHash!==owner)return false;
+   if(!a.exists||!w.exists||(id==="free"?w.data().accountKey:w.data().accountHash)!==owner)return false;
    const customer=typeof sub.customer==="string"?sub.customer:sub.customer?.id;
    if(a.data().stripeCustomerId!==customer)return false;
    const data=w.data(),active=ACTIVE_STATUSES.has(sub.status);
    let expected,patch;
    if(kind==="byo"){
-     if(data.kind!=="byo" || (data.byoSubscriptionId && data.byoSubscriptionId!==sub.id))return false;
-     expected=priceKeysBYO(byoQuote(data.storageInterval)).map(verifiedPrice);
+     if(!["byo","paid","free"].includes(data.kind) || (data.byoSubscriptionId && data.byoSubscriptionId!==sub.id))return false;
+     const interval=data.pendingByoInterval||data.byoInterval||data.storageInterval;
+     expected=priceKeysBYO(byoQuote(interval)).map(verifiedPrice);
      const matches=matchesStripePrices(sub,expected);
      patch={byoSubscriptionId:sub.id,byoStatus:sub.status,
-       byoActive:active&&matches};
+       byoActive:active&&matches,byoInterval:matches?interval:(data.byoInterval||null)};
    } else if(kind==="storage"){
-     if(data.kind!=="paid" || (data.storageSubscriptionId && data.storageSubscriptionId!==sub.id))return false;
-     expected=priceKeysStorage(storageQuote(data.storageTier,data.storageInterval,data.storageMode||"standard")).map(verifiedPrice);
+     if(!["paid","free"].includes(data.kind) || (data.storageSubscriptionId && data.storageSubscriptionId!==sub.id))return false;
+     const tier=data.pendingStorageTier||data.storageTier,interval=data.pendingStorageInterval||data.storageInterval,
+       mode=data.pendingStorageMode||data.storageMode||"standard",version=data.pendingStorageBillingVersion||data.storageBillingVersion||1;
+     if(!tier||!interval)return false;
+     expected=priceKeysStorage(storageQuote(tier,interval,mode,version)).map(verifiedPrice);
      const matches=matchesStripePrices(sub,expected);
      patch={storageSubscriptionId:sub.id,storageStatus:sub.status,
-       storageActive:active&&matches};
+       storageActive:active&&matches,storageTier:matches?tier:(data.storageTier||null),
+       storageMode:matches?mode:(data.storageMode||null),storageInterval:matches?interval:(data.storageInterval||null),
+       storageBillingVersion:matches?version:(data.storageBillingVersion||1)};
    } else {
-     if(!["paid","byo"].includes(data.kind) || (data.performanceSubscriptionId && data.performanceSubscriptionId!==sub.id))return false;
+     if(!["paid","byo","free"].includes(data.kind) || (data.performanceSubscriptionId && data.performanceSubscriptionId!==sub.id))return false;
      const tier=data.pendingPerformanceTier||data.performanceTier;
      const interval=data.pendingPerformanceInterval||data.performanceInterval;
      if(!tier||!interval)return false;
@@ -360,8 +418,8 @@ function registerBillingV2({app,db,stripe,admin,auth,agreed,hash,prices,env=proc
      return true;
    });
  }
- return {reconcileSubscription,reconcileAds,effectiveWorkers};
+ return {reconcileSubscription,reconcileAds,effectiveWorkers,projects};
 }
 module.exports={registerBillingV2,storageQuote,performanceQuote,effectiveWorkers,
  FREE_GB,FREE_WORKERS,REMOVE_ADS_CENTS,matchesStripePrices,priceKeysStorage,priceKeysPerformance,
- byoQuote,priceKeysBYO};
+ byoQuote,priceKeysBYO,effectiveStorageQuota};

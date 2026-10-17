@@ -1,0 +1,16 @@
+{
+  "build": "22",
+  "gatekeeperAccepted": true,
+  "notarized": true,
+  "signed": true,
+  "stapled": true,
+  "status": "complete",
+  "submissionId": "40e43cdb-e838-49bd-9c44-acc5b1b67aa8",
+  "version": "0.17.0",
+  "candidate": {
+    "version": "0.17.0",
+    "build": "22",
+    "productionSource": "9214bdcdc3c953c39c5015177dc6185cfc61e95d",
+    "fixtureSource": "950191aa36880b551bca8804dcf6ad545db57133"
+  }
+}

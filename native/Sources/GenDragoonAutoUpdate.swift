@@ -44,6 +44,26 @@ final class GDUpdateActivity: ObservableObject {
         lock.lock(); defer { lock.unlock() }
         return (maintenanceOwner != nil && maintenanceOwner !== owner) || busyLocked(excluding: owner, ignorePersistent: false)
     }
+    // Only the primary mount may be quiesced by the verified update worker.
+    // Running managed apps and every transient operation remain blockers.
+    private func updateBusyLocked(excluding owner: AnyObject?) -> Bool {
+        entries = entries.filter { $0.value.owner != nil }
+        return entries.contains { id, entry in
+            if let owner, id == ObjectIdentifier(owner) { return false }
+            return !entry.flags.subtracting(["mounted"]).isEmpty
+        }
+    }
+    func isBusyForUpdate(excluding owner: AnyObject? = nil) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        return (maintenanceOwner != nil && maintenanceOwner !== owner) || updateBusyLocked(excluding: owner)
+    }
+    @discardableResult func beginUpdateMaintenance(owner: AnyObject) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        guard (maintenanceOwner == nil || maintenanceOwner === owner), !updateBusyLocked(excluding: owner) else { return false }
+        maintenanceOwner = owner
+        changed()
+        return true
+    }
     var isMaintenancePending: Bool {
         lock.lock(); defer { lock.unlock() }
         return maintenanceOwner != nil
@@ -77,32 +97,60 @@ final class GDUpdateActivity: ObservableObject {
     @Published private(set) var bytesDownloaded:Int64=0
     @Published private(set) var bytesTotal:Int64=0
     @Published private(set) var isBusy=false { didSet { GDUpdateActivity.shared.set(self, key: "updater", active: isBusy) } }
+    @Published private(set) var previewUpdates:Bool
     private var launched=false
     private var timer:Timer?
+    private var restartTimer:Timer?
     private var process:Process?
-    private var output:Pipe?
-    private var lineBuffer=""
-    private var lastErrorDate:Date?
-    private var relaunchAfterUpdate=false
-    private var restartTimer: Timer?
-    private var idleSince: Date?
+    private var idleSince:Date?
+    private var retryNotBefore=Date.distantPast
     private var restartRequested=false
+    private var acknowledgedRequest:String?
     var hasProgress:Bool {isBusy || ["ready","downloading","verifying","extracting","signature","postponed","error"].contains(phase)}
-    private var updaterScript:URL? {
-        Bundle.main.resourceURL?.appendingPathComponent("gendragoon_auto_update.py")
+    var requestsTermination:Bool {restartRequested && acknowledgedRequest != nil && !isBusy}
+    private var channel:String {previewUpdates ? "preview" : "stable"}
+    private var appPath:String {Bundle.main.bundleURL.path}
+    private var statusURL:URL {
+        FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Application Support/GenDragoon Cloud SSD/AutoUpdates/status.json")
     }
     private init(){
-        let statusURL=FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Library/Application Support/GenDragoon Cloud SSD/AutoUpdates/status.json")
-        if let data=try? Data(contentsOf:statusURL),
-           let result=(try? JSONSerialization.jsonObject(with:data)) as? [String:Any],
-           result["state"] as? String == "installed",
-           let version=result["version"] as? String {
-            percentage=100;phase="installed";status="Updated successfully to \(version)."
+        previewUpdates=UserDefaults.standard.string(forKey:"gd.updates.channel") == "preview"
+        refreshObservedOutcome()
+    }
+    private func refreshObservedOutcome(){
+        guard let data=try? Data(contentsOf:statusURL), data.count<=131_072,
+              let result=(try? JSONSerialization.jsonObject(with:data)) as? [String:Any],
+              let state=result["state"] as? String else{return}
+        let version=Bundle.main.object(forInfoDictionaryKey:"CFBundleShortVersionString") as? String ?? ""
+        let build=Bundle.main.object(forInfoDictionaryKey:"CFBundleVersion") as? String ?? ""
+        if ["installed","rolled_back"].contains(state), result["version"] as? String == "v"+version,
+           String(describing:result["build"] ?? "") == build,
+           result["launchStatus"] as? String == "exact_executable_observed",
+           let records=result["launchedProcesses"] as? [[String:Any]],
+           records.contains(where:{ ($0["pid"] as? NSNumber)?.int32Value == ProcessInfo.processInfo.processIdentifier &&
+               $0["executable"] as? String == Bundle.main.executableURL?.path }) {
+            percentage=100;phase=state
+            status=state == "installed" ? "Updated to \(version) (\(build)) and reopened automatically." :
+                "The update could not finish. Your previous verified app reopened automatically."
+        }
+        if let request=acknowledgedRequest, result["request_id"] as? String == request,
+           ["postponed","attention","rolled_back"].contains(state) {
+            acknowledgedRequest=nil;restartRequested=false
+            GDUpdateActivity.shared.endMaintenance(owner:self)
+            phase="postponed";retryNotBefore=Date().addingTimeInterval(60)
+            status="The app stayed open. Automatic update will retry after current work finishes."
         }
     }
+    func setPreviewUpdates(_ enabled:Bool){
+        guard !isBusy,!restartRequested else{return}
+        previewUpdates=enabled
+        UserDefaults.standard.set(enabled ? "preview" : "stable",forKey:"gd.updates.channel")
+        phase="idle";retryNotBefore = .distantPast;idleSince=nil
+        scheduleCheck()
+    }
     func start(){
-        guard !launched else {return}
+        guard !launched else{return}
         launched=true
         scheduleCheck()
         restartTimer=Timer.scheduledTimer(withTimeInterval:5,repeats:true){[weak self] _ in
@@ -112,114 +160,130 @@ final class GDUpdateActivity: ObservableObject {
             Task {@MainActor in self?.scheduleCheck()}
         }
     }
-    func scheduleCheck(){
-        guard !isBusy, !restartRequested, let script=updaterScript else{return}
-        guard GDUpdateActivity.shared.beginMaintenance(owner: self) else {
-            if phase != "ready" { phase="postponed" }
-            status="Update check queued. Finish current work and unmount the cloud drive first."
-            return
+    // One reader drains stdout to EOF before completion. A final ready/ACK line
+    // cannot be lost through competing readability and termination callbacks.
+    private func runHelper(_ arguments:[String],finished:@escaping(Int32,[String:Any]?)->Void){
+        guard let python=GDRuntime.pythonURL,let resources=Bundle.main.resourceURL else{
+            finished(-1,nil);return
         }
-        guard let python=GDRuntime.pythonURL else {
-            GDUpdateActivity.shared.endMaintenance(owner: self)
-            phase="error";status="A supported Python runtime is unavailable. Run the installer.";return
-        }
-        isBusy=true;phase="checking";status="Checking for trusted app updates…"
-        percentage=0;remainingSeconds=nil;bytesDownloaded=0;bytesTotal=0;lineBuffer=""
         let runner=Process(),pipe=Pipe()
         runner.executableURL=python
-        GDRuntime.configurePython(runner, arguments: [script.path,"prepare"])
-        runner.standardOutput=pipe
-        runner.standardError=FileHandle.nullDevice
-        runner.terminationHandler={[weak self] done in
-            Task {@MainActor in
-                guard let self else{return}
-                self.output?.fileHandleForReading.readabilityHandler=nil
-                self.output=nil
-                self.process=nil
-                self.isBusy=false
-                GDUpdateActivity.shared.endMaintenance(owner: self)
-                if !self.lineBuffer.isEmpty { self.consume("\n") }
-                if done.terminationStatus != 0 && self.phase != "error" {
-                    self.phase="error";self.status="Update check failed. Retrying automatically in 20 minutes."
-                    self.remainingSeconds=nil
+        GDRuntime.configurePython(runner,arguments:[resources.appendingPathComponent("gendragoon_auto_update.py").path]+arguments)
+        runner.standardInput=FileHandle.nullDevice;runner.standardOutput=pipe;runner.standardError=FileHandle.nullDevice
+        do{try runner.run();process=runner}
+        catch{finished(-1,nil);return}
+        DispatchQueue.global(qos:.utility).async {[weak self] in
+            var pending=Data()
+            var last:[String:Any]?
+            while true {
+                let bytes=pipe.fileHandleForReading.availableData
+                if bytes.isEmpty{break}
+                pending.append(bytes)
+                if pending.count>1_048_576{pending.removeAll();continue}
+                while let newline=pending.firstIndex(of:10){
+                    let line=Data(pending[..<newline]);pending.removeSubrange(...newline)
+                    if let record=(try? JSONSerialization.jsonObject(with:line)) as? [String:Any]{
+                        last=record
+                        DispatchQueue.main.async {self?.consume(record)}
+                    }
                 }
             }
-        }
-        pipe.fileHandleForReading.readabilityHandler={[weak self] handle in
-            let bytes=handle.availableData
-            guard !bytes.isEmpty,let text=String(data:bytes,encoding:.utf8) else{return}
-            Task {@MainActor in self?.consume(text)}
-        }
-        do{try runner.run();process=runner;output=pipe}
-        catch {
-            isBusy=false;phase="error";status="Could not launch secure updater."
-            GDUpdateActivity.shared.endMaintenance(owner: self)
+            runner.waitUntilExit()
+            let code=runner.terminationStatus,record=last
+            DispatchQueue.main.async {
+                self?.process=nil
+                finished(code,record)
+            }
         }
     }
-    private func consume(_ incoming:String){
-        guard lineBuffer.utf8.count + incoming.utf8.count <= 1_048_576 else {
-            lineBuffer="";phase="error";status="Updater returned an invalid progress response.";return
+    private func consume(_ json:[String:Any]){
+        guard let event=json["event"] as? String else{return}
+        phase=event
+        if let message=json["message"] as? String{status=GDNativeMessage.safe(message)}
+        if let value=json["progress"] as? Double{percentage=min(100,max(0,value))}
+        remainingSeconds=(json["etaSeconds"] as? Int).map{max(0,$0)}
+        bytesDownloaded=(json["downloadedBytes"] as? NSNumber)?.int64Value ?? bytesDownloaded
+        bytesTotal=(json["totalBytes"] as? NSNumber)?.int64Value ?? bytesTotal
+    }
+    func scheduleCheck(){
+        guard !isBusy,!restartRequested,Date()>=retryNotBefore else{return}
+        guard GDUpdateActivity.shared.beginUpdateMaintenance(owner:self) else{
+            if phase != "ready"{phase="postponed"}
+            status="Update check queued until current transfers and managed applications finish."
+            return
         }
-        lineBuffer+=incoming
-        while let cut=lineBuffer.range(of:"\n"){
-            let raw=String(lineBuffer[..<cut.lowerBound])
-            lineBuffer.removeSubrange(..<cut.upperBound)
-            guard let data=raw.data(using:.utf8),
-                  let json=(try? JSONSerialization.jsonObject(with:data)) as? [String:Any],
-                  let event=json["event"] as? String else{continue}
-            phase=event
-            if let message=json["message"] as? String{status=GDNativeMessage.safe(message)}
-            if let value=json["progress"] as? Double{percentage=min(100,max(0,value))}
-            if let eta=json["etaSeconds"] as? Int {remainingSeconds=max(0,eta)}
-            else {remainingSeconds=nil}
-            bytesDownloaded=(json["downloadedBytes"] as? NSNumber)?.int64Value ?? bytesDownloaded
-            bytesTotal=(json["totalBytes"] as? NSNumber)?.int64Value ?? bytesTotal
+        isBusy=true;phase="checking";status="Checking for trusted app updates…"
+        percentage=0;remainingSeconds=nil;bytesDownloaded=0;bytesTotal=0
+        runHelper(["prepare","--app",appPath,"--channel",channel]) {[weak self] code,_ in
+            guard let self else{return}
+            self.isBusy=false
+            GDUpdateActivity.shared.endMaintenance(owner:self)
+            if code != 0 {
+                self.phase="error";self.remainingSeconds=nil
+                self.retryNotBefore=Date().addingTimeInterval(60)
+                if !self.status.contains("10 GiB"){self.status="Automatic update check could not finish. It will retry; your app stays available."}
+            }
         }
     }
     private func restartWhenIdle(){
-        if phase == "postponed", !isBusy, !GDUpdateActivity.shared.isBusy { scheduleCheck(); return }
-        guard phase=="ready", !isBusy, !restartRequested else {idleSince=nil;return}
-        guard !GDUpdateActivity.shared.isBusy else {
-            idleSince=nil;status="Update ready. Waiting for transfers and mounted drives before restarting."
-            return
+        if restartRequested{refreshObservedOutcome();return}
+        if phase=="postponed",!isBusy,!GDUpdateActivity.shared.isBusyForUpdate(),Date()>=retryNotBefore{scheduleCheck();return}
+        guard phase=="ready",!isBusy else{idleSince=nil;return}
+        guard !GDUpdateActivity.shared.isBusyForUpdate() else{
+            idleSince=nil;status="Update ready. Waiting for transfers and managed applications to finish.";return
         }
-        if idleSince==nil {idleSince=Date()}
-        guard Date().timeIntervalSince(idleSince!) >= 15 else {
-            status="Verified update ready. Restarting automatically once the app is idle."
-            return
+        if idleSince==nil{idleSince=Date()}
+        guard Date().timeIntervalSince(idleSince!)>=15 else{
+            status="Verified update ready. The app will reopen automatically when it is idle.";return
         }
-        restartToUpdate()
+        scheduleRestart()
     }
-    func restartToUpdate(){
-        guard phase=="ready",!isBusy,!restartRequested else{return}
-        guard GDUpdateActivity.shared.beginMaintenance(owner: self) else {
-            status="Finish current operations and unmount your cloud drive to restart safely.";return
-        }
-        restartRequested=true;relaunchAfterUpdate=true
-        NSApplication.shared.terminate(nil)
-        // A cancelled AppKit termination must not permanently freeze the app.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in
-            guard let self else { return }
-            self.restartRequested=false;self.relaunchAfterUpdate=false
-            GDUpdateActivity.shared.endMaintenance(owner: self)
+    private func scheduleRestart(){
+        guard phase=="ready",!isBusy,!restartRequested,
+              GDUpdateActivity.shared.beginUpdateMaintenance(owner:self) else{return}
+        restartRequested=true;isBusy=true;phase="handoff"
+        status="Preparing the verified restart helper and checking that cloud storage is idle…"
+        runHelper(["schedule-restart","--app",appPath,"--pid",String(ProcessInfo.processInfo.processIdentifier),
+                   "--ui-busy","false","--channel",channel]) {[weak self] code,record in
+            guard let self else{return}
+            self.isBusy=false
+            guard code==0,record?["state"] as? String == "scheduled",let request=record?["request_id"] as? String else{
+                self.restartRequested=false;self.phase="postponed";self.idleSince=nil
+                self.retryNotBefore=Date().addingTimeInterval(60)
+                self.status="Automatic restart postponed. Finish current cloud work; the app will retry."
+                GDUpdateActivity.shared.endMaintenance(owner:self)
+                return
+            }
+            self.acknowledgedRequest=request;self.phase="restarting"
+            self.status="Installing the verified update and reopening GenDragoon automatically…"
+            NSApplication.shared.terminate(nil)
+            // If AppKit/user cancellation keeps this exact app alive, cancel
+            // the acknowledged worker before releasing our maintenance lease.
+            DispatchQueue.main.asyncAfter(deadline:.now()+2){[weak self] in self?.cancelUnfinishedQuit(request)}
         }
     }
-    func forceUpdateAndRestart() {
-        if phase == "ready" { restartToUpdate() } else { scheduleCheck() }
+    private func cancelUnfinishedQuit(_ request:String){
+        guard acknowledgedRequest==request,restartRequested else{return}
+        isBusy=true
+        runHelper(["cancel-restart","--app",appPath,"--pid",String(ProcessInfo.processInfo.processIdentifier),
+                   "--request-id",request,"--channel",channel]) {[weak self] code,record in
+            guard let self else{return}
+            self.isBusy=false
+            if code==0,record?["state"] as? String == "cancelled"{
+                self.acknowledgedRequest=nil;self.restartRequested=false;self.phase="postponed";self.idleSince=nil
+                self.retryNotBefore=Date().addingTimeInterval(60)
+                self.status="The app stayed open. Its automatic update will retry when idle."
+                GDUpdateActivity.shared.endMaintenance(owner:self)
+            }else{
+                self.phase="postponed"
+                self.status="Waiting for the restart helper to release its maintenance lock."
+            }
+        }
     }
-    var requestsTermination: Bool { restartRequested }
     func prepareForTermination(){
-        // A detached child checks once more and installs only a trusted, notarized,
-        // newer build, and only once this app has actually exited.
-        guard !GDUpdateActivity.shared.isBusy(excluding: self),
-              let script=updaterScript, let python=GDRuntime.pythonURL else{return}
-        let worker=Process()
-        worker.executableURL=python
-        GDRuntime.configurePython(worker, arguments: [script.path,"auto-on-exit","--pid",String(ProcessInfo.processInfo.processIdentifier),"--relaunch"])
-        worker.standardInput=FileHandle.nullDevice
-        worker.standardOutput=FileHandle.nullDevice
-        worker.standardError=FileHandle.nullDevice
-        try? worker.run()
+        // Ordinary Quit stays closed. An update worker exists only after the
+        // explicit pre-quit handoff has acknowledged its lock and verified stage.
+        timer?.invalidate();restartTimer?.invalidate()
     }
 }
 struct GenDragoonAutomaticUpdateStatus:View {
@@ -234,7 +298,7 @@ struct GenDragoonAutomaticUpdateStatus:View {
         VStack(alignment:.leading,spacing:10){
             Label("Automatic app updates",systemImage:"arrow.triangle.2.circlepath.circle.fill")
                 .font(.system(size:16,weight:.bold))
-            Text("Checks at startup and every 20 minutes. Verified updates restart the app automatically when transfers finish and drives are unmounted.")
+            Text("Checks at startup and every 20 minutes. Verified updates install and reopen the app automatically after cloud work finishes. An idle cloud drive is stopped safely first.")
                 .font(.system(size:12)).foregroundStyle(.gray)
             if update.hasProgress {
                 ProgressView(value:update.percentage,total:100).tint(.cyan)
@@ -254,12 +318,12 @@ struct GenDragoonAutomaticUpdateStatus:View {
                 }
             }
             Text(update.status).font(.system(size:12)).foregroundStyle(.gray)
-            HStack(spacing:12){
-                Button("Update and restart"){update.forceUpdateAndRestart()}.disabled(update.isBusy)
-                if update.phase=="ready"{Button("Restart to update"){update.restartToUpdate()}.buttonStyle(.borderedProminent).tint(.purple)}
-            }
+            Toggle("Receive preview releases",isOn:Binding(get:{update.previewUpdates},set:{update.setPreviewUpdates($0)}))
+                .font(.system(size:12)).disabled(update.isBusy || update.requestsTermination)
+            Text(update.previewUpdates ? "Preview releases are enabled for testing. Every update still requires Apple trust verification." : "Stable releases are selected. Preview test releases are excluded.")
+                .font(.system(size:11)).foregroundStyle(.gray)
             if update.phase == "error" {
-                Text("The installed version remains unchanged. Only trusted, newer Apple-signed releases can install.")
+                Text("Only newer releases with the required Developer ID signature, Apple acceptance and a stapled ticket can install.")
                     .font(.system(size:11)).foregroundStyle(.orange)
             }
         }

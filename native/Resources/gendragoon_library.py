@@ -9,6 +9,7 @@ import argparse, hashlib, json, os, plistlib, re, shutil, subprocess, sys, tempf
 from contextlib import contextmanager
 import ctypes, errno, fcntl, posixpath, stat, time, unicodedata, uuid, zipfile
 from pathlib import Path
+import gendragoon_performance as performance
 HOME=Path.home()
 def rclone_path(helper=__file__):
     helper=Path(helper).absolute()
@@ -26,6 +27,8 @@ STREAM_MIN_BYTES=512*1024**2
 def reply(**v): print(json.dumps(dict(ok=True,**v)),flush=True)
 def fail(e): print(json.dumps(dict(ok=False,message=str(e)[-650:])),flush=True);sys.exit(1)
 def run(cmd,timeout=1800):
+    if str(cmd[0])==str(RCLONE) and any(str(x) in {"copy", "copyto", "check"} for x in cmd[1:]):
+        cmd=[cmd[0],*performance.rclone_arguments(),*cmd[1:]]
     p=subprocess.run([str(x) for x in cmd],stdin=subprocess.DEVNULL,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True,errors="replace",timeout=timeout)
     if p.returncode: raise RuntimeError("Cloud/local operation failed (exit "+str(p.returncode)+"). Original files were preserved.")
     return p.stdout
@@ -458,6 +461,10 @@ def validate_archive(path,name):
         expanded=sum(x.file_size for x in entries)
         require_space(expanded+64*1024**2,Path(path).parent)
         for entry in entries:
+            # ditto reads local headers. Validate that they describe the same
+            # members as the central directory before trusting its paths.
+            with archive.open(entry):
+                pass
             normalized=canonical(entry.filename.rstrip("/"))
             parts=normalized.split("/")
             if not normalized or normalized in names or normalized.startswith("/") or "\\" in normalized or any(p in ("",".","..") for p in parts):raise ValueError("Unsafe or duplicate archive path")
@@ -724,7 +731,9 @@ def main():
     p.add_argument("--offload",action="store_true")
     p.add_argument("--key",default="")
     p.add_argument("--maintenance-fd",type=int)
+    p.add_argument("--performance-stdin",action="store_true")
     a=p.parse_args()
+    if a.performance_stdin:performance.configure_from_stdin()
     context=selected_context(a.project,a.bucket,a.remote)
     if context and a.action=="upload" and not a.folder:raise ValueError("A selected bucket upload folder is required")
     if context and a.action=="scan" and not a.root:raise ValueError("A selected bucket scan root is required")

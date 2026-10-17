@@ -17,6 +17,19 @@ import sys
 
 ROOT=Path(__file__).resolve().parent
 
+REQUIRED_RESOURCES=("gendragoon_update_restart.py", "gendragoon_auto_update.py",
+    "gendragoon_app_control.py", "gendragoon_app_launch.py", "gendragoon_library.py",
+    "gendragoon_upload_workspace.py", "gendragoon_performance.py",
+    "gendragoon_performance_profiles.json", "gendragoon_project_files.py")
+
+def require_runtime_resources(app):
+    resources=app/"Contents/Resources"
+    for name in REQUIRED_RESOURCES:
+        path=resources/name
+        if path.is_symlink() or not path.is_file() or path.stat().st_size==0:
+            raise RuntimeError("Required bundled runtime resource missing: "+name)
+    return list(REQUIRED_RESOURCES)
+
 def reject_python_caches(app):
     """Signed caches are mutable on import; a release must not contain them."""
     def fail(error):
@@ -30,6 +43,7 @@ def reject_python_caches(app):
 def package(app,output,candidate=False):
     if sys.platform!="darwin":raise RuntimeError("Package on macOS to preserve bundle metadata")
     reject_python_caches(app)
+    runtime_resources=require_runtime_resources(app)
     requirement=('anchor apple generic and identifier "app.gendragoon.cloudssd"'
         ' and certificate leaf[subject.OU] = "NZPU8H843J"'
         ' and certificate 1[field.1.2.840.113635.100.6.2.6] exists'
@@ -68,7 +82,10 @@ def package(app,output,candidate=False):
     (output/"Install.command").chmod(0o755)
     report={"version":version,"build":build,"sha256":digest,"archiveBytes":archive.stat().st_size,
         "gatekeeperAccepted":gate.returncode==0,"stapledTicketValidated":staple.returncode==0,
-        "candidate":candidate,"automaticUpdateEligible":not candidate and gate.returncode==0 and staple.returncode==0}
+        "candidate":candidate,"automaticUpdateEligible":not candidate and gate.returncode==0 and staple.returncode==0,
+        "previewUpdateEligible":gate.returncode==0 and staple.returncode==0,
+        "bundledRestartHelper":"Contents/Resources/gendragoon_update_restart.py",
+        "requiredRuntimeResources":runtime_resources}
     (output/"package-status.json").write_text(json.dumps(report,indent=2)+"\n")
     print(json.dumps(report),flush=True)
 

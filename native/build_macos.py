@@ -13,8 +13,8 @@ import shutil
 import subprocess
 import sys
 
-VERSION="0.17.0"
-BUILD="22"
+VERSION="0.18.0"
+BUILD="23"
 ROOT=Path(__file__).resolve().parent
 NAME="GenDragoon Cloud SSD.app"
 IDENTITY="Developer ID Application: Joshua Franklin (NZPU8H843J)"
@@ -60,6 +60,12 @@ def build(base,output):
     for source in (ROOT/"Resources").iterdir():
         if source.is_file() and source.suffix in (".py",".js",".json",".txt",".html",".css"):
             shutil.copy2(source,resources/source.name)
+    registry=ROOT/"Backend/performance_profiles.json"
+    if registry.is_symlink() or not registry.is_file():
+        raise RuntimeError("Missing canonical performance profile registry")
+    shutil.copy2(registry,resources/"gendragoon_performance_profiles.json")
+    from package_macos import require_runtime_resources
+    require_runtime_resources(app)
     for retired in ("gendragoon_updates.py","release-repo.json"):
         (resources/retired).unlink(missing_ok=True)
     binary=app/"Contents/MacOS/GenDragoon Cloud SSD"

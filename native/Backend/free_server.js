@@ -11,6 +11,8 @@ const {Firestore,FieldValue}=require("@google-cloud/firestore");
 const {Storage}=require("@google-cloud/storage");
 const {TransferGovernor}=require("./free_performance");
 const {installedBilling}=require("./billing_gateway");
+const {createProjectService,ProjectError}=require("./projects");
+const {effectiveStorageQuota,effectiveWorkers}=require("./billing_v2");
 const apiKeys=require("./api_keys");
 const required=["CUSTOMER_BUCKET","STORAGE_PROJECT_ID"];
 for(const key of required)if(!process.env[key])throw Error("Missing deployment environment variable: "+key);
@@ -33,6 +35,7 @@ const QUOTA=2_000_000_000,CHUNK=8*1024*1024,MAX_CHUNKS=Math.ceil(QUOTA/CHUNK);
 const governor=new TransferGovernor();
 const accountKey=uid=>crypto.createHash("sha256").update("gd-v1:"+uid).digest("hex");
 function workspaceRef(uid){return db.collection("tenants").doc(accountKey(uid)).collection("workspaces").doc("free")}
+const freeProjectPolicy=createProjectService({db,stamp:()=>FieldValue.serverTimestamp(),hash:accountKey});
 function filePrefix(uid){return "customer/"+accountKey(uid)+"/free"}
 function accountURL(uid){return "https://firestore.googleapis.com/v1/projects/gendragoonssd/databases/(default)/documents/accepted_terms/"+encodeURIComponent(uid)}
 async function firebaseAuth(req,res,next){
@@ -93,7 +96,15 @@ async function currentWorkspace(req,res){
  if(!doc.exists){res.status(404).json({error:"Create free workspace first"});return null}
  const w=doc.data();
  if(w.accountKey!==accountKey(req.user.uid)||w.kind!=="free"){res.status(403).json({error:"Workspace access denied"});return null}
+ if(effectiveStorageQuota(w)<=0){res.status(403).json({error:"This project is not active. Restore or activate it in Projects."});return null}
  return w;
+}
+async function runFreeTransfer(req,workspace,action){
+ return governor.run(accountKey(req.user.uid),workspace,async()=>{
+   const fresh=await req.workspaceRef.get();
+   if(!fresh.exists||fresh.data().accountKey!==accountKey(req.user.uid)||effectiveStorageQuota(fresh.data())<=0)throw Error("PROJECT_NOT_ACTIVE");
+   return action();
+ });
 }
 async function cleanupExpired(req){
  const uploads=req.workspaceRef.collection("uploads");
@@ -136,18 +147,18 @@ app.get("/v1/me",auth,async(req,res)=>{
  try{
    const w=await req.workspaceRef.get();const d=w.exists?w.data():null;
    res.json({signedIn:true,termsAccepted:true,freeWorkspace:d?{
-     name:d.name,quotaBytes:QUOTA,usedBytes:d.usedBytes||0,reservedBytes:d.reservedBytes||0,
-     workers:1,provisioned:true}:null,paidPurchasesEnabled:false});
+     name:d.name,quotaBytes:effectiveStorageQuota(d),usedBytes:d.usedBytes||0,reservedBytes:d.reservedBytes||0,
+     workers:effectiveWorkers(d),provisioned:effectiveStorageQuota(d)>0,
+     projectStatus:require("./projects").projectStatus(d)}:null,paidPurchasesEnabled:process.env.STRIPE_CHECKOUT_ENABLED==="true"});
  }catch(_){res.status(503).json({error:"Workspace database unavailable"})}
 });
 app.post("/v1/free",auth,requireWrite,express.json({limit:"4kb"}),async(req,res)=>{
  try{
    const name=safeName(req.body?.name||"My Free Cloud");
-   await req.workspaceRef.create({name,kind:"free",accountKey:accountKey(req.user.uid),
-     quotaBytes:QUOTA,usedBytes:0,reservedBytes:0,provisioned:true,workers:1,
-     createdAt:FieldValue.serverTimestamp()});
-   res.status(201).json({created:true,name,quotaBytes:QUOTA,workers:1});
+   const result=await freeProjectPolicy.create(req,{name,legacyFree:true});
+   res.status(201).json({created:true,name,quotaBytes:QUOTA,workers:1,policy:result.policy});
  }catch(e){
+   if(e instanceof ProjectError)return res.status(e.status).json({error:e.message,code:e.code});
    if(e.code===6||e.message?.includes("ALREADY_EXISTS"))return res.status(409).json({error:"Free workspace already exists"});
    res.status(503).json({error:"Unable to create free workspace"});
  }
@@ -156,7 +167,7 @@ app.get("/v1/files",auth,requireRead,async(req,res)=>{
  try{
    const w=await currentWorkspace(req,res);if(!w)return;
    const docs=await req.workspaceRef.collection("files").orderBy("createdAt","desc").limit(150).get();
-   res.json({quotaBytes:QUOTA,usedBytes:w.usedBytes||0,workers:1,
+   res.json({quotaBytes:effectiveStorageQuota(w),usedBytes:w.usedBytes||0,workers:effectiveWorkers(w),
      files:docs.docs.map(doc=>({id:doc.id,name:doc.data().name,sizeBytes:doc.data().sizeBytes}))});
  }catch(_){res.status(503).json({error:"File list unavailable"})}
 });
@@ -170,17 +181,19 @@ app.post("/v1/uploads",auth,requireWrite,express.json({limit:"4kb"}),async(req,r
      const snap=await tx.get(req.workspaceRef);
      if(!snap.exists||snap.data().kind!=="free"||snap.data().accountKey!==accountKey(req.user.uid))throw Error("NO_FREE_WORKSPACE");
      const w=snap.data();
-     if((w.usedBytes||0)+(w.reservedBytes||0)+size>QUOTA)throw Error("QUOTA_EXCEEDED");
+     const quota=effectiveStorageQuota(w);if(quota<=0)throw Error("PROJECT_NOT_ACTIVE");
+     if((w.usedBytes||0)+(w.reservedBytes||0)+size>quota)throw Error("QUOTA_EXCEEDED");
      tx.update(req.workspaceRef,{reservedBytes:FieldValue.increment(size)});
      tx.create(ref,{name,sizeBytes:size,status:"active",nextIndex:0,uploadedBytes:0,
        createdAt:FieldValue.serverTimestamp()});
    });
    res.status(201).json({uploadId:id,chunkBytes:CHUNK,totalChunks:Math.ceil(size/CHUNK)});
- }catch(e){res.status(e.message==="QUOTA_EXCEEDED"?413:409).json({error:e.message==="QUOTA_EXCEEDED"?"2 GB quota exceeded":"Unable to begin upload"})}
+ }catch(e){res.status(e.message==="QUOTA_EXCEEDED"?413:409).json({error:e.message==="QUOTA_EXCEEDED"?"Project storage quota exceeded":"Unable to begin upload"})}
 });
 function validID(id){return typeof id==="string"&&/^[0-9a-f-]{36}$/.test(id)}
 app.get("/v1/uploads/:id",auth,requireRead,async(req,res)=>{
  if(!validID(req.params.id))return res.status(400).end();
+ if(!await currentWorkspace(req,res))return;
  const doc=await req.workspaceRef.collection("uploads").doc(req.params.id).get();
  if(!doc.exists)return res.status(404).end();
  const x=doc.data();
@@ -192,14 +205,14 @@ app.put("/v1/uploads/:id/chunks/:index",auth,requireWrite,async(req,res)=>{
    return res.status(400).json({error:"Invalid chunk"});
  const ref=req.workspaceRef.collection("uploads").doc(id);
  try{
+   const workspace=await currentWorkspace(req,res);if(!workspace)return;
    const snap=await ref.get();
    if(!snap.exists||snap.data().status!=="active")return res.status(404).json({error:"Unknown upload"});
    const job=snap.data(),count=Math.ceil(job.sizeBytes/CHUNK);
    if(index>=count||index!==job.nextIndex)return res.status(409).json({error:"Out-of-order chunk; resume using upload status"});
    const expected=Math.min(CHUNK,job.sizeBytes-index*CHUNK);
    if(length!==expected)return res.status(400).json({error:"Chunk length mismatch"});
-   // Cloud Run max instances = 1; governor enforces one free transfer at a time.
-   await governor.run(accountKey(req.user.uid),{kind:"free",provisioned:true},async()=>{
+   await runFreeTransfer(req,workspace,async()=>{
      const key=req.pathPrefix+"/tmp/"+id+"/"+String(index).padStart(4,"0");
      const file=bucket.file(key);
      await pipeline(req,file.createWriteStream({resumable:false,validation:"crc32c",preconditionOpts:{ifGenerationMatch:0}}));
@@ -232,6 +245,7 @@ app.post("/v1/uploads/:id/finalize",auth,requireWrite,async(req,res)=>{
  const id=req.params.id;if(!validID(id))return res.status(400).end();
  const ref=req.workspaceRef.collection("uploads").doc(id);
  try{
+   const workspace=await currentWorkspace(req,res);if(!workspace)return;
    const snap=await ref.get();
    if(!snap.exists)return res.status(404).end();
    const job=snap.data();
@@ -239,14 +253,15 @@ app.post("/v1/uploads/:id/finalize",auth,requireWrite,async(req,res)=>{
    if(job.status!=="active"||job.uploadedBytes!==job.sizeBytes||
      job.nextIndex!==Math.ceil(job.sizeBytes/CHUNK))return res.status(409).json({error:"Upload is incomplete"});
    const target=req.pathPrefix+"/files/"+id;
-   await governor.run(accountKey(req.user.uid),{kind:"free",provisioned:true},async()=>{
+   await runFreeTransfer(req,workspace,async()=>{
      await composeChunks(req.pathPrefix,id,Math.ceil(job.sizeBytes/CHUNK),target);
      const [metadata]=await bucket.file(target).getMetadata();
      if(Number(metadata.size)!==job.sizeBytes)throw Error("File size mismatch");
      await db.runTransaction(async tx=>{
        const [w,s]=await Promise.all([tx.get(req.workspaceRef),tx.get(ref)]);
        if(!s.exists||s.data().status!=="active")throw Error("Already finalized");
-       if(!w.exists||w.data().kind!=="free")throw Error("Not authorized");
+       if(!w.exists||w.data().kind!=="free"||effectiveStorageQuota(w.data())<=0)throw Error("Not authorized");
+       if((w.data().usedBytes||0)+job.sizeBytes>effectiveStorageQuota(w.data()))throw Error("QUOTA_EXCEEDED");
        tx.update(req.workspaceRef,{usedBytes:FieldValue.increment(job.sizeBytes),reservedBytes:FieldValue.increment(-job.sizeBytes)});
        tx.create(req.workspaceRef.collection("files").doc(id),{name:job.name,sizeBytes:job.sizeBytes,createdAt:FieldValue.serverTimestamp()});
        tx.update(ref,{status:"completed",completedAt:FieldValue.serverTimestamp()});
@@ -259,17 +274,19 @@ app.post("/v1/uploads/:id/finalize",auth,requireWrite,async(req,res)=>{
 app.get("/v1/files/:id/download",auth,requireRead,async(req,res)=>{
  const id=req.params.id;if(!validID(id))return res.status(400).end();
  try{
+   const workspace=await currentWorkspace(req,res);if(!workspace)return;
    const snap=await req.workspaceRef.collection("files").doc(id).get();
    if(!snap.exists)return res.status(404).end();
    const file=bucket.file(req.pathPrefix+"/files/"+id);
    const d=snap.data();
    await require("./range_download").sendObject(req,res,{file,record:d,id,
-    run:fn=>governor.run(accountKey(req.user.uid),{kind:"free",provisioned:true},fn)});
+    run:fn=>runFreeTransfer(req,workspace,fn)});
  }catch(_){if(!res.headersSent)res.status(503).json({error:"Download unavailable"});else res.destroy()}
 });
 app.delete("/v1/files/:id",auth,requireWrite,async(req,res)=>{
  const id=req.params.id;if(!validID(id))return res.status(400).end();
  try{
+   if(!await currentWorkspace(req,res))return;
    const ref=req.workspaceRef.collection("files").doc(id),snap=await ref.get();
    if(!snap.exists)return res.status(404).end();
    const doc=snap.data();

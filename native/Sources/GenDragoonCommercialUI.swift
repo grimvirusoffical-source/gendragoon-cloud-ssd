@@ -3,7 +3,8 @@ import SwiftUI
 
 private enum GDPage: String, CaseIterable {
     case home = "Home"
-    case cloud = "My Cloud"
+    case cloud = "Files"
+    case applications = "Applications"
     case plans = "Bundles"
     case storage = "Storage"
     case performance = "Performance"
@@ -12,6 +13,7 @@ private enum GDPage: String, CaseIterable {
         switch self {
         case .home: return "house.fill"
         case .cloud: return "externaldrive.fill.badge.wifi"
+        case .applications: return "app.badge.fill"
         case .plans: return "square.stack.3d.up.fill"
         case .storage: return "externaldrive.fill"
         case .performance: return "bolt.fill"
@@ -98,6 +100,7 @@ private struct GDDraftWorkspace: Identifiable, Codable {
     @EnvironmentObject private var loginSession: GDLoginSession
     @StateObject private var ads = GenDragoonAdsModel()
     @StateObject private var native = GDNativeWorkspace.shared
+    @StateObject private var customer = GDFreeCustomerModel()
     @ObservedObject private var activity = GDUpdateActivity.shared
     @State private var page:GDPage = .cloud
     @AppStorage("gd.commercial.preview.welcomeSeen") private var welcomeSeen = false
@@ -158,6 +161,7 @@ private struct GDDraftWorkspace: Identifiable, Codable {
                     switch page {
                     case .home: homePage
                     case .cloud: cloudPage
+                    case .applications: applicationsPage
                     case .plans: plansPage
                     case .storage: storagePage
                     case .performance: performancePage
@@ -171,7 +175,7 @@ private struct GDDraftWorkspace: Identifiable, Codable {
         .background(Color(red:0.055,green:0.048,blue:0.092).ignoresSafeArea())
         .preferredColorScheme(.dark)
         .frame(minWidth:950,minHeight:720)
-        .onAppear {ads.refresh(isAdFree:loginSession.isAdFree,allowFetch:loginSession.adStatusKnown)}
+        .onAppear {ads.refresh(isAdFree:loginSession.isAdFree,allowFetch:loginSession.adStatusKnown); customer.connect(loginSession)}
         .task { if loginSession.isOwner { await native.start() } }
         .onChange(of:page) {_,_ in
             loginSession.checkAdEntitlement()
@@ -180,6 +184,11 @@ private struct GDDraftWorkspace: Identifiable, Codable {
         .onChange(of:loginSession.isAdFree) {_,newValue in ads.refresh(isAdFree:newValue)}
         .onChange(of:loginSession.adStatusKnown) {_,known in
             if known {ads.refresh(isAdFree:loginSession.isAdFree)}
+        }
+        .onChange(of:loginSession.userID) {_,_ in customer.connect(loginSession)}
+        .onReceive(NotificationCenter.default.publisher(for:GDProjectPreferences.selectionChanged)) { customer.selectionChanged($0) }
+        .onReceive(NotificationCenter.default.publisher(for:NSApplication.didBecomeActiveNotification)) { _ in
+            customer.refresh(); loginSession.checkAdEntitlement()
         }
     }
     private var sidebar:some View {
@@ -464,11 +473,20 @@ private struct GDDraftWorkspace: Identifiable, Codable {
     }
     private var cloudPage:some View {
         VStack(alignment:.leading,spacing:20) {
-            GDHeading(kicker:"WORKSPACE",title:"Your cloud drive",subtitle:"Upload applications, keep complete folders together, and restore what you need.")
+            GDHeading(kicker:"FILES & FOLDERS",title:"Everything, in its place.",subtitle:"Choose your project, upload any files or complete folders, and download a verified copy when you need it.")
+            GenDragoonFreeCloudPanel(customer:customer,content:.files,onStorage:{page = .storage})
             if loginSession.isOwner {
-                GDNativeWorkspaceView(native:native)
+                GDNativeWorkspaceView(native:native,content:.files)
             }
-            GenDragoonFreeCloudPanel().id(loginSession.userID)
+        }
+    }
+    private var applicationsPage:some View {
+        VStack(alignment:.leading,spacing:20) {
+            GDHeading(kicker:"APPLICATIONS",title:"Your applications. Room to create.",subtitle:"Keep complete applications in cloud storage, restore them when needed, and launch compatible Mac apps from a verified managed library.")
+            if loginSession.isOwner {
+                GDNativeWorkspaceView(native:native,content:.applications)
+            }
+            GenDragoonFreeCloudPanel(customer:customer,content:.applications,showProjectControls:false,onStorage:{page = .storage})
         }
     }
     private var accountPage:some View {

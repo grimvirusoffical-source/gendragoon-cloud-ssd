@@ -3,7 +3,7 @@
 // This server reads those two resources with its own scoped identity; no key enters a client or chat.
 const express=require('express'),crypto=require('node:crypto');
 const {GoogleAuth}=require('google-auth-library'),Stripe=require('stripe');
-const {installedBilling}=require('./billing_gateway'),{STORAGE,PERFORMANCE}=require('./catalog');
+const {installedBilling,STRIPE_API_VERSION}=require('./billing_gateway'),{STORAGE,PERFORMANCE}=require('./catalog');
 const PROJECT='gendragood-ssd',ACCOUNT='acct_1TqS8eIpkwStQhHM';
 const API_SECRET='gendragoon-stripe-live-api',HOOK_SECRET='gendragoon-stripe-live-webhook';
 const HOOK_ID='we_1UQgwBIpkwStQhHM7YZVubdd';
@@ -16,7 +16,7 @@ function expectedCatalog(){
  }
  out['one_time|remove_ads']={cents:499,interval:null};return out;
 }
-function validateCatalog(prices,products){
+function validateCatalog(prices,products,{projectPriceId}={}){
  const out={},productMap=new Map(products.map(p=>[p.id,p]));
  for(const [key,expected]of Object.entries(expectedCatalog())){
   const lookup='gdssd_'+key.split('|').join('_')+'_v1';
@@ -27,7 +27,39 @@ function validateCatalog(prices,products){
   if(expected.interval?!(p.recurring?.interval===expected.interval&&p.recurring.interval_count===1):p.type!=='one_time')throw Error('CATALOG_INTERVAL:'+key);
   if(!/^price_[A-Za-z0-9]+$/.test(p.id))throw Error('CATALOG_ID:'+key);
   out[key]=p.id;
- }return out;
+ }
+ // Add the new one-time project Price only when explicitly configured or
+ // uniquely tagged. Missing configuration must not break legacy subscriptions.
+ const projectMatches=prices.filter(p=>projectPriceId?p.id===projectPriceId:
+   p.metadata?.service==='GenDragoonSSD'&&(p.metadata.catalogKey==='one_time|project_creation'||p.lookup_key==='gdssd_one_time_project_creation_v2'));
+ if(projectPriceId||projectMatches.length){
+   if(projectMatches.length!==1)throw Error('CATALOG_COUNT:one_time|project_creation');
+   const p=projectMatches[0],product=productMap.get(typeof p.product==='string'?p.product:p.product?.id);
+   if(!p.active||!p.livemode||p.type!=='one_time'||p.recurring||p.currency!=='usd'||p.unit_amount!==500||
+      p.billing_scheme!=='per_unit'||product?.active!==true||!/^price_[A-Za-z0-9]+$/.test(p.id))throw Error('CATALOG_VALUE:one_time|project_creation');
+   out['one_time|project_creation']=p.id;
+ }
+ return out;
+}
+function projectCheckoutReady(catalog,hook){
+ return !!catalog['one_time|project_creation']&&
+   (hook.enabled_events?.includes('*')===true||['checkout.session.completed','checkout.session.async_payment_succeeded',
+     'checkout.session.async_payment_failed','charge.refunded','charge.dispute.created'].every(name=>hook.enabled_events?.includes(name)));
+}
+async function validateUnpaidCheckoutTemplates(stripe,catalog){
+ const expected={...expectedCatalog(),'one_time|project_creation':{cents:500}};
+ const scenarios=[['one_time|remove_ads'],['workspace|month','storage|standard|100GB|month'],['workspace|year','storage|bundle|1TB|year']];
+ if(catalog['one_time|project_creation'])scenarios.push(['one_time|project_creation']);
+ for(const keys of scenarios){
+  const session=await stripe.checkout.sessions.create({mode:keys[0].startsWith('one_time')?'payment':'subscription',
+   line_items:keys.map(key=>({price:catalog[key],quantity:1})),success_url:PUBLIC+'/billing/success',cancel_url:PUBLIC+'/billing/cancel',
+   metadata:{service:'GenDragoonSSD',purpose:'unpaid_setup_validation'}});
+  try{
+   if(!session.livemode||session.status!=='open'||new URL(session.url).hostname!=='checkout.stripe.com'||
+      session.amount_total!==keys.reduce((n,key)=>n+expected[key].cents,0))throw Error('CHECKOUT_VALIDATION');
+  }finally{await stripe.checkout.sessions.expire(session.id);}
+ }
+ return scenarios.length;
 }
 function crc32c(bytes){let value=0xffffffff;for(const byte of bytes){value^=byte;for(let bit=0;bit<8;bit++)value=(value>>>1)^((value&1)?0x82f63b78:0);}return (value^0xffffffff)>>>0;}
 async function readVaultSecrets(){
@@ -60,14 +92,14 @@ function installBillingBootstrap(options){
   const secrets=await (options.readVaultSecrets||readVaultSecrets)();
   if(!/^(sk|rk)_live_[A-Za-z0-9]+$/.test(secrets.key)||!/^whsec_[A-Za-z0-9]+$/.test(secrets.webhook))throw Error('INVALID_LIVE_CREDENTIAL_FORMAT');
   setup={activationState:'validating_live_stripe',pendingSecretResources:[]};
-  const stripe=options.createStripe?options.createStripe(secrets.key):new Stripe(secrets.key,{apiVersion:'2025-06-30.basil',maxNetworkRetries:2,timeout:25000});
+  const stripe=options.createStripe?options.createStripe(secrets.key):new Stripe(secrets.key,{apiVersion:STRIPE_API_VERSION,maxNetworkRetries:2,timeout:25000});
   const account=await stripe.accounts.retrieve();
   if(account.id!==ACCOUNT||account.charges_enabled!==true)throw Error('ACCOUNT_NOT_READY');
   const [prices,products,hook]=await Promise.all([
    stripe.prices.list({limit:100,active:true}).autoPagingToArray({limit:1000}),
    stripe.products.list({limit:100}).autoPagingToArray({limit:1000}),stripe.webhookEndpoints.retrieve(HOOK_ID)
   ]);
-  const catalog=validateCatalog(prices,products);
+  const catalog=validateCatalog(prices,products,{projectPriceId:env.STRIPE_PROJECT_CREATION_PRICE_ID});
   if(!hook.livemode||hook.status!=='enabled'||hook.url!==PUBLIC+'/billing/stripe-webhook')throw Error('WEBHOOK_CONFIGURATION');
   await Promise.all([stripe.subscriptions.list({limit:1}),stripe.paymentIntents.list({limit:1}),stripe.charges.list({limit:1})]);
   const configurations=await stripe.billingPortal.configurations.list({limit:100});
@@ -80,21 +112,13 @@ function installBillingBootstrap(options){
   const hash=crypto.createHash('sha256').update(JSON.stringify(catalog)).digest('hex');
   const checkRef=options.db.collection('system').doc('stripe-live-checkout-verification'),prior=await checkRef.get();
   if(!prior.exists||prior.data().catalogHash!==hash){
-   const scenarios=[['one_time|remove_ads'],['workspace|month','storage|standard|100GB|month'],['workspace|year','storage|bundle|1TB|year']];
-   for(const keys of scenarios){
-    const session=await stripe.checkout.sessions.create({mode:keys[0].startsWith('one_time')?'payment':'subscription',
-     line_items:keys.map(key=>({price:catalog[key],quantity:1})),success_url:PUBLIC+'/billing/success',cancel_url:PUBLIC+'/billing/cancel',
-     metadata:{service:'GenDragoonSSD',purpose:'unpaid_setup_validation'}});
-    try{
-     if(!session.livemode||session.status!=='open'||new URL(session.url).hostname!=='checkout.stripe.com'||
-        session.amount_total!==keys.reduce((n,key)=>n+expectedCatalog()[key].cents,0))throw Error('CHECKOUT_VALIDATION');
-    }finally{await stripe.checkout.sessions.expire(session.id);}
-   }
+   await validateUnpaidCheckoutTemplates(stripe,catalog);
    await checkRef.set({catalogHash:hash,checkedAt:options.admin.firestore.FieldValue.serverTimestamp(),paymentSubmitted:false});
   }
   const values={STRIPE_SECRET_KEY:secrets.key,STRIPE_WEBHOOK_SECRET:secrets.webhook,
    STRIPE_ENVIRONMENT:'live',STRIPE_CHECKOUT_ENABLED:'true',PAID_STORAGE_READY:'approved',STRIPE_RUNTIME_PROBE:'true',
-   STRIPE_PRICE_CATALOG_JSON:JSON.stringify(catalog),STRIPE_PORTAL_CONFIGURATION_ID:portal.id,PUBLIC_URL:PUBLIC};
+   STRIPE_PRICE_CATALOG_JSON:JSON.stringify(catalog),STRIPE_PORTAL_CONFIGURATION_ID:portal.id,PUBLIC_URL:PUBLIC,
+   STRIPE_PROJECT_CHECKOUT_READY:projectCheckoutReady(catalog,hook)?'true':'false'};
   const previous=Object.fromEntries(Object.keys(values).map(key=>[key,process.env[key]]));
   try{
    for(const [key,value]of Object.entries(values))process.env[key]=value;
@@ -124,4 +148,4 @@ function installBillingBootstrap(options){
  });
  return {attempt,state:()=>({...setup,activated})};
 }
-module.exports={installBillingBootstrap,expectedCatalog,validateCatalog,crc32c};
+module.exports={installBillingBootstrap,expectedCatalog,validateCatalog,projectCheckoutReady,validateUnpaidCheckoutTemplates,crc32c};

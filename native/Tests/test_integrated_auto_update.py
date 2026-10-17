@@ -34,6 +34,7 @@ def write_bundle(app, version="0.16.2", marker="new-good"):
     (contents / "Info.plist").write_bytes(plistlib.dumps({
         "CFBundleIdentifier": updater.BUNDLE_ID,
         "CFBundleShortVersionString": version,
+        "CFBundleVersion": "23" if version == "0.16.2" else "22",
         "CFBundleExecutable": "GenDragoon Cloud SSD",
         "LSMinimumSystemVersion": "14.0",
     }))
@@ -52,6 +53,8 @@ class AutoUpdateTests(unittest.TestCase):
         self.mounts = (("/dev/disk3", "/", "apfs"),)
         self.mount_reader = types.ModuleType("gendragoon_app_control")
         self.mount_reader.mounted_volumes = mock.Mock(side_effect=lambda: self.mounts)
+        self.mount_reader.identify = lambda pid, executable: types.SimpleNamespace(
+            pid=pid, executable=str(executable), started="fixture-start")
         active = mock.patch.dict(sys.modules, {"gendragoon_app_launch": launcher,
                                               "gendragoon_app_control": self.mount_reader})
         active.start(); self.addCleanup(active.stop)
@@ -90,7 +93,7 @@ class AutoUpdateTests(unittest.TestCase):
         elif tool == "/usr/bin/codesign":
             if "--verify" in arguments:
                 marker = Path(arguments[-1]) / "Contents/marker"
-                if marker.read_text() != "new-good":
+                if marker.read_text() not in ("new-good", "original-good"):
                     raise RuntimeError("fixture signed-resource tampering detected")
                 self.assertIn("--deep", arguments)
                 self.assertIn("--strict", arguments)
@@ -266,17 +269,24 @@ class AutoUpdateTests(unittest.TestCase):
         self.assertEqual(data.read_text(), "keep this")
         self.assertEqual(status["launchStatus"], "exact_executable_observed")
         self.assertEqual(status["functionalReadiness"], "not_tested")
+        self.assertEqual(status["launchedProcesses"], [{"pid":4200,"uid":os.getuid(),
+                         "executable":str(self.app/"Contents/MacOS/GenDragoon Cloud SSD"),"started":"fixture-start"}])
         self.assertTrue(any(command == ["/usr/bin/open", "-n", str(self.app)] for command in self.calls))
 
     def test_launch_failure_rolls_back_previous_app(self):
         self.stage()
         def fail_launch(arguments, timeout=80):
-            if arguments[0] == "/usr/bin/open":
+            if arguments[0] == "/usr/bin/open" and (self.app / "Contents/marker").read_text() == "new-good":
                 raise RuntimeError("fixture open failed")
             return self.commands(arguments, timeout)
-        with self.mac(fail_launch), self.assertRaisesRegex(RuntimeError, "previous application restored"):
-            updater.install_worker(relaunch=True)
+        with self.mac(fail_launch):
+            self.assertEqual(updater.install_worker(relaunch=True)["event"], "rolled_back")
         self.assert_original()
+        status=json.loads(self.status.read_text())
+        self.assertEqual(status["state"],"rolled_back")
+        self.assertEqual(status["launchStatus"],"exact_executable_observed")
+        self.assertEqual(status["launchedProcesses"][0]["pid"],4200)
+        self.assertTrue(Path(status["failedCopyPath"]).exists())
 
     def test_failed_replacement_restores_previous_app(self):
         self.stage()
@@ -285,42 +295,71 @@ class AutoUpdateTests(unittest.TestCase):
             if Path(source).name == updater.APP_NAME and ".gendragoon-update-" in str(source):
                 raise OSError("fixture rename failed")
             return replace(source, destination)
-        with self.mac(), mock.patch.object(updater.os, "replace", side_effect=fail_candidate), \
-                self.assertRaisesRegex(RuntimeError, "previous application restored"):
-            updater.install_worker(relaunch=True)
+        with self.mac(), mock.patch.object(updater.os, "replace", side_effect=fail_candidate):
+            self.assertEqual(updater.install_worker(relaunch=True)["event"], "rolled_back")
         self.assert_original()
 
     def test_post_replacement_trust_failure_rolls_back(self):
         self.stage()
         def fail_after_swap(arguments, timeout=80):
-            if arguments[0] == "/usr/bin/codesign" and "--verify" in arguments and arguments[-1] == str(self.app):
+            if (arguments[0] == "/usr/bin/codesign" and "--verify" in arguments and arguments[-1] == str(self.app)
+                    and (self.app / "Contents/marker").read_text()=="new-good"):
                 raise RuntimeError("post-install trust failure")
             return self.commands(arguments, timeout)
-        with self.mac(fail_after_swap), self.assertRaisesRegex(RuntimeError, "previous application restored"):
-            updater.install_worker(relaunch=True)
+        with self.mac(fail_after_swap):
+            self.assertEqual(updater.install_worker(relaunch=True)["event"], "rolled_back")
         self.assert_original()
 
-    def test_auto_on_exit_defaults_to_restart(self):
+    def test_failed_rollback_relaunch_records_attention_and_preserves_old_app(self):
+        self.stage()
+        def fail_all_launches(arguments, timeout=80):
+            if arguments[0] == "/usr/bin/open":raise RuntimeError("fixture launch failure")
+            return self.commands(arguments,timeout)
+        with self.mac(fail_all_launches),self.assertRaisesRegex(RuntimeError,"rollback needs attention"):
+            updater.install_worker(relaunch=True,request_id="f"*32)
+        self.assert_original()
+        result=json.loads(self.status.read_text())
+        self.assertEqual(result["state"],"attention")
+        self.assertEqual(result["launchStatus"],"unconfirmed")
+        self.assertEqual(result["request_id"],"f"*32)
+        self.assertTrue(Path(result["failedCopyPath"]).exists())
+
+    def test_verified_stage_and_original_digest_are_bound_before_replacement(self):
+        self.stage()
+        with self.mac():
+            meta=updater.staged_valid(strict=True)
+            original=updater.bundle_digest(self.app)
+            bad=dict(meta,sha256="b"*64)
+            with self.assertRaisesRegex(RuntimeError,"acknowledged restart"):
+                updater.install_worker(expected_stage=bad,original_digest=original)
+            with self.assertRaisesRegex(RuntimeError,"changed after the restart"):
+                updater.install_worker(expected_stage=meta,original_digest="0"*64)
+        self.assert_original()
+        self.assertFalse(any(args[0] in ("/usr/bin/ditto","/usr/bin/open") for args in self.calls))
+
+    def test_obsolete_exit_hook_cannot_install_or_relaunch(self):
         self.stage()
         with self.mac():
             result = updater.main(["auto-on-exit"])
-        self.assertEqual(result, 0)
-        self.assertTrue(any(command[0] == "/usr/bin/open" for command in self.calls))
+        self.assertEqual(result, 1)
+        self.assertFalse(self.calls)
+        self.assert_original()
 
     def test_auto_on_exit_explicit_restart_optout(self):
         self.stage()
         with self.mac():
             result = updater.main(["auto-on-exit", "--no-relaunch"])
-        self.assertEqual(result, 0)
-        self.assertEqual(json.loads(self.status.read_text())["launchStatus"], "not_requested")
+        self.assertEqual(result, 1)
+        self.assert_original()
         self.assertFalse(any(command[0] == "/usr/bin/open" for command in self.calls))
 
-    def test_legacy_relaunch_option_remains_supported(self):
+    def test_unacknowledged_worker_cli_cannot_install(self):
         self.stage()
         with self.mac():
             result = updater.main(["install-worker", "--relaunch"])
-        self.assertEqual(result, 0)
-        self.assertTrue(any(command[0] == "/usr/bin/open" for command in self.calls))
+        self.assertEqual(result, 1)
+        self.assertFalse(self.calls)
+        self.assert_original()
 
     def test_failed_auto_action_returns_nonzero_and_records_error(self):
         self.stage()
@@ -328,11 +367,10 @@ class AutoUpdateTests(unittest.TestCase):
         # prepare normally retries invalid staging; isolate a failed action here.
         with self.mac(), mock.patch.object(updater, "prepare", side_effect=RuntimeError("fixture update failed")), \
                 redirect_stdout(io.StringIO()) as output:
-            result = updater.main(["auto-on-exit"])
+            result = updater.main(["prepare"])
         self.assertEqual(result, 1)
         self.assertEqual(json.loads(output.getvalue())["event"], "error")
-        self.assertEqual(json.loads(self.status.read_text())["state"], "error")
-        self.assertIn("fixture update failed", self.log.read_text())
+        self.assertIn("fixture update failed", json.loads(output.getvalue())["message"])
         self.assert_original()
 
     def test_root_symlink_is_rejected_before_chmod_or_writes(self):

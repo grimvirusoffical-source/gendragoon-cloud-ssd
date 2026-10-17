@@ -43,7 +43,10 @@ struct GDNativeFailure: LocalizedError {
 }
 
 enum GDNativeHelper {
-    static func invoke(_ resource: String, arguments: [String], timeout: TimeInterval = 7200) async throws -> [String: Any] {
+    static func invoke(_ resource: String, arguments: [String], timeout: TimeInterval = 7200, standardInput: Data? = nil) async throws -> [String: Any] {
+        guard (standardInput?.count ?? 0) <= 32 * 1024 else {
+            throw GDNativeFailure(message: "Private helper input exceeded its safety limit.")
+        }
         guard let python = GDRuntime.pythonURL,
               let script = Bundle.main.url(forResource: resource, withExtension: "py") else {
             throw GDNativeFailure(message: "The installed app is missing its helper or supported Python runtime. Run the installer to repair it.")
@@ -65,10 +68,15 @@ enum GDNativeHelper {
             let process = Process()
             process.executableURL = python
             GDRuntime.configurePython(process, arguments: [script.path] + arguments)
-            process.standardInput = FileHandle.nullDevice
+            let input = standardInput == nil ? nil : Pipe()
+            if let input { process.standardInput = input } else { process.standardInput = FileHandle.nullDevice }
             process.standardOutput = output
             process.standardError = errors
             try process.run()
+            if let input, let standardInput {
+                try input.fileHandleForWriting.write(contentsOf: standardInput)
+                try input.fileHandleForWriting.close()
+            }
             let deadline = Date().addingTimeInterval(timeout)
             while process.isRunning {
                 if Date() >= deadline {
@@ -141,7 +149,7 @@ enum GDNativeHelper {
     private static var isSandboxed: Bool {
         ProcessInfo.processInfo.environment["APP_SANDBOX_CONTAINER_ID"] != nil
     }
-    var externalUploadBusy: Bool { GDUpdateActivity.shared.isBusy(excluding: upload) }
+    var externalUploadBusy: Bool { !GDUpdateActivity.shared.canStart(excluding: upload) }
     var maintenanceBusy: Bool { GDUpdateActivity.shared.isBusy }
     var selectedDestination: UploadDestination? { upload.snapshot?.destination }
     var destinationLabel: String { selectedDestination?.label ?? "Verify a project and bucket to choose your destination." }
@@ -198,12 +206,16 @@ enum GDNativeHelper {
 
 @MainActor struct GDNativeWorkspaceView: View {
     @ObservedObject var native: GDNativeWorkspace
+    var content: GDProjectContent = .applications
     @ObservedObject private var activity = GDUpdateActivity.shared
     @State private var candidateProject = ""
     @State private var candidateBucket = ""
     @State private var candidateRemote = "gendragoon"
     @State private var candidatePrefix = "GenDragoon-App-Library"
     @State private var showCleanup = false
+    @State private var showConnection = false
+    @State private var showUpload = false
+    @State private var dropTarget = false
     private var cloud: CloudModel { native.cloud }
     private var library: LibraryModel { native.library }
     private var locked: Bool { native.externalUploadBusy || native.upload.isMutationPending || native.upload.workerPending }
@@ -212,15 +224,20 @@ enum GDNativeHelper {
         VStack(alignment: .leading, spacing: 20) {
             HStack(alignment: .top) {
                 VStack(alignment: .leading, spacing: 6) {
-                    Label("Applications, files & folders", systemImage: "app.badge.fill")
+                    Text("CONNECTED GOOGLE CLOUD").font(.system(size: 9, weight: .bold, design: .monospaced)).tracking(2).foregroundStyle(.purple)
+                    Label(content == .applications ? "Managed Mac applications" : "Connected files & folders", systemImage: content == .applications ? "app.badge.fill" : "folder.fill")
                         .font(.system(size: 24, weight: .bold, design: .rounded))
                     Text(native.destinationLabel).font(.caption.monospaced()).foregroundStyle(.secondary).textSelection(.enabled)
                 }
                 Spacer()
+                Button { showUpload.toggle() } label: { Label(content == .applications ? "Add Applications" : "Upload Files or Folders", systemImage: "plus") }
+                    .buttonStyle(.borderedProminent).tint(.purple).disabled(locked)
                 Button { showCleanup.toggle() } label: { Label("Cleanup Drive", systemImage: "folder.badge.gearshape") }
                     .disabled(native.maintenanceBusy)
             }
-            GroupBox("Google Cloud connection") {
+            Text("This library uses the verified Google Cloud destination shown above. Its objects remain separate from your product project's private Files index.")
+                .font(.system(size: 11)).foregroundStyle(.secondary)
+            DisclosureGroup("Connection and Google Cloud destination", isExpanded: $showConnection) {
                 VStack(alignment: .leading, spacing: 12) {
                     HStack {
                         Button("Connect Google Cloud") { native.connectGoogle() }
@@ -248,9 +265,11 @@ enum GDNativeHelper {
                     }
                 }.frame(maxWidth: .infinity, alignment: .leading).padding(8)
             }
-            ProjectUploadSection(workspace: native.upload, externalBusy: native.externalUploadBusy,
-                                 onRefreshCloudChoices: { await native.refreshCloudChoices() })
-            GDNativeLibrarySection(library: library, destinationLabel: native.destinationLabel)
+            if showUpload || native.upload.hasRunningJob || native.upload.hasQueuedJobs {
+                ProjectUploadSection(workspace: native.upload, externalBusy: native.externalUploadBusy, content: content,
+                                     onRefreshCloudChoices: { await native.refreshCloudChoices() })
+            }
+            GDNativeLibrarySection(library: library, destinationLabel: native.destinationLabel, content: content)
             if showCleanup {
                 GroupBox {
                     if let python = GDRuntime.pythonURL {
@@ -259,7 +278,7 @@ enum GDNativeHelper {
                     } else { Text("Run the GenDragoon installer to configure the Python runtime.") }
                 }
             }
-            GroupBox("Cloud drive & cache") {
+            DisclosureGroup("Finder drive and local cache settings") {
                 VStack(alignment: .leading, spacing: 12) {
                     HStack {
                         Label(cloud.mounted ? "Mounted in Finder" : "Drive disconnected", systemImage: "externaldrive.fill")
@@ -283,8 +302,16 @@ enum GDNativeHelper {
                         .font(.caption).foregroundStyle(.secondary)
                 }.frame(maxWidth: .infinity, alignment: .leading).padding(8)
             }
-            GDManualProviderSection(library: native.manualLibrary)
+            if content == .applications { GDManualProviderSection(library: native.manualLibrary) }
         }
+        .padding(24).background(.white.opacity(0.035), in: RoundedRectangle(cornerRadius: 21))
+        .overlay(RoundedRectangle(cornerRadius: 21).stroke(dropTarget ? Color.purple : .white.opacity(0.08), lineWidth: dropTarget ? 2 : 1))
+        .dropDestination(for: URL.self) { urls, _ in
+            guard !locked else { return false }
+            native.upload.addDroppedURLs(urls, content: content, externalBusy: native.externalUploadBusy)
+            showUpload = true
+            return true
+        } isTargeted: { dropTarget = $0 }
         .task {
             candidateProject = cloud.projectID
             candidateBucket = cloud.bucket
@@ -301,43 +328,114 @@ enum GDNativeHelper {
 @MainActor private struct GDNativeLibrarySection: View {
     @ObservedObject var library: LibraryModel
     let destinationLabel: String
+    let content: GDProjectContent
     @ObservedObject private var activity = GDUpdateActivity.shared
+    @State private var search = ""
+    @State private var category = "all"
+    @State private var grid = true
+    private let accent = Color(red: 0.72, green: 0.55, blue: 0.96)
     private var busy: Bool { library.busy || !GDUpdateActivity.shared.canStart(excluding: library) }
+    private func kind(_ item: StoredApp) -> String { item.kind ?? "app" }
+    private func category(_ item: StoredApp) -> String {
+        if kind(item) == "folder" { return "folders" }
+        let ext = (item.name as NSString).pathExtension.lowercased()
+        if ["mp4", "mov", "m4v", "mkv", "avi", "webm", "mpeg", "mpg"].contains(ext) { return "videos" }
+        if ["mp3", "wav", "aiff", "flac", "aac", "m4a", "ogg"].contains(ext) { return "audio" }
+        if ["png", "jpg", "jpeg", "webp", "heic", "gif", "tif", "tiff", "svg"].contains(ext) { return "pictures" }
+        return "files"
+    }
+    private var items: [StoredApp] {
+        library.apps.filter { item in
+            (content == .applications ? kind(item) == "app" : kind(item) != "app") &&
+            (search.isEmpty || item.name.localizedCaseInsensitiveContains(search)) &&
+            (content == .applications || category == "all" || category(item) == category)
+        }.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+    }
+    private func symbol(_ item: StoredApp) -> String {
+        if kind(item) == "app" { return "app.badge.fill" }
+        switch category(item) {
+        case "folders": return "folder.fill"
+        case "videos": return "play.rectangle.fill"
+        case "audio": return "waveform"
+        case "pictures": return "photo.fill"
+        default: return "doc.fill"
+        }
+    }
+    private func controls(_ item: StoredApp) -> some View {
+        HStack(spacing: 9) {
+            if kind(item) == "app" {
+                Button { library.smartLaunch(item) } label: { Label("Launch", systemImage: "play.fill") }
+                    .buttonStyle(.borderedProminent).tint(accent)
+            }
+            Button { library.restore(item) } label: { Label("Download", systemImage: "arrow.down.to.line") }
+                .buttonStyle(.bordered).tint(accent)
+            Menu {
+                if kind(item) != "app" { Button("Open a managed local copy") { library.launch(item) } }
+                Button("Clear managed cache") { library.evict(item) }
+            } label: { Image(systemName: "ellipsis") }.menuStyle(.borderlessButton).frame(width: 20)
+        }.font(.system(size: 11, weight: .medium)).disabled(busy)
+    }
+    private func tile(_ item: StoredApp) -> some View {
+        VStack(alignment: .leading, spacing: 15) {
+            HStack {
+                Image(systemName: symbol(item)).font(.system(size: 28, weight: .medium)).foregroundStyle(accent)
+                    .frame(width: 58, height: 62).background(accent.opacity(0.12), in: RoundedRectangle(cornerRadius: 15))
+                Spacer()
+                if let session = library.session(for: item.key), session.active {
+                    Label("Running", systemImage: "circle.fill").font(.system(size: 10, weight: .semibold)).foregroundStyle(.green)
+                }
+            }
+            Text(item.name).font(.system(size: 15, weight: .semibold)).lineLimit(2).frame(height: 38, alignment: .topLeading)
+            Text(kind(item) == "app" ? "macOS application bundle" : kind(item) == "folder" ? "Complete folder" : "Cloud file")
+                .font(.system(size: 11)).foregroundStyle(.secondary)
+            if let session = library.session(for: item.key) {
+                Text(session.message).font(.system(size: 10)).foregroundStyle(session.active ? Color.green : Color.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            controls(item)
+        }.padding(19).frame(maxWidth: .infinity, alignment: .leading)
+            .background(accent.opacity(0.055), in: RoundedRectangle(cornerRadius: 17))
+            .overlay(RoundedRectangle(cornerRadius: 17).stroke(accent.opacity(0.17)))
+    }
+    private func row(_ item: StoredApp) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 14) {
+                Image(systemName: symbol(item)).font(.system(size: 22)).foregroundStyle(accent).frame(width: 36)
+                Text(item.name).font(.system(size: 13, weight: .semibold)).lineLimit(2)
+                Spacer(); controls(item)
+            }
+            if let session = library.session(for: item.key) { Text(session.message).font(.caption).foregroundStyle(session.active ? Color.green : Color.secondary) }
+        }.padding(14).background(.white.opacity(0.035), in: RoundedRectangle(cornerRadius: 11))
+    }
     var body: some View {
-        GroupBox("Your cloud application library") {
-            VStack(alignment: .leading, spacing: 12) {
-                HStack {
-                    Text(destinationLabel).font(.caption).foregroundStyle(.secondary)
-                    Spacer()
-                    Button("Refresh") { library.loadApps() }.disabled(busy)
-                    Button("Scan Cloud Drive") { library.scanCloud() }.disabled(busy || !library.hasDestination)
-                }
-                Toggle("Remove managed application cache after the app exits", isOn: $library.cleanupAfterExit)
-                    .font(.caption)
-                Text("Your cloud copy stays available. Modified, in-use, or unverified local caches are retained for review.")
-                    .font(.caption).foregroundStyle(.secondary)
-                if library.apps.isEmpty { Text("Upload an application, file, or folder to see it here.").foregroundStyle(.secondary).padding(.vertical, 12) }
-                ForEach(library.apps) { item in
-                    VStack(alignment: .leading, spacing: 8) {
-                        HStack {
-                            Label(item.name, systemImage: item.kind == "app" ? "app.fill" : item.kind == "folder" ? "folder.fill" : "doc.fill")
-                                .font(.headline)
-                            Spacer()
-                            if item.kind == "app" {
-                                Button("Launch") { library.smartLaunch(item) }.buttonStyle(.borderedProminent).tint(.purple).disabled(busy)
-                            } else { Button("Open") { library.launch(item) }.disabled(busy) }
-                            Button("Restore") { library.restore(item) }.disabled(busy)
-                            Button("Clear Cache") { library.evict(item) }.disabled(busy)
-                        }
-                        if let session = library.session(for: item.key) {
-                            Label(session.message, systemImage: session.active ? "play.circle.fill" : "checkmark.circle")
-                                .font(.caption).foregroundStyle(session.active ? Color.green : Color.secondary)
-                        }
-                    }.padding(12).background(.white.opacity(0.045), in: RoundedRectangle(cornerRadius: 10))
-                }
-                if library.busy { ProgressView().controlSize(.small) }
-                Text(library.message).font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
-            }.frame(maxWidth: .infinity, alignment: .leading).padding(8)
+        VStack(alignment: .leading, spacing: 17) {
+            HStack(spacing: 12) {
+                HStack { Image(systemName: "magnifyingglass").foregroundStyle(.secondary); TextField(content == .applications ? "Find a cloud application…" : "Find connected files…", text: $search).textFieldStyle(.plain) }
+                    .padding(11).background(.black.opacity(0.18), in: RoundedRectangle(cornerRadius: 10))
+                Button { grid.toggle() } label: { Image(systemName: grid ? "list.bullet" : "square.grid.2x2") }
+                Button("Refresh Library") { library.loadApps() }.disabled(busy)
+                Button("Scan Selected Bucket") { library.scanCloud() }.disabled(busy || !library.hasDestination)
+            }
+            if content == .applications {
+                Toggle("Remove managed application cache after the app exits", isOn: $library.cleanupAfterExit).font(.system(size: 12))
+                Text("Large eligible applications use verified preloading. Other applications use a verified local install. The cloud copy stays available; changed or in-use local caches are retained.")
+                    .font(.system(size: 11)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            } else {
+                Picker("Category", selection: $category) { Text("All").tag("all"); Text("Files").tag("files"); Text("Folders").tag("folders"); Text("Videos").tag("videos"); Text("Audio").tag("audio"); Text("Pictures").tag("pictures") }.pickerStyle(.segmented)
+            }
+            HStack { Text("\(items.count) " + (content == .applications ? "applications" : "items")).font(.caption).foregroundStyle(.secondary); Spacer() }
+            if items.isEmpty {
+                VStack(spacing: 11) {
+                    Image(systemName: content == .applications ? "app.dashed" : "folder.badge.plus").font(.system(size: 35, weight: .light)).foregroundStyle(accent)
+                    Text(search.isEmpty ? (content == .applications ? "Add your first cloud application." : "Your connected files and folders appear here.") : "No matching items.").font(.system(size: 15, weight: .semibold))
+                    Text("Scan reads the selected bucket's managed library. It does not import objects into a product project's file index.")
+                        .font(.system(size: 11)).foregroundStyle(.secondary).multilineTextAlignment(.center)
+                }.frame(maxWidth: .infinity).padding(.vertical, 27)
+            } else if grid {
+                LazyVGrid(columns: [GridItem(.adaptive(minimum: 260), spacing: 14)], spacing: 14) { ForEach(items) { tile($0) } }
+            } else { LazyVStack(spacing: 9) { ForEach(items) { row($0) } } }
+            if library.busy { ProgressView().controlSize(.small) }
+            Label(library.message, systemImage: "info.circle").font(.system(size: 11)).foregroundStyle(.secondary).textSelection(.enabled)
         }
     }
 }

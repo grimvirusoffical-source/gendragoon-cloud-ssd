@@ -5,27 +5,49 @@ import CryptoKit
 
 private struct GDBillingEndpoint: Decodable { let endpoint: String }
 private struct GDBillingStatus: Decodable { let checkoutEnabled: Bool; let stripeMode: String }
-private struct GDCheckoutResponse: Decodable { let url: String?; let complimentary: Bool?; let message: String? }
+private struct GDCheckoutResponse: Decodable { let url: String?; let complimentary: Bool?; let message: String?; let alreadyActivated: Bool? }
 private struct GDWorkspaceDraft: Decodable { let workspaceId: String }
-struct GDRemoteWorkspace: Decodable, Identifiable {
+struct GDRemotePlanSelection: Codable, Equatable {
+    let storageTier: String?; let storageMode: String?; let storageInterval: String?
+    let performanceTier: String?; let performanceInterval: String?; let byoInterval: String?
+}
+struct GDRemoteWorkspace: Decodable, Identifiable, Equatable {
     let id: String; let name: String; let kind: String
     let storageActive: Bool; let provisioned: Bool
     let byoActive: Bool?; let manualProviderConfigured: Bool?
+    let storageTier: String?; let storageMode: String?; let storageInterval: String?
+    let performanceTier: String?; let performanceInterval: String?; let workers: Int?; let quotaGB: Int?
+    let performanceActive: Bool?
+    let projectStatus: String?; let projectFeeStatus: String?; let projectBillingVersion: Int?
+    let intendedSelection: GDRemotePlanSelection?
+    var isAvailable: Bool {
+        if let projectStatus { return projectStatus == "active" }
+        return (kind == "free" && provisioned) || (storageActive && provisioned) || (kind == "byo" && byoActive == true && manualProviderConfigured == true)
+    }
+    var supportsStorage: Bool { ["free", "paid"].contains(kind) && isAvailable && provisioned }
     var supportsPerformance: Bool {
-        (storageActive && provisioned) || (kind == "byo" && byoActive == true && manualProviderConfigured == true)
+        isAvailable && (supportsStorage || (kind == "byo" && byoActive == true && manualProviderConfigured == true))
     }
 }
 private struct GDWorkspacesResponse: Decodable { let workspaces: [GDRemoteWorkspace]; let ownerBenefits: Bool? }
+private struct GDBillingProjectsResponse: Decodable { let projects: [GDRemoteWorkspace]; let ownerBenefits: Bool? }
 struct GDServerBillingCatalog: Decodable {
     struct Storage: Decodable { let gb: Int; let monthlyCents: Int; let yearlyCents: Int; let bundleMonthlyCents: Int; let bundleYearlyCents: Int; let bundleWorkers: Int? }
     struct Performance: Decodable { let workers: Int; let monthlyCents: Int; let yearlyCents: Int }
     struct BYO: Decodable { let monthlyCents: Int; let yearlyCents: Int }
     struct Ads: Decodable { let oneTimeCents: Int }
+    struct Projects: Decodable {
+        let firstFree: Bool; let additionalOneTimeCents: Int; let defaultLimit: Int; let qualifiedLimit: Int
+        let qualificationLabel: String; let paymentAvailable: Bool
+    }
+    let catalogVersion: Int?
     let workspaceFeeMonthlyCents: Int
     let storage: [String: Storage]; let performance: [String: Performance]
     let byo: BYO; let removeAds: Ads
+    let projects: Projects?
 }
 private struct GDBillingSelection: Codable, Equatable {
+    var accountScope: String?
     var storageTier = "100GB"
     var performanceTier = "boost"
     var workspaceName = "My Cloud Project"
@@ -47,6 +69,7 @@ private struct GDBillingSelection: Codable, Equatable {
     @Published var checkoutPending = false
     private weak var login: GDLoginSession?
     private var accountID = ""
+    private var selectionSaveTask: Task<Void, Never>?
     private var api: URL? {
         guard let file = Bundle.main.url(forResource: "gendragoon_free_api", withExtension: "json"),
               let data = try? Data(contentsOf: file),
@@ -86,13 +109,23 @@ private struct GDBillingSelection: Codable, Equatable {
     }
     private func connect(_ session: GDLoginSession) {
         if accountID != session.userID {
+            selectionSaveTask?.cancel()
             ownerBenefits = false; workspaces = []; ready = false; checkoutPending = false
         }
         login = session; accountID = session.userID
     }
+    func workspaceForSelection(_ id: String, accountID expected: String) -> GDRemoteWorkspace? {
+        guard accountID == expected, login?.userID == expected else { return nil }
+        return workspaces.first { $0.id == id }
+    }
     private func loadWorkspaces() async throws {
-        let result = try JSONDecoder().decode(GDWorkspacesResponse.self, from: await send("v2/workspaces"))
-        workspaces = result.workspaces; ownerBenefits = result.ownerBenefits == true
+        if (catalog?.catalogVersion ?? 1) >= 2 {
+            let result = try JSONDecoder().decode(GDBillingProjectsResponse.self, from: await send("v2/projects"))
+            workspaces = result.projects; ownerBenefits = result.ownerBenefits == true
+        } else {
+            let result = try JSONDecoder().decode(GDWorkspacesResponse.self, from: await send("v2/workspaces"))
+            workspaces = result.workspaces; ownerBenefits = result.ownerBenefits == true
+        }
         if ownerBenefits { ready = true; status = "Owner access: plans and ad removal are included at no charge." }
     }
     func refresh(login session: GDLoginSession) {
@@ -122,7 +155,7 @@ private struct GDBillingSelection: Codable, Equatable {
     }
     private func openCheckout(_ data: Data) throws {
         let result = try JSONDecoder().decode(GDCheckoutResponse.self, from: data)
-        if result.complimentary == true { status = result.message ?? "Included owner access activated."; return }
+        if result.complimentary == true || result.alreadyActivated == true { status = result.message ?? "Included access is already active."; return }
         guard let raw = result.url, let url = URL(string: raw), url.scheme == "https", url.user == nil, url.password == nil,
               ["checkout.stripe.com", "billing.stripe.com"].contains(url.host ?? "") else {
             throw GDTransferError(message: "The billing service returned an invalid checkout address.", status: 0)
@@ -131,10 +164,11 @@ private struct GDBillingSelection: Codable, Equatable {
         checkoutPending = true
         status = "Checkout opened. Your selected plan is retained; return here after payment to refresh verified access."
     }
-    func buyStorage(login session: GDLoginSession, name: String, tier: String, mode: String, yearly: Bool, intentID: String) {
+    func buyStorage(login session: GDLoginSession, workspaceID: String, tier: String, mode: String, yearly: Bool) {
+        guard (catalog?.catalogVersion ?? 1) >= 2 else { status = "Project activation pricing is waiting for the service update. Your selected plan is saved."; return }
+        guard workspaces.contains(where: { $0.id == workspaceID && $0.supportsStorage }) else { status = "Choose an active project. Create or activate a project in Cloud first."; return }
         begin(login: session) {
-            let draft = try JSONDecoder().decode(GDWorkspaceDraft.self, from: await self.send("v2/workspaces/draft", method: "POST", payload: ["name": name, "tier": tier, "mode": mode, "interval": yearly ? "year" : "month", "intentId": intentID]))
-            try self.openCheckout(await self.send("v2/workspaces/" + draft.workspaceId + "/checkout/storage", method: "POST"))
+            try self.openCheckout(await self.send("v2/workspaces/" + workspaceID + "/checkout/storage", method: "POST", payload: ["tier": tier, "mode": mode, "interval": yearly ? "year" : "month"]))
             if self.ownerBenefits { try await self.loadWorkspaces() }
         }
     }
@@ -151,7 +185,8 @@ private struct GDBillingSelection: Codable, Equatable {
     func portal(login session: GDLoginSession) {
         begin(login: session) { try self.openCheckout(await self.send("billing/customer-portal", method: "POST")) }
     }
-    func buyManualBYO(login session: GDLoginSession, name: String, remote: String, provider: String, yearly: Bool, intentID: String) {
+    func buyManualBYO(login session: GDLoginSession, workspaceID: String, remote: String, provider: String, yearly: Bool) {
+        guard workspaces.contains(where: { $0.id == workspaceID && $0.isAvailable }) else { status = "Choose an active project first."; return }
         guard remote.range(of: "^[A-Za-z0-9_-]{3,40}$", options: .regularExpression) != nil else { status = "Enter an existing remote name using 3–40 letters, numbers, dashes or underscores."; return }
         guard let root = Bundle.main.resourceURL, FileManager.default.isExecutableFile(atPath: root.appendingPathComponent("rclone").path) else { status = "The local provider tool is unavailable."; return }
         begin(login: session) {
@@ -168,10 +203,27 @@ private struct GDBillingSelection: Codable, Equatable {
                 DispatchQueue.global().asyncAfter(deadline: .now() + 45) { if process.isRunning { process.terminate() } }
             }
             guard process.terminationStatus == 0 else { throw GDTransferError(message: "The provider check failed or timed out. Verify the remote in My Cloud and retry.", status: 0) }
-            let draft = try JSONDecoder().decode(GDWorkspaceDraft.self, from: await self.send("v2/workspaces/draft", method: "POST", payload: ["name": name, "mode": "byo", "interval": yearly ? "year" : "month", "intentId": intentID]))
-            _ = try await self.send("v2/workspaces/" + draft.workspaceId + "/manual-provider", method: "POST", payload: ["provider": provider, "label": remote, "connectionTested": true])
-            try self.openCheckout(await self.send("v2/workspaces/" + draft.workspaceId + "/checkout/byo", method: "POST"))
+            _ = try await self.send("v2/workspaces/" + workspaceID + "/manual-provider", method: "POST", payload: ["provider": provider, "label": remote, "connectionTested": true])
+            try self.openCheckout(await self.send("v2/workspaces/" + workspaceID + "/checkout/byo", method: "POST", payload: ["interval": yearly ? "year" : "month"]))
             if self.ownerBenefits { try await self.loadWorkspaces() }
+        }
+    }
+    func retainSelection(login session: GDLoginSession, workspaceID: String, payload: [String: String]) {
+        selectionSaveTask?.cancel()
+        guard !workspaceID.isEmpty, !session.userID.isEmpty, accountID == session.userID, (catalog?.catalogVersion ?? 1) >= 2,
+              workspaces.contains(where: { $0.id == workspaceID && $0.projectStatus != "archived" }) else { return }
+        connect(session)
+        let expected = session.userID
+        selectionSaveTask = Task {
+            do {
+                try await Task.sleep(for: .milliseconds(400))
+                guard !Task.isCancelled, self.accountID == expected, session.userID == expected,
+                      GDUpdateActivity.shared.canStart(excluding: self) else { return }
+                GDUpdateActivity.shared.set(self, key: "selection", active: true)
+                defer { GDUpdateActivity.shared.set(self, key: "selection", active: false) }
+                _ = try await self.send("v2/projects/" + workspaceID + "/selection", method: "PUT", payload: payload)
+            } catch is CancellationError { }
+            catch { if self.accountID == expected && !Task.isCancelled { self.status = "Your selection is saved on this Mac. Refresh to retry cloud synchronization." } }
         }
     }
 }
@@ -183,7 +235,11 @@ struct GenDragoonStripePurchases: View {
     let focus: String
     @State private var selected = GDBillingSelection()
     @State private var selectionAccount = ""
-    private var persistenceKey: String {
+    private var accountScope: String { SHA256.hash(data: Data(login.userID.utf8)).map { String(format: "%02x", $0) }.joined() }
+    private func persistenceKey(workspaceID: String) -> String {
+        GDProjectPreferences.key(accountID: login.userID, workspaceID: workspaceID, setting: "billing.selection." + focus)
+    }
+    private var legacyPersistenceKey: String {
         let account = SHA256.hash(data: Data(login.userID.utf8)).map { String(format: "%02x", $0) }.joined()
         return "gd.checkout.selection." + account + "." + focus
     }
@@ -200,16 +256,38 @@ struct GenDragoonStripePurchases: View {
         }.joined(separator: "-")
     }
     private func money(_ cents: Int) -> String { (Double(cents) / 100).formatted(.currency(code: "USD")) }
-    private func restoreSelection() {
+    private func restoreSelection(workspaceID: String? = nil, refresh: Bool = true) {
         selectionAccount = login.userID
-        if let data = UserDefaults.standard.data(forKey: persistenceKey), let saved = try? JSONDecoder().decode(GDBillingSelection.self, from: data) { selected = saved }
+        let projectID = workspaceID ?? GDProjectPreferences.selected(accountID: login.userID)
+        if let data = UserDefaults.standard.data(forKey: persistenceKey(workspaceID: projectID)), let saved = try? JSONDecoder().decode(GDBillingSelection.self, from: data) { selected = saved }
         else {
             var fallback = GDBillingSelection()
-            fallback.storageTier = UserDefaults.standard.string(forKey: "gd.commercial.preview.selectedTier") ?? "100GB"
-            fallback.yearly = UserDefaults.standard.bool(forKey: "gd.commercial.preview.annual")
+            if let data = UserDefaults.standard.data(forKey: legacyPersistenceKey), let saved = try? JSONDecoder().decode(GDBillingSelection.self, from: data), saved.workspaceID.isEmpty || saved.workspaceID == projectID { fallback = saved }
+            if let project = billing.workspaceForSelection(projectID, accountID: login.userID) {
+                let intention = project.intendedSelection
+                fallback.storageTier = intention?.storageTier ?? project.storageTier ?? fallback.storageTier
+                fallback.performanceTier = intention?.performanceTier ?? project.performanceTier ?? fallback.performanceTier
+                let interval = focus == "performance" ? (intention?.performanceInterval ?? project.performanceInterval) : focus == "byo" ? intention?.byoInterval : (intention?.storageInterval ?? project.storageInterval)
+                if let interval { fallback.yearly = interval == "year" }
+            }
             selected = fallback
         }
-        billing.refresh(login: login)
+        selected.accountScope = accountScope
+        selected.workspaceID = projectID
+        if refresh { billing.refresh(login: login) }
+    }
+    private func storeSelection(_ value: GDBillingSelection) {
+        guard !login.userID.isEmpty, !value.workspaceID.isEmpty, value.accountScope == accountScope else { return }
+        if let data = try? JSONEncoder().encode(value) { UserDefaults.standard.set(data, forKey: persistenceKey(workspaceID: value.workspaceID)) }
+    }
+    private func synchronizeSelection() {
+        let interval = selected.yearly ? "year" : "month"
+        let payload: [String: String]
+        if focus == "performance" { payload = ["performanceTier": selected.performanceTier, "performanceInterval": interval] }
+        else if focus == "standard" || focus == "bundle" { payload = ["storageTier": selected.storageTier, "storageMode": focus, "storageInterval": interval] }
+        else if focus == "byo" { payload = ["byoInterval": interval] }
+        else { return }
+        billing.retainSelection(login: login, workspaceID: selected.workspaceID, payload: payload)
     }
     private func selectedCard(_ title: String, detail: String, cents: Int, isSelected: Bool, choose: @escaping () -> Void) -> some View {
         Button(action: choose) {
@@ -225,32 +303,53 @@ struct GenDragoonStripePurchases: View {
     private var periodPicker: some View {
         Picker("Billing period", selection: $selected.yearly) { Text("Monthly").tag(false); Text("Yearly").tag(true) }.pickerStyle(.segmented).disabled(billing.busy)
     }
+    private var projectPicker: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            Picker("Project", selection: $selected.workspaceID) {
+                Text("Choose an existing project").tag("")
+                if !selected.workspaceID.isEmpty && !billing.workspaces.contains(where: { $0.id == selected.workspaceID }) {
+                    Text("Selected project unavailable — refresh or choose a project").tag(selected.workspaceID)
+                }
+                ForEach(billing.workspaces) { project in
+                    Text(project.name + (project.isAvailable ? "" : " · activation pending")).tag(project.id)
+                }
+            }.disabled(billing.busy)
+            if let project = billing.workspaces.first(where: { $0.id == selected.workspaceID }) {
+                if project.isAvailable {
+                    let storage = project.storageActive ? (project.storageTier ?? "Paid storage") : "2 GB basic storage"
+                    let performance = project.performanceActive == true ? (project.performanceTier?.capitalized ?? "Performance") : project.storageMode == "bundle" && project.storageActive ? "Bundle performance" : "Basic performance"
+                    Text("Verified for \(project.name): \(storage) · \(performance) · \(project.workers ?? 1) transfer worker(s)").font(.system(size: 11)).foregroundStyle(.secondary)
+                } else {
+                    Text("This project's activation is pending. Finish activation or restore it in Cloud before adding a subscription.").font(.system(size: 11)).foregroundStyle(.orange)
+                }
+            } else {
+                Text("Create or restore a project in Cloud, then choose it here. Your tier selection is saved for each project.").font(.system(size: 11)).foregroundStyle(.secondary)
+            }
+        }
+    }
     @ViewBuilder private func purchaseContent(_ catalog: GDServerBillingCatalog) -> some View {
         if focus == "standard" || focus == "bundle" {
-            TextField("Project name", text: $selected.workspaceName).textFieldStyle(.roundedBorder).disabled(billing.busy)
+            projectPicker
             periodPicker
             LazyVGrid(columns: [GridItem(.adaptive(minimum: 165), spacing: 10)], spacing: 10) {
                 ForEach(catalog.storage.keys.sorted { (catalog.storage[$0]?.gb ?? 0) < (catalog.storage[$1]?.gb ?? 0) }, id: \.self) { tier in
                     if let item = catalog.storage[tier] {
                         let base = focus == "bundle" ? (selected.yearly ? item.bundleYearlyCents : item.bundleMonthlyCents) : (selected.yearly ? item.yearlyCents : item.monthlyCents)
                         let fee = catalog.workspaceFeeMonthlyCents * (selected.yearly ? 10 : 1)
-                        selectedCard(tier, detail: focus == "bundle" ? "Includes performance + workspace fee" : "Includes workspace fee", cents: base + fee, isSelected: selected.storageTier == tier) { selected.storageTier = tier }
+                        selectedCard(tier, detail: focus == "bundle" ? "Includes \(item.bundleWorkers ?? 1) performance workers" : "Storage subscription for your chosen project", cents: base + fee, isSelected: selected.storageTier == tier) { selected.storageTier = tier }
                     }
                 }
             }
             if let plan = catalog.storage[selected.storageTier] {
                 let base = focus == "bundle" ? (selected.yearly ? plan.bundleYearlyCents : plan.bundleMonthlyCents) : (selected.yearly ? plan.yearlyCents : plan.monthlyCents)
                 let fee = catalog.workspaceFeeMonthlyCents * (selected.yearly ? 10 : 1)
-                Text("Selected: \(selected.storageTier) \(focus == "bundle" ? "Storage + Performance" : "Storage") · \(money(base)) + \(money(fee)) workspace fee = \(money(base + fee))/\(period)").font(.system(size: 12, weight: .semibold))
+                Text("Selected: \(selected.storageTier) \(focus == "bundle" ? "Storage + Performance" : "Storage") · \(money(base + fee))/\(period) for the chosen project").font(.system(size: 12, weight: .semibold))
                 Button(billing.ownerBenefits ? "Activate selected plan — included" : "Continue with selected plan · " + money(base + fee) + "/" + period) {
-                    billing.buyStorage(login: login, name: selected.workspaceName, tier: selected.storageTier, mode: focus, yearly: selected.yearly, intentID: checkoutIntent)
-                }.buttonStyle(.borderedProminent).tint(.cyan).disabled(blocked || selected.workspaceName.trimmingCharacters(in: .whitespaces).count < 3)
+                    billing.buyStorage(login: login, workspaceID: selected.workspaceID, tier: selected.storageTier, mode: focus, yearly: selected.yearly)
+                }.buttonStyle(.borderedProminent).tint(.cyan).disabled(blocked || (catalog.catalogVersion ?? 1) < 2 || !billing.workspaces.contains { $0.id == selected.workspaceID && $0.supportsStorage })
             } else { Text("Choose an available storage plan.").foregroundStyle(.orange) }
         } else if focus == "performance" {
-            Picker("Workspace", selection: $selected.workspaceID) {
-                Text("Choose an active workspace").tag("")
-                ForEach(billing.workspaces.filter(\.supportsPerformance)) { Text($0.name).tag($0.id) }
-            }.disabled(billing.busy)
+            projectPicker
             periodPicker
             LazyVGrid(columns: [GridItem(.adaptive(minimum: 165), spacing: 10)], spacing: 10) {
                 ForEach(catalog.performance.keys.sorted { (catalog.performance[$0]?.workers ?? 0) < (catalog.performance[$1]?.workers ?? 0) }, id: \.self) { tier in
@@ -264,16 +363,16 @@ struct GenDragoonStripePurchases: View {
                 Button(billing.ownerBenefits ? "Activate selected performance — included" : "Continue with selected performance") { billing.buyPerformance(login: login, workspaceID: selected.workspaceID, tier: selected.performanceTier, yearly: selected.yearly) }
                     .buttonStyle(.borderedProminent).tint(.cyan).disabled(blocked || !billing.workspaces.contains { $0.id == selected.workspaceID && $0.supportsPerformance })
             }
-            Text("Performance is billed independently and can be added to an active managed storage or BYO workspace.").font(.system(size: 11)).foregroundStyle(.secondary)
+            Text("Performance is billed independently and can be added to your active basic, storage, or BYO project.").font(.system(size: 11)).foregroundStyle(.secondary)
         } else if focus == "byo" {
+            projectPicker
             Text("Configure your cloud connection in My Cloud, then enter its existing remote name. Provider credentials stay on your Mac.").font(.system(size: 12)).foregroundStyle(.secondary)
-            TextField("Project name", text: $selected.workspaceName).textFieldStyle(.roundedBorder)
             Picker("Provider", selection: $selected.provider) { ForEach(["s3", "gcs", "r2", "b2", "sftp", "webdav", "google-drive", "onedrive", "other"], id: \.self) { Text($0.uppercased()).tag($0) } }
             TextField("Existing rclone remote name", text: $selected.remote).textFieldStyle(.roundedBorder)
             periodPicker
             Text("Selected: Bring Your Own Cloud · \(money(selected.yearly ? catalog.byo.yearlyCents : catalog.byo.monthlyCents))/\(period). Your provider's storage and transfer charges are separate.").font(.system(size: 12, weight: .semibold))
-            Button(billing.ownerBenefits ? "Verify provider and activate — included" : "Verify provider and continue to Checkout") { billing.buyManualBYO(login: login, name: selected.workspaceName, remote: selected.remote, provider: selected.provider, yearly: selected.yearly, intentID: checkoutIntent) }
-                .buttonStyle(.borderedProminent).tint(.cyan).disabled(blocked || selected.remote.isEmpty)
+            Button(billing.ownerBenefits ? "Verify provider and activate — included" : "Verify provider and continue to Checkout") { billing.buyManualBYO(login: login, workspaceID: selected.workspaceID, remote: selected.remote, provider: selected.provider, yearly: selected.yearly) }
+                .buttonStyle(.borderedProminent).tint(.cyan).disabled(blocked || selected.remote.isEmpty || (catalog.catalogVersion ?? 1) < 2 || !billing.workspaces.contains { $0.id == selected.workspaceID && $0.isAvailable })
         } else if focus == "ads" {
             Text("Permanent ad removal · " + money(catalog.removeAds.oneTimeCents) + " once").font(.system(size: 16, weight: .semibold))
             Button(billing.ownerBenefits ? "Ad removal included" : "Continue to one-time purchase") { billing.buyRemoveAds(login: login) }.buttonStyle(.borderedProminent).tint(.cyan).disabled(blocked || login.isAdFree)
@@ -288,6 +387,10 @@ struct GenDragoonStripePurchases: View {
                 if billing.ready { Text(billing.mode == "test" ? "TEST MODE" : "AVAILABLE").font(.system(size: 10, weight: .bold)).foregroundStyle(billing.mode == "test" ? .orange : .green) }
             }
             if let catalog = billing.catalog { purchaseContent(catalog) }
+            if focus != "ads", let policy = billing.catalog?.projects {
+                Text("One project is free. Each new project after that costs \(money(policy.additionalOneTimeCents)) once and starts with 2 GB basic storage. Up to \(policy.defaultLimit) projects, or \(policy.qualifiedLimit) with \(policy.qualificationLabel.lowercased()).").font(.system(size: 11)).foregroundStyle(.secondary)
+                Text("Existing subscriptions keep their current billing terms. Use Manage Billing to change or cancel an active subscription.").font(.system(size: 11)).foregroundStyle(.secondary)
+            }
             if billing.busy { ProgressView() }
             Text(billing.status).font(.system(size: 12)).foregroundStyle(billing.ready ? Color.secondary : Color.orange)
             HStack {
@@ -300,7 +403,27 @@ struct GenDragoonStripePurchases: View {
             .onChange(of: login.userID) { _, _ in restoreSelection() }
             .onChange(of: selected) { old, new in
                 guard selectionAccount == login.userID, !selectionAccount.isEmpty else { return }
-                if let data = try? JSONEncoder().encode(selected) { UserDefaults.standard.set(data, forKey: persistenceKey) }
+                if old.workspaceID != new.workspaceID {
+                    storeSelection(old)
+                    GDProjectPreferences.select(new.workspaceID, accountID: login.userID)
+                    restoreSelection(workspaceID: new.workspaceID, refresh: false)
+                    return
+                }
+                guard billing.workspaces.contains(where: { $0.id == new.workspaceID }) else { return }
+                storeSelection(new); synchronizeSelection()
+            }
+            .onChange(of: billing.workspaces) { _, _ in
+                if selectionAccount == login.userID {
+                    let key = persistenceKey(workspaceID: selected.workspaceID)
+                    if UserDefaults.standard.data(forKey: key) == nil { restoreSelection(workspaceID: selected.workspaceID, refresh: false) }
+                    synchronizeSelection()
+                }
+            }
+            .onReceive(NotificationCenter.default.publisher(for: GDProjectPreferences.selectionChanged)) { notification in
+                guard notification.userInfo?["accountID"] as? String == login.userID,
+                      let workspaceID = notification.userInfo?["workspaceID"] as? String,
+                      workspaceID != selected.workspaceID else { return }
+                storeSelection(selected); restoreSelection(workspaceID: workspaceID)
             }
             .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in if billing.checkoutPending { billing.refresh(login: login) } }
     }

@@ -1,0 +1,14 @@
+{
+  "scope": "read-only Darwin kernel filesystem inventory",
+  "readersAgree": true,
+  "rootObserved": true,
+  "selectedCloudDriveObserved": true,
+  "volumeCount": 20,
+  "noDiskOperation": true,
+  "candidate": {
+    "version": "0.17.0",
+    "build": "22",
+    "productionSource": "9214bdcdc3c953c39c5015177dc6185cfc61e95d",
+    "fixtureSource": "950191aa36880b551bca8804dcf6ad545db57133"
+  }
+}

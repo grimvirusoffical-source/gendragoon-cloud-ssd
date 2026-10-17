@@ -536,7 +536,10 @@ struct GDManagedAppSession: Identifiable {
         busy = true
         Task {
             do {
-                let result = try await GDNativeHelper.invoke(helper, arguments: args)
+                let usesPerformance = ["upload", "restore", "launch"].contains(args.first ?? "")
+                let input = usesPerformance ? await GDNativePerformance.shared.helperInput() : nil
+                let result = try await GDNativeHelper.invoke(helper,
+                    arguments: args + (input == nil ? [] : ["--performance-stdin"]), standardInput: input)
                 if let detail = result["message"] as? String { message = GDNativeMessage.safe(detail) }
                 else if helper == "gendragoon_app_launch", args.first == "launch" {
                     message = result["mode"] as? String == "streamed" ? "Application launched with optimized cloud preloading." : "Application launched from its verified managed local cache."
@@ -585,7 +588,9 @@ struct GDManagedAppSession: Identifiable {
                         self.message = "Uploading and verifying \(source.lastPathComponent)…"
                         var args = ["upload", "--source", source.path, "--folder", destination] + context
                         if offload { args.append("--offload") }
-                        let result = try await GDNativeHelper.invoke("gendragoon_library", arguments: args)
+                        let input = await GDNativePerformance.shared.helperInput()
+                        let result = try await GDNativeHelper.invoke("gendragoon_library",
+                            arguments: args + (input == nil ? [] : ["--performance-stdin"]), standardInput: input)
                         self.message = result["message"] as? String ?? "Cloud copy and restore verified."
                     }
                     self.busy = false; self.loadApps()
@@ -891,7 +896,12 @@ private struct WelcomePanel: View {
 
 @MainActor final class GDAppLifetime: NSObject, NSApplicationDelegate {
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        guard GDUpdateActivity.shared.hasActiveOperations else { return .terminateNow }
+        // Only an acknowledged update worker has already quiesced and checked
+        // the primary mount. Ordinary Quit retains the full activity gate.
+        let blocked = GDUpdateCoordinator.shared.requestsTermination
+            ? GDUpdateActivity.shared.isBusyForUpdate(excluding: GDUpdateCoordinator.shared)
+            : GDUpdateActivity.shared.hasActiveOperations
+        guard blocked else { return .terminateNow }
         let alert = NSAlert()
         alert.messageText = "Finish cloud activity before quitting"
         alert.informativeText = "Wait for transfers and cache operations, close managed applications, and unmount the cloud drive. GenDragoon keeps your pending work open."

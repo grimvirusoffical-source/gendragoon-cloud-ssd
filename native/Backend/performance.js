@@ -1,10 +1,18 @@
 "use strict";
 const {effectiveWorkers}=require("./billing_v2");
+const registry=require("./performance_profiles.json");
+function nativeProfile(workspace){
+ const workers=effectiveWorkers(workspace);
+ if(!Number.isInteger(workers)||workers<1||workers>24)throw Error("Storage not active");
+ const selected=registry.profiles.filter(p=>p.minimumWorkers<=workers).at(-1);
+ return {...selected,version:registry.version,workers,minimumFreeGiB:registry.minimumFreeGiB,
+  byteBudgetIsNetworkGuarantee:false,automaticCacheCleanup:true};
+}
 // Queue transfers per workspace and enforce a server-verified worker cap.
 // The caller must pass a workspace record fetched from Firestore *after*
 // verifying Firebase identity, account ownership, and Stripe entitlements.
 class TransferGovernor {
- constructor(){this.states=new Map()}
+ constructor(maxQueued=100){this.states=new Map();this.maxQueued=maxQueued}
  async run(workspaceId,workspace,operation){
    if(typeof operation!=="function")throw new TypeError("operation must be callable");
    const limit=effectiveWorkers(workspace);
@@ -14,7 +22,7 @@ class TransferGovernor {
    if(!state){state={active:0,queue:[],limit};this.states.set(workspaceId,state)}
    // Cap pending tasks so a user cannot exhaust server memory.
    state.limit=limit;
-   if(state.queue.length>=100)throw Error("Too many queued transfers");
+   if(state.queue.length>=this.maxQueued)throw Error("Too many queued transfers");
    return new Promise((resolve,reject)=>{
      state.queue.push({operation,resolve,reject,workspace,limit});
      this.drain(workspaceId);
@@ -42,4 +50,4 @@ function rcloneLimits(workspace){
  return ["--transfers",String(workers),"--checkers",String(Math.max(1,Math.min(8,workers))),
   "--multi-thread-streams",String(Math.max(1,Math.min(8,workers)))];
 }
-module.exports={TransferGovernor,rcloneLimits};
+module.exports={TransferGovernor,rcloneLimits,nativeProfile};

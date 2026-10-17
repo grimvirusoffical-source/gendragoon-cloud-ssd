@@ -1,0 +1,51 @@
+{
+  "ok": true,
+  "scope": "real macOS project packaging and exclusive restore",
+  "cloudOperations": 0,
+  "applicationLaunches": 0,
+  "offloads": 0,
+  "productionReserveOverride": false,
+  "cases": [
+    {
+      "kind": "folder",
+      "logicalBytes": 17,
+      "entryCount": 6,
+      "packageBytes": 4180,
+      "restored": true,
+      "sourceUnchanged": true
+    },
+    {
+      "kind": "file",
+      "logicalBytes": 0,
+      "entryCount": 1,
+      "packageBytes": 715,
+      "restored": true,
+      "sourceUnchanged": true
+    },
+    {
+      "kind": "file",
+      "logicalBytes": 27,
+      "entryCount": 1,
+      "packageBytes": 1632,
+      "restored": true,
+      "sourceUnchanged": true
+    },
+    {
+      "kind": "app",
+      "logicalBytes": 414,
+      "entryCount": 5,
+      "packageBytes": 2534,
+      "restored": true,
+      "sourceUnchanged": true
+    }
+  ],
+  "mutationBlockedOffload": true,
+  "nestedEmptyDirectoryPreserved": true,
+  "emptyFilesPreserved": true,
+  "executableModePreserved": true,
+  "relativeSymlinkPreserved": true,
+  "resourceForkAndCustomAttributesPreserved": true,
+  "nativeExclusiveRestoreUsed": true,
+  "seconds": 0.381,
+  "fixturesRemoved": true
+}

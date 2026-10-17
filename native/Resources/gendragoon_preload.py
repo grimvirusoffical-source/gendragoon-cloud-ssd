@@ -103,10 +103,12 @@ def warm(app,mb=64,limit=8,workers=2,constrained=False):
         finally:
             if done:
                 with lock:stats["bytes"]+=done;stats["files"].add(path)
-    with concurrent.futures.ThreadPoolExecutor(max_workers=max(1,min(4,int(workers)))) as executor:
+    actual_workers=max(1,min(8,int(workers)))
+    with concurrent.futures.ThreadPoolExecutor(max_workers=actual_workers) as executor:
         list(executor.map(read_range,tasks))
     return {"ok":True,"bytesWarmed":stats["bytes"],"filesWarmed":len(stats["files"]),
         "errors":stats["errors"],"seconds":round(time.monotonic()-started,3),"budgetBytes":budget,
+        "workers":actual_workers,"rangesPlanned":len(tasks),"deadlineSeconds":round(deadline-started,3),
         "message":"Warmed startup-first byte ranges. This does not guarantee launch speed or app compatibility."}
 
 def worker(result,args):

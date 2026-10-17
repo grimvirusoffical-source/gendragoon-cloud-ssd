@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "minimumFreeGiB": 10,
+  "profiles": [
+    {"minimumWorkers": 1, "name": "Basic", "preloadMiB": 8, "preloadSeconds": 0.65, "preloadWorkers": 1, "streamReaders": 1, "readChunkMiB": 1, "readAheadMiB": 1, "cacheGiB": 2},
+    {"minimumWorkers": 2, "name": "Lite", "preloadMiB": 16, "preloadSeconds": 0.8, "preloadWorkers": 2, "streamReaders": 2, "readChunkMiB": 1, "readAheadMiB": 2, "cacheGiB": 2},
+    {"minimumWorkers": 4, "name": "Boost", "preloadMiB": 32, "preloadSeconds": 1.0, "preloadWorkers": 2, "streamReaders": 2, "readChunkMiB": 2, "readAheadMiB": 4, "cacheGiB": 3},
+    {"minimumWorkers": 8, "name": "Turbo", "preloadMiB": 64, "preloadSeconds": 1.2, "preloadWorkers": 4, "streamReaders": 4, "readChunkMiB": 2, "readAheadMiB": 8, "cacheGiB": 4},
+    {"minimumWorkers": 12, "name": "Ultra", "preloadMiB": 96, "preloadSeconds": 1.2, "preloadWorkers": 4, "streamReaders": 6, "readChunkMiB": 4, "readAheadMiB": 12, "cacheGiB": 6},
+    {"minimumWorkers": 20, "name": "Max", "preloadMiB": 128, "preloadSeconds": 1.2, "preloadWorkers": 8, "streamReaders": 8, "readChunkMiB": 4, "readAheadMiB": 16, "cacheGiB": 8},
+    {"minimumWorkers": 24, "name": "Extended bundle", "preloadMiB": 192, "preloadSeconds": 1.2, "preloadWorkers": 8, "streamReaders": 8, "readChunkMiB": 4, "readAheadMiB": 24, "cacheGiB": 8}
+  ]
+}

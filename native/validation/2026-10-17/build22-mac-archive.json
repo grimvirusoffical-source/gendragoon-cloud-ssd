@@ -1,0 +1,79 @@
+{
+  "archiveLayout": "zip-root",
+  "archiveMembers": [
+    "Original metadata $literal 'quotes'.txt",
+    "__MACOSX/",
+    "__MACOSX/._Original metadata $literal 'quotes'.txt"
+  ],
+  "bytes": 8248,
+  "cloudOperations": 0,
+  "customAttributesRestored": true,
+  "dataForkRestored": true,
+  "dataMutationRejected": true,
+  "directoryCases": [
+    {
+      "emptyDirectoryAttributesRestored": true,
+      "metadataBytes": 274,
+      "name": "Complete metadata folder",
+      "nestedMetadataRestored": true,
+      "relativeLinkAndExecutablePreserved": true,
+      "rootAndNestedMetadataMutationRejected": true,
+      "rootMetadataRestored": true,
+      "sourceUnchanged": true
+    },
+    {
+      "emptyDirectoryAttributesRestored": true,
+      "metadataBytes": 274,
+      "name": "Metadata.app",
+      "nestedMetadataRestored": true,
+      "relativeLinkAndExecutablePreserved": true,
+      "rootAndNestedMetadataMutationRejected": true,
+      "rootMetadataRestored": true,
+      "sourceUnchanged": true
+    }
+  ],
+  "emptyAttributeRestored": true,
+  "expectedAttributes": {
+    "app.gendragoon.empty": {
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "size": 0
+    },
+    "app.gendragoon.smoke": {
+      "sha256": "3991c7ef06f3a690bd552de773dcafbf544228a71414679782b3f25b33c02fbb",
+      "size": 47
+    },
+    "com.apple.ResourceFork": {
+      "sha256": "6d5d76105d622b23d4fb84df99e164c97ebe5df231e47dc6f7d84f60e6f6c549",
+      "size": 89
+    }
+  },
+  "fixturesRemoved": true,
+  "metadataMutationRejected": true,
+  "nativeMetadataReadVerified": true,
+  "ok": true,
+  "productionReserveOverride": false,
+  "resourceForkRestored": true,
+  "restoredAttributes": {
+    "app.gendragoon.empty": {
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "size": 0
+    },
+    "app.gendragoon.smoke": {
+      "sha256": "3991c7ef06f3a690bd552de773dcafbf544228a71414679782b3f25b33c02fbb",
+      "size": 47
+    },
+    "com.apple.ResourceFork": {
+      "sha256": "6d5d76105d622b23d4fb84df99e164c97ebe5df231e47dc6f7d84f60e6f6c549",
+      "size": 89
+    }
+  },
+  "seconds": 0.371,
+  "sourcePreservedUntilFixtureCleanup": true,
+  "unchangedSourceGuardVerified": true,
+  "candidate": {
+    "version": "0.17.0",
+    "build": "22",
+    "productionSource": "9214bdcdc3c953c39c5015177dc6185cfc61e95d",
+    "fixtureSource": "950191aa36880b551bca8804dcf6ad545db57133"
+  }
+}

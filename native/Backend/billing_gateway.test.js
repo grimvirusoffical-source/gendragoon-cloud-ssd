@@ -42,7 +42,7 @@ test("all performance plans support month/year and workers are verifiably enforc
    assert.equal(q.totalCents,v.cents*(period==="year"?10:1));
    assert.equal(q.workerLimit,v.workers);
   }
-  const ws={kind:"paid",storageActive:true,provisioned:true,
+  const ws={kind:"paid",storageActive:true,storageTier:"100GB",provisioned:true,
     performanceActive:true,performanceTier:tier};
   assert.equal(rcloneLimits(ws)[1],String(v.workers));
   let n=0,m=0;

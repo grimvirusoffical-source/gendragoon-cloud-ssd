@@ -1,17 +1,17 @@
 'use strict';
 const test=require('node:test'),assert=require('node:assert/strict'),express=require('express');
 const {registerBillingV2}=require('./billing_v2');
+const {memoryFirestore}=require('./test_firestore');
 async function fixture(t,owner=true,record={}){
  const data={kind:'paid',accountHash:'account',storageTier:'6TB',storageInterval:'year',storageMode:'bundle',...record};
- const ws={get:async()=>({exists:true,data:()=>data}),update:async p=>Object.assign(data,p)};
- const account={collection:()=>({doc:()=>ws})};
- const db={collection:name=>({doc:()=>name==='gd_accounts'?account:{get:async()=>({exists:false})}})};
+ const recordPath='gd_accounts/account/workspaces/00000000-0000-4000-9000-000000000000';
+ const db=memoryFirestore([[recordPath,data]]);
  const app=express();app.use(express.json());
  const stripe=new Proxy({},{get(){throw Error('Stripe must not be called for owner');}});
  registerBillingV2({app,db,stripe,admin:{firestore:{FieldValue:{serverTimestamp:()=>123}}},auth:(req,res,next)=>{req.user={uid:'uid'};req.ownerBenefits=owner;next()},agreed:(req,res,next)=>next(),hash:()=> 'account',prices:{}});
  const server=app.listen(0,'127.0.0.1');await new Promise(r=>server.once('listening',r));t.after(()=>server.close());
  const request=async(path,body)=>{const r=await fetch('http://127.0.0.1:'+server.address().port+path,{method:body?'POST':'GET',headers:{'Content-Type':'application/json'},body:body?JSON.stringify(body):undefined});return {status:r.status,body:await r.json()}};
- return {data,request};
+ return {get data(){return db.rows.get(recordPath)},request};
 }
 const path='/v2/workspaces/00000000-0000-4000-9000-000000000000/checkout/';
 test('owner storage, performance, and ads activate without a Stripe call',async t=>{

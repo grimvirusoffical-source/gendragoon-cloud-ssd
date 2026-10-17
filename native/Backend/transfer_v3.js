@@ -2,13 +2,36 @@
 // Shared authenticated transfer protocol for desktop, mobile and browser clients.
 // Existing v1/v2 APIs and file records remain compatible. Never trusts client tier claims.
 const express=require("express"),crypto=require("node:crypto");
-const {effectiveWorkers}=require("./billing_v2");
+const {effectiveWorkers,effectiveStorageQuota}=require("./billing_v2");
 const {scopeFromWorkspace,safeName}=require("./paid_storage");
 const {sendObject}=require("./range_download");
+const {nativeProfile}=require("./performance");
 const CHUNK=8*1024*1024,FREE_QUOTA=2_000_000_000,MAX_FILE=5*1024**4;
 const UUID=/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
 const SHA=/^[a-f0-9]{64}$/;
 function problem(status,message){return Object.assign(Error(message),{status});}
+function itemMetadata(body,size){
+ const kind=body?.kind||"file",format=body?.archiveFormat;
+ if(!["file","folder","app"].includes(kind))throw problem(400,"Invalid item kind");
+ let originalName;
+ try{originalName=safeName(body?.originalName??body?.name);}catch(_){throw problem(400,"Invalid original item name");}
+ if(format===undefined||format===null){
+  if(kind!=="file"||body?.manifestSHA256!==undefined||(body?.logicalBytes!==undefined&&body.logicalBytes!==size))
+   throw problem(400,"Folders and applications require a verified package");
+  return {kind,originalName,logicalBytes:size};
+ }
+ if(format!=="gendragoon-package-v1"||!SHA.test(body?.manifestSHA256||"")||
+    !Number.isSafeInteger(body?.logicalBytes)||body.logicalBytes<0||body.logicalBytes>MAX_FILE)
+  throw problem(400,"Invalid package metadata");
+ if(kind==="app"&&!originalName.toLowerCase().endsWith(".app"))throw problem(400,"Invalid application package name");
+ return {kind,originalName,archiveFormat:format,manifestSHA256:body.manifestSHA256,logicalBytes:body.logicalBytes};
+}
+function publicItem(id,data){
+ return {id,name:data.name,sizeBytes:data.sizeBytes,generation:data.generation||null,crc32c:data.crc32c||null,
+  kind:data.kind||"file",originalName:data.originalName||data.name,logicalBytes:data.logicalBytes??data.sizeBytes,
+  ...(data.archiveFormat?{archiveFormat:data.archiveFormat,manifestSHA256:data.manifestSHA256}:{}),
+  createdAt:data.createdAt?.toDate?data.createdAt.toDate().toISOString():null};
+}
 function contains(ranges,index){return ranges.some(([a,b])=>index>=a&&index<=b);}
 function addRange(ranges,index){
  const sorted=[...ranges.map(x=>[...x]),[index,index]].sort((a,b)=>a[0]-b[0]),out=[];
@@ -21,7 +44,7 @@ function profile(workspace){
  return {workers,chunkBytes:CHUNK,parallelUploads:true,rangeDownloads:true,resumable:true,
   maxMemoryBytes:workers*CHUNK*2,artificialBandwidthCapMbps:null,
   recommendedMobileWorkers:Math.min(4,workers),recommendedCellularWorkers:1,
-  defaultPrefetchBytes:8*1024*1024,preloadOnCellular:false,
+  defaultPrefetchBytes:nativeProfile(workspace).preloadMiB*1024*1024,nativeApplication:nativeProfile(workspace),preloadOnCellular:false,
   speedGuarantee:false};
 }
 function registerTransferV3({app,db,bucket,firebaseAuth,accountKey,FieldValue,apiKeys,getAuth,freeGovernor,paidGovernor}){
@@ -53,7 +76,9 @@ function registerTransferV3({app,db,bucket,firebaseAuth,accountKey,FieldValue,ap
   const w=snap.data();let quota,prefix,governor,key;
   if(id==="free"){
    if(w.kind!=="free"||w.accountKey!==hash||w.provisioned!==true)throw problem(403,"Free workspace unavailable");
-   quota=FREE_QUOTA;prefix="customer/"+hash+"/free";governor=freeGovernor;key=hash;
+   quota=effectiveStorageQuota(w);
+   if(quota<=0)throw problem(403,"Project is archived or unavailable");
+   prefix="customer/"+hash+"/free";governor=freeGovernor;key=hash;
   }else{
    const scope=scopeFromWorkspace(w,hash,id);if(!scope)throw problem(403,"Active provisioned storage required");
    quota=scope.limit;prefix=scope.prefix;governor=paidGovernor;key=hash+"-"+id;
@@ -97,8 +122,7 @@ function registerTransferV3({app,db,bucket,firebaseAuth,accountKey,FieldValue,ap
    if(!cursor.exists)throw problem(400,"Expired cursor");query=query.startAfter(cursor);
   }
   const result=await query.limit(151).get(),docs=result.docs.slice(0,150);
-  res.json({files:docs.map(d=>({id:d.id,name:d.data().name,sizeBytes:d.data().sizeBytes,
-   generation:d.data().generation||null,crc32c:d.data().crc32c||null})),nextCursor:result.docs.length>150?docs[149].id:null,
+  res.json({files:docs.map(d=>publicItem(d.id,d.data())),nextCursor:result.docs.length>150?docs[149].id:null,
    quotaBytes:c.quota,usedBytes:c.workspace.usedBytes||0,workers:effectiveWorkers(c.workspace)});
  });
  async function cleanStale(c){
@@ -119,21 +143,27 @@ function registerTransferV3({app,db,bucket,firebaseAuth,accountKey,FieldValue,ap
   }
  }
  route("post","/uploads",async(req,res)=>{
-  const c=await context(req),name=safeName(req.body?.name),size=req.body?.sizeBytes;
-  if(!Number.isSafeInteger(size)||size<1||size>Math.min(MAX_FILE,c.quota))throw problem(400,"File exceeds workspace file limit");
+  const c=await context(req),size=req.body?.sizeBytes;
+  let name;try{name=safeName(req.body?.name);}catch(_){throw problem(400,"Invalid file name");}
+  if(!Number.isSafeInteger(size)||size<0||size>Math.min(MAX_FILE,c.quota))throw problem(400,"File exceeds workspace file limit");
+  const metadata=itemMetadata(req.body,size);
   const id=req.body?.requestId||crypto.randomUUID(),ref=jobRef(c,id);
   await cleanStale(c);
   const result=await db.runTransaction(async tx=>{
    const [ws,existing]=await Promise.all([tx.get(c.ref),tx.get(ref)]);
-   if(existing.exists){
-    const old=existing.data();if(old.protocol!==3||old.name!==name||old.sizeBytes!==size)throw problem(409,"Request ID already used");
-    return old;
-   }
    if(!ws.exists)throw problem(404,"Workspace removed");
    const w=ws.data();
-   if(c.id!=="free"&&!scopeFromWorkspace(w,c.hash,c.id))throw problem(403,"Subscription inactive");
-   if((w.usedBytes||0)+(w.reservedBytes||0)+size>c.quota)throw problem(413,"Storage quota exceeded");
-   const job={id,protocol:3,name,sizeBytes:size,status:"active",receivedRanges:[],uploadedBytes:0,createdAt:stamp(),updatedAt:stamp()};
+   const quota=effectiveStorageQuota(w);
+   if(quota<=0||(c.id==="free"?w.accountKey!==c.hash:!scopeFromWorkspace(w,c.hash,c.id)))throw problem(403,"Project storage inactive");
+   if(existing.exists){
+    const old=existing.data();
+    const previous=itemMetadata({name:old.name,kind:old.kind,originalName:old.originalName,
+      archiveFormat:old.archiveFormat,manifestSHA256:old.manifestSHA256,logicalBytes:old.logicalBytes},old.sizeBytes);
+    if(old.protocol!==3||old.name!==name||old.sizeBytes!==size||JSON.stringify(previous)!==JSON.stringify(metadata))throw problem(409,"Request ID already used");
+    return old;
+   }
+   if((w.usedBytes||0)+(w.reservedBytes||0)+size>quota)throw problem(413,"Storage quota exceeded");
+   const job={id,protocol:3,name,sizeBytes:size,...metadata,status:"active",receivedRanges:[],uploadedBytes:0,createdAt:stamp(),updatedAt:stamp()};
    tx.update(c.ref,{reservedBytes:FieldValue.increment(size)});tx.create(ref,job);return job;
   });
   res.status(201).json({...statusOf(result),workers:effectiveWorkers(c.workspace)});
@@ -193,6 +223,29 @@ function registerTransferV3({app,db,bucket,firebaseAuth,accountKey,FieldValue,ap
    if(job.status==="active")await ref.update({status:"assembling",assemblyLevel:0,assemblyCursor:0,updatedAt:stamp()});
    let level=job.assemblyLevel||0,cursor=job.assemblyCursor||0,operations=0;
    const target=c.prefix+"/files/"+req.params.id;
+   async function commitFile(meta){
+    if(Number(meta.size)!==job.sizeBytes)throw Error("Composed size mismatch");
+    const metadata=itemMetadata({name:job.name,kind:job.kind,originalName:job.originalName,
+      archiveFormat:job.archiveFormat,manifestSHA256:job.manifestSHA256,logicalBytes:job.logicalBytes},job.sizeBytes);
+    await db.runTransaction(async tx=>{
+     const [ws,current]=await Promise.all([tx.get(c.ref),tx.get(ref)]);
+     if(current.data()?.status==="completed")return;
+     if(!ws.exists||current.data()?.status!=="assembling")throw problem(409,"Upload changed");
+     if(effectiveStorageQuota(ws.data())<=0||(c.id!=="free"&&!scopeFromWorkspace(ws.data(),c.hash,c.id)))throw problem(403,"Project storage inactive");
+     tx.create(c.ref.collection("files").doc(req.params.id),{name:job.name,sizeBytes:job.sizeBytes,...metadata,
+      generation:meta.generation||null,crc32c:meta.crc32c||null,createdAt:stamp()});
+     tx.update(c.ref,{usedBytes:FieldValue.increment(job.sizeBytes),reservedBytes:FieldValue.increment(-job.sizeBytes)});
+     tx.update(ref,{status:"completed",updatedAt:stamp()});
+    });
+    try{await bucket.deleteFiles({prefix:temp(c,req.params.id),force:true});}catch(_){await ref.update({cleanupNeeded:true});}
+    response={saved:true,fileId:req.params.id,name:job.name,...metadata,crc32c:meta.crc32c||null};
+   }
+   if(count===0){
+    const file=bucket.file(target);
+    try{await file.save(Buffer.alloc(0),{resumable:false,validation:"crc32c",preconditionOpts:{ifGenerationMatch:0}});}
+    catch(error){if(Number(error.code)!==412)throw error;}
+    const [meta]=await file.getMetadata();await commitFile(meta);return;
+   }
    const source=(lv,i)=>temp(c,req.params.id)+(lv===0?"chunk-"+i:"assembled-"+(lv-1)+"-"+i);
    while(operations<32){
     const inputs=Math.ceil(count/(32**level)),outputs=Math.ceil(inputs/32);
@@ -202,19 +255,7 @@ function registerTransferV3({app,db,bucket,firebaseAuth,accountKey,FieldValue,ap
     const dest=last?target:temp(c,req.params.id)+"assembled-"+level+"-"+cursor;
     await bucket.combine(keys,dest);operations++;cursor++;
     if(last){
-     const [meta]=await bucket.file(target).getMetadata();if(Number(meta.size)!==job.sizeBytes)throw Error("Composed size mismatch");
-     await db.runTransaction(async tx=>{
-      const [ws,current]=await Promise.all([tx.get(c.ref),tx.get(ref)]);
-      if(current.data()?.status==="completed")return;
-      if(!ws.exists||current.data()?.status!=="assembling")throw problem(409,"Upload changed");
-      if(c.id!=="free"&&!scopeFromWorkspace(ws.data(),c.hash,c.id))throw problem(403,"Subscription inactive");
-      tx.create(c.ref.collection("files").doc(req.params.id),{name:job.name,sizeBytes:job.sizeBytes,generation:meta.generation||null,crc32c:meta.crc32c||null,createdAt:stamp()});
-      tx.update(c.ref,{usedBytes:FieldValue.increment(job.sizeBytes),reservedBytes:FieldValue.increment(-job.sizeBytes)});
-      tx.update(ref,{status:"completed",updatedAt:stamp()});
-     });
-     // Await cleanup; failed cleanup is recorded rather than invalidating a saved file.
-     try{await bucket.deleteFiles({prefix:temp(c,req.params.id),force:true});}catch(_){await ref.update({cleanupNeeded:true});}
-     response={saved:true,fileId:req.params.id,name:job.name,crc32c:meta.crc32c||null};return;
+     const [meta]=await bucket.file(target).getMetadata();await commitFile(meta);return;
     }
     await ref.update({assemblyLevel:level,assemblyCursor:cursor,updatedAt:stamp()});
    }
@@ -255,4 +296,4 @@ function registerTransferV3({app,db,bucket,firebaseAuth,accountKey,FieldValue,ap
   nativeFilesExtensionsInstalled:false,checkoutProvider:"stripe",checkoutEnabled:process.env.STRIPE_CHECKOUT_ENABLED==="true"}));
  return {router,profile};
 }
-module.exports={registerTransferV3,addRange,contains,nextMissing,profile,CHUNK,MAX_FILE};
+module.exports={registerTransferV3,addRange,contains,nextMissing,profile,itemMetadata,publicItem,CHUNK,MAX_FILE};

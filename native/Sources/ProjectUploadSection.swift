@@ -36,12 +36,14 @@ public struct UploadCloudBucket: Identifiable, Hashable, Sendable {
 struct ProjectUploadSection: View {
     private let externalBusy: Bool
     private let onRefreshCloudChoices: @MainActor () async -> Void
+    private let content: GDProjectContent?
     @ObservedObject private var workspace: UploadWorkspaceModel
 
-    init(workspace: UploadWorkspaceModel, externalBusy: Bool,
+    init(workspace: UploadWorkspaceModel, externalBusy: Bool, content: GDProjectContent? = nil,
          onRefreshCloudChoices: @escaping @MainActor () async -> Void) {
         self.workspace = workspace
         self.externalBusy = externalBusy
+        self.content = content
         self.onRefreshCloudChoices = onRefreshCloudChoices
     }
 
@@ -103,22 +105,22 @@ struct ProjectUploadSection: View {
     }
 
     private var sourcePicker: some View {
-        GroupBox("Applications, files, and folders") {
+        GroupBox(content == .applications ? "Select applications" : content == .files ? "Select files and complete folders" : "Applications, files, and folders") {
             VStack(alignment: .leading, spacing: 10) {
                 HStack {
-                    Button("Add Applications…", systemImage: "app.badge") {
+                    if content != .files { Button("Add Applications…", systemImage: "app.badge") {
                         workspace.chooseSources(startingAt: URL(fileURLWithPath: "/Applications", isDirectory: true),
-                                                externalBusy: externalBusy)
+                                                externalBusy: externalBusy, content: .applications)
                     }.buttonStyle(.borderedProminent)
                     Button("My Applications…") {
                         workspace.chooseSources(startingAt: FileManager.default.homeDirectoryForCurrentUser
-                            .appendingPathComponent("Applications", isDirectory: true), externalBusy: externalBusy)
-                    }
-                    Button("Add Files or Folders…", systemImage: "plus") {
-                        workspace.chooseSources(startingAt: nil, externalBusy: externalBusy)
-                    }
+                            .appendingPathComponent("Applications", isDirectory: true), externalBusy: externalBusy, content: .applications)
+                    } }
+                    if content != .applications { Button("Add Files or Folders…", systemImage: "plus") {
+                        workspace.chooseSources(startingAt: nil, externalBusy: externalBusy, content: .files)
+                    }.buttonStyle(.borderedProminent) }
                 }.disabled(workspace.controlsLocked(externalBusy: externalBusy))
-                Text("Applications are selected as whole app bundles. You can also add any file type or complete folder.")
+                Text(content == .applications ? "Applications are selected as complete bundles. The managed library verifies the archive before launch or offload." : "Select any file type or a complete folder. Nested files, empty folders and Mac metadata are preserved.")
                     .font(.caption).foregroundStyle(.secondary)
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 8) {
@@ -149,11 +151,11 @@ struct ProjectUploadSection: View {
             VStack(alignment: .leading, spacing: 8) {
                 HStack {
                     Button("Selected items") { Task { await workspace.browse(path: nil) } }
-                    ForEach(workspace.quickEntries) { entry in
+                    if content != .files { ForEach(workspace.quickEntries) { entry in
                         Button(entry.path == "/Applications" ? "Applications" : "My Applications") {
                             Task { await workspace.browse(path: entry.path) }
                         }
-                    }
+                    } }
                     if let path = workspace.tree?.path {
                         Button("Parent folder", systemImage: "arrow.up") {
                             Task { await workspace.browse(path: URL(fileURLWithPath: path).deletingLastPathComponent().path) }
@@ -166,7 +168,7 @@ struct ProjectUploadSection: View {
                     if tree.atomic { Label("Application bundle — uploaded as one item", systemImage: "app") }
                     ScrollView {
                         LazyVStack(alignment: .leading, spacing: 8) {
-                            ForEach(tree.children) { node in
+                            ForEach(tree.children.filter { content == .files ? $0.kind != "app" : content == .applications ? $0.kind != "file" : true }) { node in
                                 HStack {
                                     Image(systemName: uploadIcon(node.kind))
                                     Text(node.name)
@@ -179,6 +181,7 @@ struct ProjectUploadSection: View {
                                     }
                                     Button("Add") { workspace.addTreeNode(node, externalBusy: externalBusy) }
                                         .disabled(!node.selectable || workspace.controlsLocked(externalBusy: externalBusy))
+                                        .disabled(content == .applications && node.kind != "app")
                                 }
                             }
                         }
@@ -478,7 +481,7 @@ final class UploadWorkspaceModel: ObservableObject {
     func remove(sourceID: String, externalBusy: Bool) {
         mutate(["remove-source", "--id", sourceID], externalBusy: externalBusy)
     }
-    func chooseSources(startingAt directory: URL?, externalBusy: Bool) {
+    func chooseSources(startingAt directory: URL?, externalBusy: Bool, content: GDProjectContent? = nil) {
         guard !controlsLocked(externalBusy: externalBusy) else { return }
         let panel = NSOpenPanel()
         panel.title = "Add applications, files, or folders"
@@ -498,7 +501,11 @@ final class UploadWorkspaceModel: ObservableObject {
             Task { @MainActor in
                 guard let self else { return }
                 self.pickerPending = false
-                if response == .OK { self.addURLs(panel.urls, externalBusy: false) }
+                if response == .OK {
+                    if content == .applications && !panel.urls.allSatisfy({ $0.pathExtension.lowercased() == "app" }) {
+                        self.failure = UploadFailure("Choose complete .app bundles here. Use Files for other files or folders.")
+                    } else { self.addURLs(panel.urls, externalBusy: false) }
+                }
                 self.updateBusyGate()
             }
         }
@@ -506,6 +513,14 @@ final class UploadWorkspaceModel: ObservableObject {
     func addTreeNode(_ node: UploadTreeNode, externalBusy: Bool) {
         guard node.selectable else { return }
         addURLs([URL(fileURLWithPath: node.path)], externalBusy: externalBusy)
+    }
+    func addDroppedURLs(_ urls: [URL], content: GDProjectContent?, externalBusy: Bool) {
+        guard !urls.isEmpty, urls.allSatisfy({ $0.isFileURL }) else { return }
+        if content == .applications && !urls.allSatisfy({ $0.pathExtension.lowercased() == "app" }) {
+            failure = UploadFailure("Drop complete .app bundles in Applications. Use Files for other content.")
+            return
+        }
+        addURLs(urls, externalBusy: externalBusy)
     }
     private func addURLs(_ urls: [URL], externalBusy: Bool) {
         guard !controlsLocked(externalBusy: externalBusy) else { return }
@@ -593,12 +608,15 @@ final class UploadWorkspaceModel: ObservableObject {
         }
         let isMutation = ["select-destination", "add-sources", "remove-source", "clear-sources", "enqueue"]
             .contains(arguments.first ?? "")
+        let privateInput = arguments.first == "run-next" ? await GDNativePerformance.shared.helperInput() : nil
+        let helperArguments = arguments + (privateInput == nil ? [] : ["--performance-stdin"])
         let response = try await Task.detached(priority: worker ? .utility : .userInitiated) {
             // Await mutation completion: killing its parent can leave a bounded
             // Configure Cloud child running and committing the chosen context.
             try UploadHelperProcess.run(
-                arguments: ["python3", helper.path] + arguments,
-                timeout: (worker || isMutation) ? nil : 120
+                arguments: ["python3", helper.path] + helperArguments,
+                timeout: (worker || isMutation) ? nil : 120,
+                standardInput: privateInput
             )
         }.value
         guard !response.ok || response.state != nil else {
@@ -616,7 +634,8 @@ struct UploadFailure: Error, LocalizedError, Identifiable {
 }
 private enum UploadHelperProcess {
     /// File-backed capture cannot deadlock on full pipes. All waits occur off-main.
-    static func run(arguments: [String], timeout: Double?) throws -> UploadEnvelope {
+    static func run(arguments: [String], timeout: Double?, standardInput: Data? = nil) throws -> UploadEnvelope {
+        guard (standardInput?.count ?? 0) <= 32 * 1024 else { throw UploadFailure("Private helper input exceeded its safety limit.") }
         let manager = FileManager.default
         let directory = manager.temporaryDirectory.appendingPathComponent("gendragoon-upload-\(UUID().uuidString)", isDirectory: true)
         try manager.createDirectory(at: directory, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
@@ -634,12 +653,17 @@ private enum UploadHelperProcess {
         guard let python = GDRuntime.pythonURL else { throw UploadFailure("A supported Python 3 runtime is unavailable. Run the GenDragoon installer.") }
         process.executableURL = python
         GDRuntime.configurePython(process, arguments: arguments.first == "python3" ? Array(arguments.dropFirst()) : arguments)
-        process.standardInput = FileHandle.nullDevice
+        let input = standardInput == nil ? nil : Pipe()
+        if let input { process.standardInput = input } else { process.standardInput = FileHandle.nullDevice }
         process.standardOutput = output
         process.standardError = errors
         let completed = DispatchSemaphore(value: 0)
         process.terminationHandler = { _ in completed.signal() }
         try process.run()
+        if let input, let standardInput {
+            try input.fileHandleForWriting.write(contentsOf: standardInput)
+            try input.fileHandleForWriting.close()
+        }
         let waitResult = timeout.map { completed.wait(timeout: .now() + $0) } ?? completed.wait(timeout: .distantFuture)
         guard waitResult == .success else {
             if process.isRunning { process.terminate() }
