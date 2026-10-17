@@ -1,10 +1,13 @@
 # Plan selection integration
 
-`PlanSelectionSection.swift` is source for a macOS 14+ native Account/billing
-view. It has **not** been added to the absent native Swift project, compiled,
-signed, published or installed. This Linux checkout has no Swift/AppKit SDK.
+This guide describes the reference macOS 14+ `PlanSelectionSection.swift`
+contract and proposal catalog. The current native purchase flow is implemented
+in `native/Sources/GenDragoonStripePurchases.swift` and uses the authenticated
+server catalog described in [native/Backend/README.md](../native/Backend/README.md).
+Use [native/VALIDATION.md](../native/VALIDATION.md), recorded on October 17, 2026,
+for authoritative build, readiness and remaining payment acceptance evidence.
 
-Add the source to the actual native target. The existing billing model must
+For a host adopting this reference component, its billing model must
 adapt its authenticated server responses into `ServerPlanOffer` values and
 validate the complete response with `ServerPlanCatalog(offers:)`. Category,
 tier ID, name, integer price cents, currency, month/year interval, availability
@@ -48,13 +51,15 @@ server must verify Stripe webhook signatures, deduplicate/reconcile events and
 apply subscription state, cancellation and payment failures. Refresh the real
 billing model after returning from checkout or foregrounding the app.
 
-## What is available now
+## Reference proposal and historical observations
 
 `commercial/pricing.json` remains `proposed-prelaunch` and is the source for
-`commercial/catalog.js`. Catalog prices and nested plans are immutable.
-Storage/performance/workspace quotes remain unavailable until actual service
-provisioning and checkout are ready. The storage manifest says its subscription
-includes the workspace fee; storage-only quotes do not add another $5.
+`commercial/catalog.js`. Its prices and nested plans are immutable. In this
+reference proposal, storage/performance/workspace quotes remain unavailable
+until its provisioning and checkout gates are satisfied. Its storage manifest
+includes the workspace fee, so its storage-only quotes do not add another $5.
+These proposal rules are not the current native billing contract; live prices
+and fee breakdowns come from the server-owned catalog.
 
 The existing documented GPU triple bundle separately sums standard storage +
 $5 workspace + performance + GPU, applies a single 10% discount rounded upward
@@ -70,10 +75,13 @@ server before publishing prices.
 infrastructure have not been established. A storage/performance purchase does
 not supply GPU capacity. Do not publish GPU Stripe products or label the plans
 buyable until those requirements in `commercial/cloud-gpu-plans.md` pass.
-The previously observed API response was HTTP 503, `API key verification
-unavailable`; the owner credential's validity and server checkout readiness have
-not been established. This component does not repair that backend or turn the
-proposal catalog into a payment service.
+During the reference-stage inspection, before the native integration recorded
+on October 17, 2026, the observed API response was HTTP 503,
+`API key verification unavailable`; that check did not establish owner-key
+validity or checkout readiness. Current readiness observations and outstanding
+payment/webhook acceptance gates are recorded in
+[native/VALIDATION.md](../native/VALIDATION.md). The proposal catalog itself is
+not a payment service.
 
 ## Validation
 

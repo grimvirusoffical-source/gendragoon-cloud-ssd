@@ -25,6 +25,9 @@ values. The full scope and remaining release gates are in
 - `mac-package.json`: final Mac package size/SHA-256, source/resource comparison,
   runtime syntax check and generated-installer archive verification. Gatekeeper
   remains rejected, and automatic updates and installation remain ineligible.
+- `cross-platform-ci.json`: observed successful push and PR runs for the final
+  Windows portability code commit, including all seven jobs and actual Desktop
+  test/skip counts. The later documentation refresh does not change that code.
 
 The backend candidate receives zero production traffic, but retains the service's
 existing data and secret configuration. These probes used public read-only routes

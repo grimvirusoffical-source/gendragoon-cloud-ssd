@@ -1,12 +1,13 @@
 # Local drive cleanup integration
 
-This is reviewable source, not an installed or compiled feature. The native
-GenDragoon application project is absent from this checkout. Add
-`DriveCleanupSection.swift` to its macOS target and copy
-`Resources/gendragoon_drive_cleanup.py` into the signed app's resources. The
-section provides Choose Folder, Preview, a confirmation before Organize, and
-Undo Last Cleanup. It displays every proposed source/destination and skipped
-entry. No real user folders were organized during development.
+This guide describes the reference contract for `DriveCleanupSection.swift`
+and `Resources/gendragoon_drive_cleanup.py`. The complete current application is
+under [native](../native/README.md); authoritative build, runtime and remaining
+release evidence is in [native/VALIDATION.md](../native/VALIDATION.md), recorded
+on October 17, 2026. The host wiring below remains an integration contract.
+The section provides Choose Folder, Preview, confirmation before Organize, and
+Undo Last Cleanup, showing proposed moves and skipped entries. No real user
+folders were organized by the reference development fixtures.
 
 ## Required host wiring
 

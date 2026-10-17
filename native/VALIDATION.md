@@ -26,13 +26,14 @@ is implied by source/unit-test results.
 | Deployment and candidate verifier helpers | 31 passed | 10 deployment tests and 21 verifier tests; no-traffic/tag handling, unchanged service configuration, private source allowlist, TLS/credential boundaries and bounded diagnostic requests |
 | Native helper stress | 10,000 files verified; 512 index commits across 16 workers; 300 hostile archives rejected; mutation detected | Disposable local storage, 2.451 seconds on the Linux test host |
 | Mac installer/reference helper fixtures | 167 passed | Signature/Gatekeeper rejection, archive integrity, installation/update/reset safety and guarded replacement fixtures |
-| Linux desktop companion | 31 passed; 1 expected Windows-only skip | Actual local v3-router transfer/readback and Linux process-group lifecycle; changed and unexpected cache-data retention |
-| Windows desktop companion | 20 passed; 3 expected Linux-only skips | Actual Windows Job Object launch and managed-cache eviction; actual local v3-router transfer/readback |
+| Linux desktop companion | 35 passed; 1 expected Windows-only skip | Actual local v3-router transfer/readback and Linux process-group lifecycle; changed and unexpected cache-data retention; 36 tests in 4.411 seconds on the final code CI run |
+| Windows desktop companion | 32 passed; 4 expected platform skips | Actual Windows Job Object launch and managed-cache eviction; actual local v3-router transfer/readback; 36 tests in 39.188 seconds on the final code push run and 40.390 seconds on its PR run |
 | Android compilation | Java compilation and debug APK assembly passed | GitHub hosted runner; unit-test task reported NO-SOURCE, so no Android unit or device test pass is implied |
-| Cross-platform CI | All 7 jobs passed for commit `c5b02fc89e05f71a96c984cd152fb162f6242e43` | [Push run 39018995029](https://github.com/grimvirusoffical-source/gendragoon-cloud-ssd/actions/runs/39018995029) and [PR run 39018997799](https://github.com/grimvirusoffical-source/gendragoon-cloud-ssd/actions/runs/39018997799); final follow-up changes require their own run |
+| Cross-platform CI | All 7 jobs passed for code commit `18b54fcd21698239e7ca2775cd8e3b3c41d3ae38` | [Push run 39023761715](https://github.com/grimvirusoffical-source/gendragoon-cloud-ssd/actions/runs/39023761715) and [PR run 39023766003](https://github.com/grimvirusoffical-source/gendragoon-cloud-ssd/actions/runs/39023766003); this documentation refresh records those observed results |
 | Real macOS archive roundtrip | Passed | Production `ditto` packaging/extraction restored data, resource forks, custom attributes and empty attributes; later data/metadata mutations rejected; original preserved; 2,050-byte fixture; 0.027 seconds |
 | Native startup UI | Passed | The complete staged 0.17.0 (20) app opened through macOS Launch Services; its native Google sign-in window and Continue with Google button were observed; then a graceful quit was requested |
 | Bundled Node refresh | Passed | Official Node 24.22.0 arm64 archive passed its pinned SHA-256; runtime version, existing JIT entitlements and re-signed bundle verified; provenance and license retained |
+| Mac candidate packaging | Passed strict signature, source comparison and generated-installer archive checks | 0.17.0 (20), arm64/macOS 14+; 69,524,635-byte ZIP; source commit `7c37bb40b9e093ef157fef830a2eb079112a395e`; matching Swift inputs and 14 first-party resources; Gatekeeper remains rejected, with installation and automatic updates ineligible |
 
 Build/test outputs are retained during development in the Mac validation
 workspace and summarized here. No private credentials are included.
@@ -66,6 +67,14 @@ verified app. Cleanup now restricts removal to the recorded managed payload,
 checks each leaf before removal and removes directories non-recursively.
 Regression checks cover pre-existing and late-added content, changed leaves
 and swapped symlink parents. User data outside managed cache is excluded.
+
+The Windows follow-up fixed CPython's differing path-stat and descriptor-stat
+representations of creation/change time and filename-derived execute bits.
+Normalization is confined to comparisons between those APIs. Full same-API
+before/after fingerprints, file identity, link/reparse guards and content hashes
+remain checked. Both previously failing Windows cleanup cases passed in the two
+final runs above. The exact job results are retained in
+[cross-platform-ci.json](validation/2026-10-17/cross-platform-ci.json).
 
 ## Deployed backend candidate and bounded load evidence
 
@@ -108,7 +117,9 @@ assessment returned `rejected: source=Unnotarized Developer ID`. The available
 App Store Connect keys returned HTTP 401 with the available authentication
 configuration. A valid notarization credential configuration, including the
 issuer ID when using a team API key, is needed before notarization, stapling,
-release packaging, automatic update, or a checked reinstall can pass.
+production release packaging, automatic update, or a checked reinstall can pass.
+The separately marked candidate ZIP can be inspected without treating it as a
+trusted release; its archive-only verification does not assess Apple trust.
 
 Node 24.22.0 includes the maintenance fix documented in its
 [official release](https://nodejs.org/en/blog/release/v24.22.0). Separately,
@@ -119,15 +130,19 @@ published. This candidate cannot claim to include those unreleased fixes.
 See [VENDOR_REFRESH.md](VENDOR_REFRESH.md) and the recorded runtime provenance.
 
 The Mac began with limited free storage. Native/mobile builds brought free
-space below the existing 10 GiB reserve. Generated build intermediates are
-being cleaned after validation; the reserve is not reduced to make tests pass.
+space below the existing 10 GiB reserve. Verified generated build intermediates
+were cleaned after validation; the final package record still observed 7.81 GiB
+free. The reserve was not reduced to make tests pass.
 Production archive staging, large-app trials, and the installer must have
 sufficient actual space. The bounded fixture tests are not a substitute for a
 large real application's compatibility and streaming/performance trial.
 
 The connected browser plugin reported that the browser was not connected.
 Desktop Commander file/process operations and native accessibility inspection
-work. Native startup was visually verified at the Google sign-in gate.
+were used for the completed Mac checks. Native startup was visually verified at
+the Google sign-in gate. Later Desktop Commander process requests timed out; a
+read-only file request ended at 10:04 UTC with no response from the device.
+The final candidate remains staged on the Mac, without a GitHub release upload.
 Complete sign-in, Checkout interaction, and authenticated acceptance testing
 still need the actual connected browser/user session. Existing Mac
 installations remain available until the replacement passes its installation

@@ -1,10 +1,12 @@
 # macOS application components
 
-This directory contains source components for the requested upload workspace,
-drive organization, plan selection, updates and Account reset. The repository
-does not contain the main native Swift/Xcode project. These components have not
-been integrated into that project, compiled against the macOS SDK, signed,
-notarized or installed. They do not change the currently installed app.
+This directory retains the reference components and integration contracts for
+the upload workspace, drive organization, plan selection, updates and Account
+reset. The complete current application is under [native](../native/README.md).
+Use [native/VALIDATION.md](../native/VALIDATION.md), recorded on October 17, 2026,
+for authoritative build, runtime, packaging and remaining release evidence.
+Reference contracts and fixture results do not establish installation or
+production acceptance.
 
 The Python connection, library and updater baselines came from the official
 v0.16.2/build19 archive after verifying SHA-256
@@ -58,10 +60,11 @@ recovery details.
 `PlanSelectionSection.swift` makes each server-provided tier selectable and
 persists the chosen IDs and billing interval in an account/workspace scope.
 Purchasing requires the current server offer to be available and an
-authenticated checkout adapter. The source pricing catalog is still a
-proposal; it does not establish deployed Stripe products, GPU capacity or
-entitlements. See [PLAN_INTEGRATION.md](PLAN_INTEGRATION.md) and run the catalog
-tests below.
+authenticated checkout adapter. The reference `commercial/pricing.json` catalog
+is still a proposal; it does not establish deployed Stripe products, GPU capacity
+or entitlements. Current native purchasing uses the server catalog described in
+[native/Backend/README.md](../native/Backend/README.md). See
+[PLAN_INTEGRATION.md](PLAN_INTEGRATION.md) for the reference contract and tests.
 
 ## Updates, reset and installation
 
@@ -76,10 +79,11 @@ a bounded, acknowledged restart after the calling app exits. Reset preserves
 cloud files, local originals, library metadata, settings, credentials and
 caches. See [ACCOUNT_INTEGRATION.md](ACCOUNT_INTEGRATION.md).
 
-Uploads, cleanup, restart and updates share the maintenance lock. The actual
-native app must also connect every component to its central operation gate,
-including existing mounts, launches, cache installs and transfers. These
-components cannot infer all activity of an unmodified native app.
+Uploads, cleanup, restart and updates share the maintenance lock. Any host
+adopting these reference components must connect them to its central operation
+gate, including mounts, launches, cache installs and transfers. The current
+native integration is documented under [native](../native/README.md); these
+component contracts cannot infer all activity of another host application.
 
 [INSTALL.md](INSTALL.md) documents the checked-in `install-macos.py` script for
 the pinned original reference package. That package does not include these new
@@ -90,13 +94,15 @@ The automatic updater requires a nondraft, nonprerelease `vX.Y.Z` release newer
 than the installed version, with `GenDragoon-Cloud-SSD-Mac-vX.Y.Z.zip` and a
 `sha256.txt` naming that exact ZIP. The app must have bundle ID
 `app.gendragoon.cloudssd`, Developer ID Team `NZPU8H843J`, and pass native trust
-assessment. The inspected v0.16.2 draft still has notarization and a signed-in
-Mac smoke test outstanding. The published v0.4.0 prerelease is also ineligible.
-No eligible stable update was available during the public release check.
+assessment. At the reference-stage release check, before the native integration
+recorded on October 17, 2026, v0.16.2 was a draft with notarization and signed-in
+Mac validation outstanding; v0.4.0 was an ineligible prerelease. That check found
+no eligible stable update. These are historical observations; current candidate
+and installation gates are recorded in [native/VALIDATION.md](../native/VALIDATION.md).
 
-The inspected native updater already describes checks at startup and every
-20 minutes, applying updates after transfers finish and drives unmount. Retain
-that scheduler when integrating the updated helper.
+The reference updater contract checks at startup and every 20 minutes and waits
+for transfers and mounts to finish. Current scheduler integration and observed
+validation belong to the native application and its validation record.
 
 ## Validation and remaining work
 
@@ -112,24 +118,28 @@ the helper behavior and failure paths; they do not establish native UI,
 signature, TCC/sandbox, live Google Cloud, Stripe or installed-app readiness.
 No cleanup command has organized the user's real files here.
 
-The library retains local restore/launch/evict operations. Optimized streaming
-of large apps, verified automatic cache eviction after process exit, and the
-native launch coordinator still need integration and real Mac validation. The
-old raw streaming helper's hardcoded mount must not be used for an arbitrary
-selected project/bucket. Do not promise that moving an application bundle to
-cloud storage makes it runnable on a different operating system.
+The reference library retains local restore/launch/evict operations. Current
+managed launch, cache cleanup and eligible large-app staging are implemented
+under [native](../native/README.md); actual lifecycle evidence and remaining
+large-application trials are recorded in [native/VALIDATION.md](../native/VALIDATION.md).
+The old reference streaming helper's hardcoded mount must not be used for an
+arbitrary selected project/bucket. Moving an application bundle to cloud storage
+does not make it runnable on a different operating system.
 
-These native components target macOS. The repository's existing Python and
-JavaScript SDKs are storage clients, not complete Windows, Linux, iOS or Android
-apps. Separate platform implementations and testing are still required, and
-mobile operating systems restrict installation/execution of arbitrary apps.
+These reference components target macOS; the Python and JavaScript SDKs are
+storage clients. Current Windows/Linux command-line and mobile implementations
+are documented in [native/Desktop](../native/Desktop/README.md) and
+[native/Mobile](../native/Mobile/PLATFORM_BEHAVIOR.md). Their platform and
+validation limits remain explicit, including mobile execution restrictions.
 
-The live account/file API checks returned HTTP 503,
-`API key verification unavailable`; `/health` explicitly did not check
-dependencies. The existing owner-key binding is present, but authenticated
-cloud readiness has not been established. Backend source/service logs and the
-Stripe integration are absent from this checkout. Full-app load/security tests
-and live payment/entitlement checks remain blocked by those prerequisites.
+Historical reference-stage observations, before the native integration recorded
+on October 17, 2026: account/file API checks returned HTTP 503,
+`API key verification unavailable`, and `/health` did not check dependencies.
+An owner-key binding was present, but those checks did not establish authenticated
+cloud readiness. Backend source and Stripe integration were not then included
+in the reference checkout. Current backend source is under `native/Backend`;
+readiness, candidate load evidence and outstanding payment/authenticated
+acceptance gates are recorded in [native/VALIDATION.md](../native/VALIDATION.md).
 
 The SDK download repairs have separate local HTTPS and filesystem regression
 suites documented in [sdk/README.md](../sdk/README.md). They preserve existing

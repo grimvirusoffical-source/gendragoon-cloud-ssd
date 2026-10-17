@@ -1,12 +1,13 @@
 # Account reset integration
 
-`AccountResetSection.swift` is a reviewable macOS 14+ SwiftUI component. This
-checkout does not contain the native app's `AccountView`, Xcode project, signing
-configuration, or the rest of its source. The component has **not** been inserted
-into the compiled app, built for macOS, signed, published, or installed on the
-user's Mac.
+This guide describes the reference contract for the macOS 14+
+`AccountResetSection.swift` component. The complete current application is under
+[native](../native/README.md); authoritative build, runtime and remaining release
+evidence is in [native/VALIDATION.md](../native/VALIDATION.md), recorded on
+October 17, 2026. The example below documents the reference host-adapter
+requirements; the validation record tracks current integration and acceptance.
 
-Add the source to the native app target and include the section in Account:
+For a host adopting this reference component, add it to the target's Account view:
 
 ```swift
 Form {
@@ -66,10 +67,10 @@ current reset outcome.
 For restart outcomes after the UI exits, inspect the helper's private status at
 `~/Library/Application Support/GenDragoon Cloud SSD/AppControl/status.json`.
 
-Before shipping, build and test the actual macOS 14+ SwiftUI/AppKit target on a
-Mac using the project's pinned Xcode version. No Swift toolchain or AppKit SDK is
-available in this Linux cloud environment, so this component has not been
-compiled here. Validate successful reset/relaunch, active-work gating and the
+The original reference-stage checks used a Linux host without Swift/AppKit.
+For current native build evidence, see the October 17, 2026
+[validation record](../native/VALIDATION.md). Before shipping, validate the signed
+macOS 14+ target's successful reset/relaunch, active-work gating and the
 pending-operation gate, cancelled app termination, missing Python/helper,
 nonzero/invalid helper responses, timeout, and relaunch failure with the signed
 app. Confirm that cloud files, saved credentials, and local data survive reset.

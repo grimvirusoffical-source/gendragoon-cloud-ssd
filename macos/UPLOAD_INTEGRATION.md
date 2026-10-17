@@ -1,10 +1,13 @@
 # Shared Google Cloud destination and upload UI
 
-This is source for the missing native app project. It has not been inserted into
-the existing compiled app, compiled against AppKit/SwiftUI, signed, released, or
-installed on a Mac. This Linux environment has no Swift compiler or macOS SDK.
+This guide describes the reference upload-workspace component contract.
+The complete current app is under [native](../native/README.md); authoritative
+build, runtime and remaining release evidence is in
+[native/VALIDATION.md](../native/VALIDATION.md), recorded on October 17, 2026.
+The host wiring below does not establish authenticated upload or installation
+acceptance.
 
-Add `ProjectUploadSection.swift` to the macOS 14+ app target. Its single
+For a host adopting `ProjectUploadSection.swift` on macOS 14+, its single
 `@StateObject UploadWorkspaceModel` supplies the destination selector, source
 picker/tree, and lower upload queue. Use this complete section in the existing
 upload screen; do not keep a second destination variable in the lower panel.
@@ -12,8 +15,8 @@ Instantiate this section once. If the native layout needs separate top and lower
 views, extract child views that observe this same model; never create a second
 workspace model or a second default destination for the lower panel.
 
-The following is an adapter example, not a claim that the absent app defines
-these property names:
+The following is a reference adapter example; use the actual host model's
+property names:
 
 ~~~swift
 ProjectUploadSection(
@@ -79,9 +82,10 @@ actual helper outcome; killing only a selection parent could otherwise leave a
 Configure Cloud child that commits later. Helpers bound their external commands.
 The UI adds no upload timeout; individual helpers retain bounded external-command
 timeouts (including archive and rclone operations), so oversized or slow uploads
-can still fail safely. Optimized streaming for large applications remains a
-separate integration task. File-backed private stdout/stderr capture avoids pipe
-deadlocks, reads at
+can still fail safely. Current large-app staging eligibility and remaining
+real-application trials are documented in [native](../native/README.md) and its
+[validation record](../native/VALIDATION.md). File-backed private stdout/stderr
+capture avoids pipe deadlocks, reads at
 most 5 MiB of JSON, and displays bounded/redacted helper errors. A failure
 envelope retains its authoritative state; it never becomes a success alert.
 
@@ -118,7 +122,8 @@ the open panel if prompted. For a non-sandboxed Developer ID build, pass false.
 Bookmark lookup keys resolve allowed ancestor links to match the Python helper's
 canonical source paths; the original scoped URL is retained for the actual grant.
 
-The native project's entitlements and executable packaging are missing.
+Reference component wiring alone does not establish sandbox entitlement or
+helper access. Current build packaging is under [native](../native/README.md).
 Validate the signed app's user-selected read/write access, app-scoped bookmarks,
 helper execution/inherited sandbox access, network access, and Finder Trash
 permissions before claiming sandbox support. Holding native bookmark access

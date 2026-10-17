@@ -25,9 +25,11 @@ and a final source-mutation check. Originals move to Finder Trash; the app does
 not empty Trash. An error, changed source, or running application retains the
 original. Cloud revisions retain the prior recovery metadata.
 
-Compatible apps launch from a managed local copy. Large newly verified macOS
-apps also receive an immutable raw directory layout for an isolated, read-only
-NFS/VFS mount. Startup preloading is bounded by bytes, worker count, elapsed
+Compatible apps launch from a managed local copy. Eligible large newly verified
+macOS apps can also receive an immutable raw directory layout for an isolated,
+read-only NFS/VFS mount. Bundles with metadata that this layout cannot preserve,
+including resource forks or extended attributes, use verified archive/local
+staging instead. Startup preloading is bounded by bytes, worker count, elapsed
 time, and available disk space. Logical preloaded bytes are not a measurement
 of cloud network traffic or a guarantee of launch speed. Application signing,
 licensing, platform requirements, installers, privileged helpers, and software
