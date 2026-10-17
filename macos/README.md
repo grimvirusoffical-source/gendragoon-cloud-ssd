@@ -131,7 +131,10 @@ cloud readiness has not been established. Backend source/service logs and the
 Stripe integration are absent from this checkout. Full-app load/security tests
 and live payment/entitlement checks remain blocked by those prerequisites.
 
-The unchanged SDKs also have previously identified download/redirect defects;
-passing these native-helper tests does not resolve or certify those clients.
-Complete native build/signing, authorized staging tests, payment/webhook tests
-and full-app security/load testing before marking the app ready for release.
+The SDK download repairs have separate local HTTPS and filesystem regression
+suites documented in [sdk/README.md](../sdk/README.md). They preserve existing
+destinations, reject redirects and incomplete responses, and publish completed
+downloads without overwriting concurrent files. These passes do not establish
+backend authorization, quotas or full-app security. Complete native
+build/signing, authorized staging tests, payment/webhook tests and full-app
+security/load testing before marking the app ready for release.
