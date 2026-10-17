@@ -368,11 +368,13 @@ class PackagingFailClosedTests(unittest.TestCase):
             commands.append(argv)
             code = 1 if "stapler" in argv else 0
             return SimpleNamespace(returncode=code)
-        with patch.object(package.sys, "platform", "darwin"), \
+        with tempfile.TemporaryDirectory(prefix="gd-package-fixture-") as folder, \
+             patch.object(package.sys, "platform", "darwin"), \
              patch.object(package.subprocess, "run", side_effect=command):
+            app = Path(folder) / "GenDragoon Cloud SSD.app"
+            app.mkdir()
             with self.assertRaisesRegex(RuntimeError, "stapled Apple notarization ticket"):
-                package.package(Path("/fake/GenDragoon Cloud SSD.app"),
-                                Path("/fake/unused-release"), candidate=False)
+                package.package(app, Path(folder) / "unused-release", candidate=False)
         self.assertTrue(any("-R" in args for args in commands))
         self.assertTrue(any("stapler" in args for args in commands))
 

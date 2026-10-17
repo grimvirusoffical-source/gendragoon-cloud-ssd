@@ -8,6 +8,11 @@ caller; it does not acquire the shared maintenance lock or contact the network.
 run-next holds AutoUpdates/update.lock through the upload and gives that lock FD
 to the library child, but releases the workspace lock during external work.
 """
+
+# Bundled helpers are signed resources: imports must never create or update caches.
+import os, sys
+sys.dont_write_bytecode = True
+os.environ["PYTHONDONTWRITEBYTECODE"] = "1"
 import argparse
 from contextlib import contextmanager
 import copy
@@ -470,7 +475,7 @@ def select_destination_cli(project, bucket, remote, prefix, expected_revision, h
     snapshot = read_state(home)
     require_revision(snapshot, expected_revision)
     require_idle(snapshot)
-    command = [sys.executable, str(helper_path("gendragoon_connect.py")), "configure",
+    command = [sys.executable, "-B", str(helper_path("gendragoon_connect.py")), "configure",
                "--project", project, "--bucket", bucket, "--remote", remote,
                "--prefix", prefix, "--expected-revision", str(expected_revision)]
     child_result(command)
@@ -568,7 +573,7 @@ def run_next(home=None):
                 unchanged(source)
                 destination = job["destination"]
                 folder = destination["bucket"] + ("/" + destination["prefix"] if destination["prefix"] else "")
-                command = [sys.executable, str(helper_path("gendragoon_library.py")), "upload",
+                command = [sys.executable, "-B", str(helper_path("gendragoon_library.py")), "upload",
                            "--source", source["path"], "--remote", destination["remote"], "--folder", folder,
                            "--project", destination["project"], "--bucket", destination["bucket"],
                            "--maintenance-fd", str(maintenance_fd)]

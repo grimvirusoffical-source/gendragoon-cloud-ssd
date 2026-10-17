@@ -633,7 +633,7 @@ private enum UploadHelperProcess {
         let process = Process()
         guard let python = GDRuntime.pythonURL else { throw UploadFailure("A supported Python 3 runtime is unavailable. Run the GenDragoon installer.") }
         process.executableURL = python
-        process.arguments = arguments.first == "python3" ? Array(arguments.dropFirst()) : arguments
+        GDRuntime.configurePython(process, arguments: arguments.first == "python3" ? Array(arguments.dropFirst()) : arguments)
         process.standardInput = FileHandle.nullDevice
         process.standardOutput = output
         process.standardError = errors

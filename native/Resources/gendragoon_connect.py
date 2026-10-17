@@ -4,6 +4,11 @@
 Uses official CLIs for delegated OAuth. Does not ask for passwords or export keys.
 JSON responses contain status only, never tokens or account secrets.
 """
+
+# Bundled helpers are signed resources: imports must never create or update caches.
+import os, sys
+sys.dont_write_bytecode = True
+os.environ["PYTHONDONTWRITEBYTECODE"] = "1"
 import argparse
 import configparser
 from contextlib import contextmanager

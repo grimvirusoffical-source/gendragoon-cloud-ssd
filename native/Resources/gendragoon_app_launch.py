@@ -5,6 +5,11 @@ Only generated, unchanged application cache is removed. User settings outside
 an application bundle are never part of the cache. Interrupted or ambiguous
 sessions retain data. Launch Services enforces the platform's application policy.
 """
+
+# Bundled helpers are signed resources: imports must never create or update caches.
+import os, sys
+sys.dont_write_bytecode = True
+os.environ["PYTHONDONTWRITEBYTECODE"] = "1"
 import argparse
 import contextlib
 import ctypes
@@ -380,14 +385,14 @@ def launch(key, project, bucket, remote, keep_cache=False):
             path = Path(record["cachePath"])
             compatible(path)
         try:
-            result = lib.run([sys.executable, RESOURCE / "gendragoon_preload.py", "--app", path,
+            result = lib.run([sys.executable, "-B", RESOURCE / "gendragoon_preload.py", "--app", path,
                               "--budget-mb", "24", "--seconds", "0.75", "--workers", "2"], timeout=4)
             record["preload"] = json.loads(result)
         except Exception:
             record["preload"] = {"ok": False, "message": "Preload unavailable; normal launch continues"}
         record["state"] = "launching"
         save(record)
-        process = subprocess.Popen([sys.executable, str(RESOURCE / "gendragoon_app_launch.py"),
+        process = subprocess.Popen([sys.executable, "-B", str(RESOURCE / "gendragoon_app_launch.py"),
                                     "watch", "--session", record["id"]], stdin=subprocess.DEVNULL,
                                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
         handed_off = True

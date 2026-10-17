@@ -254,7 +254,7 @@ private enum ResetHelperProcess {
         let process = Process()
         guard let python = GDRuntime.pythonURL else { throw ResetFailure("A supported Python runtime is unavailable. Run the installer.") }
         process.executableURL = python
-        process.arguments = arguments.first == "python3" ? Array(arguments.dropFirst()) : arguments
+        GDRuntime.configurePython(process, arguments: arguments.first == "python3" ? Array(arguments.dropFirst()) : arguments)
         process.standardInput = FileHandle.nullDevice
         process.standardOutput = stdout
         process.standardError = stderr

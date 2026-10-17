@@ -3,6 +3,11 @@
 JSON-lines progress, bounded release extraction, strong signer/bundle/version validation,
 atomic rollback and background apply only after the parent application exits.
 """
+
+# Bundled helpers are signed resources: imports must never create or update caches.
+import os, sys
+sys.dont_write_bytecode = True
+os.environ["PYTHONDONTWRITEBYTECODE"] = "1"
 import argparse
 import ctypes
 import fcntl

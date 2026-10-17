@@ -2,6 +2,11 @@
 """Bounded, startup-first cache warming. Reads only; never changes app contents.
 Logical bytes read are not a measurement of provider network traffic: rclone may read ahead.
 """
+
+# Bundled helpers are signed resources: imports must never create or update caches.
+import os, sys
+sys.dont_write_bytecode = True
+os.environ["PYTHONDONTWRITEBYTECODE"] = "1"
 import argparse, concurrent.futures, json, multiprocessing, os, plistlib, queue
 import shutil, sys, threading, time
 from collections import deque

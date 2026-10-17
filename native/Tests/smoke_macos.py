@@ -7,6 +7,11 @@ their path constants point into this script's private temporary fixture home.
 No cloud client, credential, network operation, or security-policy change is used.
 A failed test retains its small fixture directory for inspection.
 """
+
+# Bundled helpers are signed resources: imports must never create or update caches.
+import os, sys
+sys.dont_write_bytecode = True
+os.environ["PYTHONDONTWRITEBYTECODE"] = "1"
 import argparse
 import contextlib
 import hashlib
@@ -331,7 +336,7 @@ def main(args):
                 log = home / (case["case"] + "-worker.log")
                 with log.open("wb") as errors:
                     log.chmod(0o600)
-                    process = subprocess.Popen([sys.executable, str(Path(__file__).resolve()), "--worker",
+                    process = subprocess.Popen([sys.executable, "-B", str(Path(__file__).resolve()), "--worker",
                         "--resources", str(args.resources.resolve()), "--fixture-home", str(home), "--token", token,
                         "--session", case["id"]], stdin=subprocess.DEVNULL, stdout=errors, stderr=errors)
                 processes.append(process)

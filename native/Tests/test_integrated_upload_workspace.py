@@ -433,7 +433,10 @@ s=Path(a.source);d={'project':a.project,'bucket':a.bucket,'remote':a.remote,'pre
 print(json.dumps(dict(ok=True,verified=True,key=w.library_key(d,{'name':s.name}),offloaded=False,
 project=a.project,bucket=a.bucket,remote=a.remote,folder=a.folder,source=str(s),kind=w.kindof(s),name=s.name)))
 ''')
-        environment = {"HOME": str(self.home), "PATH": os.defpath, "PYTHONDONTWRITEBYTECODE": "1"}
+        original_bundle = {path.relative_to(bundle): path.read_bytes() for path in bundle.rglob("*") if path.is_file()}
+        # A bare CLI must propagate its own bytecode guard to the real child
+        # processes above, whose fixture imports otherwise write into Resources.
+        environment = {"HOME": str(self.home), "PATH": os.defpath}
         def cli(*args, expected=0):
             result = subprocess.run([sys.executable, str(copied), *args], env=environment,
                                     text=True, capture_output=True, check=False, timeout=10)
@@ -461,6 +464,9 @@ project=a.project,bucket=a.bucket,remote=a.remote,folder=a.folder,source=str(s),
         self.assertEqual(finished["state"]["jobs"][0]["completed_items"], 1)
         self.assertEqual(finished["state"]["destination"], FIRST)
         self.assertTrue(source.exists())
+        self.assertEqual(original_bundle,
+            {path.relative_to(bundle): path.read_bytes() for path in bundle.rglob("*") if path.is_file()})
+        self.assertFalse(any(path.name == "__pycache__" for path in bundle.rglob("*")))
 
 
 if __name__ == "__main__":

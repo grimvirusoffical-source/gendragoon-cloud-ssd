@@ -288,7 +288,7 @@ private enum CleanupProcess {
         defer { try? errors.close() }
         let process = Process()
         process.executableURL = executable
-        process.arguments = arguments
+        GDRuntime.configurePython(process, arguments: arguments)
         process.standardInput = FileHandle.nullDevice
         process.standardOutput = output
         process.standardError = errors

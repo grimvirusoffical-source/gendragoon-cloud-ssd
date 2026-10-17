@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
 """GenDragoon cloud library: verified app/file/folder archives, remote discovery and local staging."""
+
+# Bundled helpers are signed resources: imports must never create or update caches.
+import os, sys
+sys.dont_write_bytecode = True
+os.environ["PYTHONDONTWRITEBYTECODE"] = "1"
 import argparse, hashlib, json, os, plistlib, re, shutil, subprocess, sys, tempfile
 from contextlib import contextmanager
 import ctypes, errno, fcntl, posixpath, stat, time, unicodedata, uuid, zipfile

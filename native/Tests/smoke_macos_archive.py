@@ -7,6 +7,11 @@ original offload, application launch, or production disk-reserve override. All
 fixture files are removed when the test finishes; the source must remain intact
 through every production-helper operation before that fixture cleanup.
 """
+
+# Bundled helpers are signed resources: imports must never create or update caches.
+import os, sys
+sys.dont_write_bytecode = True
+os.environ["PYTHONDONTWRITEBYTECODE"] = "1"
 import argparse
 import ctypes
 import errno

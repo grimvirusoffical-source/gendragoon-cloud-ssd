@@ -4,6 +4,11 @@
 No Google credentials or GitHub tokens are accepted by this program. GitHub CLI
 manages the signed-in account; publish actions re-check its verified owner email.
 """
+
+# Bundled helpers are signed resources: imports must never create or update caches.
+import os, sys
+sys.dont_write_bytecode = True
+os.environ["PYTHONDONTWRITEBYTECODE"] = "1"
 import argparse
 import hashlib
 import json

@@ -127,7 +127,7 @@ final class GDUpdateActivity: ObservableObject {
         percentage=0;remainingSeconds=nil;bytesDownloaded=0;bytesTotal=0;lineBuffer=""
         let runner=Process(),pipe=Pipe()
         runner.executableURL=python
-        runner.arguments=[script.path,"prepare"]
+        GDRuntime.configurePython(runner, arguments: [script.path,"prepare"])
         runner.standardOutput=pipe
         runner.standardError=FileHandle.nullDevice
         runner.terminationHandler={[weak self] done in
@@ -215,7 +215,7 @@ final class GDUpdateActivity: ObservableObject {
               let script=updaterScript, let python=GDRuntime.pythonURL else{return}
         let worker=Process()
         worker.executableURL=python
-        worker.arguments=[script.path,"auto-on-exit","--pid",String(ProcessInfo.processInfo.processIdentifier)]+["--relaunch"]
+        GDRuntime.configurePython(worker, arguments: [script.path,"auto-on-exit","--pid",String(ProcessInfo.processInfo.processIdentifier),"--relaunch"])
         worker.standardInput=FileHandle.nullDevice
         worker.standardOutput=FileHandle.nullDevice
         worker.standardError=FileHandle.nullDevice

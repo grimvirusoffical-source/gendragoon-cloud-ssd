@@ -8,6 +8,7 @@ or make the package eligible for automatic updates.
 import argparse
 import hashlib
 import json
+import os
 from pathlib import Path
 import plistlib
 import re
@@ -16,8 +17,19 @@ import sys
 
 ROOT=Path(__file__).resolve().parent
 
+def reject_python_caches(app):
+    """Signed caches are mutable on import; a release must not contain them."""
+    def fail(error):
+        raise error
+    for directory, folders, files in os.walk(app, followlinks=False, onerror=fail):
+        for name in folders + files:
+            if name == "__pycache__" or name.endswith((".pyc", ".pyo")):
+                relative=(Path(directory)/name).relative_to(app)
+                raise RuntimeError("Python cache artifact in app bundle: "+str(relative)+". Rebuild before signing and notarizing.")
+
 def package(app,output,candidate=False):
     if sys.platform!="darwin":raise RuntimeError("Package on macOS to preserve bundle metadata")
+    reject_python_caches(app)
     requirement=('anchor apple generic and identifier "app.gendragoon.cloudssd"'
         ' and certificate leaf[subject.OU] = "NZPU8H843J"'
         ' and certificate 1[field.1.2.840.113635.100.6.2.6] exists'
@@ -51,7 +63,7 @@ def package(app,output,candidate=False):
         'elif command -v python3 >/dev/null 2>&1; then\n'
         '  PYTHON="$(command -v python3)"\n'
         'else\n  echo "Python 3.9 or newer is required for this verified installer." >&2\n  exit 1\nfi\n'
-        'exec "$PYTHON" ./install-macos.py --archive "./'+archive.name+'" --reinstall --restart\n')
+        'exec "$PYTHON" -B ./install-macos.py --archive "./'+archive.name+'" --reinstall --restart\n')
     (output/"Install.command").write_text(command)
     (output/"Install.command").chmod(0o755)
     report={"version":version,"build":build,"sha256":digest,"archiveBytes":archive.stat().st_size,

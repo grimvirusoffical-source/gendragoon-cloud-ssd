@@ -5,6 +5,14 @@ import SwiftUI
 
 /// The installer verifies this runtime. Helper arguments never pass through a shell.
 enum GDRuntime {
+    /// Python helpers live inside a sealed app bundle. Descendants must preserve it too.
+    static func configurePython(_ process: Process, arguments: [String]) {
+        process.arguments = ["-B"] + arguments
+        var environment = ProcessInfo.processInfo.environment
+        environment["PYTHONDONTWRITEBYTECODE"] = "1"
+        process.environment = environment
+    }
+
     static var pythonURL: URL? {
         let resources = Bundle.main.resourceURL
         let candidates = [
@@ -56,7 +64,7 @@ enum GDNativeHelper {
             defer { try? output.close(); try? errors.close() }
             let process = Process()
             process.executableURL = python
-            process.arguments = [script.path] + arguments
+            GDRuntime.configurePython(process, arguments: [script.path] + arguments)
             process.standardInput = FileHandle.nullDevice
             process.standardOutput = output
             process.standardError = errors

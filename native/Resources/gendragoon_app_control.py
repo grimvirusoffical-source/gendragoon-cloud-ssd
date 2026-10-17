@@ -8,6 +8,11 @@ The worker never kills the app or unmounts a volume. Post-quit outcomes are in
 AppControl/status.json (also available with the ``status`` subcommand).
 UI isBusy must cover in-process transfers: OS checks cannot see every URLSession.
 """
+
+# Bundled helpers are signed resources: imports must never create or update caches.
+import os, sys
+sys.dont_write_bytecode = True
+os.environ["PYTHONDONTWRITEBYTECODE"] = "1"
 import argparse
 from contextlib import contextmanager
 import ctypes
@@ -482,7 +487,7 @@ def schedule(pid, app, ui_busy, home=None, ready_timeout=READY_TIMEOUT):
     child = None
     try:
         child = subprocess.Popen(
-            [sys.executable, str(worker), "worker", "--pid", str(pid), "--app", str(app),
+            [sys.executable, "-B", str(worker), "worker", "--pid", str(pid), "--app", str(app),
              "--ui-busy", "false", "--ready-fd", str(write_fd), "--request-id", request_id],
             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             start_new_session=True, close_fds=True, pass_fds=(write_fd,),

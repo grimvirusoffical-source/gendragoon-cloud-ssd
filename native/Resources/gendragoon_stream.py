@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
 """GenDragoon on-demand app streaming: remote apps, space reserve, safe archive offload."""
+
+# Bundled helpers are signed resources: imports must never create or update caches.
+import os, sys
+sys.dont_write_bytecode = True
+os.environ["PYTHONDONTWRITEBYTECODE"] = "1"
 import argparse,json,os,shutil,subprocess,sys,hashlib,tempfile
 from pathlib import Path
 HOME=Path.home()
@@ -53,7 +58,7 @@ def stream(key,execute=True):
   warmInfo={}
   if preload.is_file():
    try:
-    result=call([sys.executable,preload,"--key",key,"--budget-mb","24","--seconds","0.75","--workers","2"],timeout=4)
+    result=call([sys.executable,"-B",preload,"--key",key,"--budget-mb","24","--seconds","0.75","--workers","2"],timeout=4)
     warmInfo=json.loads(result)
    except (OSError,ValueError,subprocess.TimeoutExpired,RuntimeError):pass
   call(["/usr/bin/open",str(p)],timeout=60)

@@ -1,0 +1,72 @@
+{
+  "sourceCommit": "868ac6a3efe726a326c51afe439522f2c8520355",
+  "observedAt": "2026-10-17",
+  "runs": [
+    {
+      "id": 39061527435,
+      "event": "pull_request",
+      "status": "completed",
+      "conclusion": "success",
+      "url": "https://github.com/grimvirusoffical-source/gendragoon-cloud-ssd/actions/runs/39061527435"
+    },
+    {
+      "id": 39061524462,
+      "event": "push",
+      "status": "completed",
+      "conclusion": "success",
+      "url": "https://github.com/grimvirusoffical-source/gendragoon-cloud-ssd/actions/runs/39061524462"
+    }
+  ],
+  "pushJobs": [
+    {
+      "id": 117480314009,
+      "name": "ios",
+      "status": "completed",
+      "conclusion": "success",
+      "url": "https://github.com/grimvirusoffical-source/gendragoon-cloud-ssd/actions/runs/39061524462/job/117480314009"
+    },
+    {
+      "id": 117480314146,
+      "name": "native-helpers",
+      "status": "completed",
+      "conclusion": "success",
+      "url": "https://github.com/grimvirusoffical-source/gendragoon-cloud-ssd/actions/runs/39061524462/job/117480314146"
+    },
+    {
+      "id": 117480314159,
+      "name": "desktop (ubuntu-latest)",
+      "status": "completed",
+      "conclusion": "success",
+      "url": "https://github.com/grimvirusoffical-source/gendragoon-cloud-ssd/actions/runs/39061524462/job/117480314159"
+    },
+    {
+      "id": 117480314167,
+      "name": "desktop (windows-latest)",
+      "status": "completed",
+      "conclusion": "success",
+      "url": "https://github.com/grimvirusoffical-source/gendragoon-cloud-ssd/actions/runs/39061524462/job/117480314167"
+    },
+    {
+      "id": 117480314192,
+      "name": "macos-compile",
+      "status": "completed",
+      "conclusion": "success",
+      "url": "https://github.com/grimvirusoffical-source/gendragoon-cloud-ssd/actions/runs/39061524462/job/117480314192"
+    },
+    {
+      "id": 117480314197,
+      "name": "android",
+      "status": "completed",
+      "conclusion": "success",
+      "url": "https://github.com/grimvirusoffical-source/gendragoon-cloud-ssd/actions/runs/39061524462/job/117480314197"
+    },
+    {
+      "id": 117480314251,
+      "name": "backend",
+      "status": "completed",
+      "conclusion": "success",
+      "url": "https://github.com/grimvirusoffical-source/gendragoon-cloud-ssd/actions/runs/39061524462/job/117480314251"
+    }
+  ],
+  "scope": "Compilation and automated test evidence only; does not establish signed-in app acceptance or paid Stripe fulfillment."
+}

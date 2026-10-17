@@ -6,6 +6,11 @@ The calling app MUST hold its operation coordinator's exclusive reservation and
 pass --ui-busy false. The shared update lock also excludes cooperating helpers.
 Plans and receipts contain paths and fingerprints, never file contents/secrets.
 """
+
+# Bundled helpers are signed resources: imports must never create or update caches.
+import os, sys
+sys.dont_write_bytecode = True
+os.environ["PYTHONDONTWRITEBYTECODE"] = "1"
 import argparse
 from contextlib import contextmanager
 import ctypes
