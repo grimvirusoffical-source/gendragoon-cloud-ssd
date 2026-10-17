@@ -1,6 +1,68 @@
 import Foundation
 import SwiftUI
 import AppKit
+import Darwin
+
+// Read-only filesystem inventory. The reentrant API owns its buffer, so a
+// concurrent system query cannot invalidate a shared getmntinfo snapshot.
+private enum GDDarwinMountInventory {
+    struct Volume {
+        let source: String
+        let target: String
+        let filesystem: String
+    }
+    enum InspectionError: Error { case unavailable }
+
+    static func name<T>(_ field: inout T) throws -> String {
+        try withUnsafeBytes(of: &field) { bytes in
+            guard let end = bytes.firstIndex(of: 0), end > 0,
+                  let value = String(bytes: bytes.prefix(end), encoding: .utf8) else {
+                throw InspectionError.unavailable
+            }
+            return value
+        }
+    }
+
+    static func snapshot() throws -> [Volume] {
+        var buffer: UnsafeMutablePointer<statfs>?
+        // MNT_NOWAIT reads retained kernel information without refreshing an
+        // unreachable network volume. This does not mount or unmount anything.
+        let count = getmntinfo_r_np(&buffer, MNT_NOWAIT)
+        guard let buffer else { throw InspectionError.unavailable }
+        defer { free(UnsafeMutableRawPointer(buffer)) }
+        guard count > 0, count <= 10_000 else { throw InspectionError.unavailable }
+        var result: [Volume] = []
+        result.reserveCapacity(Int(count))
+        for index in 0..<Int(count) {
+            var entry = buffer[index]
+            let target = try name(&entry.f_mntonname)
+            guard target.hasPrefix("/") else { throw InspectionError.unavailable }
+            result.append(Volume(source: try name(&entry.f_mntfromname), target: target,
+                                 filesystem: try name(&entry.f_fstypename)))
+        }
+        guard result.contains(where: { $0.target == "/" }) else { throw InspectionError.unavailable }
+        return result
+    }
+
+    static func contains(_ target: String, in volumes: [Volume]) -> Bool {
+        // Lexical normalization only. NSString.standardizingPath can consult
+        // the filesystem, which is unsafe when an NFS server is unreachable.
+        func lexical(_ value: String) -> String {
+            var parts: [Substring] = []
+            for part in value.split(separator: "/") {
+                if part == "." { continue }
+                if part == ".." {
+                    if !parts.isEmpty { parts.removeLast() }
+                } else { parts.append(part) }
+            }
+            return "/" + parts.joined(separator: "/")
+        }
+        let expected = lexical(target)
+        return volumes.contains {
+            lexical($0.target).compare(expected, options: .caseInsensitive) == .orderedSame
+        }
+    }
+}
 
 private enum GD {
     static let support = FileManager.default.homeDirectoryForCurrentUser
@@ -73,6 +135,9 @@ enum GDProjects {
     @Published var status = "Configure Google Cloud Storage, then test your connection."
     @Published var tested = false
     @Published var mounted = false { didSet { GDUpdateActivity.shared.set(self, key: "mounted", active: mounted) } }
+    @Published private(set) var mountStatusKnown = false {
+        didSet { GDUpdateActivity.shared.set(self, key: "mountInspection", active: !mountStatusKnown) }
+    }
     @Published var busy = false { didSet { GDUpdateActivity.shared.set(self, key: "busy", active: busy) } }
     @Published var lastError = ""
     private var mountProcess: Process?
@@ -89,6 +154,7 @@ enum GDProjects {
         poller = Timer.scheduledTimer(withTimeInterval: 4, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.refreshMountStatus() }
         }
+        GDUpdateActivity.shared.set(self, key: "mountInspection", active: true)
         refreshMountStatus()
     }
 
@@ -207,7 +273,8 @@ enum GDProjects {
     }
 
     func mountDrive() {
-        guard !mounted, !busy, binaryInstalled, validInput(), GDUpdateActivity.shared.canStart(excluding: self) else { return }
+        refreshMountStatus()
+        guard mountStatusKnown, !mounted, !busy, binaryInstalled, validInput(), GDUpdateActivity.shared.canStart(excluding: self) else { return }
         do {
             try FileManager.default.createDirectory(at: GD.mount, withIntermediateDirectories: true)
             try FileManager.default.createDirectory(at: GD.cache, withIntermediateDirectories: true)
@@ -285,7 +352,8 @@ enum GDProjects {
     }
 
     func unmountDrive() {
-        guard mounted, !busy, GDUpdateActivity.shared.canStart(excluding: self) else { return }
+        refreshMountStatus()
+        guard mountStatusKnown, mounted, !busy, GDUpdateActivity.shared.canStart(excluding: self) else { return }
         busy = true
         status = "Unmounting… Close any files currently in use."
         runTool("/sbin/umount", [GD.mount.path]) { [weak self] code, result in
@@ -305,13 +373,24 @@ enum GDProjects {
     }
 
     func refreshMountStatus() {
-        runTool("/sbin/mount", []) { [weak self] code, output in
-            guard let self = self, code == 0 else { return }
-            let wasMounted = self.mounted
-            self.mounted = output.components(separatedBy: "\n").contains { line in
-                line.contains(" on \(GD.mount.path) ") || line.contains(" on \(GD.mount.path) (")
+        let inspectionError = "Could not read macOS volume status. Drive changes and app maintenance are paused until status is available."
+        do {
+            let volumes = try GDDarwinMountInventory.snapshot()
+            let wasMounted = mounted
+            mounted = GDDarwinMountInventory.contains(GD.mount.path, in: volumes)
+            mountStatusKnown = true
+            if lastError == inspectionError {
+                lastError = ""
+                status = mounted ? "GenDragoon Cloud SSD is mounted in Finder." : "Cloud SSD is disconnected."
+            } else if mounted && !wasMounted {
+                status = "GenDragoon Cloud SSD is mounted in Finder."
             }
-            if self.mounted && !wasMounted { self.status = "GenDragoon Cloud SSD is mounted in Finder." }
+        } catch {
+            // Never turn an inspection failure into evidence that a mount is
+            // absent. Retain the last observation and block maintenance.
+            mountStatusKnown = false
+            lastError = inspectionError
+            status = "Cloud drive status is unavailable."
         }
     }
 

@@ -84,7 +84,7 @@ def own_archive_shape(archive, source_name, output):
         output["archiveMembers"] = [entry.filename for entry in entries]
         require(0 < len(entries) < 32, "Unexpected fixture archive entry count")
         require(sum(entry.file_size for entry in entries) < MAX_BYTES, "Expanded fixture exceeds 1 MiB")
-        require(any(entry.filename == source_name for entry in entries), "ditto omitted the named source file")
+        require(any(entry.filename.rstrip("/") == source_name for entry in entries), "ditto omitted the named source item")
         for entry in entries:
             parts = entry.filename.rstrip("/").split("/")
             require(parts and parts[0] in {source_name, "__MACOSX"}
@@ -95,6 +95,65 @@ def own_archive_shape(archive, source_name, output):
 
 def timeout_handler(_signum, _frame):
     raise TimeoutError("Darwin archive smoke reached its 30-second wall limit")
+
+
+def directory_roundtrip(home, library, set_attribute, name):
+    """Root and nested directory metadata must survive the native ZIP path."""
+    source = home / name
+    (source / "nested/empty").mkdir(parents=True, mode=0o700)
+    payload = source / "nested/executable.command"
+    payload.write_text("#!/bin/sh\nexit 0\n")
+    payload.chmod(0o755)
+    (source / "nested/relative-link").symlink_to("executable.command")
+    if source.suffix == ".app":
+        (source / "Contents").mkdir(mode=0o700)
+        (source / "Contents/Info.plist").write_bytes(b"<?xml version='1.0'?><plist version='1.0'><dict/></plist>")
+    attributes = {
+        ".": {"app.gendragoon.directory": b"root directory metadata", "app.gendragoon.empty": b""},
+        "nested": {"app.gendragoon.directory": b"nested directory metadata", "app.gendragoon.empty": b""},
+        "nested/empty": {"app.gendragoon.empty": b""},
+        "nested/executable.command": {"com.apple.ResourceFork": ATTRIBUTES["com.apple.ResourceFork"],
+                                      "app.gendragoon.empty": b""},
+    }
+    for relative, values in attributes.items():
+        for attribute, value in values.items():
+            set_attribute(source if relative == "." else source / relative, attribute, value)
+    baseline = library.snapshot(source)
+    before = {entry["path"]: entry for entry in baseline["manifest"]}
+    for relative, values in attributes.items():
+        expected = digest_attributes(values)
+        require(all(before[relative]["xattrs"].get(key) == value for key, value in expected.items()),
+                "Directory fixture did not capture its independently expected metadata")
+    archive = home / (name + ".zip")
+    library.package(source, archive)
+    library.unchanged(source, baseline)
+    shape = {}
+    own_archive_shape(archive, name, shape)
+    require(archive.stat().st_size < MAX_BYTES, "Directory fixture archive exceeds 1 MiB")
+    require(shape["archiveMembers"].count("__MACOSX/._" + name) == 1,
+            "Directory archive does not contain exactly one root AppleDouble entry")
+    destination = home / (name + "-restore")
+    destination.mkdir(mode=0o700)
+    library.run(["/usr/bin/ditto", "-x", "-k", archive, destination], timeout=10)
+    restored = destination / name
+    library.verify_restored(restored, baseline["manifest"])
+    require((restored / "nested/empty").is_dir()
+            and (restored / "nested/relative-link").is_symlink()
+            and os.readlink(restored / "nested/relative-link") == "executable.command"
+            and (restored / "nested/executable.command").stat().st_mode & 0o111 == 0o111,
+            "Directory archive lost an empty directory, relative link, or executable flag")
+    set_attribute(restored, "app.gendragoon.directory", b"modified restored directory")
+    rejection(lambda: library.verify_restored(restored, baseline["manifest"]), "Root metadata mutation escaped verification")
+    set_attribute(restored, "app.gendragoon.directory", attributes["."]["app.gendragoon.directory"])
+    set_attribute(restored / "nested", "app.gendragoon.empty", b"changed empty attribute")
+    rejection(lambda: library.verify_restored(restored, baseline["manifest"]), "Nested metadata mutation escaped verification")
+    set_attribute(restored / "nested", "app.gendragoon.empty", b"")
+    library.verify_restored(restored, baseline["manifest"])
+    library.unchanged(source, baseline)
+    return {"name": name, "rootMetadataRestored": True, "nestedMetadataRestored": True,
+            "emptyDirectoryAttributesRestored": True, "rootAndNestedMetadataMutationRejected": True,
+            "relativeLinkAndExecutablePreserved": True, "sourceUnchanged": True,
+            "metadataBytes": 2 * sum(len(value) for values in attributes.values() for value in values.values())}
 
 
 def run(resources):
@@ -167,7 +226,10 @@ def run(resources):
         rejection(lambda: library.verify_restored(restored, baseline["manifest"]), "Data mutation escaped restore verification")
         library.unchanged(source, baseline)
         require(source.read_bytes() == SOURCE_BYTES, "Original fixture data changed")
-        used = fixture_bytes(home) + sum(len(value) for value in ATTRIBUTES.values()) * 2
+        output["directoryCases"] = [directory_roundtrip(home, library, set_attribute, name)
+                                    for name in ("Complete metadata folder", "Metadata.app")]
+        used = (fixture_bytes(home) + sum(len(value) for value in ATTRIBUTES.values()) * 2
+                + sum(case["metadataBytes"] for case in output["directoryCases"]))
         require(used < MAX_BYTES, "Fixture data exceeds 1 MiB")
         output.update(ok=True, bytes=used, seconds=round(time.monotonic() - started, 3),
                       nativeMetadataReadVerified=True, dataForkRestored=True, resourceForkRestored=True,

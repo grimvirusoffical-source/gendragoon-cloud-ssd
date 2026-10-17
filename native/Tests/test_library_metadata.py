@@ -7,10 +7,12 @@ import io
 import json
 import os
 from pathlib import Path
+import stat
 import sys
+import tempfile
 from types import SimpleNamespace
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 import zipfile
 
 import test_integrated_library as fixture_module
@@ -115,6 +117,103 @@ class NativeXattrTests(unittest.TestCase):
         self.assertFalse(backend.calls)
 
 
+class DirectoryMetadataPackingTests(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory(prefix="gd-directory-metadata-")
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name).resolve()
+        self.source = self.root / "Folder"
+        self.source.mkdir()
+        self.packed = self.root / "root.appledouble"
+
+    def serializer(self, content=b"fixture AppleDouble"):
+        def copy(source, destination, state, flags):
+            self.assertEqual(source, os.fsencode(self.source))
+            self.assertEqual(destination, os.fsencode(self.packed))
+            self.assertIsNone(state)
+            self.assertEqual(flags, 7 | (1 << 22) | (1 << 17) | (1 << 18) | (1 << 19))
+            Path(os.fsdecode(destination)).write_bytes(content)
+            return 0
+        return Mock(side_effect=copy)
+
+    def test_native_serializer_uses_exclusive_metadata_only_nofollow_flags(self):
+        before = library.snapshot(self.source)
+        native = SimpleNamespace(copyfile=self.serializer())
+        with patch.object(library, "_native_xattr_api", return_value=native):
+            library._pack_directory_metadata(self.source, self.packed)
+        native.copyfile.assert_called_once()
+        self.assertEqual(self.packed.read_bytes(), b"fixture AppleDouble")
+        self.assertEqual(stat.S_IMODE(self.packed.stat().st_mode), 0o600)
+        library.unchanged(self.source, before)
+
+    def test_linked_or_existing_outputs_are_rejected_before_native_copy(self):
+        external = self.root / "outside"
+        external.write_bytes(b"untouched")
+        self.packed.symlink_to(external)
+        with patch.object(library, "_native_xattr_api") as native:
+            with self.assertRaises(ValueError):
+                library._pack_directory_metadata(self.source, self.packed)
+            native.assert_not_called()
+        self.assertEqual(external.read_bytes(), b"untouched")
+        self.packed.unlink()
+        self.packed.write_bytes(b"existing")
+        with patch.object(library, "_native_xattr_api") as native:
+            with self.assertRaises(ValueError):
+                library._pack_directory_metadata(self.source, self.packed)
+            native.assert_not_called()
+        self.assertEqual(self.packed.read_bytes(), b"existing")
+
+    def test_oversized_native_metadata_is_refused(self):
+        native = SimpleNamespace(copyfile=self.serializer(b"12345"))
+        with patch.object(library, "_native_xattr_api", return_value=native), \
+             patch.object(library, "MAX_PACKED_METADATA_BYTES", 4):
+            with self.assertRaisesRegex(RuntimeError, "safe limit"):
+                library._pack_directory_metadata(self.source, self.packed)
+
+    def archive(self, names):
+        archive = self.root / "fixture.zip"
+        with zipfile.ZipFile(archive, "w") as output:
+            for name in names:
+                item = zipfile.ZipInfo(name)
+                item.create_system = 3
+                item.external_attr = (stat.S_IFREG | 0o600) << 16
+                output.writestr(item, b"original metadata")
+        return archive
+
+    def test_existing_exact_metadata_is_preserved_without_duplicate_or_replacement(self):
+        archive = self.archive(["__MACOSX/._Folder"])
+        before = archive.read_bytes()
+        with patch.object(library, "_pack_directory_metadata") as pack:
+            library._supplement_root_directory_metadata(self.source, archive)
+            pack.assert_not_called()
+        self.assertEqual(archive.read_bytes(), before)
+
+    def test_case_equivalent_or_directory_metadata_names_are_refused(self):
+        for members in (("__macosx/._folder",), ("__MACOSX/._Folder/",),
+                        ("__MACOSX/._Folder", "__macosx/._folder")):
+            archive = self.archive(members)
+            before = archive.read_bytes()
+            with self.subTest(members=members), patch.object(library, "_pack_directory_metadata") as pack:
+                with self.assertRaisesRegex(ValueError, "ambiguous"):
+                    library._supplement_root_directory_metadata(self.source, archive)
+                pack.assert_not_called()
+            self.assertEqual(archive.read_bytes(), before)
+
+    def test_reserved_root_and_escaping_names_are_rejected_before_packaging(self):
+        reserved = self.root / "__MACOSX"
+        reserved.mkdir()
+        archive = self.root / "never-created.zip"
+        with patch.object(library, "run") as external:
+            with self.assertRaisesRegex(ValueError, "reserved"):
+                library.package(reserved, archive)
+            external.assert_not_called()
+        with self.assertRaisesRegex(ValueError, "reserved"):
+            library.validate_archive(archive, "__macosx")
+        with self.assertRaises(ValueError):
+            library.validate_archive(archive, "../Folder")
+        self.assertFalse(archive.exists())
+
+
 @unittest.skipUnless(all(callable(getattr(os, name, None)) for name in ("listxattr", "getxattr", "setxattr")),
                      "Archive fixture backend requires local xattr test APIs; libc fallback has separate coverage")
 class ArchiveMetadataTests(unittest.TestCase):
@@ -128,11 +227,21 @@ class ArchiveMetadataTests(unittest.TestCase):
         self.fixture.fake_run.stop()
         self.commands = patch.object(library, "run", side_effect=self.archive_command)
         self.commands.start()
+        # Linux fixture AppleDouble payload; the real Darwin smoke exercises
+        # Apple's copyfile serializer and ditto unpacker without this backend.
+        self.packer = patch.object(library, "_pack_directory_metadata", side_effect=self.pack_directory_metadata)
+        self.packer.start()
 
     def tearDown(self):
+        self.packer.stop()
         self.commands.stop()
         self.platform.stop()
         self.fixture.tearDown()
+
+    def pack_directory_metadata(self, source, destination):
+        values = {name: base64.b64encode(os.getxattr(source, name, follow_symlinks=False)).decode()
+                  for name in os.listxattr(source, follow_symlinks=False)}
+        Path(destination).write_bytes(b"fixture-appledouble\n" + json.dumps(values).encode())
 
     def archive_command(self, args, timeout=1800):
         values = [str(value) for value in args]
@@ -142,23 +251,62 @@ class ArchiveMetadataTests(unittest.TestCase):
                 source, destination = map(Path, values[-2:])
                 metadata = {}
                 for path in [source, *sorted(source.rglob("*"))]:
-                    if path.is_symlink():
+                    if path.is_symlink() or (path == source and source.is_dir()):
                         continue
                     metadata[str(path.relative_to(source.parent))] = {
                         name: base64.b64encode(os.getxattr(path, name, follow_symlinks=False)).decode()
                         for name in os.listxattr(path, follow_symlinks=False)}
-                # This disposable backend models ditto's metadata preservation;
-                # the helper still verifies actual xattrs after cloud read-back.
+                # Model the observed Darwin omission of the selected directory's
+                # root metadata while preserving nested directory/file metadata.
                 with zipfile.ZipFile(destination, "a") as archive:
                     archive.comment = json.dumps(metadata).encode()
             elif self.preserve_metadata:
                 source, destination = map(Path, values[-2:])
                 with zipfile.ZipFile(source) as archive:
                     metadata = json.loads(archive.comment or b"{}")
+                    for entry in archive.infolist():
+                        if entry.filename.startswith("__MACOSX/._") and entry.filename.count("/") == 1:
+                            data = archive.read(entry)
+                            if data.startswith(b"fixture-appledouble\n"):
+                                metadata[entry.filename[len("__MACOSX/._"):]] = json.loads(data.split(b"\n", 1)[1])
                 for relative, attributes in metadata.items():
                     for name, encoded in attributes.items():
                         os.setxattr(destination / relative, name, base64.b64decode(encoded), follow_symlinks=False)
         return result
+
+    def test_folder_and_app_root_metadata_survives_real_upload_and_restore_paths(self):
+        for kind in ("folder", "app"):
+            with self.subTest(kind=kind):
+                source = self.fixture.source(kind)
+                os.setxattr(source, "user.gendragoon.root", b"root directory metadata")
+                os.setxattr(source, "user.gendragoon.empty", b"")
+                os.setxattr(source / "nested", "user.gendragoon.nested", b"nested directory metadata")
+                os.setxattr(source / "empty", "user.gendragoon.empty", b"")
+                baseline = library.snapshot(source)
+                result = self.fixture.upload(source)
+                entry = library.load()[result["key"]]
+                archive = self.fixture.remote[library.item_path(entry)]
+                with zipfile.ZipFile(io.BytesIO(archive)) as packed:
+                    self.assertEqual(packed.namelist().count("__MACOSX/._" + source.name), 1)
+                self.assertEqual(hashlib.sha256(archive).hexdigest(), entry["sha256"])
+                library.stage_item(result["key"], False, "project-one", "bucket-one")
+                restored = Path(self.fixture.mock_reply.call_args.kwargs["localPath"])
+                library.verify_restored(restored, baseline["manifest"])
+                library.unchanged(source, baseline)
+                os.setxattr(restored, "user.gendragoon.root", b"changed root metadata")
+                with self.assertRaisesRegex(RuntimeError, "metadata"):
+                    library.verify_restored(restored, baseline["manifest"])
+        self.fixture.mock_trash.assert_not_called()
+
+    def test_root_metadata_loss_still_blocks_offload_and_library_commit(self):
+        source = self.fixture.source("folder")
+        os.setxattr(source, "user.gendragoon.root", b"must survive")
+        with patch.object(library, "_supplement_root_directory_metadata"):
+            with self.assertRaisesRegex(RuntimeError, "metadata"):
+                self.fixture.upload(source, True)
+        self.assertEqual(library.load(), {})
+        self.fixture.mock_trash.assert_not_called()
+        self.assertEqual(os.getxattr(source, "user.gendragoon.root"), b"must survive")
 
     def tagged_source(self):
         source = self.fixture.source("file")

@@ -49,7 +49,11 @@ class AutoUpdateTests(unittest.TestCase):
         # updater transaction without touching the machine's real app library.
         launcher = types.ModuleType("gendragoon_app_launch")
         launcher.sessions = mock.Mock(return_value={"active": False})
-        active = mock.patch.dict(sys.modules, {"gendragoon_app_launch": launcher})
+        self.mounts = (("/dev/disk3", "/", "apfs"),)
+        self.mount_reader = types.ModuleType("gendragoon_app_control")
+        self.mount_reader.mounted_volumes = mock.Mock(side_effect=lambda: self.mounts)
+        active = mock.patch.dict(sys.modules, {"gendragoon_app_launch": launcher,
+                                              "gendragoon_app_control": self.mount_reader})
         active.start(); self.addCleanup(active.stop)
         temporary = tempfile.TemporaryDirectory(prefix="gendragoon-auto-update-test-")
         self.addCleanup(temporary.cleanup)
@@ -62,7 +66,6 @@ class AutoUpdateTests(unittest.TestCase):
         write_bundle(self.app, version="0.16.1", marker="original-good")
         self.calls = []
         self.running = []
-        self.mount_output = "/dev/disk3s1s1 on / (apfs, sealed, local, read-only)\n"
         for name, value in {"APP": self.app, "ROOT": self.update_root, "STAGED": self.staged,
                             "STATUS": self.status, "LOG": self.log}.items():
             patch = mock.patch.object(updater, name, value)
@@ -113,8 +116,6 @@ class AutoUpdateTests(unittest.TestCase):
                 mock.patch.object(updater.platform, "machine", return_value="arm64"), \
                 mock.patch.object(updater.platform, "mac_ver", return_value=("14.5", (), "")), \
                 mock.patch.object(updater, "app_pids", side_effect=lambda app=None: self.running.copy()), \
-                mock.patch.object(updater.subprocess, "check_output", side_effect=lambda *a, **kw: self.mount_output), \
-                mock.patch.object(updater.os.path, "ismount", return_value=False), \
                 mock.patch.object(updater.time, "sleep"), \
                 mock.patch.object(updater, "sufficient_space"):
             yield
@@ -181,12 +182,31 @@ class AutoUpdateTests(unittest.TestCase):
 
     def test_active_mount_blocks_install(self):
         self.stage()
-        self.mount_output = "gendragoon: on /Volumes/GenDragoon (macfuse, local)\n"
+        self.mounts = (("gendragoon:", "/Volumes/GenDragoon (Archive)", "macfuse"),)
         with self.mac():
             result = updater.install_worker(relaunch=True)
         self.assertEqual(result["event"], "postponed")
         self.assert_original()
         self.assertFalse(any(command[0] in ("/usr/bin/ditto", "/usr/bin/open") for command in self.calls))
+
+    def test_native_inventory_failure_preserves_app_and_staged_update(self):
+        self.stage()
+        self.mount_reader.mounted_volumes.side_effect = RuntimeError("snapshot unavailable")
+        with self.mac():
+            result = updater.install_worker(relaunch=True)
+        self.assertEqual(result["event"], "postponed")
+        self.assert_original()
+        self.assertTrue((self.staged / updater.APP_NAME / "Contents/marker").is_file())
+        self.assertFalse(any(command[0] in ("/usr/bin/ditto", "/usr/bin/osascript", "/usr/bin/open")
+                             for command in self.calls))
+
+    def test_snapshot_reader_does_not_execute_a_mount_command_or_touch_a_volume(self):
+        with mock.patch.object(updater.subprocess, "check_output") as command, \
+                mock.patch.object(updater.os.path, "ismount") as stat_mount:
+            self.assertFalse(updater.active_mount())
+        self.mount_reader.mounted_volumes.assert_called_once()
+        command.assert_not_called()
+        stat_mount.assert_not_called()
 
     def test_pid_zero_cannot_replace_running_app(self):
         self.stage()

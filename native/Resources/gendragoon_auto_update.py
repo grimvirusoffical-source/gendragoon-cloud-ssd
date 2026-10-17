@@ -374,15 +374,14 @@ def active_mount():
     try:
         import gendragoon_app_launch
         if gendragoon_app_launch.sessions().get("active"):return True
-        out=subprocess.check_output(["/sbin/mount"],text=True,timeout=8)
+        # Reuse the adjacent signed helper's owned, read-only Darwin snapshot.
+        # Import failure or an unreadable table retains the existing fail-closed gate.
+        from gendragoon_app_control import mounted_volumes
         mount=Path.home()/"GenDragoon Cloud SSD"
-        if os.path.ismount(mount):return True
-        for line in out.splitlines():
-            match=re.match(r"^(.*?) on (.*?) \(.*\)$",line)
-            if not match:continue
-            source,target=(re.sub(r"\\([0-7]{3})",lambda m:chr(int(m.group(1),8)),value)
-                           for value in match.groups())
-            if target==str(mount) or "gendragoon" in source.casefold() or "gendragoon" in target.casefold():return True
+        expected=unicodedata.normalize("NFC",os.path.normpath(str(mount))).casefold()
+        for source,target,_ in mounted_volumes():
+            actual=unicodedata.normalize("NFC",os.path.normpath(target)).casefold()
+            if actual==expected or "gendragoon" in source.casefold() or "gendragoon" in target.casefold():return True
         return False
     except Exception:return True
 

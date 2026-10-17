@@ -96,15 +96,14 @@ class AppControlTests(unittest.TestCase):
         external.assert_not_called()  # Fixtures never contact Keychain or a cloud API.
 
     def test_active_cloud_mount_blocks_restart(self):
-        mounted = subprocess.CompletedProcess([], 0, "/dev/fuse on /Users/example/GenDragoon Cloud SSD (fusefs)\n", "")
-        with patch.object(control, "command", return_value=mounted), patch.object(control, "processes") as processes:
+        mounted = (("localhost:/", "/Users/example/GenDragoon Cloud SSD", "nfs"),)
+        with patch.object(control, "mounted_volumes", return_value=mounted), patch.object(control, "processes") as processes:
             self.assertCode("active_mount", control.ensure_idle, self.app)
         processes.assert_not_called()
 
     def test_ui_busy_and_resource_helpers_block_restart(self):
         self.assertCode("busy", control.ensure_idle, self.app, True)
-        empty_mount = subprocess.CompletedProcess([], 0, "/dev/disk on / (apfs)\n", "")
-        with patch.object(control, "command", return_value=empty_mount):
+        with patch.object(control, "mounted_volumes", return_value=(("/dev/disk", "/", "apfs"),)):
             for arguments in (
                 str(self.app / "Contents/Resources/rclone") + " copy fixture remote:",
                 "python3 " + str(self.app / "Contents/Resources/gendragoon_library.py") + " upload",
@@ -113,8 +112,22 @@ class AppControlTests(unittest.TestCase):
                     self.assertCode("busy", control.ensure_idle, self.app)
 
     def test_unobservable_mounts_fail_closed(self):
-        with patch.object(control, "command", return_value=subprocess.CompletedProcess([], 1, "", "")):
+        with patch.object(control, "mounted_volumes", side_effect=control.ControlError("inspection_failed")), \
+                patch.object(control, "processes") as processes:
             self.assertCode("inspection_failed", control.ensure_idle, self.app)
+        processes.assert_not_called()
+
+    def test_native_source_target_and_filesystem_markers_preserve_busy_guard(self):
+        for volume in (
+            ("remote:gen-dragoon", "/Volumes/Other (Archive)", "nfs"),
+            ("localhost:/", "/Volumes/CloudSSD \\040", "nfs"),
+            ("localhost:/", "/Volumes/Other", "rclone"),
+        ):
+            with self.subTest(volume=volume), patch.object(control, "mounted_volumes", return_value=(volume,)), \
+                    patch.object(control, "command") as command, patch.object(control, "processes") as processes:
+                self.assertCode("active_mount", control.ensure_idle, self.app)
+            command.assert_not_called()
+            processes.assert_not_called()
 
     def test_wrong_pid_or_owner_is_refused(self):
         with patch.object(control, "kernel_path", return_value="/Applications/Another.app/Contents/MacOS/Another"):

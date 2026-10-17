@@ -369,17 +369,71 @@ def require_space(extra,root=None):
     reserve=10*1024**3
     if extra<0 or free<reserve+extra:
         raise RuntimeError("Not enough local space for a verified restore while retaining 10 GiB free. Original and cloud copies were preserved.")
+
+# Darwin copyfile.h: metadata only, AppleDouble serialization, exclusive output,
+# and no following source/destination symlinks. No data-fork copy is requested.
+COPYFILE_PACK_METADATA=7|(1<<22)|(1<<17)|(1<<18)|(1<<19)
+MAX_PACKED_METADATA_BYTES=MAX_XATTR_TOTAL_BYTES+2*1024*1024
+
+def _pack_directory_metadata(source,destination):
+    """Use Apple's native AppleDouble format, including ACLs and quarantine."""
+    source,destination=Path(source).absolute(),Path(destination).absolute()
+    for path in (source,destination):
+        if b"\0" in os.fsencode(path) or any(part.is_symlink() for part in (path,*path.parents)):
+            raise ValueError("Unsafe directory metadata path")
+    before=source.lstat()
+    if not stat.S_ISDIR(before.st_mode) or destination.exists():
+        raise ValueError("Directory metadata needs a real source and a new private output")
+    native=_native_xattr_api().copyfile
+    native.argtypes=[ctypes.c_char_p,ctypes.c_char_p,ctypes.c_void_p,ctypes.c_uint32]
+    native.restype=ctypes.c_int
+    if native(os.fsencode(source),os.fsencode(destination),None,COPYFILE_PACK_METADATA)!=0:
+        raise OSError(ctypes.get_errno() or errno.EIO,"Could not preserve directory metadata; original retained")
+    if _fingerprint(source.lstat())!=_fingerprint(before):
+        raise RuntimeError("Source changed while packing directory metadata; original retained")
+    info=destination.lstat()
+    if (not stat.S_ISREG(info.st_mode) or info.st_uid!=os.getuid() or info.st_nlink!=1
+            or not 0<info.st_size<=MAX_PACKED_METADATA_BYTES):
+        raise RuntimeError("Packed directory metadata is invalid or exceeds its safe limit; original retained")
+    destination.chmod(0o600)
+
+def _supplement_root_directory_metadata(source,archive):
+    """ditto --keepParent can omit only the root's __MACOSX/._name entry.
+
+    Supplement it before hashing/uploading, so every restore uses the same
+    checksum-bound metadata through ordinary ditto extraction. No full app copy
+    and no special restore format are needed. Existing archives stay readable.
+    """
+    member="__MACOSX/._"+source.name
+    canonical=lambda name:unicodedata.normalize("NFC",name).casefold()
+    with zipfile.ZipFile(archive,"a") as output:
+        matches=[entry for entry in output.infolist() if canonical(entry.filename.rstrip("/"))==canonical(member)]
+        if matches:
+            if (len(matches)!=1 or matches[0].filename!=member
+                    or not stat.S_ISREG(matches[0].external_attr>>16)):
+                raise ValueError("Duplicate or ambiguous root directory metadata in archive")
+            return  # A ditto version that already preserved it needs no duplicate.
+        with tempfile.TemporaryDirectory(prefix="gd-root-metadata-",dir=Path(archive).parent) as temporary:
+            packed=Path(temporary)/"root.appledouble"
+            _pack_directory_metadata(source,packed)
+            output.write(packed,member,compress_type=zipfile.ZIP_DEFLATED)
+
 def package(source,archive):
     """Put exactly one named source at ZIP root, preserving Darwin metadata."""
     source=Path(source)
     if source.is_symlink() or not (source.is_file() or source.is_dir()):
         raise ValueError("Select an actual regular file, folder, or app")
+    check_name(source.name)
+    if unicodedata.normalize("NFC",source.name).casefold()=="__macosx":
+        raise ValueError("The selected name conflicts with reserved archive metadata; rename the source first")
     command=["/usr/bin/ditto","-c","-k","--sequesterRsrc"]
     # For a file, --keepParent adds its containing directory to the ZIP. For
     # directories/apps it retains the selected directory itself, as required by
     # zip-root validation and restoration. Both forms preserve AppleDouble.
     if source.is_dir():command.append("--keepParent")
     run([*command,source,archive],timeout=900)
+    if source.is_dir() and sys.platform=="darwin":
+        _supplement_root_directory_metadata(source,archive)
 def stream_metadata_reason(manifest):
     """Raw object/NFS layouts cannot represent preserved macOS xattrs."""
     unknown="The original macOS metadata was not recorded; use a verified local copy."
@@ -397,6 +451,7 @@ def validate_archive(path,name):
     check_name(name)
     canonical=lambda value:unicodedata.normalize("NFC",value).casefold()
     expected_root=canonical(name)
+    if expected_root=="__macosx":raise ValueError("Selected archive root conflicts with reserved metadata")
     with zipfile.ZipFile(path) as archive:
         entries=archive.infolist();names=set();links={}
         if len(entries)>500000:raise ValueError("Archive has too many entries")

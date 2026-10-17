@@ -315,15 +315,83 @@ def processes():
     return entries
 
 
+class _DarwinStatFS(ctypes.Structure):
+    # Public arm64 statfs ABI, from Apple XNU bsd/sys/mount.h. On arm64 the
+    # 64-bit-inode API has no symbol suffix; never use this layout on x86_64.
+    _fields_ = [
+        ("f_bsize", ctypes.c_uint32), ("f_iosize", ctypes.c_int32),
+        ("f_blocks", ctypes.c_uint64), ("f_bfree", ctypes.c_uint64),
+        ("f_bavail", ctypes.c_uint64), ("f_files", ctypes.c_uint64),
+        ("f_ffree", ctypes.c_uint64), ("f_fsid", ctypes.c_int32 * 2),
+        ("f_owner", ctypes.c_uint32), ("f_type", ctypes.c_uint32),
+        ("f_flags", ctypes.c_uint32), ("f_fssubtype", ctypes.c_uint32),
+        ("f_fstypename", ctypes.c_char * 16),
+        ("f_mntonname", ctypes.c_char * 1024),
+        ("f_mntfromname", ctypes.c_char * 1024),
+        ("f_flags_ext", ctypes.c_uint32), ("f_reserved", ctypes.c_uint32 * 7),
+    ]
+
+
+def mounted_volumes():
+    """Copy a read-only, owned Darwin mount snapshot; never touch a volume.
+
+    getmntinfo_r_np (macOS 10.13+) avoids getmntinfo's shared static buffer.
+    MNT_NOWAIT reads cached kernel information, including stale NFS mounts.
+    See Apple Libc gen/FreeBSD/getmntinfo.c and XNU bsd/sys/mount.h.
+    """
+    if (sys.platform != "darwin" or platform.machine() != "arm64"
+            or ctypes.sizeof(ctypes.c_void_p) != 8
+            or ctypes.sizeof(_DarwinStatFS) != 2168
+            or _DarwinStatFS.f_mntonname.offset != 88
+            or _DarwinStatFS.f_mntfromname.offset != 1112):
+        raise ControlError("inspection_failed")
+    try:
+        library = ctypes.CDLL("/usr/lib/libSystem.B.dylib", use_errno=True)
+        inventory = library.getmntinfo_r_np
+        inventory.argtypes = [ctypes.POINTER(ctypes.POINTER(_DarwinStatFS)), ctypes.c_int]
+        inventory.restype = ctypes.c_int
+        release = library.free
+        release.argtypes = [ctypes.c_void_p]
+        release.restype = None
+    except (OSError, AttributeError):
+        raise ControlError("inspection_failed") from None
+    pointer = ctypes.POINTER(_DarwinStatFS)()
+    try:
+        count = inventory(ctypes.byref(pointer), 2)  # MNT_NOWAIT; no disk operation.
+        if not 0 < count <= 10000 or not pointer:
+            raise ControlError("inspection_failed")
+        result = []
+        for index in range(count):
+            entry = pointer[index]
+            names = []
+            for name, capacity in (("f_mntfromname", 1024), ("f_mntonname", 1024),
+                                   ("f_fstypename", 16)):
+                raw = ctypes.string_at(ctypes.addressof(entry) + getattr(_DarwinStatFS, name).offset,
+                                       capacity)
+                end = raw.find(b"\0")
+                if end <= 0:
+                    raise ControlError("inspection_failed")
+                names.append(os.fsdecode(raw[:end]))
+            if not names[1].startswith("/"):
+                raise ControlError("inspection_failed")
+            result.append(tuple(names))
+        if not any(target == "/" for _, target, _ in result):
+            raise ControlError("inspection_failed")
+        return tuple(result)
+    except (OSError, ValueError, ctypes.ArgumentError):
+        raise ControlError("inspection_failed") from None
+    finally:
+        if pointer:
+            release(pointer)
+
+
 def ensure_idle(app, ui_busy=False):
     if ui_busy:
         raise ControlError("busy")
-    mounts = command(["/sbin/mount"])
-    if mounts.returncode:
-        raise ControlError("inspection_failed")
-    lower = mounts.stdout.lower()
-    if any(name in lower for name in ("gendragoon", "gen-dragoon", "cloudssd", "rclone")):
-        raise ControlError("active_mount")
+    for volume in mounted_volumes():
+        if any(name in value.casefold() for value in volume
+               for name in ("gendragoon", "gen-dragoon", "cloudssd", "rclone")):
+            raise ControlError("active_mount")
     known = ("gendragoon_stream.py", "gendragoon_library.py", "gendragoon_preload.py", "gendragoon_connect.py", "gendragoon_app_launch.py")
     for pid, _, uid, arguments in processes():
         if uid != os.getuid() or pid == os.getpid():

@@ -79,8 +79,6 @@ class InstallerTests(unittest.TestCase):
                     + "\nAuthority=Developer ID Application: Example (" + installer.TEAM_ID + ")\n")
         if arguments[0] == "/usr/bin/lipo":
             return "arm64\n"
-        if arguments[0] == "/sbin/mount":
-            return "/dev/disk3s1s1 on / (apfs, sealed, local, read-only)\n"
         return ""
 
     @contextlib.contextmanager
@@ -90,7 +88,7 @@ class InstallerTests(unittest.TestCase):
                 mock.patch.object(installer, "require_mac"), \
                 mock.patch.object(installer, "run_checked", side_effect=command or self.fake_command), \
                 mock.patch.object(installer, "running_pids", return_value=[]), \
-                mock.patch.object(installer.os.path, "ismount", return_value=False), \
+                mock.patch.object(installer, "mounted_volumes", return_value=(("/dev/disk3", "/", "apfs"),)), \
                 mock.patch.object(installer.shutil, "disk_usage", return_value=shutil._ntuple_diskusage(10**12, 0, 10**12)):
             yield
 
@@ -233,27 +231,46 @@ class InstallerTests(unittest.TestCase):
         self.assert_old_preserved()
 
     def test_active_mount_blocks_before_extraction(self):
-        def mounted(arguments, timeout=90):
-            if arguments[0] == "/sbin/mount":
-                return "gendragoon: on " + str(Path.home() / "GenDragoon Cloud SSD") + " (macfuse, local)\n"
-            return self.fake_command(arguments, timeout)
-        with self.fake_mac(mounted), self.assertRaisesRegex(installer.InstallError, "Active GenDragoon"):
+        with self.fake_mac(), mock.patch.object(installer, "mounted_volumes", return_value=(
+                ("localhost:/", str(self.root / "GenDragoon Cloud SSD"), "nfs"),)), \
+                self.assertRaisesRegex(installer.InstallError, "Active GenDragoon"):
             installer.install(self.archive, self.app.parent)
         self.assert_old_preserved()
         self.assertFalse(any(command[0] == "/usr/bin/ditto" for command in self.calls))
 
     def test_mount_appearing_after_staging_still_blocks_replacement(self):
-        count = 0
-        def later_mount(arguments, timeout=90):
-            nonlocal count
-            if arguments[0] == "/sbin/mount":
-                count += 1
-                if count > 1:
-                    return "gendragoon: on /Volumes/GenDragoon (macfuse, local)\n"
-            return self.fake_command(arguments, timeout)
-        with self.fake_mac(later_mount), self.assertRaisesRegex(installer.InstallError, "Active GenDragoon"):
+        root = (("/dev/disk3", "/", "apfs"),)
+        with self.fake_mac(), mock.patch.object(installer, "mounted_volumes", side_effect=[
+                root, root + (("gendragoon:", "/Volumes/GenDragoon", "macfuse"),)]), \
+                self.assertRaisesRegex(installer.InstallError, "Active GenDragoon"):
             installer.install(self.archive, self.app.parent)
         self.assert_old_preserved()
+
+    def test_unreadable_mount_inventory_blocks_before_extraction_or_quit(self):
+        with self.fake_mac(), mock.patch.object(installer, "mounted_volumes", side_effect=
+                installer.InstallError("Cannot inspect macOS mount table")), \
+                self.assertRaisesRegex(installer.InstallError, "mount table"):
+            installer.install(self.archive, self.app.parent, restart=True)
+        self.assert_old_preserved()
+        self.assertFalse(any(command[0] in ("/usr/bin/ditto", "/usr/bin/osascript", "/usr/bin/open")
+                             for command in self.calls))
+
+    def test_explicit_mount_path_uses_literal_native_names_without_volume_access(self):
+        target = "/Volumes/My Cloud (Archive) \\040"
+        for actual in (target, target.upper()):
+            with self.subTest(target=actual), mock.patch.object(installer, "mounted_volumes",
+                    return_value=(("localhost:/", actual, "nfs"),)), \
+                    mock.patch.object(installer, "run_checked") as command, \
+                    mock.patch.object(installer.os.path, "ismount") as stat_mount, \
+                    self.assertRaisesRegex(installer.InstallError, "Active GenDragoon"):
+                installer.ensure_no_active_mount([target])
+            command.assert_not_called()
+            stat_mount.assert_not_called()
+
+    def test_literal_backslash_digits_are_not_decoded_as_spaces(self):
+        with mock.patch.object(installer, "mounted_volumes", return_value=(
+                ("localhost:/", "/Volumes/Cloud\\040Archive", "nfs"),)):
+            installer.ensure_no_active_mount(["/Volumes/Cloud Archive"])
 
     def test_unmounted_bundled_helper_blocks_replacement_without_quit_or_kill(self):
         def processes(app, *, include_helpers=False):

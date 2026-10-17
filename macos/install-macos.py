@@ -293,24 +293,89 @@ def verify_app(app):
     run_checked(["/usr/bin/xcrun", "stapler", "validate", str(app)], timeout=120)
 
 
-def unescape_mount(value):
-    return re.sub(r"\\([0-7]{3})", lambda match: chr(int(match.group(1), 8)), value)
+class _DarwinStatFS(ctypes.Structure):
+    # Public arm64 statfs ABI, from Apple XNU bsd/sys/mount.h. On arm64 the
+    # 64-bit-inode API has no symbol suffix; never use this layout on x86_64.
+    _fields_ = [
+        ("f_bsize", ctypes.c_uint32), ("f_iosize", ctypes.c_int32),
+        ("f_blocks", ctypes.c_uint64), ("f_bfree", ctypes.c_uint64),
+        ("f_bavail", ctypes.c_uint64), ("f_files", ctypes.c_uint64),
+        ("f_ffree", ctypes.c_uint64), ("f_fsid", ctypes.c_int32 * 2),
+        ("f_owner", ctypes.c_uint32), ("f_type", ctypes.c_uint32),
+        ("f_flags", ctypes.c_uint32), ("f_fssubtype", ctypes.c_uint32),
+        ("f_fstypename", ctypes.c_char * 16),
+        ("f_mntonname", ctypes.c_char * 1024),
+        ("f_mntfromname", ctypes.c_char * 1024),
+        ("f_flags_ext", ctypes.c_uint32), ("f_reserved", ctypes.c_uint32 * 7),
+    ]
+
+
+def mounted_volumes():
+    """Copy a read-only, owned Darwin mount snapshot; never touch a volume.
+
+    getmntinfo_r_np (macOS 10.13+) avoids getmntinfo's shared static buffer.
+    MNT_NOWAIT reads cached kernel information, including stale NFS mounts.
+    See Apple Libc gen/FreeBSD/getmntinfo.c and XNU bsd/sys/mount.h.
+    """
+    error = "Cannot inspect macOS mount table; installation is postponed"
+    if (sys.platform != "darwin" or platform.machine() != "arm64"
+            or ctypes.sizeof(ctypes.c_void_p) != 8
+            or ctypes.sizeof(_DarwinStatFS) != 2168
+            or _DarwinStatFS.f_mntonname.offset != 88
+            or _DarwinStatFS.f_mntfromname.offset != 1112):
+        raise InstallError(error)
+    try:
+        library = ctypes.CDLL("/usr/lib/libSystem.B.dylib", use_errno=True)
+        inventory = library.getmntinfo_r_np
+        inventory.argtypes = [ctypes.POINTER(ctypes.POINTER(_DarwinStatFS)), ctypes.c_int]
+        inventory.restype = ctypes.c_int
+        release = library.free
+        release.argtypes = [ctypes.c_void_p]
+        release.restype = None
+    except (OSError, AttributeError) as exc:
+        raise InstallError(error) from exc
+    pointer = ctypes.POINTER(_DarwinStatFS)()
+    try:
+        count = inventory(ctypes.byref(pointer), 2)  # MNT_NOWAIT; no disk operation.
+        if not 0 < count <= 10000 or not pointer:
+            raise InstallError(error)
+        result = []
+        for index in range(count):
+            entry = pointer[index]
+            names = []
+            for name, capacity in (("f_mntfromname", 1024), ("f_mntonname", 1024),
+                                   ("f_fstypename", 16)):
+                raw = ctypes.string_at(ctypes.addressof(entry) + getattr(_DarwinStatFS, name).offset,
+                                       capacity)
+                end = raw.find(b"\0")
+                if end <= 0:
+                    raise InstallError(error)
+                names.append(os.fsdecode(raw[:end]))
+            if not names[1].startswith("/"):
+                raise InstallError(error)
+            result.append(tuple(names))
+        if not any(target == "/" for _, target, _ in result):
+            raise InstallError(error)
+        return tuple(result)
+    except (OSError, ValueError, ctypes.ArgumentError) as exc:
+        raise InstallError(error) from exc
+    finally:
+        if pointer:
+            release(pointer)
 
 
 def ensure_no_active_mount(extra_paths=()):
     # Failure to read the mount table blocks an update rather than risking a transfer.
-    output = run_checked(["/sbin/mount"], timeout=10)
+    mounts = mounted_volumes()
     paths = [Path.home() / "GenDragoon Cloud SSD", *[Path(p).expanduser().absolute() for p in extra_paths]]
-    expected = {str(path) for path in paths}
-    for path in paths:
-        if os.path.ismount(path):
-            raise InstallError("Active GenDragoon cloud mount detected; safely disconnect it in the app first")
-    for line in output.splitlines():
-        match = re.match(r"^(.*?) on (.*?) \(.*\)$", line)
-        if not match:
-            continue
-        source, target = (unescape_mount(value) for value in match.groups())
-        if target in expected or "gendragoon" in source.casefold() or "gendragoon" in target.casefold():
+    # Compare native names without shell unescaping or stat'ing a remote volume.
+    # Case/canonical-equivalent names conservatively match common Mac filesystems.
+    def comparable(value):
+        return unicodedata.normalize("NFC", os.path.normpath(value)).casefold()
+    expected = {comparable(str(path)) for path in paths}
+    for source, target, _ in mounts:
+        if (comparable(target) in expected or "gendragoon" in source.casefold()
+                or "gendragoon" in target.casefold()):
             raise InstallError("Active GenDragoon cloud mount detected; safely disconnect it in the app first")
 
 
