@@ -24,7 +24,7 @@ spec.loader.exec_module(control)
 class AppControlTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory(prefix="gd-reset-fixture-")
-        self.home = Path(self.temporary.name)
+        self.home = Path(self.temporary.name).resolve()
         self.home.chmod(0o700)
         self.app = self.home / "Applications" / control.APP_NAME
         (self.app / "Contents/MacOS").mkdir(parents=True)

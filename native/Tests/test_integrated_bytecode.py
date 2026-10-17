@@ -50,8 +50,9 @@ class SignedResourceBytecodeTests(unittest.TestCase):
         for variable in ("PYTHONDONTWRITEBYTECODE", "PYTHONPYCACHEPREFIX", "PYTHONPATH"):
             self.environment.pop(variable, None)
 
-    def python(self, *arguments):
-        return subprocess.run([sys.executable, *map(str, arguments)], env=self.environment,
+    def python(self, *arguments, environment=None):
+        return subprocess.run([sys.executable, *map(str, arguments)],
+                              env=self.environment if environment is None else environment,
                               stdin=subprocess.DEVNULL, capture_output=True, text=True,
                               timeout=15, check=False)
 
@@ -112,15 +113,23 @@ print(json.dumps({'library': str(Path(library.__file__).parent),
 
     def test_multiprocessing_preloader_cli_fails_safely_without_cache_writes(self):
         before = snapshot(self.resources)
+        home = self.root / "preloader-home"
+        home.mkdir(mode=0o700)
+        environment = self.environment.copy()
+        environment["HOME"] = str(home)
         # Invalid storage is rejected by the actual spawned worker, before any
         # app reads. Its JSON result proves spawn reached production validation.
+        # Its child-only HOME keeps validation away from the user's NFS mount.
+        # Allow interpreter startup; this fixture checks validation, not latency.
         result = self.python(self.resources / "gendragoon_preload.py", "--app",
-                             self.root / "Unmanaged.app", "--seconds", "0.1")
+                             self.root / "Unmanaged.app", "--seconds", "5", environment=environment)
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         response = json.loads(result.stdout)
         self.assertFalse(response["ok"])
+        self.assertFalse(response.get("timedOut", False), response)
         self.assertEqual(response["message"], "Preload path is outside managed application storage")
         self.assertEqual(snapshot(self.resources), before)
+        self.assertEqual(list(home.iterdir()), [])
 
     def test_build_prunes_only_the_staged_copy_and_never_follows_cache_links(self):
         build = load_tool("build_macos")
