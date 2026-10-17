@@ -64,6 +64,30 @@ The deployment command uses the active Google application-default account throug
 
 ## Validation
 
+### Review a candidate before promoting production traffic
+
+Use a new, unique tag for each review. These commands stage the current checkout without changing production traffic; the helper refuses a tag that already exists, and `--tag` requires `--no-traffic`.
+
+```sh
+python3 native/Backend/deploy_free.py --no-traffic --tag review-0170-20261017a --dry-run
+python3 native/Backend/deploy_free.py --project gendragood-ssd --region us-central1 --service gendragoon-free --no-traffic --tag review-0170-20261017a
+```
+
+Before promotion, use the existing delegated Google application-default credentials to read the service's `status.traffic` and the tagged revision's `status.conditions`. Verify that the tag resolves to the intended new revision, that `Ready` is true, and that the sum of production traffic percentages for that revision is zero. Use the tag URL returned by Cloud Run; do not construct its hostname. Record the currently serving revision and percentage for rollback. Promote a reviewed revision by its exact revision name, not a mutable `latest` alias.
+
+`GET /health?deep=1`, `GET /v3/capabilities`, and `GET /v2/pricing` are read-only HTTP smoke checks against the tag URL. The existing service's health endpoints are public; do not send an ADC access token to the application URL. ADC authenticates the Cloud Run control-plane reads. The deploy helper neither grants public invocation nor changes the service's IAM policy.
+
+No-traffic staging provides **traffic isolation, not data isolation**. The tagged candidate retains the existing database, bucket, runtime identity, and live secrets. `GET /v2/billing/status` deliberately triggers the existing live bootstrap and is therefore a controlled activation check, not a strictly read-only check: it can create a missing portal configuration, create/expire unpaid validation Checkout sessions when catalog verification changes, and write/delete readiness markers. Existing Stripe webhooks and Checkout return URLs remain bound to the canonical service URL until promotion, so a tagged Checkout test alone does not verify delivery to the candidate's webhook handler.
+
+Run the deployment-helper tests locally; they mock every external process call and never authenticate or deploy:
+
+```sh
+cd native/Backend
+python3 -m unittest -v test_deploy_free.py
+```
+
+### Runtime tests
+
 ```sh
 cd native/Backend
 npm ci --ignore-scripts

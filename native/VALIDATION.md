@@ -16,15 +16,27 @@ is implied by source/unit-test results.
 | Live billing status | Checkout enabled; live mode; webhook configured; runtime storage verified | Server readiness response, not a completed purchase |
 | macOS compilation | Full active Swift sources compiled as 0.17.0 (20) | Apple Silicon Mac, macOS/Xcode 27 |
 | macOS signature | `codesign --verify --deep --strict` passed | Locally staged Developer ID-signed bundle |
+| Real macOS lifecycle | All 3 cases passed: automatic cache cleanup, explicit cache retention, and changed-cache retention | Locally compiled/ad hoc-signed disposable AppKit applications; actual LaunchServices, kernel executable identity, start time, open resources and watcher identity; originals/index unchanged; 49.3 seconds; no cloud calls or security-policy changes |
 | iOS compilation | `xcodebuild` simulator build succeeded | Real Xcode build; ZIPFoundation 0.9.20 revision resolved and saved |
 | Integrated Python suite | 137 passed | Disposable upload, restore, selection, cleanup, restart, and updater fixtures |
 | Launch lifecycle/security suite | 29 passed | Disposable cache and receipt tests; process/mount operations substituted |
 | Preloader suite | 8 passed | Byte budgets, priorities, bounded reads, symlinks, unchanged content |
+| Metadata regression suite | 12 passed, in addition to 20 integrated library cases | macOS native fallback, resource-fork hashes, no-follow reads, bounded metadata, restore compatibility and original preservation |
+| Backend regression/security | 118 passed; production npm audit: zero vulnerabilities | Actual local HTTP/router tests with controlled storage/Stripe fixtures |
+| Deployment helper | 10 passed; candidate staging dry run passed | No-traffic/tag handling, unchanged service configuration and private source allowlist; external calls substituted |
 | Native helper stress | 10,000 files verified; 512 index commits across 16 workers; 300 hostile archives rejected; mutation detected | Disposable local storage, approximately 2 seconds on the Linux test host |
-| Desktop companion tests | 22 implemented cases passed initially; Windows-specific runtime case added | Actual local v3-router fixture and Linux child-process lifecycle; Windows requires its CI runner |
+| Linux desktop companion | 22 passed; 1 expected Windows-only skip | Actual local v3-router transfer/readback and Linux process-group lifecycle |
+| Windows desktop companion | 20 passed; 3 expected Linux-only skips | Actual Windows Job Object launch and managed-cache eviction; actual local v3-router transfer/readback |
+| Android compilation | Java compilation and debug APK assembly passed | GitHub hosted runner; unit-test task reported NO-SOURCE, so no Android unit or device test pass is implied |
+| Cross-platform CI | All 7 jobs passed for commit `a16e22b27e88aaa114b455f4f07dffb19df82bb5` | [Run 39017673006](https://github.com/grimvirusoffical-source/gendragoon-cloud-ssd/actions/runs/39017673006); later commits require their own run |
 
 Build/test outputs are retained during development in the Mac validation
 workspace and summarized here. No private credentials are included.
+
+The first real Mac lifecycle run exposed that the Python.org macOS runtime
+does not expose `os.listxattr`. The corrected helper uses bounded, no-follow
+Darwin `libSystem` calls when Python lacks the APIs. The real Mac rerun above
+passed with that correction; metadata errors still retain the original.
 
 ## Installation and production gates
 

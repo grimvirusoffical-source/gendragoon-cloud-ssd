@@ -28,6 +28,9 @@ jobs:
           PYTHONPATH: native/Resources
       - run: python -m unittest discover -s native/Tests -p test_app_launch.py
       - run: python -m unittest discover -s native/Tests -p test_preload.py
+      - run: python -m unittest discover -s native/Tests -p test_library_metadata.py
+        env:
+          PYTHONPATH: native/Resources
       - run: python native/Tests/stress_native.py
 
   desktop:
@@ -71,6 +74,7 @@ jobs:
       - run: npm ci --ignore-scripts
       - run: npm test
       - run: npm audit --omit=dev --audit-level=high
+      - run: python3 -m unittest test_deploy_free.py
 
   macos-compile:
     runs-on: macos-latest
