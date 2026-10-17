@@ -15,6 +15,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from types import SimpleNamespace
 import unittest
 import urllib.request
 import uuid
@@ -262,6 +263,70 @@ class PackageTests(unittest.TestCase):
         self.assertEqual((replacement/"empty-file").read_text(), "new user content")
         self.assertTrue((saved/"empty-file").is_file())
 
+    def windows_cache_stat_fixture(self, name="managed.exe"):
+        file = self.root/name
+        file.write_bytes(b"verified managed content")
+        info = file.stat()
+        by_path = SimpleNamespace(st_dev=info.st_dev, st_ino=info.st_ino,
+            st_mode=stat.S_IFREG | (0o777 if name.endswith(".exe") else 0o666),
+            st_size=info.st_size, st_mtime_ns=info.st_mtime_ns, st_ctime_ns=100,
+            st_birthtime_ns=100, st_nlink=1, st_file_attributes=0)
+        # Reproduce CPython's Windows path/fd differences without requiring a
+        # Windows host: full same-API fingerprints and real bytes remain checked.
+        by_fd = SimpleNamespace(**vars(by_path))
+        by_fd.st_mode = stat.S_IFREG | 0o666
+        by_fd.st_ctime_ns = 200
+        record = {"size": info.st_size, "sha256": gd.digest(file)}
+        return file, by_path, by_fd, record
+
+    def test_windows_cross_api_creation_time_and_execute_mode_are_compatible(self):
+        for name in (".gendragoon-entry", "managed.exe"):
+            with self.subTest(name=name):
+                file, by_path, by_fd, record = self.windows_cache_stat_fixture(name)
+                expected = gd.cache_file_state(by_path)
+                with patch.object(gd.sys, "platform", "win32"), \
+                        patch.object(gd, "cache_node_state", return_value=expected), \
+                        patch.object(gd.os, "fstat", return_value=by_fd):
+                    gd.remove_cache_file(file, record, expected)
+                self.assertFalse(file.exists())
+
+    def test_windows_normalization_still_rejects_identity_permission_and_content_changes(self):
+        changes = {"st_dev": 123456789, "st_ino": 987654321,
+            "st_mode": stat.S_IFREG | 0o444, "st_size": 0, "st_mtime_ns": 0,
+            "st_birthtime_ns": 300, "st_nlink": 2, "st_file_attributes": 0x400}
+        for field, value in changes.items():
+            with self.subTest(field=field):
+                file, by_path, by_fd, record = self.windows_cache_stat_fixture()
+                setattr(by_fd, field, value)
+                expected = gd.cache_file_state(by_path)
+                with patch.object(gd.sys, "platform", "win32"), \
+                        patch.object(gd, "cache_node_state", return_value=expected), \
+                        patch.object(gd.os, "fstat", return_value=by_fd):
+                    with self.assertRaisesRegex(ValueError, "retained"):
+                        gd.remove_cache_file(file, record, expected)
+                self.assertEqual(file.read_bytes(), b"verified managed content")
+
+    def test_windows_descriptor_change_time_is_still_checked_during_hashing(self):
+        file, by_path, by_fd, record = self.windows_cache_stat_fixture()
+        changed_fd = SimpleNamespace(**vars(by_fd)); changed_fd.st_ctime_ns += 1
+        expected = gd.cache_file_state(by_path)
+        with patch.object(gd.sys, "platform", "win32"), \
+                patch.object(gd, "cache_node_state", return_value=expected), \
+                patch.object(gd.os, "fstat", side_effect=[by_fd, changed_fd]):
+            with self.assertRaisesRegex(ValueError, "changed"):
+                gd.remove_cache_file(file, record, expected)
+        self.assertEqual(file.read_bytes(), b"verified managed content")
+
+    def test_unix_cross_api_change_time_mismatch_is_not_normalized(self):
+        file, by_path, by_fd, record = self.windows_cache_stat_fixture("managed-data")
+        expected = gd.cache_file_state(by_path)
+        with patch.object(gd.sys, "platform", "linux"), \
+                patch.object(gd, "cache_node_state", return_value=expected), \
+                patch.object(gd.os, "fstat", return_value=by_fd):
+            with self.assertRaisesRegex(ValueError, "retained"):
+                gd.remove_cache_file(file, record, expected)
+        self.assertEqual(file.read_bytes(), b"verified managed content")
+
     @unittest.skipUnless(sys.platform.startswith("linux") and shutil.which("cc"), "Linux C compiler required for changed-data lifecycle fixture")
     def test_native_launch_reports_retained_changed_application_data(self):
         app_dir = self.root/"PortableApp"; app_dir.mkdir()
@@ -308,7 +373,7 @@ class PackageTests(unittest.TestCase):
         archive=self.root/"windows-app.zip";gd.make_package(app,archive,application="where.exe")
         cache=gd.ManagedCache(self.root/"cache");key=str(uuid.uuid4());cache.stage(archive,key,"free")
         with contextlib.redirect_stdout(io.StringIO()):result=cache.launch(key)
-        self.assertIsInstance(result["exitCode"],int);self.assertTrue(result["cacheRemoved"])
+        self.assertIsInstance(result["exitCode"],int);self.assertTrue(result["cacheRemoved"], result)
         self.assertTrue(app.is_file());self.assertTrue(archive.is_file())
 
     def test_preload_budget_is_enforced(self):

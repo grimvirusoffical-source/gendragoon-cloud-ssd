@@ -22,6 +22,9 @@ values. The full scope and remaining release gates are in
   seconds, with independent per-case deadlines and detailed timings.
 - `mac-native-initial-budget-failure.json`: the earlier shared 55-second harness
   timeout is retained as evidence. Its temporary fixture path is omitted.
+- `mac-package.json`: final Mac package size/SHA-256, source/resource comparison,
+  runtime syntax check and generated-installer archive verification. Gatekeeper
+  remains rejected, and automatic updates and installation remain ineligible.
 
 The backend candidate receives zero production traffic, but retains the service's
 existing data and secret configuration. These probes used public read-only routes

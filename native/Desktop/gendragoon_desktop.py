@@ -394,6 +394,21 @@ def default_cache():
     return Path(os.environ.get("XDG_CACHE_HOME", str(Path.home()/".cache")))/"gendragoon/managed"
 
 
+def cache_file_state(info):
+    return (info.st_dev, info.st_ino, info.st_mode, info.st_size, info.st_mtime_ns,
+            info.st_ctime_ns, getattr(info, "st_birthtime_ns", None))
+
+
+def comparable_cache_file_state(state):
+    if sys.platform == "win32":
+        # CPython path stat adds filename-derived execute bits and reports birth
+        # time as ctime; fstat has neither adjustment (CPython issue #157671).
+        # Normalize only across APIs; full path/fd mutation checks stay below.
+        created = state[6] if state[6] is not None else state[5]
+        return state[:2] + (state[2] & ~0o111,) + state[3:5] + (created,)
+    return state
+
+
 def cache_node_state(path: Path, directory=False):
     """Identity for managed nodes; never accept links or Windows reparse points."""
     info = path.lstat()
@@ -402,7 +417,7 @@ def cache_node_state(path: Path, directory=False):
             or (not directory and info.st_nlink != 1)):
         raise ValueError("Cache contains an unsafe or linked node; it was retained for inspection")
     identity = (info.st_dev, info.st_ino, info.st_mode)
-    return identity if directory else identity + (info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+    return identity if directory else cache_file_state(info)
 
 
 def remove_cache_file(path: Path, record: dict, expected_state: tuple):
@@ -412,8 +427,10 @@ def remove_cache_file(path: Path, record: dict, expected_state: tuple):
     flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0)
     with os.fdopen(os.open(path, flags), "rb") as stream:
         info = os.fstat(stream.fileno())
-        opened = (info.st_dev, info.st_ino, info.st_mode, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
-        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or opened != expected_state:
+        opened = cache_file_state(info)
+        if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1
+                or getattr(info, "st_file_attributes", 0) & 0x400
+                or comparable_cache_file_state(opened) != comparable_cache_file_state(expected_state)):
             raise ValueError("A cached file was replaced during cleanup; remaining cache was retained")
         h = hashlib.sha256(); size = 0
         for block in iter(lambda: stream.read(1024 * 1024), b""):
@@ -421,7 +438,10 @@ def remove_cache_file(path: Path, record: dict, expected_state: tuple):
             if size > record["size"]:
                 raise ValueError("A cached file grew during cleanup; remaining cache was retained")
             h.update(block)
-        if (size != record["size"] or h.hexdigest() != record["sha256"]
+        after = os.fstat(stream.fileno())
+        if (cache_file_state(after) != opened or after.st_nlink != 1
+                or getattr(after, "st_file_attributes", 0) & 0x400
+                or size != record["size"] or h.hexdigest() != record["sha256"]
                 or cache_node_state(path) != expected_state):
             raise ValueError("A cached file changed during cleanup; remaining cache was retained")
     # All paths come from the verified manifest. New children are never enumerated
