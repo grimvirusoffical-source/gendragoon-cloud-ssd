@@ -12,6 +12,7 @@ import unittest
 from unittest.mock import Mock, patch
 
 RESOURCES = Path(__file__).resolve().parents[1] / "Resources"
+sys.path.insert(0, str(RESOURCES))
 lib_spec = importlib.util.spec_from_file_location("launch_library_fixture", RESOURCES / "gendragoon_library.py")
 library = importlib.util.module_from_spec(lib_spec)
 lib_spec.loader.exec_module(library)

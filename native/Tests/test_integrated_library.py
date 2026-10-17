@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import shutil
 import stat
+import sys
 import tempfile
 import threading
 import unittest
@@ -12,6 +13,7 @@ from unittest.mock import patch
 import zipfile
 
 HELPER=Path(__file__).resolve().parents[1]/"Resources/gendragoon_library.py"
+sys.path.insert(0,str(HELPER.parent))
 spec=importlib.util.spec_from_file_location("library_fixture",HELPER)
 library=importlib.util.module_from_spec(spec);spec.loader.exec_module(library)
 
