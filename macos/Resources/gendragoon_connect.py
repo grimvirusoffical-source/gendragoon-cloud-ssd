@@ -394,9 +394,22 @@ def configure(project, bucket, remote="gendragoon", prefix=None, expected_revisi
             try:
                 committed=workspace.select_destination(project,bucket,remote,chosen_prefix,revision)
             except BaseException:
-                if APP_RCLONE_CONFIG.read_bytes()==prepared:
-                    if original is None:APP_RCLONE_CONFIG.unlink()
-                    else:atomic_config(APP_RCLONE_CONFIG,original)
+                # A state save can raise *after* its atomic rename (for example
+                # directory fsync failure). Reverting the config blindly would
+                # leave a committed new destination paired with the old remote.
+                try:
+                    observed=workspace.read_state()
+                except BaseException:
+                    raise RuntimeError("Cloud selection persistence is uncertain. The prepared cloud configuration was retained; refresh the workspace before retrying.") from None
+                intended={"project":project,"bucket":bucket,"remote":remote,"prefix":chosen_prefix}
+                if observed.get("revision")==revision+1 and observed.get("destination")==intended:
+                    raise RuntimeError("Cloud selection is visible, but its durability could not be confirmed. The matching cloud configuration was retained; refresh the workspace before continuing.") from None
+                if observed!=before:
+                    raise RuntimeError("Workspace changed while cloud selection persistence failed. The prepared cloud configuration was retained because rollback could not be proven safe; refresh before retrying.") from None
+                if APP_RCLONE_CONFIG.read_bytes()!=prepared:
+                    raise RuntimeError("Cloud configuration changed after a failed selection. No configuration was overwritten; refresh before retrying.") from None
+                if original is None:APP_RCLONE_CONFIG.unlink()
+                else:atomic_config(APP_RCLONE_CONFIG,original)
                 raise
         reply(message=f"Connected and tested gs://{bucket} in {project}.",remote=remote,bucket=bucket,project=project,
               context=committed.get("destination"),workspace=committed)

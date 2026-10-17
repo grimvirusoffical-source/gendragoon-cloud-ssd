@@ -4,6 +4,7 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import stat
 import sys
 import tempfile
 from types import SimpleNamespace
@@ -113,6 +114,36 @@ class ConnectionTests(unittest.TestCase):
         with patch.object(self.workspace,"select_destination",side_effect=workspace.WorkspaceError("revision_conflict","fixture conflict")):
             with self.assertRaises(workspace.WorkspaceError):connect.configure("project-one","bucket-one",expected_revision=1)
         self.assertEqual(self.selected(),before);self.assertEqual(self.config.read_bytes(),self.original)
+
+    def test_postrename_directory_fsync_error_retains_config_matching_committed_state(self):
+        original_fsync=os.fsync
+        failed=[]
+        def fail_directory(descriptor):
+            if stat.S_ISDIR(os.fstat(descriptor).st_mode):
+                failed.append(descriptor)
+                raise OSError("directory durability fixture failure after state rename")
+            return original_fsync(descriptor)
+        with patch.object(workspace.os,"fsync",side_effect=fail_directory):
+            with self.assertRaisesRegex(RuntimeError,"durability could not be confirmed"):
+                connect.configure("project-one","bucket-one",expected_revision=0)
+        self.assertEqual(len(failed),1)
+        state=self.selected()
+        self.assertEqual(state["revision"],1)
+        self.assertEqual(state["destination"],{"project":"project-one","bucket":"bucket-one","remote":"gendragoon","prefix":"GenDragoon-App-Library"})
+        self.assertIn(b"env_auth = true",self.config.read_bytes())
+        self.assertNotEqual(self.config.read_bytes(),self.original)
+        self.assertIn(b"[existing]",self.config.read_bytes())
+        self.mock_reply.assert_not_called()  # Visible commit is not confirmed durability.
+
+    def test_unreadable_recovery_state_does_not_blindly_rollback_prepared_config(self):
+        before=self.selected()
+        with patch.object(self.workspace,"read_state",side_effect=[before,before,OSError("fixture state unavailable")]),patch.object(self.workspace,"select_destination",side_effect=OSError("fixture commit uncertain")):
+            with self.assertRaisesRegex(RuntimeError,"persistence is uncertain"):
+                connect.configure("project-one","bucket-one",expected_revision=0)
+        self.assertEqual(self.selected(),before)
+        self.assertIn(b"env_auth = true",self.config.read_bytes())
+        self.assertNotEqual(self.config.read_bytes(),self.original)
+        self.mock_reply.assert_not_called()
 
     def test_existing_prefix_is_retained_unless_explicitly_changed(self):
         workspace.select_destination("old-project","old-bucket","gendragoon","keep/me",0,self.home)
