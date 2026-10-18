@@ -658,50 +658,131 @@ test("retry after failed: same job, queued 202, token set grows, finished steps 
  }finally{h.close();}
 });
 
-test("retry after failed: the sixth status token drops the oldest hash",async()=>{
- const stripe={subscriptions:{
-  list:async()=>({has_more:false,data:[{id:"sub_cap",status:"active",customer:"cus_lease"}]}),
-  cancel:async()=>{throw Object.assign(Error("down"),{code:"stripe_cancel_failed"});},
+function stripeCancel(cancel){
+ return {subscriptions:{
+  list:async q=>({has_more:false,data:[{id:"sub_try",status:"active",customer:q.customer}]}),
+  cancel,
  }};
- const h=harness({uids:["u-tok"],stripe,bucket:{deleteFiles:async()=>{}}});
- seedCustomer(h,"u-tok");
+}
+function assertStatusBody(body){
+ assert.deepEqual(Object.keys(body).sort(),["jobId","retryable","status"]);
+ assert.equal("failureReason" in body,false);
+ assert.equal("attempts" in body,false);
+}
+
+test("transient deletion errors stay retryable and record a failureReason",async()=>{
+ const cases=[
+  [{statusCode:503,type:"api_error"},"upstream_unavailable"],
+  [{code:"ECONNRESET"},"network"],
+  [{code:"ETIMEDOUT"},"timeout"],
+  [{type:"rate_limit_error",statusCode:429},"rate_limited"],
+ ];
+ for(const [fields,reason] of cases){
+  const uid="u-transient-"+reason;
+  const h=harness({uids:[uid],stripe:stripeCancel(async()=>{throw Object.assign(Error(reason),fields);}),bucket:{deleteFiles:async()=>{}}});
+  seedCustomer(h,uid);
+  await h.listen();
+  try{
+   const first=(await h.del(uid)).json;
+   const failed=await h.pollUntil(first.jobId,first.statusToken,"failed");
+   assert.equal(failed.last.json.status,"failed");
+   assert.equal(failed.last.json.retryable,true,reason);
+   assertStatusBody(failed.last.json);
+   const stored=h.db.rows.get("deletion_jobs/"+first.jobId);
+   assert.equal(stored.failureReason,reason);
+   assert.equal(stored.attempts,1);
+   const again=await h.del(uid);
+   assert.equal(again.status,202,again.text);
+   assert.equal(again.json.status,"queued");
+   assert.equal(again.json.jobId,first.jobId);
+  }finally{h.close();}
+ }
+});
+
+test("the fifth transient failure is not retryable and the next DELETE is 409",async()=>{
+ const h=harness({uids:["u-cap"],stripe:stripeCancel(async()=>{throw Object.assign(Error("reset"),{code:"ECONNRESET"});}),bucket:{deleteFiles:async()=>{}}});
+ seedCustomer(h,"u-cap");
  await h.listen();
  try{
-  const first=(await h.del("u-tok")).json;
-  const hashes=[tokenHash(first.statusToken)];
-  assert.equal((await h.pollUntil(first.jobId,first.statusToken,"failed")).last.json.status,"failed");
-  for(let n=0;n<5;n++){
-   const next=await h.del("u-tok");
+  const first=(await h.del("u-cap")).json;
+  let token=first.statusToken;
+  for(let attempt=1;attempt<=5;attempt++){
+   const failed=await h.pollUntil(first.jobId,token,"failed");
+   assert.equal(failed.last.json.status,"failed");
+   assertStatusBody(failed.last.json);
+   const stored=h.db.rows.get("deletion_jobs/"+first.jobId);
+   assert.equal(stored.attempts,attempt);
+   assert.equal(stored.failureReason,"network");
+   assert.equal(stored.retryable,attempt<5,String(attempt));
+   assert.equal(failed.last.json.retryable,attempt<5);
+   if(attempt===5)break;
+   const next=await h.del("u-cap");
    assert.equal(next.status,202,next.text);
    assert.equal(next.json.status,"queued");
    assert.equal(next.json.jobId,first.jobId);
-   hashes.push(tokenHash(next.json.statusToken));
-   assert.equal((await h.pollUntil(first.jobId,next.json.statusToken,"failed")).last.json.status,"failed");
+   token=next.json.statusToken;
   }
+  const before=h.db.rows.get("deletion_jobs/"+first.jobId).statusTokens.map(item=>item.hash);
+  assert.equal(before.length,5);
+  const denied=await h.del("u-cap");
+  assert.equal(denied.status,409,denied.text);
+  assert.deepEqual(denied.json,{error:"deletion_not_retryable",jobId:first.jobId});
   const stored=h.db.rows.get("deletion_jobs/"+first.jobId);
-  assert.equal(stored.statusTokens.length,5);
-  assert.equal(stored.statusTokens.some(item=>item.hash===hashes[0]),false,"oldest hash was dropped");
-  for(const hash of hashes.slice(1))assert.ok(stored.statusTokens.some(item=>item.hash===hash));
+  assert.deepEqual(stored.statusTokens.map(item=>item.hash),before);
+  assert.equal(stored.attempts,5);
+  assert.equal(stored.retryable,false);
  }finally{h.close();}
 });
 
-test("failed job with retryable false is 409 and issues no status token",async()=>{
- const h=harness({uids:["u-lock"]});
- const owner=hash("u-lock");
- const jobId="11111111-1111-4111-8111-000000000099";
- const kept={hash:"cd".repeat(32),expiresAtMs:NOW+60_000};
- const record={jobId,accountHash:owner,uid:"u-lock",status:"failed",retryable:false,failure:"blocked",
-  steps:{stripe:true},statusTokens:[kept],canceledIds:[],subscriptionIds:[],customerId:null};
- h.db.rows.set("account_deletions/"+owner,record);
- h.db.rows.set("deletion_jobs/"+jobId,structuredClone(record));
+test("permanent deletion errors flip retryable immediately and the next DELETE is 409",async()=>{
+ const cases=[
+  ["gcs-403","gcs_permission_denied",{bucket:async({prefix})=>{if(prefix.startsWith("customer/"))throw Object.assign(Error("denied"),{code:403});}}],
+  ["gcs-permission","gcs_permission_denied",{bucket:async()=>{throw Object.assign(Error("denied"),{code:"permission-denied"});}}],
+  ["stripe-auth","stripe_authentication_error",{cancel:async()=>{throw Object.assign(Error("auth"),{type:"authentication_error",statusCode:401});}}],
+  ["stripe-permission","stripe_permission_error",{cancel:async()=>{throw Object.assign(Error("perm"),{type:"permission_error",statusCode:403});}}],
+  ["stripe-invalid","stripe_invalid_request",{cancel:async()=>{throw Object.assign(Error("bad"),{type:"invalid_request_error",code:"parameter_unknown",statusCode:400});}}],
+ ];
+ for(const [name,reason,fault] of cases){
+  const uid="u-perm-"+name;
+  const stripe=stripeCancel(fault.cancel||(async()=>({})));
+  const bucket={deleteFiles:fault.bucket||(async()=>{})};
+  const h=harness({uids:[uid],stripe,bucket});
+  seedCustomer(h,uid);
+  await h.listen();
+  try{
+   const first=(await h.del(uid)).json;
+   const failed=await h.pollUntil(first.jobId,first.statusToken,"failed");
+   assert.equal(failed.last.json.status,"failed",name);
+   assert.equal(failed.last.json.retryable,false,name);
+   assertStatusBody(failed.last.json);
+   const stored=h.db.rows.get("deletion_jobs/"+first.jobId);
+   assert.equal(stored.failureReason,reason,name);
+   assert.equal(stored.attempts,1,name);
+   assert.equal(stored.retryable,false,name);
+   const hashes=stored.statusTokens.map(item=>item.hash);
+   const denied=await h.del(uid);
+   assert.equal(denied.status,409,denied.text);
+   assert.deepEqual(denied.json,{error:"deletion_not_retryable",jobId:first.jobId});
+   assert.equal("statusToken" in denied.json,false);
+   const after=h.db.rows.get("deletion_jobs/"+first.jobId);
+   assert.deepEqual(after.statusTokens.map(item=>item.hash),hashes,name);
+   assert.equal(after.status,"failed");
+  }finally{h.close();}
+ }
+});
+
+test("a Stripe resource_missing cancel is success and does not count as a failed attempt",async()=>{
+ const h=harness({uids:["u-missing"],stripe:stripeCancel(async()=>{throw Object.assign(Error("gone"),{type:"invalid_request_error",code:"resource_missing",statusCode:404});}),bucket:{deleteFiles:async()=>{}}});
+ seedCustomer(h,"u-missing");
  await h.listen();
  try{
-  const denied=await h.del("u-lock");
-  assert.equal(denied.status,409,denied.text);
-  assert.deepEqual(denied.json,{error:"deletion_not_retryable",jobId});
-  const stored=h.db.rows.get("deletion_jobs/"+jobId);
-  assert.equal(stored.status,"failed");
-  assert.deepEqual(stored.statusTokens,[kept]);
+  const first=(await h.del("u-missing")).json;
+  const done=await h.pollUntil(first.jobId,first.statusToken,"done");
+  assert.equal(done.last.json.status,"done");
+  assert.equal(done.last.json.retryable,false);
+  const stored=h.db.rows.get("deletion_jobs/"+first.jobId);
+  assert.equal(stored.attempts||0,0);
+  assert.equal(stored.failureReason,null);
  }finally{h.close();}
 });
 

@@ -11,6 +11,7 @@ const REAUTH_SECONDS=5*60;
 const STATUS_TOKEN_TTL_MS=7*24*60*60*1000;
 const LEASE_MS=60*1000;
 const MAX_STATUS_TOKENS=5;
+const MAX_FAILED_ATTEMPTS=5;
 const JOB_STATUS=new Set(["queued","running","done","failed"]);
 const SUBSCRIPTION_KEY=/SubscriptionId$/;
 
@@ -33,12 +34,90 @@ async function ignoreMissing(work){
  try{return await work();}
  catch(error){if(!isMissing(error))throw error;}
 }
+const STRIPE_TYPE={
+ StripeAuthenticationError:"authentication_error",
+ StripePermissionError:"permission_error",
+ StripeInvalidRequestError:"invalid_request_error",
+ StripeRateLimitError:"rate_limit_error",
+ StripeAPIError:"api_error",
+ StripeConnectionError:"api_connection_error",
+ StripeIdempotencyError:"idempotency_error",
+};
+function errorChain(error){
+ const list=[];
+ let current=error;
+ for(let depth=0;depth<4&&current;depth++){
+  list.push(current);
+  current=current.cause;
+ }
+ return list;
+}
+function stripeType(error){
+ const raw=error?.rawType||error?.raw?.type;
+ if(typeof raw==="string"&&raw)return raw;
+ const type=error?.type;
+ if(typeof type!=="string"||!type)return "";
+ return STRIPE_TYPE[type]||type;
+}
+function httpStatus(error){
+ const value=error?.statusCode??(typeof error?.status==="number"||typeof error?.status==="string"?error.status:undefined);
+ if(typeof value==="number"&&Number.isInteger(value))return value;
+ if(typeof value==="string"&&/^\d+$/.test(value))return Number(value);
+ return null;
+}
+function isTimeoutError(error){
+ const code=String(error?.code||error?.errno||"");
+ if(/^(ETIMEDOUT|ESOCKETTIMEDOUT|UND_ERR_CONNECT_TIMEOUT|UND_ERR_HEADERS_TIMEOUT|UND_ERR_BODY_TIMEOUT|ETIME)$/.test(code))return true;
+ return /timeout/i.test(code);
+}
+function isNetworkError(error){
+ const code=String(error?.code||error?.errno||"");
+ if(/^(ECONNRESET|ECONNREFUSED|ENOTFOUND|EAI_AGAIN|ECONNABORTED|EHOSTUNREACH|ENETUNREACH|EPIPE)$/.test(code))return true;
+ return code==="api_connection_error"||stripeType(error)==="api_connection_error";
+}
+function isGcsPermission(error){
+ const code=error?.code??error?.statusCode??error?.status;
+ if(code===403||code==="403")return true;
+ const reason=[error?.code,error?.reason,error?.errors?.[0]?.reason].filter(item=>typeof item==="string").join(" ");
+ return /permission[-_ ]?denied|^forbidden$|storage\/unauthorized/i.test(reason);
+}
+// Permanent classes cannot succeed on another try. Everything else stays
+// retryable until the attempt cap: 5xx, network, timeouts, and 429.
+function classifyDeletionError(error){
+ const items=errorChain(error);
+ for(const item of items){
+  // resource_missing is success at the call site. If it still arrives here, it is
+  // not an invalid_request failure and must not become permanent.
+  if(item?.code==="resource_missing"||item?.raw?.code==="resource_missing")continue;
+  const type=stripeType(item);
+  if(type==="authentication_error")return {permanent:true,failureReason:"stripe_authentication_error"};
+  if(type==="permission_error")return {permanent:true,failureReason:"stripe_permission_error"};
+  if(type==="invalid_request_error")return {permanent:true,failureReason:"stripe_invalid_request"};
+ }
+ if(items.some(item=>item?.ownPrefix===true)&&items.some(isGcsPermission))
+  return {permanent:true,failureReason:"gcs_permission_denied"};
+ for(const item of items){
+  const status=httpStatus(item);
+  if(stripeType(item)==="rate_limit_error"||status===429||item?.code==="rate_limit_error")
+   return {permanent:false,failureReason:"rate_limited"};
+ }
+ if(items.some(isTimeoutError))return {permanent:false,failureReason:"timeout"};
+ if(items.some(isNetworkError))return {permanent:false,failureReason:"network"};
+ for(const item of items){
+  const status=httpStatus(item);
+  if(stripeType(item)==="api_error"||(status>=500&&status<=599))
+   return {permanent:false,failureReason:"upstream_unavailable"};
+ }
+ return {permanent:false,failureReason:"deletion_step_failed"};
+}
 function plainJob(job){
  const steps={...(job.steps||{})};
  if(steps.prefixes)steps.prefixes={...steps.prefixes};
  const data={jobId:job.jobId,accountHash:job.accountHash,status:job.status,steps,
   canceledIds:[...(job.canceledIds||[])],subscriptionIds:[...(job.subscriptionIds||[])],
   customerId:job.customerId||null,retryable:job.retryable===true,failure:job.failure||null,
+  failureReason:typeof job.failureReason==="string"?job.failureReason:null,
+  attempts:Number.isInteger(job.attempts)&&job.attempts>0?job.attempts:0,
   statusTokens:(job.statusTokens||[]).map(item=>({hash:item.hash,expiresAtMs:item.expiresAtMs}))};
  if(job.lease&&typeof job.lease.owner==="string"&&typeof job.lease.expiresAtMs==="number")
   data.lease={owner:job.lease.owner,expiresAtMs:job.lease.expiresAtMs};
@@ -91,6 +170,9 @@ function createAccountDeletion({db,stripe,bucket,auth,byoProviders,hash,now}){
   job.canceledIds=[...new Set([...(stored.canceledIds||[]),...(job.canceledIds||[])])];
   job.subscriptionIds=[...new Set([...(stored.subscriptionIds||[]),...(job.subscriptionIds||[])])];
   if(!job.customerId&&stored.customerId)job.customerId=stored.customerId;
+  const storedAttempts=Number.isInteger(stored.attempts)?stored.attempts:0;
+  const liveAttempts=Number.isInteger(job.attempts)?job.attempts:0;
+  job.attempts=Math.max(storedAttempts,liveAttempts);
   if(!job.uid&&stored.uid)job.uid=stored.uid;
   if(stored.accountHash)job.accountHash=stored.accountHash;
   if(stored.jobId)job.jobId=stored.jobId;
@@ -122,6 +204,8 @@ function createAccountDeletion({db,stripe,bucket,auth,byoProviders,hash,now}){
    steps:{...(data.steps||{}),prefixes:{...(data.steps?.prefixes||{})}},
    canceledIds:[...(data.canceledIds||[])],subscriptionIds:[...(data.subscriptionIds||[])],
    customerId:data.customerId||null,retryable:data.retryable===true,failure:data.failure||null,
+   failureReason:typeof data.failureReason==="string"?data.failureReason:null,
+   attempts:Number.isInteger(data.attempts)&&data.attempts>0?data.attempts:0,
    statusTokens:(data.statusTokens||[]).map(item=>({hash:item.hash,expiresAtMs:item.expiresAtMs})),
    lease:data.lease?{owner:data.lease.owner,expiresAtMs:data.lease.expiresAtMs}:null,inflight:false};
  }
@@ -229,8 +313,15 @@ function createAccountDeletion({db,stripe,bucket,auth,byoProviders,hash,now}){
   if(job.customerId&&typeof stripe?.subscriptions?.list==="function"){
    let startingAfter;
    do{
-    const page=await stripe.subscriptions.list({customer:job.customerId,status:"all",limit:100,
-     ...(startingAfter?{starting_after:startingAfter}:{})});
+    let page;
+    try{
+     page=await stripe.subscriptions.list({customer:job.customerId,status:"all",limit:100,
+      ...(startingAfter?{starting_after:startingAfter}:{})});
+    }catch(error){
+     // A missing customer has nothing to cancel. Other invalid requests fail the job.
+     if(isMissing(error))break;
+     throw error;
+    }
     const rows=page?.data||[];
     for(const sub of rows){
      const subCustomer=typeof sub?.customer==="string"?sub.customer:sub?.customer?.id;
@@ -258,19 +349,32 @@ function createAccountDeletion({db,stripe,bucket,auth,byoProviders,hash,now}){
   }
  }
  async function deletePrefix(prefix){
-  await ignoreMissing(async()=>{
-   if(typeof bucket?.deleteFiles==="function"){
-    await bucket.deleteFiles({prefix,force:true});
-    return;
+  try{
+   await ignoreMissing(async()=>{
+    if(typeof bucket?.deleteFiles==="function"){
+     await bucket.deleteFiles({prefix,force:true});
+     return;
+    }
+    if(typeof bucket?.getFiles!=="function")return;
+    const listed=await bucket.getFiles({prefix});
+    const files=listed?.[0]||[];
+    for(const file of files){
+     if(typeof file?.delete==="function")await ignoreMissing(()=>file.delete({ignoreNotFound:true}));
+     else if(file?.name&&typeof bucket.file==="function")await ignoreMissing(()=>bucket.file(file.name).delete({ignoreNotFound:true}));
+    }
+   });
+  }catch(error){
+   // deletePrefix is only called for this account's customer/ and tenants/ folders.
+   if(isGcsPermission(error)){
+    try{error.ownPrefix=true;}catch(_){/* frozen */}
+    if(error.ownPrefix===true)throw error;
+    const wrapped=refusal(403,"gcs_permission_denied");
+    wrapped.cause=error;
+    wrapped.ownPrefix=true;
+    throw wrapped;
    }
-   if(typeof bucket?.getFiles!=="function")return;
-   const listed=await bucket.getFiles({prefix});
-   const files=listed?.[0]||[];
-   for(const file of files){
-    if(typeof file?.delete==="function")await ignoreMissing(()=>file.delete({ignoreNotFound:true}));
-    else if(file?.name&&typeof bucket.file==="function")await ignoreMissing(()=>bucket.file(file.name).delete({ignoreNotFound:true}));
-   }
-  });
+   throw error;
+  }
  }
  async function deleteTree(collectionRef){
   const snap=await collectionRef.get();
@@ -361,37 +465,40 @@ function createAccountDeletion({db,stripe,bucket,auth,byoProviders,hash,now}){
     job.status="done";
     job.retryable=false;
     job.failure=null;
+    job.failureReason=null;
     await commitCheckpoint(job);
     return;
    }
    try{await performBatch(job,kind);}
    catch(error){
-    const stored=await readJob(job.jobId);
-    const at=clock();
-    const own=stored?.lease?.owner===instanceId&&at<=stored?.lease?.expiresAtMs;
-    if(!own)return;
-    job.status="failed";
-    job.retryable=true;
-    job.failure=error?.code||"deletion_step_failed";
-    await commitCheckpoint(job);
-    console.error("account deletion job failed",job.jobId,job.failure);
+    await failJob(job,error);
     return;
    }
    if(!(await commitCheckpoint(job)))return;
   }
+ }
+ async function failJob(job,error){
+  const stored=await readJob(job.jobId);
+  const at=clock();
+  const own=stored?.lease?.owner===instanceId&&typeof stored?.lease?.expiresAtMs==="number"&&at<=stored.lease.expiresAtMs;
+  if(!own)return;
+  const classified=classifyDeletionError(error);
+  const prior=Math.max(Number.isInteger(job.attempts)?job.attempts:0,Number.isInteger(stored?.attempts)?stored.attempts:0);
+  job.attempts=prior+1;
+  job.status="failed";
+  job.failureReason=classified.failureReason;
+  job.failure=classified.failureReason;
+  job.retryable=classified.permanent!==true&&job.attempts<MAX_FAILED_ATTEMPTS;
+  try{await commitCheckpoint(job);}catch(_){/* status remains failed in memory */}
+  console.error("account deletion job failed",job.jobId,job.failureReason);
  }
  function schedule(job){
   if(job.inflight||job.status==="done")return;
   job.inflight=true;
   job.promise=(async()=>{
    try{await runJob(job);}
-   catch(error){
-    job.status="failed";
-    job.retryable=true;
-    job.failure=error?.code||"deletion_step_failed";
-    try{await commitCheckpoint(job);}catch(_){/* status remains failed in memory */}
-    console.error("account deletion job failed",job.jobId,job.failure);
-   }finally{job.inflight=false;}
+   catch(error){await failJob(job,error);}
+   finally{job.inflight=false;}
   })();
  }
  async function firebaseUserGone(uid){
@@ -441,6 +548,7 @@ function createAccountDeletion({db,stripe,bucket,auth,byoProviders,hash,now}){
    existing.uid=existing.uid||uid;
    existing.status="queued";
    existing.failure=null;
+   existing.failureReason=null;
    const {statusToken,claimed}=await issueStatusToken(existing,{claim:true});
    if(claimed)schedule(existing);
    return {status:202,jobId:existing.jobId,statusToken,httpStatus:"queued"};
@@ -452,7 +560,8 @@ function createAccountDeletion({db,stripe,bucket,auth,byoProviders,hash,now}){
    return {status:202,jobId:existing.jobId,statusToken};
   }
   const job={jobId:crypto.randomUUID(),accountHash:owner,uid,status:"queued",steps:{},
-   canceledIds:[],subscriptionIds:[],customerId:null,retryable:true,failure:null,inflight:false,statusTokens:[]};
+   canceledIds:[],subscriptionIds:[],customerId:null,retryable:true,failure:null,failureReason:null,
+   attempts:0,inflight:false,statusTokens:[]};
   jobs.set(job.jobId,job);
   const {statusToken,claimed}=await issueStatusToken(job,{claim:true});
   if(claimed)schedule(job);

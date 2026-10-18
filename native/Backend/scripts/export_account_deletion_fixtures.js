@@ -191,21 +191,6 @@ async function main(){
   publish("retry-after-failed",again,[created.response.body.statusToken,again.response.body.statusToken]);
  }finally{await failed.close();}
 
- const blockedId="00000000-0000-4000-8000-0000000000aa";
- const blockedOwner=hash("owner");
- const blockedRecord={jobId:blockedId,accountHash:blockedOwner,uid:"owner",status:"failed",retryable:false,
-  failure:"blocked",steps:{stripe:true},statusTokens:[],canceledIds:[],subscriptionIds:[],customerId:null};
- const blocked=await listen({rows:[
-  ["account_deletions/"+blockedOwner,blockedRecord],
-  ["deletion_jobs/"+blockedId,blockedRecord],
- ]});
- try{
-  const denied=await capture(blocked.base,"DELETE","/v2/account",{body:{confirm:"DELETE"}});
-  if(denied.response.status!==409||denied.response.body?.error!=="deletion_not_retryable"||denied.response.body?.jobId!==blockedId||denied.response.body?.statusToken)
-   throw Error("not retryable "+JSON.stringify(denied.response));
-  publish("retry-not-retryable",denied);
- }finally{await blocked.close();}
-
  let clock=NOW;
  const finished=await listen({now:()=>clock});
  try{
@@ -248,5 +233,24 @@ async function main(){
   publish("status-unauthorized",missingHeader,[created.response.body.statusToken]);
   await pollUntil(polled.base,created.response.body.jobId,created.response.body.statusToken,"done");
  }finally{await polled.close();}
+
+ const permanent=await listen({
+  rows:[["gd_accounts/"+hash("owner"),{stripeCustomerId:"cus_fixture"}]],
+  stripe:stripeDouble({cancel:async()=>{throw Object.assign(Error("stripe key rejected"),{type:"authentication_error",statusCode:401});}}),
+ });
+ try{
+  const created=await capture(permanent.base,"DELETE","/v2/account",{body:{confirm:"DELETE"}});
+  if(created.response.status!==202)throw Error("permanent create "+JSON.stringify(created.response));
+  const status=await pollUntil(permanent.base,created.response.body.jobId,created.response.body.statusToken,"failed");
+  const body=status.response.body||{};
+  if(status.response.status!==200||body.status!=="failed"||body.retryable!==false||body.jobId!==created.response.body.jobId)
+   throw Error("permanent status "+JSON.stringify(status.response));
+  if(body.failureReason||body.attempts||body.statusToken)throw Error("status leaked "+JSON.stringify(body));
+  publish("status-failed-not-retryable",status,[created.response.body.statusToken]);
+  const denied=await capture(permanent.base,"DELETE","/v2/account",{body:{confirm:"DELETE"}});
+  if(denied.response.status!==409||denied.response.body?.error!=="deletion_not_retryable"||denied.response.body?.jobId!==created.response.body.jobId||denied.response.body?.statusToken)
+   throw Error("not retryable "+JSON.stringify(denied.response));
+  publish("retry-not-retryable",denied,[created.response.body.statusToken]);
+ }finally{await permanent.close();}
 }
 main().catch(error=>{console.error(error);process.exit(1);});
