@@ -146,7 +146,7 @@ test("byo secrets: server rejects any payload with provider secrets and never pe
       accessKey:secret,secretAccessKey:secret,password:secret,privateKey:secret}),{status:400,code:"BYO_SECRET_REJECTED"});
     const response=await fetch("http://127.0.0.1:"+server.address().port+"/v2/workspaces/"+idFor(1)+"/byo/register",{method:"POST",headers:{"Content-Type":"application/json"},
       body:JSON.stringify({provider:"sftp",endpoint:"sftp://files.example",hostFingerprint:"b".repeat(16),password:secret,privateKey:secret})});
-    const body=await response.json();assert.equal(response.status,400);assert.equal(body.code,"BYO_SECRET_REJECTED");
+    const body=await response.json();assert.equal(response.status,400);assert.equal(body.error,"BYO_SECRET_REJECTED");
     f.put(idFor(1),{kind:"byo",projectStatus:"pending_activation",name:"BYO workspace"});
     const savedByo=await f.service.registerByo(f.req,idFor(1),{provider:"r2",endpoint:"https://acct.r2.cloudflarestorage.com",bucketFingerprint:"cd".repeat(8)});
     assert.deepEqual(savedByo,{providerType:"s3",endpoint:"https://acct.r2.cloudflarestorage.com",bucketFingerprint:"cd".repeat(8),byoRegistered:true,updatedAt:1});

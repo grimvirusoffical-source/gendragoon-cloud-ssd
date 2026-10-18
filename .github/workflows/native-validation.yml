@@ -4,7 +4,7 @@ on:
   push:
     branches: [codex/native-integration-20261017]
   pull_request:
-    paths: ['native/**', 'macos/**', '.github/workflows/native-validation.yml']
+    paths: ['native/**', 'macos/**', 'fixtures/**', '.github/workflows/native-validation.yml']
   workflow_dispatch:
 
 permissions:

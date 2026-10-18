@@ -95,7 +95,7 @@ Ownership is `accountHash` on UUID workspaces and `accountKey` on the legacy fre
 
 BYO uses the same $5/month workspace fee, the same cap, and the same lapse and lock rules. Performance tiers stay separate paid add-ons.
 
-Launch providers are S3-compatible only, stored as `providerType: "s3"`: AWS, Cloudflare R2, Backblaze B2, Wasabi, MinIO, and GCS via S3 keys. Aliases `aws`, `r2`, `cloudflare`, `backblaze`, `b2`, `wasabi`, `minio`, `gcs`, and `google` normalize to `s3`. SFTP, Azure, and WebDAV are not launch providers. `POST /v2/workspaces/:id/byo/register` with one of those returns **422** `{error: "byo_provider_unsupported", code: "byo_provider_unsupported", provider}`. Secret fields are rejected first, so a body that also contains a password still returns **400** `BYO_SECRET_REJECTED`.
+Launch providers are S3-compatible only, stored as `providerType: "s3"`: AWS, Cloudflare R2, Backblaze B2, Wasabi, MinIO, and GCS via S3 keys. Aliases `aws`, `r2`, `cloudflare`, `backblaze`, `b2`, `wasabi`, `minio`, `gcs`, and `google` normalize to `s3`. SFTP, Azure, and WebDAV are not launch providers. `POST /v2/workspaces/:id/byo/register` with one of those returns **422** `{error: "byo_provider_unsupported", provider}`. Error codes are the `error` string. Responses do not include a `code` field. Secret fields are rejected first, so a body that also contains a password still returns **400** `BYO_SECRET_REJECTED`.
 
 The server stores `providerType`, `endpoint`, and `bucketFingerprint`. Credentials never reach the server. A body that contains `accessKey`, `secretAccessKey`, `password`, `privateKey`, `private_key`, `serviceAccount`, `keyFile`, `pem`, a `BEGIN PRIVATE KEY` block, or pasted service-account JSON returns **400** `BYO_SECRET_REJECTED`. The value is not written to Firestore and is not logged.
 
@@ -114,6 +114,8 @@ Challenge errors: `BYO_CHALLENGE_MISMATCH`, `BYO_CHALLENGE_EXPIRED`, `BYO_CHALLE
 The legacy `POST /v2/workspaces/:id/manual-provider` route still records a local label, and it now rejects secret fields the same way. It does not by itself verify a challenge.
 
 ## Merge
+
+`POST /v2/workspaces/:sourceId/merge/preview` returns the same ownership and `confirmName` checks without copying. Its `files` list includes each source name and `renamedTo` (`name (from <sourceName>)`, then `2`, `3`, …) so a client can show the conflict rename before it commits.
 
 `POST /v2/workspaces/:sourceId/merge`
 

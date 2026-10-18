@@ -48,7 +48,7 @@ test('an exactly matching legacy draft resumes without writes or charges and kee
  assert.equal(first.body.quote.workspaceFeeCents,500);assert.equal(first.body.quote.totalCents,1140);
  assert.deepEqual(f.rows,before);assert.equal(f.created.length,0);
  const changed=await f.post('/v2/workspaces/draft',{...selection,tier:'6TB'});
- assert.equal(changed.status,409);assert.equal(changed.body.code,'INTENT_CONFLICT');assert.deepEqual(f.rows,before);
+ assert.equal(changed.status,409);assert.equal(changed.body.error,'INTENT_CONFLICT');assert.deepEqual(f.rows,before);
 });
 test('an existing annual BYO draft replays its original contract without migration or a project fee',async t=>{
  const f=await fixture(t,{name:selection.name,kind:'byo',storageTier:null,storageMode:null,storageInterval:'year',storageActive:false,provisioned:false});
@@ -60,7 +60,7 @@ test('unknown legacy creation intents receive an update requirement before any w
  const f=await fixture(t),before=structuredClone(f.rows);
  for(const body of [selection,{...selection,intentId:undefined},{name:selection.name,mode:'byo',interval:'year',intentId:selection.intentId}]){
    const result=await f.post('/v2/workspaces/draft',body);assert.equal(result.status,426);
-   assert.equal(result.body.code,'CLIENT_UPDATE_REQUIRED');assert.match(result.body.error,/Update GenDragoon.*\$5 once/);
+   assert.equal(result.body.error,'CLIENT_UPDATE_REQUIRED');assert.match(result.body.message,/Update GenDragoon.*\$5 once/);
    assert.equal(result.body.workspaceId,undefined);assert.equal(result.body.url,undefined);
  }
  assert.deepEqual(f.rows,before);assert.equal(f.created.length,0);assert.equal(f.expired.length,0);

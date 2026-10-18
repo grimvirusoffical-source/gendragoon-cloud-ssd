@@ -8,7 +8,7 @@ const {FREE_WORKSPACES,WORKSPACE_FEE_CENTS,BASE_CAP,RAISED_CAP,QUALIFYING_STORAG
  monthlyPriceId,isGrandfathered,evaluateLapse,projectStatus,activatedBasicProject,
  qualifiesForRaisedCap:qualifiesForHigherLimit,summarizeProjects,lockBody,publicByoRegistration,rejectProviderSecrets,
  issueChallenge,verifyChallenge,collisionName,fileDigest,storedChecksums,checksumsAgree,invoicePaidThroughMs,isPrivateAddress,
- listAccountProjects}=policy;
+ listAccountProjects,BYO_CHALLENGE_TTL_MS}=policy;
 const PROJECT_FEE_CENTS=WORKSPACE_FEE_CENTS,DEFAULT_PROJECT_LIMIT=BASE_CAP,QUALIFIED_PROJECT_LIMIT=RAISED_CAP;
 const BASIC_QUOTA_BYTES=2_000_000_000;
 const UUID=/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
@@ -367,7 +367,12 @@ function createProjectService({db,stamp,hash,stripe,env={},prices={},ensureCusto
  async function registerByo(req,id,body){
    let registration;
    try{registration=publicByoRegistration(body);}catch(error){
-     if(error.status)throw new ProjectError(error.status,error.message,error.code);throw error;
+     if(error.status){
+       const wrapped=new ProjectError(error.status,error.message,error.code);
+       if(error.provider)wrapped.provider=error.provider;
+       throw wrapped;
+     }
+     throw error;
    }
    const owner=hash(req.user.uid),ref=refFor(owner,id);
    return db.runTransaction(async tx=>{
@@ -393,7 +398,7 @@ function createProjectService({db,stamp,hash,stripe,env={},prices={},ensureCusto
      if(!snap.data().providerType)throw new ProjectError(409,"Register the provider before requesting a challenge","BYO_NOT_REGISTERED");
      tx.update(ref,{byoChallenge:challenge,byoChallengeVerified:false,updatedAt:stamp()});
    });
-   return {nonce:challenge.nonce,expiresAtMs:challenge.expiresAtMs,ttlMs:policy.BYO_CHALLENGE_TTL_MS};
+   return {nonce:challenge.nonce,expiresAtMs:challenge.expiresAtMs,ttlMs:BYO_CHALLENGE_TTL_MS};
  }
  function challengeError(status,message,code){return new ProjectError(status,message,code);}
  function endpointHost(value){
@@ -491,6 +496,22 @@ function createProjectService({db,stamp,hash,stripe,env={},prices={},ensureCusto
    }
    if(workspaceFeePaid&&current.projectStatus==="lapsed")patch.projectStatus="active";
    await ref.update(patch);return true;
+ }
+ async function mergePreview(req,sourceId,{targetId,confirmName}={}){
+   if(!safeProjectId(sourceId)||!safeProjectId(targetId)||sourceId===targetId)throw new ProjectError(400,"Choose two different workspaces","INVALID_MERGE");
+   const owner=hash(req.user.uid),sourceRef=refFor(owner,sourceId),targetRef=refFor(owner,targetId);
+   const [source,target]=await Promise.all([sourceRef.get(),targetRef.get()]);
+   if(!source.exists||!owned(source.data(),owner,sourceId))throw new ProjectError(404,"Project not found","PROJECT_NOT_FOUND");
+   if(!target.exists||!owned(target.data(),owner,targetId))throw new ProjectError(404,"Project not found","PROJECT_NOT_FOUND");
+   if(confirmName!==source.data().name)throw new ProjectError(400,"Enter the exact source workspace name","CONFIRM_NAME_REQUIRED");
+   const taken=new Set((await listFiles(targetRef)).map(file=>file.data.name));
+   const files=[];
+   for(const file of await listFiles(sourceRef)){
+     const renamedTo=collisionName(file.data.name,source.data().name,taken);
+     taken.add(renamedTo);
+     files.push({name:file.data.name,renamedTo,sizeBytes:file.data.sizeBytes||0});
+   }
+   return {sourceId,targetId,confirmName,files};
  }
  async function merge(req,sourceId,{targetId,confirmName}={}){
    if(!safeProjectId(sourceId)||!safeProjectId(targetId)||sourceId===targetId)throw new ProjectError(400,"Choose two different workspaces","INVALID_MERGE");
@@ -633,7 +654,7 @@ function createProjectService({db,stamp,hash,stripe,env={},prices={},ensureCusto
    for(const id of ids)await cancel(id,{},{idempotencyKey:"gd-merge-"+mergeId+"-cancel-"+id});
  }
  return {inventory,get,create,setSelection,checkout,archive,restore,withLease,reconcilePayment,revokePayment,
-   registerByo,issueByoChallenge,verifyByo,reconcileWorkspaceFee,merge,
+   registerByo,issueByoChallenge,verifyByo,reconcileWorkspaceFee,mergePreview,merge,
    paymentAvailable,monthlyReady,refFor,legacyRef,policy,hasContinuingBilling};
 }
 module.exports={createProjectService,ProjectError,projectStatus,activatedBasicProject,effectiveStorageQuota,

@@ -169,7 +169,11 @@ app.post("/v1/free",auth,requireWrite,express.json({limit:"4kb"}),async(req,res)
    const result=await freeProjectPolicy.create(req,{name,legacyFree:true});
    res.status(201).json({created:true,name,quotaBytes:QUOTA,workers:1,policy:result.policy});
  }catch(e){
-   if(e instanceof ProjectError)return res.status(e.status).json({error:e.message,code:e.code});
+   if(e instanceof ProjectError){
+     const body={error:e.code};
+     if(e.message&&e.message!==e.code)body.message=e.message;
+     return res.status(e.status).json(body);
+   }
    if(e.code===6||e.message?.includes("ALREADY_EXISTS"))return res.status(409).json({error:"Free workspace already exists"});
    res.status(503).json({error:"Unable to create free workspace"});
  }
