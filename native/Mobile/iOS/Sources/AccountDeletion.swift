@@ -296,7 +296,8 @@ struct AccountDeletion:Equatable {
         if supportRefresh {
             supportRefresh=false
             let ok = !exchange.failed && (exchange.body.map{$0.status>=200 && $0.status<300} ?? false)
-            let refreshed = ok ? exchange.body?.jobStatus : nil
+            // Same as core caf30ae: the body must be a status for this job (queued, running, done or failed).
+            let refreshed:String? = ok && jobId != nil && exchange.body?.jobId == jobId ? exchange.body?.jobStatus : nil
             if ok,let body=exchange.body,refreshed=="running" || refreshed=="queued" {
                 // Still running: no mailto and no error.
                 lastHttp=body

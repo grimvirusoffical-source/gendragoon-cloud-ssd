@@ -1096,6 +1096,20 @@ final class AccountLogicTests: XCTestCase {
         }
     }
 
+    func testSupportRefreshForAnotherJobFallsBack() async {
+        let dead=fixture("status-failed-not-retryable")
+        for value in ["running","queued","done"] {
+            var flow=await refreshing(dead)
+            let s=ScriptedDeletionTransport();s.respond(status("00000000-0000-4000-8000-0000000000ff",value));await flow.pollThrough(s)
+            XCTAssertTrue(flow.openSupportMailto,value)
+            XCTAssertEqual(flow.step,.failed)
+            XCTAssertFalse(flow.requestsWipe())
+        }
+        var missing=await refreshing(dead)
+        let m=ScriptedDeletionTransport();m.respond(AccountHttp.parse(status:200,data:Data("{\"status\":\"running\"}".utf8)));await missing.pollThrough(m)
+        XCTAssertTrue(missing.openSupportMailto)
+    }
+
     func testSupportSavedJobReadFailureFallsBackToMailto() {
         let job=fixture("status-failed-not-retryable").jobId ?? ""
         XCTAssertNil(DeletionSupport.savedJob{throw ReplacementFailure.offline})

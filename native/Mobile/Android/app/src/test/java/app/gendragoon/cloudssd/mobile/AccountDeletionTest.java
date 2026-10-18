@@ -1092,6 +1092,20 @@ public final class AccountDeletionTest {
         }
     }
 
+    @Test public void supportRefreshForAnotherJobFallsBack(){
+        AccountActions.HttpBody dead=fixture("status-failed-not-retryable");
+        for(String status:new String[]{"running","queued","done"}){
+            AccountDeletion flow=refreshing(dead);
+            flow.pollThrough(new Script().respond(AccountActions.parse(200,"{\"jobId\":\"00000000-0000-4000-8000-0000000000ff\",\"status\":\""+status+"\"}")));
+            assertTrue(status,flow.openSupportMailto);
+            assertEquals(AccountDeletion.Step.FAILED,flow.step);
+            assertFalse(flow.requestsWipe());
+        }
+        AccountDeletion missing=refreshing(dead);
+        missing.pollThrough(new Script().respond(AccountActions.parse(200,"{\"status\":\"running\"}")));
+        assertTrue(missing.openSupportMailto);
+    }
+
     @Test public void supportSavedJobReadFailureFallsBackToMailto(){
         String job=fixture("status-failed-not-retryable").jobId;
         assertNull(DeletionSupport.savedJob(()->{throw new java.security.KeyStoreException("keystore unavailable");}));

@@ -396,7 +396,8 @@ final class AccountDeletion {
         if(!keepsPolling())return;
         if(supportRefresh){
             boolean ok=exchange!=null&&!exchange.failed&&exchange.body!=null&&exchange.body.status>=200&&exchange.body.status<300;
-            String refreshed=ok?exchange.body.jobStatus:null;
+            // Same as core caf30ae: the body must be a status for this job (queued, running, done or failed).
+            String refreshed=ok&&jobId!=null&&jobId.equals(exchange.body.jobId)?exchange.body.jobStatus:null;
             supportRefresh=false;
             if(ok&&("running".equals(refreshed)||"queued".equals(refreshed))){
                 // Still running: no mailto and no error.

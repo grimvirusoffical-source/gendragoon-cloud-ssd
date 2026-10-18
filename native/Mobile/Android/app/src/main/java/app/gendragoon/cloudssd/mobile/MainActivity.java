@@ -327,7 +327,7 @@ public final class MainActivity extends AppCompatActivity {
                 space(content,8);content.addView(button("Cancel",this::cancelDeletion));
                 if(!deletionSignInStarted){deletionSignInStarted=true;beginDeletionSignIn();}
             }
-            case DELETING, POLLING -> {content.addView(text(deletion.step==AccountDeletion.Step.POLLING?"Deleting your account…":"Starting deletion…",15,false));}
+            case DELETING, POLLING -> {TextView progress=text(AccountDeletion.STILL_IN_PROGRESS.equals(deletion.message)?AccountDeletion.STILL_IN_PROGRESS:deletion.step==AccountDeletion.Step.POLLING?"Deleting your account…":"Starting deletion…",15,false);progress.setAccessibilityLiveRegion(View.ACCESSIBILITY_LIVE_REGION_POLITE);content.addView(progress);}
             case DONE -> {
                 if(wiping)content.addView(text("Removing this device's copy of your account…",15,false));
                 else{content.addView(text(deletion.message==null?"Local data could not be removed.":deletion.message,15,false));space(content,12);content.addView(button("Retry",this::finishDeletionLocally));}

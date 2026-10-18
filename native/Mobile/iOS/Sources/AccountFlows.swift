@@ -116,7 +116,7 @@ struct CloudDeletionTransport:DeletionTransport {
                         Button("Sign in again"){Task{await authenticateAndDelete()}}.buttonStyle(.borderedProminent).disabled(working)
                     case .deleting,.polling:
                         ProgressView()
-                        Text(model.flow.step == .polling ? "Deleting your account…" : "Starting deletion…")
+                        Text(model.flow.message == AccountDeletion.stillInProgress ? AccountDeletion.stillInProgress : model.flow.step == .polling ? "Deleting your account…" : "Starting deletion…")
                     case .done:
                         if working { ProgressView(); Text("Removing this device's copy of your account…") }
                         else { Text(model.flow.message ?? "Local data could not be removed."); Button("Retry"){Task{await wipe()}} }
