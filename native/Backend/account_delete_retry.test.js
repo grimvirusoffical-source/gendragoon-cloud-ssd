@@ -138,15 +138,23 @@ test("deletion 401s are reauth_required or invalid_token, never a bare 401",asyn
  await assert.rejects(f.svc.deleteAccount({}),{status:401,code:"invalid_token"});
  const started=await f.svc.deleteAccount(f.fresh);
  assert.equal((await untilDone(f.svc,started.jobId)).status,"done");
- const before=f.canceled.length;
- await assert.rejects(f.svc.deleteAccount(f.fresh),{status:401,code:"invalid_token"});
- const stale={user:{uid,auth_time:Math.floor(NOW/1000)-6*60}};
- await assert.rejects(f.svc.deleteAccount(stale),(error)=>{
-  assert.equal(error.status,401);
-  assert.equal(error.code,"invalid_token");
-  assert.notEqual(error.code,"reauth_required");
-  return true;
- });
+  const before=f.canceled.length;
+  await assert.rejects(f.svc.deleteAccount(f.fresh),error=>{
+   assert.equal(error.status,410);
+   assert.equal(error.code,"account_deleted");
+   assert.equal(error.jobId,started.jobId);
+   assert.match(error.statusToken,/^[A-Za-z0-9_-]{43}$/);
+   return true;
+  });
+  const stale={user:{uid,auth_time:Math.floor(NOW/1000)-6*60}};
+  await assert.rejects(f.svc.deleteAccount(stale),error=>{
+   assert.equal(error.status,410);
+   assert.equal(error.code,"account_deleted");
+   assert.equal(error.jobId,started.jobId);
+   assert.match(error.statusToken,/^[A-Za-z0-9_-]{43}$/);
+   assert.notEqual(error.code,"reauth_required");
+   return true;
+  });
  assert.equal(f.canceled.length,before);
  assert.equal(f.auth.deletedUsers.length,1);
 });

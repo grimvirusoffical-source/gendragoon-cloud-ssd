@@ -48,8 +48,9 @@ test("production login chain: status token polls running then done after Terms a
  let termsReads=0;
  const gate=createLoginGate({
   verifyIdToken:async token=>{
+   // JWT-only, as free_server does. A deleted user's unexpired ID token still verifies.
    const user=tokens.get(token);
-   if(!user||!users.has(user.uid))throw Object.assign(Error("revoked"),{code:"auth/id-token-revoked"});
+   if(!user)throw Object.assign(Error("revoked"),{code:"auth/id-token-revoked"});
    return user;
   },
   fetchTerms:async uid=>{
@@ -137,13 +138,15 @@ test("production login chain: status token polls running then done after Terms a
   assert.equal((await db.collection("accepted_terms").doc(uidA).get()).exists,false);
   assert.equal(users.has(uidA),false);
   const firebasePoll=await fetch(base+"/v2/account/deletions/"+started.jobId,{headers:{authorization:"Bearer good.token.userA"}});
-  assert.equal(firebasePoll.status,404);
+  assert.equal(firebasePoll.status,200);
+  assert.deepEqual(await firebasePoll.json(),{jobId:started.jobId,status:"done",retryable:false});
   const done=await fetch(base+"/v2/account/deletions/"+started.jobId,{headers:{authorization:"Bearer "+activeToken}});
   assert.equal(done.status,200);
   assert.deepEqual(await done.json(),{jobId:started.jobId,status:"done",retryable:false});
   const stored=await db.collection("deletion_jobs").doc(started.jobId).get();
-  assert.equal(stored.data().statusTokenHash,crypto.createHash("sha256").update(activeToken).digest("hex"));
-  assert.equal(stored.data().statusTokenExpiresAt,NOW+STATUS_TOKEN_TTL_MS);
+  const activeHash=crypto.createHash("sha256").update(activeToken).digest("hex");
+  assert.ok(stored.data().statusTokens.some(item=>item.hash===activeHash));
+  assert.equal(stored.data().statusTokens.find(item=>item.hash===activeHash).expiresAtMs,NOW+STATUS_TOKEN_TTL_MS);
   assert.equal(JSON.stringify(stored.data()).includes(started.statusToken),false);
   assert.equal(JSON.stringify(stored.data()).includes(activeToken),false);
   const other=await fetch(base+"/v2/account",{method:"DELETE",headers:{authorization:"Bearer good.token.userB","content-type":"application/json"},body:JSON.stringify({confirm:"DELETE"})});
@@ -185,10 +188,20 @@ test("repeat DELETE after a tombstone returns 410 with the same jobId and a fres
    }})};
   },
  });
+ const users=new Set([uid]);
  const auth={deletedUsers:[],revokeRefreshTokens:async()=>{},
-  deleteUser:async user=>{auth.deletedUsers.push(user);},
-  getUser:async user=>({uid:user}),
-  verifyIdToken:async user=>({uid:user})};
+  deleteUser:async user=>{
+   if(!users.has(user))throw Object.assign(Error("gone"),{code:"auth/user-not-found"});
+   users.delete(user);auth.deletedUsers.push(user);
+  },
+  getUser:async user=>{
+   if(!users.has(user))throw Object.assign(Error("gone"),{code:"auth/user-not-found"});
+   return {uid:user};
+  },
+  verifyIdToken:async user=>{
+   if(!users.has(user))throw Object.assign(Error("revoked"),{code:"auth/id-token-revoked"});
+   return {uid:user};
+  }};
  const app=express();
  app.use(express.json());
  app.get("/v2/session",gate.firebaseAuth,(req,res)=>res.json({ok:true,uid:req.user.uid}));
@@ -226,7 +239,8 @@ test("repeat DELETE after a tombstone returns 410 with the same jobId and a fres
   assert.equal(fresh.status,200);
   assert.deepEqual(await fresh.json(),{jobId:started.jobId,status:"done",retryable:false});
   const stale=await fetch(base+"/v2/account/deletions/"+started.jobId,{headers:{authorization:"Bearer "+started.statusToken}});
-  assert.equal(stale.status,404);
+  assert.equal(stale.status,200);
+  assert.deepEqual(await stale.json(),{jobId:started.jobId,status:"done",retryable:false});
   assertUnlogged(logs.lines,started.statusToken,body.statusToken);
  }finally{logs.restore();server.close();}
 });
