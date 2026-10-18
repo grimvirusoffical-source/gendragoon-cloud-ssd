@@ -2,7 +2,7 @@ import XCTest
 @testable import GenDragoonContract
 
 /// Support-request bodies are Riley's PR #6 fixtures. A missing-header 401 `unauthorized`
-/// uses the same outcome as the 404 fixture. Riley has not published `support-unauthorized` yet.
+/// uses the same outcome as the 404 fixture (`support-unauthorized.json`, from PR #6 at 0486412).
 final class SupportRequestTests: XCTestCase {
     func testReceivedAndRepeatShareTheRequestId() throws {
         let received = try GDFixtureFile.load("account-deletion", "support-received")
@@ -27,7 +27,10 @@ final class SupportRequestTests: XCTestCase {
         XCTAssertEqual(missing.status, 404)
         XCTAssertEqual(GDServerCode.read(missing.body), "not_found")
         let notFound = GDAccountContract.interpretSupportRequest(status: missing.status, json: missing.body)
-        let unauthorized = GDAccountContract.interpretSupportRequest(status: 401, json: ["error": "unauthorized"])
+        let published = try GDFixtureFile.load("account-deletion", "support-unauthorized")
+        XCTAssertEqual(published.status, 401)
+        XCTAssertEqual(GDServerCode.read(published.body), "unauthorized")
+        let unauthorized = GDAccountContract.interpretSupportRequest(status: published.status, json: published.body)
         XCTAssertEqual(notFound, .emailFallback)
         XCTAssertEqual(unauthorized, .emailFallback)
         XCTAssertFalse(GDAccountContract.supportRequestShowsSignIn(unauthorized))
