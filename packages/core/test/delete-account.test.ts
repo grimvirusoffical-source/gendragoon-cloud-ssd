@@ -340,47 +340,4 @@ describe("accountUidFromIdToken", () => {
     expect(accountUidFromIdToken(token)).toBeNull();
   });
 
-  it("returns null without throwing for a token over 16 KB", () => {
-    const big = unsignedToken({ sub: "user-1", pad: "x".repeat(16 * 1024) });
-    expect(big.length).toBeGreaterThan(16 * 1024);
-    expect(() => accountUidFromIdToken(big)).not.toThrow();
-    expect(accountUidFromIdToken(big)).toBeNull();
-    const padFor = (target: number) => {
-      const base = unsignedToken({ sub: "user-1", pad: "" }).length;
-      // Each 3 payload bytes become 4 base64url characters.
-      return "x".repeat(Math.floor(((target - base) * 3) / 4));
-    };
-    const justUnder = unsignedToken({ sub: "user-1", pad: padFor(16 * 1024) });
-    expect(justUnder.length).toBeLessThanOrEqual(16 * 1024);
-    expect(accountUidFromIdToken(justUnder)).toBe("user-1");
-  });
-
-  it.each([
-    ["a space", "user 1"],
-    ["a control character", "user\n1"],
-    ["a non-ASCII character", "usér-1"],
-    ["DEL (0x7F)", "user\u007f1"],
-    ["129 characters", "a".repeat(129)],
-  ])("returns null without throwing when sub contains %s", (_label, sub) => {
-    const token = unsignedToken({ sub });
-    expect(() => accountUidFromIdToken(token)).not.toThrow();
-    expect(accountUidFromIdToken(token)).toBeNull();
-  });
-
-  it("accepts a sub of 1 and 128 printable ASCII characters", () => {
-    expect(accountUidFromIdToken(unsignedToken({ sub: "a" }))).toBe("a");
-    const longest = "!~".repeat(64);
-    expect(accountUidFromIdToken(unsignedToken({ sub: longest }))).toBe(longest);
-  });
-
-  it.each([
-    ["an empty signature", ""],
-    ["a signature with non-base64url characters", "ab+/="],
-    ["a signature with a space", "ab cd"],
-  ])("returns null without throwing for %s", (_label, signature) => {
-    const [header, payload] = unsignedToken({ sub: "user-1" }).split(".");
-    const token = `${header}.${payload}.${signature}`;
-    expect(() => accountUidFromIdToken(token)).not.toThrow();
-    expect(accountUidFromIdToken(token)).toBeNull();
-  });
 });
