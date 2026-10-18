@@ -212,6 +212,7 @@ export function MobileRoot(props: {
           workspaceIds={workspaces.map((workspace) => workspace.id)}
           idToken={idToken}
           client={client}
+          apiBase={apiBase}
           onReauth={() => {
             setIdToken((token) => sessionTokenAfterAuthFailure("reauth", token));
             if (navigationRef.isReady()) navigationRef.navigate("SignIn");

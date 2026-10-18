@@ -11,7 +11,6 @@ import {
   byoErrorMessage,
   categorize,
   challengeObjectKey,
-  planMerge,
   planSummary,
   type LockAssessment,
   GenDragoonClient,
@@ -22,7 +21,7 @@ import {
   type WorkspaceRecord,
 } from "@gendragoon/core";
 import { colors, space, tapTarget, type as typeScale } from "./theme";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Linking, Pressable, StyleSheet, Text, View } from "react-native";
 import {
   applyAuthFailureSignal,
@@ -46,7 +45,7 @@ import {
   workspaceQuoteExplanation,
 } from "./pricing";
 import { WORKSPACE_BUSY_MESSAGE, graceBanner, isDeletingWorkspace, isWorkspaceBusy } from "./workspaceState";
-import { SUPPORT_REQUEST_ALREADY, SUPPORT_REQUEST_SENT } from "./supportRequest";
+import { SUPPORT_DELETION_STILL_RUNNING, SUPPORT_REQUEST_ALREADY, SUPPORT_REQUEST_SENT } from "./supportRequest";
 import { supportContactTarget } from "./supportContact";
 import { Banner, Button, Field, ProgressCard, Screen, SectionLabel, Title, cardStyle } from "./ui";
 
@@ -368,8 +367,23 @@ export function WorkspacesScreen(props: {
   const showPrice = props.pricingEnabled ?? WORKSPACE_PRICING_ENABLED;
   const feeText = additionalWorkspaceFeeText(props.additionalMonthlyCents);
   const rows = workspacesWithUnpaid(props.workspaces, props.unpaidIds);
-  const [sourceId, setSourceId] = useState(rows[0]?.id ?? "");
-  const [targetId, setTargetId] = useState(rows[1]?.id ?? "");
+  const [pickedSourceId, setSourceId] = useState(rows[0]?.id ?? "");
+  const [pickedTargetId, setTargetId] = useState(rows[1]?.id ?? "");
+  /**
+   * Picks are checked against `rows` on every render. A pick that is missing
+   * (refresh, deletion elsewhere, or a list that loaded after mount) resets to
+   * the first valid row, so a merge is never sent with an id that is not listed.
+   */
+  const rowIds = new Set(rows.map((row) => row.id));
+  const pickable = rows.filter((row) => !isDeletingWorkspace(row));
+  const sourceId = rowIds.has(pickedSourceId) ? pickedSourceId : pickable[0]?.id ?? "";
+  const targetId = rowIds.has(pickedTargetId) && pickedTargetId !== sourceId
+    ? pickedTargetId
+    : pickable.find((row) => row.id !== sourceId)?.id ?? "";
+  useEffect(() => {
+    if (pickedSourceId !== sourceId) setSourceId(sourceId);
+    if (pickedTargetId !== targetId) setTargetId(targetId);
+  }, [pickedSourceId, pickedTargetId, sourceId, targetId]);
   /** Merging needs two distinct workspaces. */
   const mergeable = rows.length >= 2;
   /** Server preview, error, or result stay visible, e.g. after a merge leaves one workspace. */
@@ -377,9 +391,7 @@ export function WorkspacesScreen(props: {
   const [pendingDeleteId, setPendingDeleteId] = useState<string | null>(null);
   const [busyMessage, setBusyMessage] = useState<string | null>(null);
   const deletingIds = new Set(rows.filter((workspace) => isDeletingWorkspace(workspace)).map((workspace) => workspace.id));
-  const localPreview = props.serverPreview || !sourceId || !targetId || sourceId === targetId
-    ? []
-    : planMerge([{ path: "Photos/cat.jpg" }], rows.find((row) => row.id === sourceId)?.name ?? "source", ["Photos/cat.jpg"]);
+  const canMerge = Boolean(sourceId && targetId) && sourceId !== targetId && !deletingIds.has(sourceId) && !deletingIds.has(targetId);
   async function confirmDelete(id: string) {
     try {
       await props.onDelete(id);
@@ -413,6 +425,7 @@ export function WorkspacesScreen(props: {
               accessibilityRole="button"
               accessibilityLabel={`Open ${workspace.name}`}
               testID={`open-${workspace.id}`}
+              style={styles.openRow}
               onPress={() => props.onOpen?.(workspace.id)}
             >
               <Text testID={`workspace-name-${workspace.id}`} style={styles.category}>{workspace.name}</Text>
@@ -483,7 +496,7 @@ export function WorkspacesScreen(props: {
       <SectionLabel>Merge workspaces</SectionLabel>
       <Text style={styles.help}>Copies every file from the source into the target. Name clashes are renamed, never overwritten.</Text>
       {mergeable && !props.serverPreview ? (
-        <Text style={styles.help}>{localPreview[0] ? `${localPreview[0].sourcePath} → ${localPreview[0].targetPath}` : "Choose two workspaces to preview a merge."}</Text>
+        <Text testID="merge-preview-hint" style={styles.help}>{canMerge ? "The server lists every file and any rename before anything is copied." : "Choose two workspaces to preview a merge."}</Text>
       ) : null}
       {props.serverPreview ? (
         <View testID="merge-preview" style={cardStyle()}>
@@ -541,8 +554,10 @@ export function WorkspacesScreen(props: {
         label="Merge"
         testID="merge-workspaces"
         accessibilityLabel="Merge source into target"
-        disabled={!sourceId || !targetId || sourceId === targetId || deletingIds.has(sourceId) || deletingIds.has(targetId)}
-        onPress={() => props.onMerge(sourceId, targetId)}
+        disabled={!canMerge}
+        onPress={() => {
+          if (canMerge) props.onMerge(sourceId, targetId);
+        }}
       />
       </>) : null}
     </Screen>
@@ -799,6 +814,7 @@ export function DeleteAccountScreen(props: {
   jobId?: string;
   /** Overrides the build flag in tests. Production reads `DELETION_SUPPORT_ENDPOINT_ENABLED`. */
   supportEndpointEnabled?: boolean;
+  /** Same API base the rest of the app uses (`MobileRoot`). Empty means no support request is sent. */
   apiBase?: string;
   supportFetch?: typeof fetch;
 }) {
@@ -895,32 +911,43 @@ export function DeleteAccountScreen(props: {
   async function contact() {
     const jobId = notice?.jobId ?? "";
     const enabled = props.supportEndpointEnabled ?? DELETION_SUPPORT_ENDPOINT_ENABLED;
-    if (enabled) {
+    // Without a configured API base there is no server to ask, so mail support directly.
+    const apiBase = props.apiBase?.trim();
+    if (enabled && apiBase) {
+      let result: Awaited<ReturnType<typeof requestDeletionSupport>> | null = null;
       try {
-        const result = await requestDeletionSupport(jobId, {
+        result = await requestDeletionSupport(jobId, {
           client: new GenDragoonClient({
-            baseUrl: props.apiBase ?? "https://api.example.test",
+            baseUrl: apiBase,
             getToken: async () => "",
             fetch: props.supportFetch,
           }),
           secureStore: props.secrets,
         });
-        if (result.kind === "received") {
-          setSupportNotice(SUPPORT_REQUEST_SENT);
-          return;
-        }
-        if (result.kind === "already_sent") {
-          setSupportNotice(SUPPORT_REQUEST_ALREADY);
-          return;
-        }
-        if (result.kind === "not_needed") {
-          applyStatus(result.status);
-          return;
-        }
-        await Linking.openURL(supportContactTarget(result.contact.value, jobId));
+      } catch {
+        // Any throw here (unexpected 2xx/3xx, body read error) still has to reach
+        // a human, and never sign-in: fall through to the support email.
+        result = null;
+      }
+      if (result?.kind === "received") {
+        setSupportNotice(SUPPORT_REQUEST_SENT);
         return;
-      } catch (error) {
-        showFailure(error);
+      }
+      if (result?.kind === "already_sent") {
+        setSupportNotice(SUPPORT_REQUEST_ALREADY);
+        return;
+      }
+      if (result?.kind === "not_needed") {
+        if (result.status.status === "done" || result.status.status === "failed") {
+          applyStatus(result.status);
+        } else {
+          // A 409 whose refresh says the job is still queued or running.
+          setSupportNotice(SUPPORT_DELETION_STILL_RUNNING);
+        }
+        return;
+      }
+      if (result?.kind === "fallback") {
+        await Linking.openURL(supportContactTarget(result.contact.value, jobId));
         return;
       }
     }
@@ -936,6 +963,7 @@ export function DeleteAccountScreen(props: {
       {notice?.progress ? <ProgressCard testID="deletion-progress" title={notice.message} /> : null}
       {notice && !notice.progress ? <Banner testID="deletion-error">{notice.message}</Banner> : null}
       {supportNotice === SUPPORT_REQUEST_SENT ? <Banner tone="info" testID="support-request-sent">{SUPPORT_REQUEST_SENT}</Banner> : null}
+      {supportNotice === SUPPORT_DELETION_STILL_RUNNING ? <Banner tone="info" testID="support-deletion-running">{SUPPORT_DELETION_STILL_RUNNING}</Banner> : null}
       {supportNotice === SUPPORT_REQUEST_ALREADY ? <Banner tone="info" testID="support-request-already">{SUPPORT_REQUEST_ALREADY}</Banner> : null}
       {notice?.support && __DEV__ && SUPPORT_CONTACT.isPlaceholder ? (
         <Text testID="support-placeholder-note" style={styles.devNote}>placeholder contact</Text>
@@ -989,17 +1017,18 @@ const styles = StyleSheet.create({
   label: { color: colors.text, fontSize: typeScale.bodySize },
   error: { color: colors.dangerText, fontSize: typeScale.helpSize },
   checkRow: { flexDirection: "row", alignItems: "center", gap: space.sm, minHeight: tapTarget },
-  checkbox: { width: 22, height: 22, borderRadius: 6, borderWidth: 1.5, borderColor: colors.secondaryBorder, alignItems: "center", justifyContent: "center" },
+  checkbox: { width: 22, height: 22, borderRadius: 6, borderWidth: 1.5, borderColor: colors.controlBorder, alignItems: "center", justifyContent: "center" },
   checkboxOn: { backgroundColor: colors.primary, borderColor: colors.primary },
   checkMark: { color: colors.primaryText, fontSize: 14, fontWeight: "700" },
   choices: { gap: space.sm },
   devNote: { color: colors.muted, fontSize: 12 },
   category: { color: colors.text, fontSize: typeScale.bodySize },
+  openRow: { minHeight: tapTarget, justifyContent: "center" },
   soon: { color: colors.muted, fontSize: typeScale.helpSize },
   input: {
     minHeight: tapTarget,
     borderWidth: 1,
-    borderColor: colors.line,
+    borderColor: colors.controlBorder,
     borderRadius: 12,
     color: colors.text,
     paddingHorizontal: space.md,

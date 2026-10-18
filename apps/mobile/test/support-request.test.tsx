@@ -266,7 +266,14 @@ describe("deletion support request", () => {
     expect(fixture.request.method).toBe("POST");
     expect(fixture.request.body).toBeNull();
     expect(fixture.response).toEqual({ status: 401, body: { error: "unauthorized" } });
-    // Required: the mobile copy is byte-identical to the one core vendors from cloud-ssd 0486412.
+    // Required: the mobile copy matches core's vendored copy (cloud-ssd 0486412) on content.
+    // It is not byte-for-byte: like every mobile fixture it starts with a Source-SHA /
+    // Source-Path header and a blank line, which are dropped before comparing.
+    expect(readFileSync(path.join(__dirname, "fixtures/account-deletion/support-unauthorized.json"), "utf8").split("\n").slice(0, 3)).toEqual([
+      `Source-SHA: ${SUPPORT_UNAUTHORIZED_SHA}`,
+      "Source-Path: fixtures/account-deletion/support-unauthorized.json",
+      "",
+    ]);
     const vendored = readFileSync(
       path.join(__dirname, "../../../packages/core/test/fixtures/server/account-deletion/support-unauthorized.json"),
       "utf8",

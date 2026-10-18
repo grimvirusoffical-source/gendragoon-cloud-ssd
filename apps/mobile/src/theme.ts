@@ -12,6 +12,12 @@ export const colors = {
   surface: "#1c1828",
   surfaceRaised: "#241f34",
   border: "#3a3352",
+  /**
+   * Outline of an interactive control that has no fill of its own (unchecked
+   * checkbox, ghost button). WCAG 1.4.11 needs 3:1 against the surface it sits
+   * on: 4.2:1 on `bg`, 3.8:1 on `surface`, 3.5:1 on `surfaceRaised`.
+   */
+  controlBorder: "#7a6fa0",
   /** Text roles. `muted` is lifted from the shared value to clear AA on raised cards. */
   text: "#f6f3fb",
   muted: "#b3adc4",

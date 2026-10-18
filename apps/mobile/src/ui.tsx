@@ -85,6 +85,7 @@ export function Button(props: {
         styles.button,
         tone === "danger" ? styles.danger : tone === "ghost" ? styles.ghost : tone === "secondary" ? styles.secondary : styles.primary,
         props.compact ? styles.compact : null,
+        props.selected === true && !props.disabled ? styles.selectedChoice : null,
         props.disabled ? styles.disabled : null,
         pressed && !props.disabled ? (tone === "primary" ? styles.primaryPressed : styles.pressed) : null,
       ]}
@@ -126,7 +127,7 @@ export function Field(props: {
         accessibilityLabel={props.label}
         accessibilityHint={hint}
         placeholder={props.placeholder ?? props.label}
-        placeholderTextColor={colors.faint}
+        placeholderTextColor={colors.muted}
         secureTextEntry={props.secureTextEntry}
         autoCapitalize={props.autoCapitalize}
         autoComplete={props.autoComplete}
@@ -206,7 +207,9 @@ const styles = StyleSheet.create({
   primaryPressed: { backgroundColor: colors.primaryPressed, borderColor: colors.primaryPressed },
   secondary: { backgroundColor: colors.secondaryBg, borderColor: colors.secondaryBorder },
   danger: { backgroundColor: colors.dangerBg, borderColor: colors.dangerBorder },
-  ghost: { backgroundColor: "transparent", borderColor: colors.border },
+  ghost: { backgroundColor: "transparent", borderColor: colors.controlBorder },
+  /** A selected choice must stand out from the now-brighter ghost outline of its siblings. */
+  selectedChoice: { borderColor: colors.focus, borderWidth: 2 },
   /** Muted surface + muted text instead of opacity, so the label keeps AA contrast. */
   disabled: { backgroundColor: colors.surfaceRaised, borderColor: colors.border },
   disabledText: { color: colors.muted, fontSize: typeScale.bodySize, fontWeight: typeScale.buttonWeight },
@@ -229,7 +232,7 @@ const styles = StyleSheet.create({
   input: {
     minHeight: tapTarget,
     borderWidth: 1,
-    borderColor: colors.border,
+    borderColor: colors.controlBorder,
     borderRadius: radii.md,
     color: colors.text,
     fontSize: typeScale.bodySize,
