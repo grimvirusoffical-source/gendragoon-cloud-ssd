@@ -419,22 +419,41 @@ enum DeletionReceiptVault {
     static let account="status-receipt"
     static let backedByKeychain=true
     static let usesUserDefaults=false
+    /// Last `SecItem` status. The simulator often returns -34018 once before the keychain is ready.
+    static var lastStatus:OSStatus=errSecSuccess
+    private static let missingEntitlement:OSStatus = -34018
     static func save(jobId:String,token:String){
         guard let receipt=DeletionReceipt.of(jobId:jobId,statusToken:token),
-              let data=try? JSONSerialization.data(withJSONObject:["jobId":receipt.jobId,"statusToken":receipt.statusToken]) else {return}
+              let data=try? JSONSerialization.data(withJSONObject:["jobId":receipt.jobId,"statusToken":receipt.statusToken]) else {lastStatus=errSecParam;return}
         let query:[String:Any]=[kSecClass as String:kSecClassGenericPassword,kSecAttrService as String:service,kSecAttrAccount as String:account]
         SecItemDelete(query as CFDictionary)
         var add=query
         add[kSecValueData as String]=data
-        add[kSecAttrAccessible as String]=kSecAttrAccessibleWhenUnlockedThisDeviceOnly
-        SecItemAdd(add as CFDictionary,nil)
+        add[kSecAttrAccessible as String]=kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+        lastStatus=addItem(add)
+    }
+    /// Retries the simulator's one-shot missing-entitlement error. Stays in the keychain.
+    private static func addItem(_ add:[String:Any])->OSStatus {
+        var status:OSStatus=errSecSuccess
+        for attempt in 0..<5 {
+            status=SecItemAdd(add as CFDictionary,nil)
+            if status != missingEntitlement {return status}
+            if attempt<4 {Thread.sleep(forTimeInterval:0.2)}
+        }
+        return status
     }
     static func load()->DeletionReceipt? {
         var query:[String:Any]=[kSecClass as String:kSecClassGenericPassword,kSecAttrService as String:service,kSecAttrAccount as String:account,kSecReturnData as String:true,kSecMatchLimit as String:kSecMatchLimitOne]
         var result:CFTypeRef?
-        guard SecItemCopyMatching(query as CFDictionary,&result)==errSecSuccess,let data=result as? Data,
-              let json=try? JSONSerialization.jsonObject(with:data) as? [String:String] else {return nil}
-        return DeletionReceipt.of(jobId:json["jobId"],statusToken:json["statusToken"])
+        var status=SecItemCopyMatching(query as CFDictionary,&result)
+        if status==missingEntitlement {
+            Thread.sleep(forTimeInterval:0.2)
+            status=SecItemCopyMatching(query as CFDictionary,&result)
+        }
+        lastStatus=status
+        guard status==errSecSuccess,let data=result as? Data,
+              let json=try? JSONSerialization.jsonObject(with:data) as? [String:Any] else {return nil}
+        return DeletionReceipt.of(jobId:json["jobId"] as? String,statusToken:json["statusToken"] as? String)
     }
     static func clear(){
         let query:[String:Any]=[kSecClass as String:kSecClassGenericPassword,kSecAttrService as String:service,kSecAttrAccount as String:account]

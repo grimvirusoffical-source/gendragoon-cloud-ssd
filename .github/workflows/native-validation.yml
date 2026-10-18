@@ -155,7 +155,7 @@ jobs:
         env:
           IOS_SCREENSHOT_DIR: ${{ github.workspace }}/ios-screenshots
           TEST_RUNNER_IOS_SCREENSHOT_DIR: ${{ github.workspace }}/ios-screenshots
-        run: xcodebuild test -project native/Mobile/iOS/GenDragoonMobile.xcodeproj -scheme GenDragoonMobile -destination "platform=iOS Simulator,id=${{ steps.simulator.outputs.udid }}" -derivedDataPath "$RUNNER_TEMP/GenDragoon-iOS" CODE_SIGNING_ALLOWED=NO ONLY_ACTIVE_ARCH=YES SWIFT_ENABLE_EXPLICIT_MODULES=NO
+        run: xcodebuild test -project native/Mobile/iOS/GenDragoonMobile.xcodeproj -scheme GenDragoonMobile -destination "platform=iOS Simulator,id=${{ steps.simulator.outputs.udid }}" -derivedDataPath "$RUNNER_TEMP/GenDragoon-iOS" CODE_SIGNING_ALLOWED=YES CODE_SIGN_IDENTITY=- CODE_SIGN_STYLE=Manual DEVELOPMENT_TEAM= CODE_SIGNING_REQUIRED=YES AD_HOC_CODE_SIGNING_ALLOWED=YES ONLY_ACTIVE_ARCH=YES SWIFT_ENABLE_EXPLICIT_MODULES=NO
       - name: Collect simulator screenshots
         if: always()
         run: |
