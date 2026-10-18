@@ -1,3 +1,4 @@
+import { useState } from "react";
 import type { Settings, SortCategory } from "@gendragoon/core";
 import { SORT_CATEGORIES } from "@gendragoon/core";
 
@@ -5,7 +6,10 @@ export function SettingsView(props: {
   settings: Settings;
   rows: { extension: string; category: SortCategory; source: "default" | "override" }[];
   onChange: (extension: string, category: SortCategory) => void;
+  onDeleteAccount: () => void;
+  deleting?: boolean;
 }) {
+  const [step, setStep] = useState<"closed" | "review" | "confirm">("closed");
   return (
     <section data-testid="settings-view">
       <header className="topbar">
@@ -32,6 +36,48 @@ export function SettingsView(props: {
         ))}
       </div>
       <p className="footer-note">{Object.keys(props.settings.sortOverrides.extensions).length} extension override(s) stored on this device.</p>
+      <section className="panel stack" data-testid="delete-account-panel" style={{ marginTop: 16 }}>
+        <strong>Delete account</strong>
+        <p className="help">
+          This cancels every Stripe subscription, deletes objects in GenDragoon&apos;s bucket, and deletes the Firebase user.
+          Storage you connected yourself is left in place. Keys for it are removed from this device.
+        </p>
+        {step === "closed" ? (
+          <div className="actions">
+            <button type="button" className="btn-danger" data-testid="delete-account" onClick={() => setStep("review")}>
+              Delete account
+            </button>
+          </div>
+        ) : null}
+        {step === "review" ? (
+          <div className="stack">
+            <p className="help">Sign in again if it has been more than an hour. You will be signed out when deletion is accepted.</p>
+            <div className="actions">
+              <button type="button" className="btn" data-testid="delete-account-continue" onClick={() => setStep("confirm")}>
+                Continue
+              </button>
+              <button type="button" className="btn-ghost" onClick={() => setStep("closed")}>Back</button>
+            </div>
+          </div>
+        ) : null}
+        {step === "confirm" ? (
+          <div className="stack">
+            <p className="help">Delete the account permanently. This cannot be undone.</p>
+            <div className="actions">
+              <button
+                type="button"
+                className="btn-danger"
+                data-testid="delete-account-confirm"
+                disabled={props.deleting}
+                onClick={props.onDeleteAccount}
+              >
+                Delete account permanently
+              </button>
+              <button type="button" className="btn-ghost" onClick={() => setStep("closed")}>Back</button>
+            </div>
+          </div>
+        ) : null}
+      </section>
     </section>
   );
 }

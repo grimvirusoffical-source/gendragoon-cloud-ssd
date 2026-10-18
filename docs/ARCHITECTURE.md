@@ -20,7 +20,7 @@ Ownership, the workspace cap, lapse, and the login lock are enforced on the serv
 - **Customers do not get a GCP project.** Logical workspaces share one private bucket (`CUSTOMER_BUCKET`). The personal bucket `gen-dragoon-ssd` is rejected by the server. A GCP Owner role is not how a customer owns a GenDragoon workspace.
 - **Cap.** 10 workspaces on the base account (`MAX_WORKSPACES_BASE`). 20 (`MAX_WORKSPACES_HIGH`) when one active project meets the backend's existing high-tier rule: at least 2 TB and Turbo (8 workers), or an equivalent bundle. The cap is recomputed on every login and plan change. A downgrade that leaves the account over the new cap opens the delete/merge lock. It does not keep silent access.
 - **Lapse.** Recurring workspace subscriptions lapse at Stripe `current_period_end` plus a 3-day grace. Grandfathered one-time buyers keep `feeIsOneTime=true` and never lapse. `FREE_WORKSPACES` is 1 by default and may be 0. Grim has not closed that question. The free workspace has no performance add-on.
-- **Lock.** Over cap or unpaid: cloud data stays readable and downloadable. Uploads and the rest of normal use are blocked until the account deletes or merges down to the cap and clears unpaid workspaces.
+- **Lock.** Over cap or unpaid: cloud data stays readable and downloadable, and deletes still succeed. Writes return HTTP 423 `{ "code": "workspace_lock" }`. `GenDragoonClient` throws `WorkspaceLockedError`. `reduceAccount` moves the account to `delete_or_merge`. `AccountSurface` shows the lock screen instead of a generic error.
 - **Merge.** New endpoint for Riley. Files move into the target. On a path collision the incoming copy is renamed to `name (from <source>)`, then `name (from <source>) 2`, and so on. The target file is never overwritten. The source workspace is deleted only after every copy verifies.
 - **Price.** A workspace that is not inside the free allowance and is not a grandfathered one-time purchase is $5 per month (`WORKSPACE_MONTHLY_CENTS = 500`). BYO pays that same fee. Performance tiers (Lite through Max, including Turbo) are add-ons on top. The live server still sells the extra project as a one-time $5 activation; the recurring fee is an addition.
 
@@ -30,7 +30,11 @@ Launch providers are S3-compatible (AWS, Cloudflare R2, Backblaze B2, Wasabi, Mi
 
 Credentials stay on the user's device (OS keychain or secure storage). They are never sent to the API, never logged, and never committed. The server stores provider type, endpoint, and a bucket fingerprint. Before the workspace activates, the client writes a server-generated challenge object, reads it back, and deletes it. The server compares the read-back to the nonce it generated. That proves the user controls the bucket. It does not replace `accountHash` as the ownership rule. The provider's own IAM or filesystem permissions are only this setup check.
 
-The Windows shell includes a stub of that screen. The request bodies are described in `docs/API.md`.
+The Windows shell includes that setup inside Workspaces. The request bodies are described in `docs/API.md`.
+
+## Managed bucket
+
+The device does not hold a GCP credential. Firebase sign-in, an `accountHash` check, and `POST /v2/workspaces/:id/storage-urls` produce V4 or resumable URLs of at most 15 minutes, scoped to that workspace prefix. File bytes and names are AES-256-GCM on the device before upload. The per-file key is random and wrapped by a per-workspace key that lives in the OS keychain. See `docs/SECURITY.md`.
 
 ## Updater
 

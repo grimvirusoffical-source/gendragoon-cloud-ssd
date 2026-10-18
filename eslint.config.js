@@ -9,7 +9,7 @@ export default tseslint.config(
       "**/release/**",
       "**/coverage/**",
       "**/*.d.ts",
-      "apps/desktop/electron-builder.config.cjs",
+      "apps/desktop/electron-builder.cjs",
       "apps/desktop/scripts/**",
     ],
   },

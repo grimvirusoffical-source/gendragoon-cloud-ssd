@@ -1,16 +1,17 @@
-import { app, BrowserWindow, safeStorage } from "electron";
-import { readFile, rm, writeFile } from "node:fs/promises";
+import { app, BrowserWindow, ipcMain, safeStorage } from "electron";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
 import {
   chooseRelease,
   fetchReleaseManifests,
+  relaunchIfIdle,
   runUpdate,
   settleHealth,
+  type InstalledVersion,
   type ReleaseManifest,
 } from "@gendragoon/updater";
 
-const here = path.dirname(fileURLToPath(import.meta.url));
+const here = __dirname;
 
 const FEED = {
   repo: "grimvirusoffical-source/gendragoon-apps",
@@ -62,11 +63,26 @@ async function hasPending(): Promise<boolean> {
   }
 }
 
+let transferActive = false;
+let deferredInstall: InstalledVersion | null = null;
+let shell: BrowserWindow | null = null;
+
+function notifyUpdating(): void {
+  shell?.webContents.send("updater-notice", "Updating...");
+}
+
+async function relaunchInstalled(installed: InstalledVersion): Promise<void> {
+  notifyUpdating();
+  await writeFile(await pendingPath(), JSON.stringify({ version: installed.version }));
+  app.relaunch();
+  app.exit(0);
+}
+
 async function checkForUpdate(): Promise<void> {
   const manifests = await fetchReleaseManifests({ ...FEED, readToken: readGitHubToken });
   const chosen = chooseRelease(manifests, "stable");
   if (!chosen || chosen.version === app.getVersion()) return;
-  await runUpdate({
+  const outcome = await runUpdate({
     manifest: chosen,
     download: (manifest) => download(manifest),
     install: async (manifest, bytes) => {
@@ -74,16 +90,67 @@ async function checkForUpdate(): Promise<void> {
       await writeFile(location, bytes);
       return { version: manifest.version, location };
     },
+    notifyUpdating,
+    transferActive: () => transferActive,
     relaunch: async (installed) => {
-      await writeFile(await pendingPath(), JSON.stringify({ version: installed.version }));
-      app.relaunch();
-      app.exit(0);
+      await relaunchInstalled(installed);
     },
     healthCheck: async () => true,
     rollback: async () => {
       await clearPending();
     },
   });
+  if (outcome.outcome === "deferred") deferredInstall = outcome.installed;
+}
+
+function registerIpc(): void {
+  ipcMain.on("transfer-active", (_event, active: unknown) => {
+    transferActive = active === true;
+    if (transferActive || !deferredInstall) return;
+    const installed = deferredInstall;
+    deferredInstall = null;
+    void relaunchIfIdle({
+      deferred: installed,
+      transferActive: () => transferActive,
+      relaunch: (pending) => relaunchInstalled(pending),
+    });
+  });
+  ipcMain.handle("auth:id-token", () => undefined);
+  ipcMain.handle("secret:get", async (_event, name: unknown) => {
+    const file = secretFile(name);
+    if (!file) return null;
+    try {
+      const encrypted = await readFile(file);
+      if (!safeStorage.isEncryptionAvailable()) return null;
+      const encoded = safeStorage.decryptString(encrypted);
+      return Buffer.from(encoded, "base64");
+    } catch {
+      return null;
+    }
+  });
+  ipcMain.handle("secret:set", async (_event, name: unknown, bytes: unknown) => {
+    const file = secretFile(name);
+    if (!file || !safeStorage.isEncryptionAvailable()) return;
+    const raw = toBuffer(bytes);
+    if (!raw) return;
+    await mkdir(path.dirname(file), { recursive: true });
+    await writeFile(file, safeStorage.encryptString(raw.toString("base64")));
+  });
+  ipcMain.handle("secret:delete", async (_event, name: unknown) => {
+    const file = secretFile(name);
+    if (!file) return;
+    await rm(file, { force: true });
+  });
+}
+
+function secretFile(name: unknown): string | null {
+  if (typeof name !== "string" || !/^[a-z0-9:_-]{1,80}$/.test(name)) return null;
+  return path.join(app.getPath("userData"), "keychain", name.replaceAll(":", "_"));
+}
+
+function toBuffer(bytes: unknown): Buffer | null {
+  if (bytes instanceof Uint8Array) return Buffer.from(bytes);
+  return null;
 }
 
 async function clearPending(): Promise<void> {
@@ -97,7 +164,9 @@ async function download(manifest: ReleaseManifest): Promise<Uint8Array> {
 }
 
 void app.whenReady().then(async () => {
+  registerIpc();
   const window = createWindow();
+  shell = window;
   const settlement = await settleHealth({
     pending: await hasPending(),
     healthCheck: async () => !window.webContents.isCrashed(),

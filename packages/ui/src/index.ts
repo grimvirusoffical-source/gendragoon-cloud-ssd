@@ -1,3 +1,4 @@
+export { AccountSurface } from "./AccountSurface.js";
 export { AppShell } from "./AppShell.js";
 export type { ShellView } from "./AppShell.js";
 export { FileBrowser } from "./FileBrowser.js";

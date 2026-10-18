@@ -29,7 +29,7 @@ try {
   });
   const page = await browser.newPage();
   await page.setViewport({ width: 1440, height: 960, deviceScaleFactor: 1 });
-  await page.goto(`http://127.0.0.1:${port}/#/lock`, { waitUntil: "networkidle0" });
+  await page.goto(`http://127.0.0.1:${port}/#/workspaces`, { waitUntil: "networkidle0" });
   await page.waitForSelector("[data-testid='lock-screen']");
   const previewText = await page.$eval("[data-testid='merge-preview']", (node) => node.textContent ?? "");
   if (!previewText.includes("(from ")) throw new Error(`Merge preview missing rename: ${previewText}`);
@@ -58,7 +58,10 @@ try {
   if (!saved.includes("Saved override")) throw new Error("Settings override did not persist in the view");
   await shot(page, "settings-mapping.png");
 
-  await page.click("[data-testid='nav-connect']");
+  const restart = await page.$$eval("button", (nodes) => nodes.map((node) => node.textContent?.trim()).filter((text) => text === "Restart" || text === "Debug"));
+  if (restart.length !== 0) throw new Error(`Unexpected controls: ${restart.join(",")}`);
+
+  await page.click("[data-testid='nav-workspaces']");
   await page.waitForSelector("[data-testid='provider-gcs-s3']");
   const providers = await page.$$eval("[data-testid^='provider-']", (nodes) => nodes.map((node) => node.getAttribute("data-testid")));
   for (const id of ["provider-aws", "provider-r2", "provider-b2", "provider-wasabi", "provider-minio", "provider-gcs-s3", "provider-sftp"]) {
@@ -70,6 +73,14 @@ try {
   await page.click("[data-testid='byo-challenge']");
   await page.waitForFunction(() => document.querySelector("[data-testid='byo-message']")?.textContent?.includes("Credentials were not included"));
   await shot(page, "connect-storage.png");
+
+  await page.click("[data-testid='nav-settings']");
+  await page.click("[data-testid='delete-account']");
+  await page.click("[data-testid='delete-account-continue']");
+  await page.waitForSelector("[data-testid='delete-account-confirm']");
+  await shot(page, "delete-account.png");
+  await page.click("[data-testid='delete-account-confirm']");
+  await page.waitForSelector("[data-testid='signed-out']");
 
   await browser.close();
   console.log(`screenshots written to ${outDir}`);

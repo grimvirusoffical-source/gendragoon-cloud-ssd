@@ -1,4 +1,6 @@
 import { assertNoCredentialFields } from "../byo.js";
+import { ApiError, WorkspaceLockedError } from "./errors.js";
+import { assertStorageUrlResponse, reauthIsRecent } from "../storage.js";
 import type {
   AccessResponse,
   BillingStatusResponse,
@@ -20,19 +22,14 @@ import type {
   Workspace,
   WorkspaceFeeCheckout,
   WorkspaceListResponse,
+  StorageUrlRequest,
+  StorageUrlResponse,
+  DeleteAccountRequest,
+  DeleteAccountAccepted,
+  AccountDeletionStatus,
 } from "./types.js";
 
-export class ApiError extends Error {
-  readonly status: number;
-  readonly code: string;
-
-  constructor(status: number, code: string, message: string) {
-    super(message);
-    this.name = "ApiError";
-    this.status = status;
-    this.code = code;
-  }
-}
+export { ApiError, WorkspaceLockedError };
 
 export interface ClientOptions {
   baseUrl: string;
@@ -140,36 +137,61 @@ export class GenDragoonClient {
 
   listFiles(workspaceId: string, cursor?: string): Promise<FileListResponse> {
     const query = cursor ? `?cursor=${encodeURIComponent(cursor)}` : "";
-    return this.request("GET", `/v3/cloud/${encodeURIComponent(workspaceId)}/files${query}`);
+    return this.request("GET", `${this.cloud(workspaceId)}/files${query}`);
   }
 
   createUpload(workspaceId: string, body: CreateUploadRequest): Promise<UploadStatus> {
-    return this.request("POST", `/v3/cloud/${encodeURIComponent(workspaceId)}/uploads`, body);
+    return this.request("POST", `${this.cloud(workspaceId)}/uploads`, body);
   }
 
   uploadStatus(workspaceId: string, uploadId: string): Promise<UploadStatus> {
-    return this.request("GET", `/v3/cloud/${encodeURIComponent(workspaceId)}/uploads/${encodeURIComponent(uploadId)}`);
+    return this.request("GET", `${this.cloud(workspaceId)}/uploads/${encodeURIComponent(uploadId)}`);
   }
 
   async uploadChunk(workspaceId: string, uploadId: string, index: number, bytes: Uint8Array, sha256: string): Promise<{ saved: boolean; index: number }> {
     return this.request(
       "PUT",
-      `/v3/cloud/${encodeURIComponent(workspaceId)}/uploads/${encodeURIComponent(uploadId)}/chunks/${index}`,
+      `${this.cloud(workspaceId)}/uploads/${encodeURIComponent(uploadId)}/chunks/${index}`,
       bytes,
       { "content-type": "application/octet-stream", "x-chunk-sha256": sha256 },
     );
   }
 
   finalizeUpload(workspaceId: string, uploadId: string): Promise<{ saved: boolean; fileId?: string }> {
-    return this.request("POST", `/v3/cloud/${encodeURIComponent(workspaceId)}/uploads/${encodeURIComponent(uploadId)}/finalize`);
+    return this.request("POST", `${this.cloud(workspaceId)}/uploads/${encodeURIComponent(uploadId)}/finalize`);
   }
 
   cancelUpload(workspaceId: string, uploadId: string): Promise<{ cancelled: boolean }> {
-    return this.request("DELETE", `/v3/cloud/${encodeURIComponent(workspaceId)}/uploads/${encodeURIComponent(uploadId)}`);
+    return this.request("DELETE", `${this.cloud(workspaceId)}/uploads/${encodeURIComponent(uploadId)}`);
   }
 
   deleteFile(workspaceId: string, fileId: string): Promise<{ deleted: boolean }> {
-    return this.request("DELETE", `/v3/cloud/${encodeURIComponent(workspaceId)}/files/${encodeURIComponent(fileId)}`);
+    return this.request("DELETE", `${this.cloud(workspaceId)}/files/${encodeURIComponent(fileId)}`);
+  }
+
+  /**
+   * Short-lived V4 or resumable URLs scoped to the workspace prefix.
+   * A locked workspace is download-only. Writes from the server come back as HTTP 423.
+   */
+  async storageUrls(id: string, body: StorageUrlRequest): Promise<StorageUrlResponse> {
+    assertNoCredentialFields(body);
+    const response = await this.request<StorageUrlResponse>("POST", `/v2/workspaces/${encodeURIComponent(id)}/storage-urls`, body);
+    assertStorageUrlResponse(response);
+    return response;
+  }
+
+  /** Requires a re-auth newer than one hour. Returns the 202 job. Does not send key material. */
+  async deleteAccount(body: DeleteAccountRequest): Promise<DeleteAccountAccepted> {
+    if (!reauthIsRecent(body.reauthenticatedAt)) {
+      throw new ApiError(401, "REAUTH_REQUIRED", "Sign in again before deleting the account");
+    }
+    const accepted = await this.request<DeleteAccountAccepted>("DELETE", "/v2/account", body);
+    if (!accepted?.jobId) throw new ApiError(502, "DELETION_UNCONFIRMED", "Account deletion was not accepted");
+    return accepted;
+  }
+
+  deletionStatus(jobId: string): Promise<AccountDeletionStatus> {
+    return this.request("GET", `/v2/account/deletion/${encodeURIComponent(jobId)}`);
   }
 
   /** Proposed. Recurring workspace fee, distinct from one-time project activation. */
@@ -204,7 +226,11 @@ export class GenDragoonClient {
   }
 
   async download(workspaceId: string, file: Pick<CloudFile, "id">): Promise<Response> {
-    return this.raw("GET", `/v3/cloud/${encodeURIComponent(workspaceId)}/files/${encodeURIComponent(file.id)}/download`);
+    return this.raw("GET", `${this.cloud(workspaceId)}/files/${encodeURIComponent(file.id)}/download`);
+  }
+
+  private cloud(workspaceId: string): string {
+    return `/v2/workspaces/${encodeURIComponent(workspaceId)}/cloud`;
   }
 
   private async request<T>(method: string, path: string, body?: object | Uint8Array, extraHeaders?: Record<string, string>): Promise<T> {
@@ -247,6 +273,7 @@ function safeJson(text: string): unknown {
 function toError(status: number, parsed: unknown): ApiError {
   const record = parsed && typeof parsed === "object" ? parsed as { error?: unknown; code?: unknown } : {};
   const code = typeof record.code === "string" ? record.code : "";
+  if (status === 423 || code === "workspace_lock") return new WorkspaceLockedError();
   if (status === 404 || code === "PROJECT_FORBIDDEN") {
     return new ApiError(404, "NOT_FOUND", "Not found");
   }

@@ -66,9 +66,11 @@ interface FeedConfig {
 2. Download the URL.
 3. Verify SHA-256. On mismatch, stop. Nothing is installed or relaunched.
 4. `install`.
-5. `relaunch`.
-6. `healthCheck`.
-7. If the check fails, `rollback` to the previous version.
+5. Show a non-blocking `Updating...` notice. There is no Restart button.
+6. If an upload or backup is in progress, defer. Call `relaunchIfIdle` when it finishes.
+7. Otherwise `relaunch` immediately.
+8. `healthCheck`.
+9. If the check fails, `rollback` to the previous version.
 
 Hosts that exit inside `relaunch` should persist a pending marker and call `settleHealth` on the next launch. That runs the same health check and rollback.
 

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { ApiError, GenDragoonClient, hidesWorkspaceExistence } from "../src/index.js";
+import { ApiError, GenDragoonClient, WorkspaceLockedError, hidesWorkspaceExistence } from "../src/index.js";
 
 function jsonResponse(status: number, body: unknown): Response {
   return new Response(JSON.stringify(body), {
@@ -92,7 +92,74 @@ describe("GenDragoonClient", () => {
       },
     });
     const status = await client.createUpload("free", { name: "note.txt", sizeBytes: 4, kind: "file" });
-    expect(url).toBe("https://api.example.test/v3/cloud/free/uploads");
+    expect(url).toBe("https://api.example.test/v2/workspaces/free/cloud/uploads");
     expect(status.chunkBytes).toBe(8388608);
+  });
+
+  it("maps HTTP 423 workspace_lock to WorkspaceLockedError and still allows reads and deletes", async () => {
+    const calls: string[] = [];
+    const client = new GenDragoonClient({
+      baseUrl: "https://api.example.test",
+      getToken: () => "firebase-token",
+      fetch: async (input, init) => {
+        const url = String(input);
+        calls.push(`${init?.method} ${url}`);
+        if (init?.method === "POST") {
+          return jsonResponse(423, { code: "workspace_lock", error: "over cap" });
+        }
+        return jsonResponse(200, init?.method === "DELETE" ? { deleted: true } : { files: [], nextCursor: null, quotaBytes: 1, usedBytes: 0, workers: 2 });
+      },
+    });
+    await expect(client.createUpload("ws", { name: "a.txt", sizeBytes: 1, kind: "file" })).rejects.toBeInstanceOf(WorkspaceLockedError);
+    try {
+      await client.createUpload("ws", { name: "a.txt", sizeBytes: 1, kind: "file" });
+    } catch (error) {
+      expect(error).toMatchObject({ status: 423, code: "workspace_lock", name: "WorkspaceLockedError" });
+      expect((error as Error).message).not.toContain("over cap");
+      expect((error as Error).message).not.toContain("firebase-token");
+    }
+    await expect(client.listFiles("ws")).resolves.toMatchObject({ files: [] });
+    await expect(client.deleteFile("ws", "file-1")).resolves.toEqual({ deleted: true });
+    expect(calls.map((call) => call.split(" ")[0])).toEqual(["POST", "POST", "GET", "DELETE"]);
+  });
+
+  it("requests /v2 storage links and accepts account deletion only after a recent re-auth", async () => {
+    const seen: { method?: string; url?: string; body?: unknown }[] = [];
+    const client = new GenDragoonClient({
+      baseUrl: "https://api.example.test",
+      getToken: () => "fresh-token",
+      fetch: async (input, init) => {
+        const url = String(input);
+        seen.push({ method: init?.method, url, body: init?.body ? JSON.parse(String(init.body)) : null });
+        if (url.endsWith("/storage-urls")) {
+          return jsonResponse(200, {
+            prefix: "customers/abc/workspaces/ws/",
+            expiresAt: new Date(Date.now() + 5 * 60 * 1000).toISOString(),
+            access: "read-only",
+            links: [{
+              op: "download",
+              oid: "oid",
+              method: "GET",
+              url: "https://storage.googleapis.com/customers/abc/workspaces/ws/oid?X-Goog-Signature=1",
+              expiresAt: new Date(Date.now() + 5 * 60 * 1000).toISOString(),
+            }],
+          });
+        }
+        if (init?.method === "DELETE") return jsonResponse(202, { jobId: "job-1", status: "accepted" });
+        return jsonResponse(200, { jobId: "job-1", status: "succeeded", confirmation: "deleted", firebaseUserDeleted: true });
+      },
+    });
+    const links = await client.storageUrls("ws", { operations: [{ op: "download", oid: "oid" }] });
+    expect(links.access).toBe("read-only");
+    expect(seen[0]?.url).toBe("https://api.example.test/v2/workspaces/ws/storage-urls");
+    await expect(client.deleteAccount({ reauthenticatedAt: new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString() })).rejects.toMatchObject({
+      code: "REAUTH_REQUIRED",
+    });
+    const accepted = await client.deleteAccount({ reauthenticatedAt: new Date().toISOString() });
+    expect(accepted).toEqual({ jobId: "job-1", status: "accepted" });
+    expect(seen.some((call) => call.method === "DELETE" && call.url === "https://api.example.test/v2/account")).toBe(true);
+    const status = await client.deletionStatus("job-1");
+    expect(status.status).toBe("succeeded");
+    expect(seen.at(-1)?.url).toBe("https://api.example.test/v2/account/deletion/job-1");
   });
 });

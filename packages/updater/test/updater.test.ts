@@ -6,6 +6,7 @@ import {
   manifestsFromGitHub,
   parseReleaseManifest,
   parseSha256Sums,
+  relaunchIfIdle,
   runUpdate,
   settleHealth,
   verifySha256,
@@ -75,6 +76,40 @@ describe("checksum failure", () => {
     expect(relaunch).not.toHaveBeenCalled();
     expect(rollback).not.toHaveBeenCalled();
     expect(verifySha256(bytes, createHash("sha256").update(bytes).digest("hex"))).toBe(true);
+  });
+});
+
+describe("automatic relaunch", () => {
+  it("relaunches after a verified install and defers only while a transfer is active", async () => {
+    const bytes = new TextEncoder().encode("archive");
+    const sha256 = createHash("sha256").update(bytes).digest("hex");
+    const notify = vi.fn();
+    const relaunch = vi.fn();
+    const deferred = await runUpdate({
+      manifest: manifest({ sha256, version: "1.5.0" }),
+      download: async () => bytes,
+      install: async () => ({ version: "1.5.0", location: "/next" }),
+      relaunch,
+      healthCheck: async () => true,
+      rollback: async () => undefined,
+      transferActive: () => true,
+      notifyUpdating: notify,
+    });
+    expect(deferred.outcome).toBe("deferred");
+    expect(notify).toHaveBeenCalledOnce();
+    expect(relaunch).not.toHaveBeenCalled();
+    if (deferred.outcome !== "deferred") throw new Error("expected deferral");
+    await expect(relaunchIfIdle({
+      deferred: deferred.installed,
+      transferActive: () => true,
+      relaunch,
+    })).resolves.toBe("waiting");
+    await expect(relaunchIfIdle({
+      deferred: deferred.installed,
+      transferActive: () => false,
+      relaunch,
+    })).resolves.toBe("relaunched");
+    expect(relaunch).toHaveBeenCalledOnce();
   });
 });
 

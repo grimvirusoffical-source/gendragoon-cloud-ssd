@@ -1,19 +1,19 @@
 import type { ReactNode } from "react";
 
-export type ShellView = "files" | "backup" | "lock" | "settings" | "connect";
+export type ShellView = "files" | "backup" | "workspaces" | "settings";
 
 const NAV: { id: ShellView; label: string }[] = [
   { id: "files", label: "Files" },
   { id: "backup", label: "Backup" },
-  { id: "connect", label: "Connect storage" },
+  { id: "workspaces", label: "Workspaces" },
   { id: "settings", label: "Settings" },
-  { id: "lock", label: "Workspaces" },
 ];
 
 export function AppShell(props: {
   view: ShellView;
   onView: (view: ShellView) => void;
   locked: boolean;
+  onSignOut: () => void;
   children: ReactNode;
 }) {
   return (
@@ -40,10 +40,13 @@ export function AppShell(props: {
               data-testid={`nav-${item.id}`}
             >
               <span>{item.label}</span>
-              {item.id === "lock" && props.locked ? <span className="tag">LOCK</span> : null}
+              {item.id === "workspaces" && props.locked ? <span className="tag">LOCK</span> : null}
             </button>
           ))}
         </nav>
+        <button type="button" className="nav-signout" data-testid="sign-out" onClick={props.onSignOut}>
+          Sign out
+        </button>
       </aside>
       <main className="main">{props.children}</main>
     </div>

@@ -12,5 +12,8 @@ Riley's service is the existing Express app at `gendragoon-cloud-ssd/native/Back
 - `POST /v2/workspaces/merge` and lock-resolution delete.
 - BYO challenge/proof. Store only provider type, endpoint, and bucket fingerprint.
 - Foreign workspace lookups return 404, including the case that is 403 `PROJECT_FORBIDDEN` today.
+- Workspace routes are `/v2/workspaces/...`, including `POST /v2/workspaces/:id/storage-urls` (15-minute prefix-scoped links; locked accounts are download-only).
+- Writes while over cap or unpaid return HTTP 423 `{ "code": "workspace_lock" }`. Reads and deletes still succeed.
+- `DELETE /v2/account` requires a re-auth newer than one hour, returns 202 with a job id, and `GET /v2/account/deletion/:jobId` reports status. BYO buckets stay; local keys are wiped by the client.
 
 Do not put Stripe keys, Firebase private keys, or bucket credentials in this repo.

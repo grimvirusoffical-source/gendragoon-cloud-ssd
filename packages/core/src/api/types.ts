@@ -219,3 +219,53 @@ export interface AccessResponse {
   highTier: boolean;
   freeWorkspaces: 0 | 1;
 }
+
+export type StorageOp = "upload" | "download" | "resumable" | "delete";
+export type StorageAccess = "read-write" | "read-only";
+
+/** POST /v2/workspaces/:id/storage-urls. Object ids only. No names, keys, or GCP credentials. */
+export interface StorageOperation {
+  op: StorageOp;
+  oid: string;
+  sizeBytes?: number;
+}
+
+export interface StorageUrlRequest {
+  operations: StorageOperation[];
+}
+
+export interface StorageLink {
+  op: StorageOp;
+  oid: string;
+  method: "GET" | "PUT" | "POST" | "DELETE";
+  url: string;
+  expiresAt: string;
+}
+
+export interface StorageUrlResponse {
+  prefix: string;
+  expiresAt: string;
+  access: StorageAccess;
+  links: StorageLink[];
+}
+
+/** DELETE /v2/account. reauthenticatedAt must be less than one hour old. */
+export interface DeleteAccountRequest {
+  reauthenticatedAt: string;
+}
+
+/** HTTP 202. The deletion continues in the background. */
+export interface DeleteAccountAccepted {
+  jobId: string;
+  status: "accepted";
+}
+
+export interface AccountDeletionStatus {
+  jobId: string;
+  status: "accepted" | "running" | "succeeded" | "failed";
+  stripeSubscriptionsCancelled?: number;
+  managedObjectsDeleted?: number;
+  byoWorkspacesLeftIntact?: number;
+  firebaseUserDeleted?: boolean;
+  confirmation?: string;
+}

@@ -13,10 +13,11 @@ export interface InstalledVersion {
   location?: string;
 }
 
-export type UpdateOutcome =
+export type UpdateOutcome<TInstalled extends InstalledVersion = InstalledVersion> =
   | { outcome: "healthy"; version: string }
   | { outcome: "checksum_failed"; version: string }
-  | { outcome: "rolled_back"; version: string };
+  | { outcome: "rolled_back"; version: string }
+  | { outcome: "deferred"; version: string; installed: TInstalled };
 
 export interface UpdateHooks<TInstalled extends InstalledVersion = InstalledVersion> {
   manifest: ReleaseManifest;
@@ -26,6 +27,10 @@ export interface UpdateHooks<TInstalled extends InstalledVersion = InstalledVers
   healthCheck: () => Promise<boolean>;
   rollback: (previous: TInstalled | null) => Promise<void>;
   previous?: TInstalled | null;
+  /** True while an upload or backup is still moving bytes. */
+  transferActive?: () => boolean | Promise<boolean>;
+  /** Synchronous, non-blocking. Hosts show "Updating..." here. There is no Restart button. */
+  notifyUpdating?: () => void;
 }
 
 export function verifySha256(bytes: Uint8Array, expectedHex: string): boolean {
@@ -42,12 +47,16 @@ export function verifySha256(bytes: Uint8Array, expectedHex: string): boolean {
  */
 export async function runUpdate<TInstalled extends InstalledVersion>(
   hooks: UpdateHooks<TInstalled>,
-): Promise<UpdateOutcome> {
+): Promise<UpdateOutcome<TInstalled>> {
   const bytes = await hooks.download(hooks.manifest);
   if (!verifySha256(bytes, hooks.manifest.sha256)) {
     return { outcome: "checksum_failed", version: hooks.manifest.version };
   }
   const installed = await hooks.install(hooks.manifest, bytes);
+  hooks.notifyUpdating?.();
+  if (await hooks.transferActive?.()) {
+    return { outcome: "deferred", version: hooks.manifest.version, installed };
+  }
   await hooks.relaunch(installed);
   const healthy = await hooks.healthCheck();
   if (!healthy) {
@@ -55,6 +64,21 @@ export async function runUpdate<TInstalled extends InstalledVersion>(
     return { outcome: "rolled_back", version: hooks.manifest.version };
   }
   return { outcome: "healthy", version: hooks.manifest.version };
+}
+
+/**
+ * After a deferred install, relaunch as soon as the transfer is idle.
+ * Hosts call this when the upload or backup finishes. There is no manual restart.
+ */
+export async function relaunchIfIdle<TInstalled extends InstalledVersion>(input: {
+  deferred: TInstalled | null;
+  transferActive: () => boolean | Promise<boolean>;
+  relaunch: (installed: TInstalled) => Promise<void>;
+}): Promise<"idle" | "waiting" | "relaunched"> {
+  if (!input.deferred) return "idle";
+  if (await input.transferActive()) return "waiting";
+  await input.relaunch(input.deferred);
+  return "relaunched";
 }
 
 /**

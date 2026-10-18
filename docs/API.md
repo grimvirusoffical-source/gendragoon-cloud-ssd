@@ -33,8 +33,8 @@ Recompute the cap on every login and whenever storage or performance changes. If
 
 When the account is over the cap or has an unpaid workspace (not free, not `feeIsOneTime`, not owner-complimentary, and past grace if it has `currentPeriodEnd`):
 
-- Cloud data stays readable and downloadable.
-- Uploads, new backups, and the rest of normal use return 403 with a stable code such as `ACCOUNT_LOCKED`.
+- Cloud data stays readable and downloadable. Deletes still succeed.
+- Writes return **HTTP 423** `{ "code": "workspace_lock" }`. The client throws `WorkspaceLockedError` and the account state machine moves to delete-or-merge. The UI shows the lock screen. It does not show that payload as a generic error.
 - The user deletes or merges until they are inside the cap and nothing unpaid remains.
 
 Proposed `GET /v2/access` (also fine as fields on `GET /v2/workspaces`):
@@ -108,21 +108,21 @@ Both ids must belong to the caller. A foreign id is 404. The pure planner lives 
 
 ### Transfers
 
-Protocol 3 is the client path. Chunk size is 8,388,608 bytes. Each chunk sends `x-chunk-sha256`. Folders and `.app` bundles use `kind: "folder"` or `"app"` plus `archiveFormat: "gendragoon-package-v1"` and `manifestSHA256`. A bare file omits the package fields.
+This client calls workspace routes on `/v2` only. Chunk size is 8,388,608 bytes. Managed-bucket bytes are ciphertext (see `docs/SECURITY.md`) uploaded through signed links, not with a GCP credential. Folders and `.app` bundles use `kind: "folder"` or `"app"` plus `archiveFormat: "gendragoon-package-v1"` and `manifestSHA256`. A bare file omits the package fields.
 
 | Method | Path |
 | --- | --- |
-| GET | `/v3/cloud/:workspaceId/config` |
-| GET | `/v3/cloud/:workspaceId/files` |
-| POST | `/v3/cloud/:workspaceId/uploads` |
-| GET | `/v3/cloud/:workspaceId/uploads/:id` |
-| PUT | `/v3/cloud/:workspaceId/uploads/:id/chunks/:index` |
-| POST | `/v3/cloud/:workspaceId/uploads/:id/finalize` |
-| DELETE | `/v3/cloud/:workspaceId/uploads/:id` |
-| GET | `/v3/cloud/:workspaceId/files/:id/download` |
-| DELETE | `/v3/cloud/:workspaceId/files/:id` |
+| GET | `/v2/workspaces/:id/cloud/files` |
+| POST | `/v2/workspaces/:id/cloud/uploads` |
+| GET | `/v2/workspaces/:id/cloud/uploads/:uploadId` |
+| PUT | `/v2/workspaces/:id/cloud/uploads/:uploadId/chunks/:index` |
+| POST | `/v2/workspaces/:id/cloud/uploads/:uploadId/finalize` |
+| DELETE | `/v2/workspaces/:id/cloud/uploads/:uploadId` |
+| GET | `/v2/workspaces/:id/cloud/files/:fileId/download` |
+| DELETE | `/v2/workspaces/:id/cloud/files/:fileId` |
+| POST | `/v2/workspaces/:id/storage-urls` |
 
-v1 (`/v1/files`, `/v1/uploads/...`) remains for the legacy free workspace. v2 paid cloud remains at `/v2/workspaces/:workspaceId/cloud/...` (`files`, `uploads`, chunks, finalize, download, delete). New clients use v3.
+`GET /v3/capabilities` stays a catalog route. It is not a workspace route. Older `/v1/files` and `/v3/cloud/:workspaceId` mounts are not called by this client.
 
 ### API keys
 
@@ -188,6 +188,43 @@ Activate the workspace only when `readBack` equals the stored nonce and the chal
 3. The client writes, reads, and deletes the challenge object.
 4. `POST .../byo/proof`. The workspace stays inactive on failure.
 5. Billing is the same $5/month workspace fee, plus an optional performance add-on if this workspace is not the free one. The provider's own permissions are only the challenge. Ownership of the GenDragoon workspace remains `accountHash`.
+
+## Managed bucket links
+
+Clients never hold GCP credentials. After Firebase sign-in the backend checks the ID token and `accountHash`, then:
+
+`POST /v2/workspaces/:id/storage-urls`
+
+```json
+{ "operations": [{ "op": "upload", "oid": "<opaque>", "sizeBytes": 1024 }] }
+```
+
+`op` is `upload`, `resumable`, `download`, or `delete`. The response is workspace-prefix scoped and expires in at most 15 minutes:
+
+```json
+{
+  "prefix": "customers/<accountHash>/workspaces/<id>/",
+  "expiresAt": "<iso, <= 15 min>",
+  "access": "read-write",
+  "links": [{ "op": "upload", "oid": "<opaque>", "method": "PUT", "url": "https://storage.googleapis.com/...", "expiresAt": "<iso>" }]
+}
+```
+
+A locked workspace (over cap or unpaid) gets `access: "read-only"` and download links only. An upload or resumable request in that state is a write and returns HTTP 423 `workspace_lock`. The signed URL itself must be `https`, must not carry userinfo, and must contain `prefix`. The client then PUTs ciphertext to that URL with no `Authorization` header.
+
+Object ids are random. Filenames live only in an AES-256-GCM manifest sealed with the per-workspace key. See `docs/SECURITY.md`.
+
+## Delete account
+
+`DELETE /v2/account`
+
+Requires a Firebase re-auth newer than one hour. Body: `{ "reauthenticatedAt": "<iso>" }`. Response **202**:
+
+```json
+{ "jobId": "<id>", "status": "accepted" }
+```
+
+`GET /v2/account/deletion/:jobId` returns `accepted`, `running`, `succeeded`, or `failed`. Success cancels every Stripe subscription, deletes managed-bucket objects, deletes the Firebase user and account records, and leaves BYO buckets untouched. The client wipes local workspace keys and BYO secrets, then signs out. Settings uses a two-step confirm before this call.
 
 ## What the Windows client does not send
 

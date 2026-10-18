@@ -70,6 +70,16 @@ button { cursor: pointer; }
 .brand p { margin: 2px 0 0; color: var(--muted); font-size: 11px; letter-spacing: 0.12em; }
 
 .nav { display: flex; flex-direction: column; gap: 4px; }
+.nav-signout {
+  margin-top: auto;
+  text-align: left;
+  background: transparent;
+  border: 0;
+  color: #d9d4e6;
+  border-radius: 12px;
+  padding: 10px 12px;
+}
+.nav-signout:hover { background: rgba(255, 255, 255, 0.04); }
 .nav button {
   text-align: left;
   background: transparent;

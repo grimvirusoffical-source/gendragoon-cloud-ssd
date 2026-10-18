@@ -3,11 +3,13 @@ import { useState } from "react";
 
 export function ByoSetup(props: {
   onChallenge: (input: { provider: ByoProviderId; endpoint: string; bucket: string }) => void;
+  onStoreSecret?: (secret: string) => void;
   message: string | null;
 }) {
   const [provider, setProvider] = useState<ByoProviderId>("r2");
   const [endpoint, setEndpoint] = useState("https://example.r2.cloudflarestorage.com");
   const [bucket, setBucket] = useState("library");
+  const [secret, setSecret] = useState("");
   return (
     <section data-testid="byo-setup">
       <header className="topbar">
@@ -38,7 +40,7 @@ export function ByoSetup(props: {
           <input data-testid="byo-bucket" value={bucket} onChange={(event) => setBucket(event.target.value)} />
         </label>
         <label className="field">Access key or SFTP key
-          <input data-testid="byo-secret" type="password" placeholder="Stored only in the OS keychain" autoComplete="off" />
+          <input data-testid="byo-secret" type="password" placeholder="Stored only in the OS keychain" autoComplete="off" value={secret} onChange={(event) => setSecret(event.target.value)} />
         </label>
         <p className="help">
           Setup writes a server-generated challenge file, reads it back, and deletes it. The server checks the read-back. The workspace stays inactive until that proof succeeds. The server stores the provider type, endpoint, and a bucket fingerprint only.
@@ -48,7 +50,10 @@ export function ByoSetup(props: {
             type="button"
             className="btn"
             data-testid="byo-challenge"
-            onClick={() => props.onChallenge({ provider, endpoint, bucket })}
+            onClick={() => {
+              if (secret) props.onStoreSecret?.(secret);
+              props.onChallenge({ provider, endpoint, bucket });
+            }}
           >
             Verify ownership
           </button>

@@ -90,8 +90,43 @@ export type { TransferKind, ChunkPlan, TransferMetadata } from "./transfer.js";
 export { libraryDestination, libraryKey } from "./library.js";
 export type { LibraryDestination } from "./library.js";
 
-export { ApiError, GenDragoonClient } from "./api/client.js";
+export { ApiError, WorkspaceLockedError, GenDragoonClient } from "./api/client.js";
 export type { ClientOptions } from "./api/client.js";
+export {
+  accountFromAssessment,
+  reduceAccount,
+  isWorkspaceLockError,
+  applyApiFailure,
+  viewAfterFailure,
+  deleteAccountAndWipe,
+} from "./account.js";
+export type { AccountPhase, AccountLockReason, AccountState, AccountEvent } from "./account.js";
+export {
+  SIGNED_URL_MAX_MS,
+  REAUTH_WINDOW_MS,
+  reauthIsRecent,
+  storageOperations,
+  assertStorageUrlResponse,
+  putSignedObject,
+} from "./storage.js";
+export {
+  LIBRARY_OBJECT_ID,
+  MemorySecretStore,
+  workspaceKeyId,
+  byoSecretId,
+  createWorkspaceKey,
+  importWorkspaceKey,
+  loadOrCreateWorkspaceKey,
+  wipeWorkspaceKeys,
+  sealNamedFile,
+  openNamedFile,
+  sealLibrary,
+  openLibrary,
+  sealStream,
+  sealBytes,
+  openBytes,
+} from "./seal.js";
+export type { SecretStore, SealedName, LibraryManifest } from "./seal.js";
 export type {
   HealthResponse,
   CapabilitiesResponse,
@@ -114,4 +149,13 @@ export type {
   ByoProofRequest,
   ByoProofResponse,
   AccessResponse,
+  StorageOp,
+  StorageAccess,
+  StorageOperation,
+  StorageUrlRequest,
+  StorageLink,
+  StorageUrlResponse,
+  DeleteAccountRequest,
+  DeleteAccountAccepted,
+  AccountDeletionStatus,
 } from "./api/types.js";
