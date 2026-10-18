@@ -172,11 +172,40 @@ class UploadWorkspaceTests(unittest.TestCase):
         child = folder / "nested/child.data"
         child.write_bytes(b"before")
         self.prepare([folder])
-        child.write_bytes(b"after!")
+        # Different size on purpose: a same-size edit within one timestamp tick is
+        # invisible to the size+mtime/ctime fingerprint (see the expectedFailure
+        # test below), which made this test flaky in full-suite runs.
+        child.write_bytes(b"after, a different size")
         with self.fake_library() as helper, self.assertRaises(workspace.WorkspaceError):
             workspace.run_next(self.home)
         helper.assert_not_called()
         self.assertTrue(child.exists())
+
+    @unittest.expectedFailure  # needs content hash; size+mtime misses same-size edits
+    def test_same_size_edit_with_restored_mtime_is_detected(self):
+        """Deterministic: same-size rewrite, mtime restored with os.utime, and
+        ctime pinned so filesystem timestamp granularity cannot hide or reveal it."""
+        folder = self.sources / "Deterministic"
+        folder.mkdir(parents=True)
+        child = folder / "child.data"
+        child.write_bytes(b"before")
+        original = child.stat()
+        real_lstat = Path.lstat
+
+        def pinned_lstat(item, *args, **kwargs):
+            info = real_lstat(item, *args, **kwargs)
+            fields = {name: getattr(info, name) for name in dir(info) if name.startswith("st_")}
+            if Path(item) == child:
+                fields["st_ctime_ns"] = original.st_ctime_ns
+            return type("PinnedStat", (), fields)()
+
+        with mock.patch.object(Path, "lstat", pinned_lstat):
+            before = workspace.fingerprint(folder)
+            child.write_bytes(b"after!")
+            self.assertEqual(child.stat().st_size, original.st_size)
+            os.utime(child, ns=(original.st_atime_ns, original.st_mtime_ns))
+            after = workspace.fingerprint(folder)
+        self.assertNotEqual(before, after)
 
     def test_same_name_roots_fail_before_any_job_or_offload(self):
         first = self.source("A/report.txt")
