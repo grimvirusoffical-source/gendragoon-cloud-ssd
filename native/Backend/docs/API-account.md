@@ -6,7 +6,7 @@ No Stripe secret, Firebase private key, customer payload, or user identifier bel
 
 ## Authentication
 
-`DELETE /v2/account` uses the same Firebase ID token middleware as the rest of `/v2` (`Authorization: Bearer <Firebase ID token>`, Google provider, current Terms acceptance).
+`DELETE /v2/account` requires a Firebase ID token (`Authorization: Bearer <Firebase ID token>`, Google provider). It uses the production login chain with Terms acceptance turned off. Deleting the account removes `accepted_terms/{uid}`, so a Terms check on this route would reject the caller before the job could be polled. `GET /v2/account/deletions/:jobId` also skips Terms. Other `/v2` routes still require current Terms.
 
 Checks run in this order. A later check is not used to explain an earlier failure.
 
@@ -26,7 +26,7 @@ Every `401` from these routes is JSON with one of two machine-readable codes. Cl
 | `reauth_required` | The token is valid, the Firebase user still exists, no deletion tombstone exists, and `auth_time` is stale or missing. Sign in again. Nothing was deleted. |
 | `invalid_token` | The token is missing, rejected, revoked, or the Firebase user is already gone. |
 
-A repeat `DELETE` after the job is `done` is `401 {"error":"invalid_token"}` when the Firebase user is gone or the token is revoked, or `410 {"error":"account_deleted","jobId":"<id>"}` when the user record is still present and the tombstone exists. That repeat is never `reauth_required` and never `500`. It does not cancel billing, delete objects, or call `deleteUser` again. A stale token on an account that has not been deleted does not create a job. An upstream auth middleware that would have returned a prose `401` is rewritten to `{"error":"invalid_token"}` on these routes.
+A repeat `DELETE` after the job is `done` is `401 {"error":"invalid_token"}` when the Firebase user is gone or the token is revoked, or `410 {"error":"account_deleted","jobId":"<id>","statusToken":"<token>"}` when the user record is still present and the tombstone exists. The `statusToken` on that `410` is a new token for the same `jobId`. That repeat is never `reauth_required` and never `500`. It does not cancel billing, delete objects, or call `deleteUser` again. A stale token on an account that has not been deleted does not create a job. An upstream auth middleware that would have returned a prose `401` is rewritten to `{"error":"invalid_token"}` on these routes.
 
 When the client sends a JSON body, it must be exactly a confirmation object:
 
@@ -48,12 +48,14 @@ Content-Type: application/json
 
 ```http
 HTTP/1.1 202 Accepted
-Cache-Control: no-store
+Cache-Control: private, no-store
 
-{"status":"deleting","jobId":"<uuid>"}
+{"status":"deleting","jobId":"<uuid>","statusToken":"<base64url>"}
 ```
 
-The service method `deleteAccount(req)` returns `{status:202, jobId}`. The HTTP body uses `status:"deleting"` plus the same `jobId`.
+`statusToken` is 32 random bytes encoded as base64url. The job stores only `sha256(statusToken)` and an expiry 7 days out. The raw token is returned once in this response and is never written to logs. It polls only this `jobId`.
+
+The service method `deleteAccount(req)` returns `{status:202, jobId, statusToken}`. The HTTP body uses `status:"deleting"` plus the same `jobId` and `statusToken`.
 
 The job is keyed by `accountHash` (`sha256("gd-v1:"+uid)` in the running service). Repeating `DELETE` while the job is `queued`, `running`, or `failed` returns the same `jobId` and resumes incomplete steps. It does not start a second cancellation pass.
 
@@ -64,17 +66,24 @@ GET /v2/account/deletions/:jobId
 Authorization: Bearer <Firebase ID token>
 ```
 
+The same URL also accepts the job's status token:
+
+```http
+GET /v2/account/deletions/:jobId
+Authorization: Bearer <statusToken>
+```
+
 ```json
 {"jobId":"<uuid>","status":"running","retryable":true}
 ```
 
-`status` is one of `queued`, `running`, `done`, `failed`.
+`status` is one of `queued`, `running`, `done`, `failed`. The body stays those three fields. It does not include `statusToken`, `accountHash`, or the token hash.
 
 This is the only status route. `GET /v2/account/deletion/:jobId` (singular) is not registered and returns `404`. There is no alias and no `Deprecation` header.
 
-The plural route uses the same Firebase authentication middleware as `DELETE /v2/account`. The five-minute `auth_time` window is enforced on `DELETE` only, so a client can keep polling with the token it already has. The job must belong to the caller's `accountHash`. A missing job and another account's `jobId` both return `404 {"error":"not_found"}` so existence is not revealed. Responses are `Cache-Control: private, no-store`. A rejected token is `401 {"error":"invalid_token"}`.
+A Firebase ID token is accepted when it verifies for the account that owns the job. Terms acceptance is not checked, so polling still works after `accepted_terms/{uid}` is deleted. The five-minute `auth_time` window is enforced on `DELETE` only. After `deleteUser`, that Firebase token can no longer verify, and the client polls with the `statusToken` from the `202` response. A status token is compared with `sha256` of the bearer against the hash stored on that job. It is valid for 7 days. A token issued for job A presented to job B, an expired token, a missing bearer, and any other bad bearer all return `404 {"error":"not_found"}`. A missing job returns the same `404`. Responses are `Cache-Control: private, no-store`.
 
-`jobStatus(jobId)` on the service returns `{status}` (plus `accountHash`, `retryable`, and `failure` when set) or `null`. The HTTP body does not include `accountHash`.
+`jobStatus(jobId)` on the service returns `{status}` (plus `accountHash`, `retryable`, `failure`, and the status-token hash and expiry when set) or `null`. The HTTP body does not include `accountHash` or the hash.
 
 ## What the job does
 

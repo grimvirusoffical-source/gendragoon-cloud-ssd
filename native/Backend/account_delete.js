@@ -6,6 +6,7 @@
 // dropped. Firebase refresh tokens are revoked and the user is deleted last.
 const crypto=require("node:crypto");
 const REAUTH_SECONDS=5*60;
+const STATUS_TOKEN_TTL_MS=7*24*60*60*1000;
 const JOB_STATUS=new Set(["queued","running","done","failed"]);
 const SUBSCRIPTION_KEY=/SubscriptionId$/;
 
@@ -25,8 +26,14 @@ function plainJob(job){
   steps:{...job.steps},canceledIds:[...(job.canceledIds||[])],
   subscriptionIds:[...(job.subscriptionIds||[])],customerId:job.customerId||null,
   retryable:job.retryable===true,failure:job.failure||null};
+ if(typeof job.statusTokenHash==="string")data.statusTokenHash=job.statusTokenHash;
+ if(typeof job.statusTokenExpiresAt==="number")data.statusTokenExpiresAt=job.statusTokenExpiresAt;
  if(job.status!=="done")data.uid=job.uid;
  return data;
+}
+function bearerToken(req){
+ const match=/^Bearer ([A-Za-z0-9._~-]+)$/.exec(req?.headers?.authorization||"");
+ return match?match[1]:"";
 }
 function createAccountDeletion({db,stripe,bucket,auth,byoProviders,hash,now}){
  // byoProviders is accepted so callers can pass the registry. Deletion must
@@ -42,6 +49,20 @@ function createAccountDeletion({db,stripe,bucket,auth,byoProviders,hash,now}){
    jobRef(job.jobId).set(data),
    accountRef(job.accountHash).set(data),
   ]);
+ }
+ function issueStatusToken(job){
+  const statusToken=crypto.randomBytes(32).toString("base64url");
+  job.statusTokenHash=crypto.createHash("sha256").update(statusToken).digest("hex");
+  job.statusTokenExpiresAt=clock()+STATUS_TOKEN_TTL_MS;
+  return statusToken;
+ }
+ function statusTokenMatches(job,token){
+  if(!job||typeof token!=="string"||!/^[A-Za-z0-9_-]{43}$/.test(token))return false;
+  if(typeof job.statusTokenExpiresAt!=="number"||clock()>job.statusTokenExpiresAt)return false;
+  const actual=Buffer.from(crypto.createHash("sha256").update(token).digest("hex"),"hex");
+  const expected=Buffer.from(String(job.statusTokenHash||""),"hex");
+  if(actual.length!==expected.length||expected.length!==32)return false;
+  return crypto.timingSafeEqual(actual,expected);
  }
  function remembered(owner){
   for(const job of jobs.values())if(job.accountHash===owner)return job;
@@ -233,7 +254,11 @@ function createAccountDeletion({db,stripe,bucket,auth,byoProviders,hash,now}){
   if(typeof owner!=="string"||!/^[a-f0-9]{64}$/.test(owner))throw refusal(400,"invalid_account");
   const existing=await load(owner);
   // account_deletions/{accountHash} with status done is the deletion tombstone.
-  if(existing?.status==="done")throw refusal(410,"account_deleted",{jobId:existing.jobId});
+  if(existing?.status==="done"){
+   const statusToken=issueStatusToken(existing);
+   await save(existing);
+   throw refusal(410,"account_deleted",{jobId:existing.jobId,statusToken});
+  }
   const authTime=user.auth_time;
   const age=Math.floor(clock()/1000)-(typeof authTime==="number"?authTime:Number.NaN);
   if(!Number.isFinite(authTime)||age>REAUTH_SECONDS)throw refusal(401,"reauth_required");
@@ -243,26 +268,30 @@ function createAccountDeletion({db,stripe,bucket,auth,byoProviders,hash,now}){
   }
   if(existing&&(existing.status==="queued"||existing.status==="running"||existing.status==="failed")){
    existing.uid=existing.uid||uid;
+   const statusToken=issueStatusToken(existing);
    schedule(existing);
-   return {status:202,jobId:existing.jobId};
+   return {status:202,jobId:existing.jobId,statusToken};
   }
   const job={jobId:crypto.randomUUID(),accountHash:owner,uid,status:"queued",steps:{},
    canceledIds:[],subscriptionIds:[],customerId:null,retryable:true,failure:null,inflight:false};
+  const statusToken=issueStatusToken(job);
   jobs.set(job.jobId,job);
   schedule(job);
-  return {status:202,jobId:job.jobId};
+  return {status:202,jobId:job.jobId,statusToken};
  }
  async function jobStatus(jobId){
   if(typeof jobId!=="string"||!jobId)return null;
   const live=jobs.get(jobId);
-  if(live)return {status:live.status,accountHash:live.accountHash,retryable:live.retryable===true,failure:live.failure||null};
+  if(live)return {status:live.status,accountHash:live.accountHash,retryable:live.retryable===true,failure:live.failure||null,
+   statusTokenHash:live.statusTokenHash||null,statusTokenExpiresAt:live.statusTokenExpiresAt||null};
   const snap=await jobRef(jobId).get();
   if(!snap.exists)return null;
   const data=snap.data();
   if(!JOB_STATUS.has(data?.status))return null;
-  return {status:data.status,accountHash:data.accountHash,retryable:data.retryable===true,failure:data.failure||null};
+  return {status:data.status,accountHash:data.accountHash,retryable:data.retryable===true,failure:data.failure||null,
+   statusTokenHash:data.statusTokenHash||null,statusTokenExpiresAt:data.statusTokenExpiresAt||null};
  }
- return {deleteAccount,jobStatus};
+ return {deleteAccount,jobStatus,statusTokenMatches};
 }
 function deletionAuth(firebaseAuth){
  return (req,res,next)=>{
@@ -284,28 +313,73 @@ function registerAccountDeletion({app,firebaseAuth,...deps}){
  app.delete("/v2/account",authn,async(req,res)=>{
   try{
    const result=await svc.deleteAccount(req);
-   res.status(202).json({status:"deleting",jobId:result.jobId});
+   res.setHeader("Cache-Control","private, no-store");
+   const body={status:"deleting",jobId:result.jobId};
+   if(typeof result.statusToken==="string")body.statusToken=result.statusToken;
+   res.status(202).json(body);
   }catch(error){
    const status=Number.isInteger(error?.status)?error.status:500;
    const code=error?.code||"account_deletion_failed";
    const body={error:status===401&&code!=="reauth_required"?"invalid_token":code};
    if(status===410&&typeof error?.jobId==="string")body.jobId=error.jobId;
+   if(status===410&&typeof error?.statusToken==="string")body.statusToken=error.statusToken;
+   if(status>=500)console.error("account deletion request failed",code);
+   res.setHeader("Cache-Control","private, no-store");
    res.status(status).json(body);
   }
  });
- app.get("/v2/account/deletions/:jobId",authn,async(req,res)=>{
+ app.get("/v2/account/deletions/:jobId",async(req,res)=>{
   try{
-   if(typeof req.user?.uid!=="string"||!req.user.uid)return res.status(401).json({error:"invalid_token"});
-   const job=await svc.jobStatus(req.params.jobId);
-   if(!job)return res.status(404).json({error:"not_found"});
-   if(typeof job.accountHash==="string"){
-    const owner=typeof deps.hash==="function"?deps.hash(req.user.uid):null;
-    if(job.accountHash!==owner)return res.status(404).json({error:"not_found"});
+   const jobId=req.params.jobId;
+   const job=await svc.jobStatus(jobId);
+   const presented=bearerToken(req);
+   if(job&&typeof svc.statusTokenMatches==="function"&&svc.statusTokenMatches(job,presented)){
+    res.setHeader("Cache-Control","private, no-store");
+    return res.json({jobId,status:job.status,retryable:job.retryable===true});
    }
-   res.setHeader("Cache-Control","private, no-store");
-   res.json({jobId:req.params.jobId,status:job.status,retryable:job.retryable===true});
+   continueWithFirebase(firebaseAuth,req,res,()=>finishStatus(req,res,job,jobId));
   }catch(_){if(!res.headersSent)res.status(503).json({error:"deletion_status_unavailable"});}
  });
  return svc;
+ function finishStatus(req,res,job,jobId){
+  if(res.headersSent)return;
+  if(typeof req.user?.uid!=="string"||!req.user.uid||!job)return res.status(404).json({error:"not_found"});
+  if(typeof job.accountHash==="string"){
+   const owner=typeof deps.hash==="function"?deps.hash(req.user.uid):null;
+   if(job.accountHash!==owner)return res.status(404).json({error:"not_found"});
+  }
+  res.setHeader("Cache-Control","private, no-store");
+  res.json({jobId,status:job.status,retryable:job.retryable===true});
+ }
 }
-module.exports={createAccountDeletion,registerAccountDeletion,REAUTH_SECONDS};
+function continueWithFirebase(firebaseAuth,req,res,onOk){
+ let done=false;
+ const probe={
+  statusCode:200,
+  status(code){this.statusCode=code;return this;},
+  setHeader(){return this;},
+  getHeader(){return undefined;},
+  json(){
+   if(done||res.headersSent)return this;
+   done=true;
+   res.status(404).json({error:"not_found"});
+   return this;
+  },
+ };
+ try{
+  const maybe=firebaseAuth(req,probe,()=>{
+   if(done||res.headersSent)return;
+   done=true;
+   onOk();
+  });
+  Promise.resolve(maybe).catch(()=>{
+   if(!done&&!res.headersSent){
+    done=true;
+    res.status(404).json({error:"not_found"});
+   }
+  });
+ }catch(_){
+  if(!done&&!res.headersSent)res.status(404).json({error:"not_found"});
+ }
+}
+module.exports={createAccountDeletion,registerAccountDeletion,REAUTH_SECONDS,STATUS_TOKEN_TTL_MS};

@@ -40,7 +40,7 @@ function environmentGuard(env){
   throw Error("Live checkout requires PAID_STORAGE_READY=approved after provisioning acceptance");
  return {enabled,hasSecret,hasHook,priceCatalog};
 }
-function installedBilling({app,db,bucket,admin,firebaseAuth,accountKey,env=process.env,stripeOverride,adminAuth,byoProviders,now}){
+function installedBilling({app,db,bucket,admin,firebaseAuth,firebaseAuthWithoutTerms,accountKey,env=process.env,stripeOverride,adminAuth,byoProviders,now}){
  const state=environmentGuard(env);
  const Stripe=state.hasSecret&&!stripeOverride?require("stripe"):null;
  const stripe=stripeOverride||(Stripe?new Stripe(env.STRIPE_SECRET_KEY,{apiVersion:STRIPE_API_VERSION,maxNetworkRetries:2,timeout:25000}):{
@@ -194,8 +194,8 @@ function installedBilling({app,db,bucket,admin,firebaseAuth,accountKey,env=proce
    res.status(503).json({error:"Webhook temporary failure; Stripe will retry"});
   }
  });
- if(app&&typeof firebaseAuth==="function"){
-  require("./account_delete").registerAccountDeletion({app,firebaseAuth,db,bucket,stripe,
+ if(app&&typeof (firebaseAuthWithoutTerms||firebaseAuth)==="function"){
+  require("./account_delete").registerAccountDeletion({app,firebaseAuth:firebaseAuthWithoutTerms||firebaseAuth,db,bucket,stripe,
    auth:adminAuth||{async deleteUser(){throw Object.assign(Error("auth_unavailable"),{status:503,code:"auth_unavailable"});}},
    byoProviders:byoProviders||{},hash:accountKey,now:now||(()=>Date.now())});
  }

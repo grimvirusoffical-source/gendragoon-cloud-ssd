@@ -223,10 +223,17 @@ test("singular deletion status is not registered; plural enforces ownership",asy
   current={uid,auth_time:Math.floor(NOW/1000)-6*60};
   const again=await fetch(base+"/v2/account",{method:"DELETE",headers:{"Content-Type":"application/json"},body:JSON.stringify({confirm:"DELETE"})});
   assert.equal(again.status,410);
-  assert.deepEqual(await again.json(),{error:"account_deleted",jobId});
+  const againBody=await again.json();
+  assert.equal(againBody.error,"account_deleted");
+  assert.equal(againBody.jobId,jobId);
+  assert.match(againBody.statusToken,/^[A-Za-z0-9_-]{43}$/);
   current={uid,auth_time:Math.floor(NOW/1000)-30};
   const againFresh=await fetch(base+"/v2/account",{method:"DELETE",headers:{"Content-Type":"application/json"},body:JSON.stringify({confirm:"DELETE"})});
   assert.equal(againFresh.status,410);
-  assert.deepEqual(await againFresh.json(),{error:"account_deleted",jobId});
+  const freshBody=await againFresh.json();
+  assert.equal(freshBody.error,"account_deleted");
+  assert.equal(freshBody.jobId,jobId);
+  assert.match(freshBody.statusToken,/^[A-Za-z0-9_-]{43}$/);
+  assert.notEqual(freshBody.statusToken,againBody.statusToken);
  }finally{server.close();}
 });
