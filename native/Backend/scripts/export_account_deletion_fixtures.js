@@ -18,7 +18,7 @@ const fs=require("node:fs");
 const path=require("node:path");
 const express=require("express");
 const {memoryFirestore}=require("../test_firestore");
-const {registerAccountDeletion,createWebhookNotifier,STATUS_TOKEN_TTL_MS}=require("../account_delete");
+const {registerAccountDeletion,STATUS_TOKEN_TTL_MS}=require("../account_delete");
 const {installV2Errors}=require("../v2_errors");
 
 const NOW=1_700_000_000_000;
@@ -99,7 +99,7 @@ async function listen({now=()=>NOW,stripe,rows=[],holdRunner=false}={}){
  const bucket={deleteFiles:async()=>{}};
  const auth={revokeRefreshTokens:async()=>{},deleteUser:async()=>{}};
  registerAccountDeletion({app,db,stripe:stripe||stripeDouble(),bucket,auth,hash,now,firebaseAuth:authFor(now),
-  notifier:createWebhookNotifier({env:{},warn(){}})});
+  notifier:async()=>{}});
  installV2Errors(app);
  const server=app.listen(0,"127.0.0.1");
  await new Promise(resolve=>server.once("listening",resolve));
@@ -265,28 +265,26 @@ async function main(){
   const jobId=created.response.body.jobId;
   const failed=await pollUntil(support.base,jobId,token,"failed");
   if(failed.response.body?.status!=="failed")throw Error("support failed "+JSON.stringify(failed.response));
-  const received=await capture(support.base,"POST","/v2/support/deletion-request",{token,body:{jobId}});
+  const supportPath="/v2/account/deletions/"+jobId+"/support-request";
+  const received=await capture(support.base,"POST",supportPath,{token});
   if(received.response.status!==202||received.response.body?.status!=="received"||typeof received.response.body?.requestId!=="string")
    throw Error("support received "+JSON.stringify(received.response));
-  publish("request-received",received,[token],"support");
-  const repeat=await capture(support.base,"POST","/v2/support/deletion-request",{token,body:{jobId}});
+  publish("support-received",received,[token]);
+  const repeat=await capture(support.base,"POST",supportPath,{token});
   if(repeat.response.status!==202||repeat.response.body?.requestId!==received.response.body.requestId)
    throw Error("support repeat "+JSON.stringify(repeat.response));
-  publish("request-repeat",repeat,[token],"support");
-  const extra=await capture(support.base,"POST","/v2/support/deletion-request",{token,body:{jobId,email:"person@example.com"}});
-  if(extra.response.status!==400||extra.response.body?.error!=="unknown_field")throw Error("support field "+JSON.stringify(extra.response));
-  publish("request-unknown-field",extra,[token],"support");
-  const bad=await capture(support.base,"POST","/v2/support/deletion-request",{token:"not-a-token",body:{jobId}});
+  publish("support-repeat",repeat,[token]);
+  const bad=await capture(support.base,"POST",supportPath,{token:"not-a-token"});
   if(bad.response.status!==404||bad.response.body?.error!=="not_found")throw Error("support token "+JSON.stringify(bad.response));
-  publish("request-bad-token",bad,[token],"support");
+  publish("support-bad-token",bad,[token]);
   for(let n=0;n<3;n++){
-   const more=await capture(support.base,"POST","/v2/support/deletion-request",{token,body:{jobId}});
+   const more=await capture(support.base,"POST",supportPath,{token});
    if(more.response.status!==202)throw Error("support fill "+JSON.stringify(more.response));
   }
-  const limited=await capture(support.base,"POST","/v2/support/deletion-request",{token,body:{jobId}});
+  const limited=await capture(support.base,"POST",supportPath,{token});
   if(limited.response.status!==429||limited.response.body?.error!=="rate_limited"||!Number.isInteger(limited.response.body?.retryAfterSec))
    throw Error("support limit "+JSON.stringify(limited.response));
-  publish("request-rate-limited",limited,[token],"support");
+  publish("support-rate-limited",limited,[token]);
  }finally{await support.close();}
 
  const finishedSupport=await listen();
@@ -295,9 +293,9 @@ async function main(){
   if(created.response.status!==202)throw Error("support done create "+JSON.stringify(created.response));
   const token=created.response.body.statusToken;
   await pollUntil(finishedSupport.base,created.response.body.jobId,token,"done");
-  const early=await capture(finishedSupport.base,"POST","/v2/support/deletion-request",{token,body:{jobId:created.response.body.jobId}});
+  const early=await capture(finishedSupport.base,"POST","/v2/account/deletions/"+created.response.body.jobId+"/support-request",{token});
   if(early.response.status!==409||early.response.body?.error!=="support_not_needed")throw Error("support early "+JSON.stringify(early.response));
-  publish("request-not-failed",early,[token],"support");
+  publish("support-not-needed",early,[token]);
  }finally{await finishedSupport.close();}
 }
 main().catch(error=>{console.error(error);process.exit(1);});

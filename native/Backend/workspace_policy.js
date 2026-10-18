@@ -97,6 +97,52 @@ function qualifiesForRaisedCap(w){
  const bundled=w.storageMode==="bundle"?Math.min(24,Math.max(2,Math.floor(STORAGE[w.storageTier].gb/250))):0;
  return Math.max(extra,bundled)>=QUALIFYING_WORKERS;
 }
+function isByoWorkspace(w){
+ if(!w||typeof w!=="object")return false;
+ if(w.kind==="byo"||w.byoRegistered===true)return true;
+ return typeof w.providerType==="string"&&w.providerType.length>0;
+}
+function subscriptionActive(w){
+ const status=w?.workspaceFeeStatus||"";
+ if(w?.workspaceFeePaid===true&&["active","paid","trialing"].includes(status))return true;
+ return ["active","paid","trialing"].includes(status)&&w?.workspaceFeePaid!==false;
+}
+function byoLapsed(w){return isByoWorkspace(w)&&!isGrandfathered(w)&&!subscriptionActive(w);}
+function feeLapsed(w){return !!w&&(evaluateLapse(w).lapsed||byoLapsed(w));}
+function hostedEligible(w){
+ if(!w||!w.id||isByoWorkspace(w))return false;
+ const status=projectStatus(w);
+ return status!=="archived"&&status!=="merged";
+}
+function byCreated(a,b){
+ const ca=createdAtMs(a),cb=createdAtMs(b);
+ const da=ca==null?Number.MAX_SAFE_INTEGER:ca,db=cb==null?Number.MAX_SAFE_INTEGER:cb;
+ if(da!==db)return da-db;
+ return String(a.id).localeCompare(String(b.id));
+}
+function chooseFreeWorkspaceId(projects,{avoidId=null}={}){
+ const eligible=(Array.isArray(projects)?projects:[]).filter(hostedEligible).sort(byCreated);
+ const pick=eligible.find(workspace=>workspace.id!==avoidId);
+ return pick?pick.id:null;
+}
+// The one hosted workspace that does not pay the monthly fee. A stored id keeps
+// the slot through archive. A BYO id is never eligible, so the oldest remaining
+// hosted workspace is chosen instead. Callers pass the account plus its projects.
+function freeWorkspaceId(account,projects){
+ const stored=typeof account?.freeWorkspaceId==="string"&&account.freeWorkspaceId?account.freeWorkspaceId:null;
+ if(!Array.isArray(projects))return stored;
+ if(stored){
+  const holder=projects.find(workspace=>workspace&&workspace.id===stored);
+  if(holder&&!isByoWorkspace(holder))return stored;
+ }
+ return chooseFreeWorkspaceId(projects);
+}
+function workspacePrice(workspace,freeId){
+ const isFree=!!workspace&&workspace.id===freeId&&!isByoWorkspace(workspace);
+ const monthlyPriceCents=isByoWorkspace(workspace)?WORKSPACE_FEE_CENTS
+  :(isFree||isGrandfathered(workspace)||workspace?.projectFeeStatus==="owner"?0:WORKSPACE_FEE_CENTS);
+ return {isFree,monthlyPriceCents};
+}
 function countsTowardCap(w){return !["archived","merged"].includes(projectStatus(w));}
 function summarizeProjects(projects){
  const list=Array.isArray(projects)?projects:[];
@@ -104,7 +150,7 @@ function summarizeProjects(projects){
  const qualified=current.some(qualifiesForRaisedCap);
  const projectLimit=qualified?RAISED_CAP:BASE_CAP;
  const overBy=Math.max(0,current.length-projectLimit);
- const unpaidWorkspaceIds=list.filter(w=>w&&w.id&&evaluateLapse(w).lapsed).map(w=>w.id);
+ const unpaidWorkspaceIds=list.filter(w=>w&&w.id&&feeLapsed(w)).map(w=>w.id);
  const locked=overBy>0||unpaidWorkspaceIds.length>0;
  const reason=overBy>0&&unpaidWorkspaceIds.length?"over_cap_and_lapsed":unpaidWorkspaceIds.length?"lapsed":overBy>0?"over_cap":null;
  return {qualified,projectLimit,used:current.length,overBy,unpaidWorkspaceIds,locked,uploadsBlocked:locked,reason,
@@ -256,5 +302,6 @@ module.exports={FREE_WORKSPACES,WORKSPACE_FEE_USD_MONTHLY,WORKSPACE_FEE_CENTS,BA
  GRANDFATHER_CUTOFF_MS,LIST_UNAVAILABLE,LIST_UNAVAILABLE_LOCK,
  monthlyPriceId,isGrandfathered,evaluateLapse,projectStatus,activatedBasicProject,
  qualifiesForRaisedCap,summarizeProjects,lockBody,findSecretFields,rejectProviderSecrets,
+ isByoWorkspace,subscriptionActive,byoLapsed,feeLapsed,chooseFreeWorkspaceId,freeWorkspaceId,workspacePrice,
  publicByoRegistration,issueChallenge,verifyChallenge,collisionName,fileDigest,storedChecksums,checksumsAgree,
  invoicePaidThroughMs,isPrivateAddress,listAccountProjects,writeNeedsLock};

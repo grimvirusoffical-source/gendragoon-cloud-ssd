@@ -8,7 +8,8 @@ const {FREE_WORKSPACES,WORKSPACE_FEE_CENTS,BASE_CAP,RAISED_CAP,QUALIFYING_STORAG
  monthlyPriceId,isGrandfathered,evaluateLapse,projectStatus,activatedBasicProject,
  qualifiesForRaisedCap:qualifiesForHigherLimit,summarizeProjects,lockBody,publicByoRegistration,rejectProviderSecrets,
  issueChallenge,verifyChallenge,collisionName,fileDigest,storedChecksums,checksumsAgree,invoicePaidThroughMs,isPrivateAddress,
- listAccountProjects,BYO_CHALLENGE_TTL_MS}=policy;
+ listAccountProjects,BYO_CHALLENGE_TTL_MS,isByoWorkspace,subscriptionActive,byoLapsed,
+ chooseFreeWorkspaceId,freeWorkspaceId,workspacePrice}=policy;
 const PROJECT_FEE_CENTS=WORKSPACE_FEE_CENTS,DEFAULT_PROJECT_LIMIT=BASE_CAP,QUALIFIED_PROJECT_LIMIT=RAISED_CAP;
 const BASIC_QUOTA_BYTES=2_000_000_000;
 const UUID=/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
@@ -23,20 +24,21 @@ function effectiveStorageQuota(w){
    return w.storageActive===true&&Object.hasOwn(STORAGE,w.storageTier||"")?STORAGE[w.storageTier].gb*1e9:BASIC_QUOTA_BYTES;
  }
  if(w.kind!=="paid"||w.provisioned!==true)return 0;
+ // An unpaid BYO workspace stays readable so the lapse lock can answer 423.
+ if(isByoWorkspace(w)&&projectStatus(w)==="active"){
+  if(w.storageActive===true&&Object.hasOwn(STORAGE,w.storageTier||""))return STORAGE[w.storageTier].gb*1e9;
+  return BASIC_QUOTA_BYTES;
+ }
  if(w.projectBillingVersion===2&&!activatedBasicProject(w))return 0;
  if(w.storageActive===true&&Object.hasOwn(STORAGE,w.storageTier||""))return STORAGE[w.storageTier].gb*1e9;
  return activatedBasicProject(w)?BASIC_QUOTA_BYTES:0;
 }
-function freeSlotsUsed(projects){
- return (Array.isArray(projects)?projects:[]).filter(workspace=>workspace&&(workspace.kind==="free"||workspace.projectFeeStatus==="free")).length;
-}
 function policyFor(account,projects,{ownerBenefits=false,paymentAvailable=false}={}){
  const summary=summarizeProjects(projects);
- const freeUsed=freeSlotsUsed(projects);
- // A claimed allowance still counts after the free workspace is archived.
- const reserved=account.freeProjectClaimed===true?Math.max(freeUsed,FREE_WORKSPACES):freeUsed;
- const freeClaimed=reserved>=FREE_WORKSPACES;
- return {firstProjectFree:true,freeProjectClaimed:freeClaimed,freeProjectAvailable:reserved<FREE_WORKSPACES,
+ const freeId=freeWorkspaceId(account,projects);
+ // Archive keeps the stored id, so deleting is what releases the slot.
+ const freeClaimed=!!freeId;
+ return {firstProjectFree:true,freeProjectClaimed:freeClaimed,freeProjectAvailable:!freeId,freeWorkspaceId:freeId,
    newProjectOneTimeCents:PROJECT_FEE_CENTS,workspaceMonthlyCents:WORKSPACE_FEE_CENTS,freeWorkspaces:FREE_WORKSPACES,
    currency:"usd",feeIsOneTime:false,
    defaultLimit:DEFAULT_PROJECT_LIMIT,qualifiedLimit:QUALIFIED_PROJECT_LIMIT,
@@ -94,7 +96,14 @@ function createProjectService({db,stamp,hash,stripe,env={},prices={},ensureCusto
    if(legacy.exists&&owned(legacy.data(),owner,"free"))records.push({id:"free",ref:legacy.ref||legacyRef(owner),data:legacy.data()});
    return {account:account.data()||{},records};
  }
- function policy(state,req){return policyFor(state.account,state.records.map(w=>({...w.data,id:w.id})),{ownerBenefits:req.ownerBenefits===true,paymentAvailable:paymentAvailable()});}
+ function projectViews(state){return state.records.map(w=>({...w.data,id:w.id}));}
+ function policy(state,req){return policyFor(state.account,projectViews(state),{ownerBenefits:req.ownerBenefits===true,paymentAvailable:paymentAvailable()});}
+ function assignFree(tx,record){
+  if(!record)return;
+  if(isGrandfathered(record.data)||record.data.projectFeeStatus==="owner"||record.data.projectFeeStatus==="free")return;
+  tx.update(record.ref,{projectFeeStatus:"free",projectFeeCents:0,projectStatus:"active",provisioned:true,
+    workspaceFeeModel:null,workspaceFeeStatus:null,workspaceFeePaid:null,workspaceFeeCents:0,updatedAt:stamp()});
+ }
  function touch(tx,owner,state,extra={}){
    tx.set(accountRef(owner),{freeProjectClaimed:state.account.freeProjectClaimed===true||state.records.length>0,
      projectPolicyVersion:2,projectRevision:(state.account.projectRevision||0)+1,projectUpdatedAt:stamp(),...extra},{merge:true});
@@ -121,6 +130,7 @@ function createProjectService({db,stamp,hash,stripe,env={},prices={},ensureCusto
      }
      if(p.usedProjectSlots>=p.projectLimit)throw new ProjectError(409,"Project limit reached ("+p.projectLimit+"). Archive a project or qualify with 2 TB storage and Turbo performance.","PROJECT_LIMIT_REACHED");
      if(legacyFree&&!p.freeProjectAvailable)throw new ProjectError(409,"The lifetime free project has already been claimed. Create an additional project for $5 once.","FREE_PROJECT_ALREADY_CLAIMED");
+     // The free slot is chosen here, while the account row is locked by this transaction.
      const feeStatus=req.ownerBenefits===true?"owner":p.freeProjectAvailable?"free":"pending";
      if(feeStatus==="pending"&&!p.paymentAvailable)throw new ProjectError(503,configuredMonthlyPrice()
        ?"The $5 monthly workspace price is not configured. Your existing workspaces remain available."
@@ -136,9 +146,11 @@ function createProjectService({db,stamp,hash,stripe,env={},prices={},ensureCusto
        provisioned:feeStatus!=="pending",quotaBytes:BASIC_QUOTA_BYTES,usedBytes:0,reservedBytes:0,
        createdAt:stamp(),updatedAt:stamp()};
      tx.create(ref,data);
-     touch(tx,owner,state,{freeProjectClaimed:true,projectsCreatedLifetime:(state.account.projectsCreatedLifetime||state.records.length)+1});
-     const next={...state,account:{...state.account,freeProjectClaimed:true},records:[...state.records,{id,ref,data}]};
-     return {project:{id,ref,data},policy:policy(next,req),resumed:false};
+     const assignedFree=p.freeProjectAvailable?id:p.freeWorkspaceId;
+     touch(tx,owner,state,{freeProjectClaimed:true,freeWorkspaceId:assignedFree,projectsCreatedLifetime:(state.account.projectsCreatedLifetime||state.records.length)+1});
+     const next={...state,account:{...state.account,freeProjectClaimed:true,freeWorkspaceId:assignedFree},records:[...state.records,{id,ref,data}]};
+     const price=workspacePrice({...data,id},assignedFree);
+     return {project:{id,ref,data},policy:policy(next,req),resumed:false,isFree:price.isFree,monthlyPriceCents:price.monthlyPriceCents};
    });
  }
  async function setSelection(req,id,raw){
@@ -364,6 +376,20 @@ function createProjectService({db,stamp,hash,stripe,env={},prices={},ensureCusto
    const snap=await ref.collection("files").get();
    return snap.docs.map(d=>({id:d.id,ref:d.ref,data:d.data()}));
  }
+ async function remove(req,id){
+  const owner=hash(req.user.uid);
+  return db.runTransaction(async tx=>{
+    const state=await snapshot(owner,tx),current=state.records.find(w=>w.id===id);
+    if(!current)throw new ProjectError(404,"Project not found","PROJECT_NOT_FOUND");
+    const projects=projectViews(state),freeId=freeWorkspaceId(state.account,projects);
+    const remaining=projects.filter(workspace=>workspace.id!==id);
+    let nextFree=freeId===id?chooseFreeWorkspaceId(remaining):freeId;
+    if(freeId===id&&nextFree)assignFree(tx,state.records.find(w=>w.id===nextFree));
+    tx.delete(current.ref);
+    touch(tx,owner,state,{freeWorkspaceId:nextFree||null});
+    return {workspaceId:id,deleted:true,freeWorkspaceId:nextFree||null};
+  });
+ }
  async function registerByo(req,id,body){
    let registration;
    try{registration=publicByoRegistration(body);}catch(error){
@@ -376,18 +402,32 @@ function createProjectService({db,stamp,hash,stripe,env={},prices={},ensureCusto
    }
    const owner=hash(req.user.uid),ref=refFor(owner,id);
    return db.runTransaction(async tx=>{
-     const snap=await tx.get(ref);
-     if(!snap.exists||!owned(snap.data(),owner,id))throw new ProjectError(404,"Project not found","PROJECT_NOT_FOUND");
-     const current=snap.data();
+     const state=await snapshot(owner,tx),current=state.records.find(w=>w.id===id);
+     if(!current)throw new ProjectError(404,"Project not found","PROJECT_NOT_FOUND");
+     const projects=projectViews(state),freeId=freeWorkspaceId(state.account,projects),wasFree=freeId===id;
      const patch={providerType:registration.providerType,endpoint:registration.endpoint,
        bucketFingerprint:registration.bucketFingerprint,byoRegistered:true,updatedAt:stamp()};
      // A new or changed endpoint invalidates the previous proof. First-time
      // registration leaves absent flags unset so callers can tell it never activated.
-     const changed=!!current.endpoint&&current.endpoint!==registration.endpoint;
-     if(changed||current.byoChallengeVerified===true||current.byoActive===true||current.manualProviderConfigured===true){
+     const changed=!!current.data.endpoint&&current.data.endpoint!==registration.endpoint;
+     if(changed||current.data.byoChallengeVerified===true||current.data.byoActive===true||current.data.manualProviderConfigured===true){
        patch.byoChallengeVerified=false;patch.byoActive=false;patch.manualProviderConfigured=false;patch.bucketFingerprint=null;
      }
-     tx.update(ref,patch);return patch;
+     // BYO is never the free slot. A hosted free workspace becomes the $5 monthly fee.
+     if(!subscriptionActive(current.data)){
+       patch.workspaceFeeModel="monthly";patch.feeIsOneTime=false;patch.workspaceFeeCents=WORKSPACE_FEE_CENTS;
+       patch.workspaceFeeStatus="unpaid";patch.workspaceFeePaid=false;
+     }
+     if(wasFree){patch.projectFeeStatus="pending";patch.projectFeeCents=WORKSPACE_FEE_CENTS;patch.projectStatus="active";patch.provisioned=true;}
+     let nextFree=freeId;
+     if(wasFree){
+       nextFree=chooseFreeWorkspaceId(projects.filter(workspace=>workspace.id!==id));
+       if(nextFree)assignFree(tx,state.records.find(w=>w.id===nextFree));
+     }
+     tx.update(ref,patch);
+     touch(tx,owner,state,{freeWorkspaceId:nextFree||null});
+     const price=workspacePrice({...current.data,...patch,id,byoRegistered:true,providerType:registration.providerType},nextFree);
+     return {...patch,isFree:price.isFree,monthlyPriceCents:price.monthlyPriceCents,freeWorkspaceId:nextFree||null,lapsed:byoLapsed({...current.data,...patch,id})};
    });
  }
  async function issueByoChallenge(req,id){
@@ -623,15 +663,21 @@ function createProjectService({db,stamp,hash,stripe,env={},prices={},ensureCusto
      await drain("files");
      await drain("uploads");
      await db.runTransaction(async tx=>{
-       const [source,target,targetFiles,leftover]=await Promise.all([
-         tx.get(sourceRef),tx.get(targetRef),tx.get(targetRef.collection("files")),tx.get(sourceRef.collection("files").limit(1))]);
+       const state=await snapshot(owner,tx);
+       const [targetFiles,leftover]=await Promise.all([tx.get(targetRef.collection("files")),tx.get(sourceRef.collection("files").limit(1))]);
+       const source=state.records.find(w=>w.id===sourceId),target=state.records.find(w=>w.id===targetId);
        if((leftover.docs||[]).length)throw new ProjectError(409,"Source changed during merge. Retry to resume.","MERGE_SOURCE_CHANGED");
-       if(!source.exists||source.data().mergeLock?.token!==token)throw new ProjectError(409,"Merge lock lost","MERGE_LOCK_LOST");
-       if(!target.exists||!owned(target.data(),owner,targetId))throw new ProjectError(404,"Project not found","PROJECT_NOT_FOUND");
+       if(!source||source.data.mergeLock?.token!==token)throw new ProjectError(409,"Merge lock lost","MERGE_LOCK_LOST");
+       if(!target||!owned(target.data,owner,targetId))throw new ProjectError(404,"Project not found","PROJECT_NOT_FOUND");
+       const projects=projectViews(state),freeId=freeWorkspaceId(state.account,projects);
+       // The survivor keeps its own fee status. A deleted free source moves the slot elsewhere.
+       let nextFree=freeId===sourceId?chooseFreeWorkspaceId(projects.filter(w=>w.id!==sourceId),{avoidId:targetId}):freeId;
+       if(freeId===sourceId&&nextFree)assignFree(tx,state.records.find(w=>w.id===nextFree));
        const used=(targetFiles.docs||[]).reduce((sum,file)=>sum+(file.data().sizeBytes||0),0);
        tx.set(tombRef,{name:sourceName,targetId,phase:"completed",copied:copied.size,sourceObjectKeys,mergedAt:stamp()});
        tx.delete(sourceRef);
        tx.update(targetRef,{mergeLock:null,usedBytes:used,updatedAt:stamp()});
+       touch(tx,owner,state,{freeWorkspaceId:nextFree||null});
      });
      held=false;
      if(objectStore)for(const key of sourceObjectKeys)await objectStore.delete(key);
@@ -653,11 +699,11 @@ function createProjectService({db,stamp,hash,stripe,env={},prices={},ensureCusto
    const ids=[...new Set(["workspaceFee","storage","performance","byo"].map(key=>data[key+"SubscriptionId"]).filter(id=>typeof id==="string"&&id))];
    for(const id of ids)await cancel(id,{},{idempotencyKey:"gd-merge-"+mergeId+"-cancel-"+id});
  }
- return {inventory,get,create,setSelection,checkout,archive,restore,withLease,reconcilePayment,revokePayment,
+ return {inventory,get,create,setSelection,checkout,archive,restore,remove,withLease,reconcilePayment,revokePayment,
    registerByo,issueByoChallenge,verifyByo,reconcileWorkspaceFee,mergePreview,merge,
    paymentAvailable,monthlyReady,refFor,legacyRef,policy,hasContinuingBilling};
 }
 module.exports={createProjectService,ProjectError,projectStatus,activatedBasicProject,effectiveStorageQuota,
  qualifiesForHigherLimit,policyFor,validateSelection,safeProjectId,hasContinuingBilling,listAccountProjects,
  PROJECT_FEE_CENTS,DEFAULT_PROJECT_LIMIT,QUALIFIED_PROJECT_LIMIT,BASIC_QUOTA_BYTES,FREE_WORKSPACES,
- evaluateLapse,isGrandfathered,lockBody,summarizeProjects};
+ evaluateLapse,isGrandfathered,lockBody,summarizeProjects,freeWorkspaceId,workspacePrice,byoLapsed};
