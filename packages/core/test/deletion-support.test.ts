@@ -469,7 +469,7 @@ describe("requestDeletionSupport gaps on 3c78d74", () => {
     expect(seen.sessionClears).toBe(0);
   };
 
-  it.fails("1. a secure-store read that rejects (locked keychain) -> fallback, no throw, no request", async () => {
+  it("1. a secure-store read that rejects (locked keychain) -> fallback, no throw, no request", async () => {
     const { deps, seen } = harness([], async () => { throw new Error("keychain locked"); });
     await expect(deps.secureStore.get(JOB_KEY)).rejects.toThrow("keychain locked");
     const result = await settle(JOB, deps);
@@ -478,7 +478,7 @@ describe("requestDeletionSupport gaps on 3c78d74", () => {
     noSignIn(seen);
   });
 
-  it.fails("2. a lone-surrogate jobId that matches the saved one -> fallback, not URIError", async () => {
+  it("2. a lone-surrogate jobId that matches the saved one -> fallback, not URIError", async () => {
     const bad = "job-\uD800";
     expect(() => encodeURIComponent(bad)).toThrow(URIError);
     const { deps, seen } = harness([], async (key) => (key === JOB_KEY ? bad : key === TOKEN_KEY ? STATUS_TOKEN : null));
@@ -495,7 +495,7 @@ describe("requestDeletionSupport gaps on 3c78d74", () => {
    * pinned, only that they land in range. Missing or non-numeric is exactly 60;
    * an in-range value (including the fixture's 86400) is kept.
    */
-  it.fails("3. 429 retryAfterSec is clamped to 1..86400, default 60 (Avery's rule)", async () => {
+  it("3. 429 retryAfterSec is clamped to 1..86400, default 60 (Avery's rule)", async () => {
     const run = async (raw: string) => {
       const { deps, seen } = harness([new Response(raw, { status: 429, headers: { "content-type": "application/json" } })], saved(JOB));
       const r = await settle(JOB, deps);
@@ -517,7 +517,7 @@ describe("requestDeletionSupport gaps on 3c78d74", () => {
     expect(await run('{"error":"rate_limited","retryAfterSec":86400}')).toEqual({ kind: "already_sent", retryAfterSec: 86400 });
   });
 
-  it.fails("4. 409 support_not_needed, then a refresh body that is not a status object -> fallback", async () => {
+  it("4. 409 support_not_needed, then a refresh body that is not a status object -> fallback", async () => {
     for (const body of [[], "done", null, { status: 42 }]) {
       const { deps, seen } = harness([json(409, { error: "support_not_needed" }), json(200, body)], saved(JOB));
       const result = await settle(JOB, deps);
@@ -528,7 +528,7 @@ describe("requestDeletionSupport gaps on 3c78d74", () => {
   });
 
   /** Avery's rule: after 409, a refresh of `failed` means support is needed (fallback); `running` and `queued` stay not_needed. */
-  it.fails("5. 409 support_not_needed, then a refresh that says failed -> fallback (Avery's rule)", async () => {
+  it("5. 409 support_not_needed, then a refresh that says failed -> fallback (Avery's rule)", async () => {
     const refresh = async (status: string) => {
       const { deps, seen } = harness([json(409, { error: "support_not_needed" }), json(200, { jobId: JOB, status })], saved(JOB));
       const result = await settle(JOB, deps);
@@ -567,5 +567,60 @@ describe("requestDeletionSupport gaps on 3c78d74", () => {
       }
     }
     expect(odd).toEqual([]);
+  });
+});
+
+/**
+ * Cases on 0fe9942 not covered by Morgan's block above: the upper clamp, a
+ * refresh for another job or an unknown state, and the done / not-retryable
+ * fixtures for the 409 ruling.
+ */
+describe("requestDeletionSupport edges on 0fe9942", () => {
+  const settle = (fn: CoreSupport, jobId: string, deps: Parameters<CoreSupport>[1]) =>
+    fn(jobId, deps).then(
+      (r): SupportResult | { threw: string } => r,
+      (e: unknown) => ({ threw: `${(e as Error)?.name}: ${(e as Error)?.message}` }),
+    );
+
+  it("429 retryAfterSec 999999 (DERIVED) is clamped to 86400", async () => {
+    const jobId = jobOf("support-rate-limited");
+    const t = setup(jobId, { support: [{ status: 429, body: { error: "rate_limited", retryAfterSec: 999999 } }] });
+    const deps = await t.deps();
+    const result = await settle(requestDeletionSupport(), jobId, deps);
+    expect(result).toEqual({ kind: "already_sent", retryAfterSec: 86400 });
+    expect(t.srv.calls).toHaveLength(1);
+    await expectNoSignInAndJobKept(t, deps.secureStore, jobId);
+  });
+
+  it("409 then a refresh for another job id, with no job id, or with an unknown state (DERIVED) -> fallback", async () => {
+    const jobId = jobOf("support-not-needed");
+    const running = fx("status-running").response.body as Record<string, unknown>;
+    for (const body of [
+      { ...running, jobId: "00000000-0000-4000-8000-0000000000ff" },
+      { ...running, jobId: undefined },
+      { ...running, jobId, status: "exploded" },
+    ]) {
+      const t = setup(jobId, { support: [reply("support-not-needed")], status: [{ status: 200, body }] });
+      const deps = await t.deps();
+      const result = await settle(requestDeletionSupport(), jobId, deps);
+      expect(result, JSON.stringify(body)).toEqual({ kind: "fallback", contact: SUPPORT_CONTACT });
+      expect(t.srv.calls.map((c) => c.method)).toEqual(["POST", "GET"]);
+      await expectNoSignInAndJobKept(t, deps.secureStore, jobId);
+    }
+  });
+
+  it("ruling: 409 then real status-done stays not_needed; real status-failed-not-retryable -> fallback", async () => {
+    const jobId = jobOf("support-not-needed");
+    const withJob = (name: string) => ({ ...(fx(name).response.body as object), jobId });
+    const done = withJob("status-done");
+    const t1 = setup(jobId, { support: [reply("support-not-needed")], status: [{ status: 200, body: done }] });
+    const d1 = await t1.deps();
+    expect(await settle(requestDeletionSupport(), jobId, d1)).toEqual({ kind: "not_needed", status: done });
+    await expectNoSignInAndJobKept(t1, d1.secureStore, jobId);
+    const t2 = setup(jobId, { support: [reply("support-not-needed")], status: [{ status: 200, body: withJob("status-failed-not-retryable") }] });
+    const d2 = await t2.deps();
+    expect(await settle(requestDeletionSupport(), jobId, d2)).toEqual({ kind: "fallback", contact: SUPPORT_CONTACT });
+    expect(t2.srv.calls.map((c) => c.method)).toEqual(["POST", "GET"]);
+    await expectNoSignInAndJobKept(t2, d2.secureStore, jobId);
   });
 });
