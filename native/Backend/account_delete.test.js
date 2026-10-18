@@ -2,19 +2,15 @@
 // Contract tests for DELETE /v2/account (Avery's spec; Riley implements).
 // Contract: 202 + job id, job polled until done; recent sign-in window 5 min;
 // stale auth refused immediately (no job); second call 401 (Firebase user gone).
-// The endpoint does not exist yet on codex/native-integration-20261017, so every
-// test is {todo}: it runs and fails honestly until ./account_delete.js lands.
-// Assumed module shape (adjust to Riley's implementation when it lands):
 //   const {createAccountDeletion}=require("./account_delete");
 //   const svc=createAccountDeletion({db,stripe,bucket,auth,byoProviders,hash,now});
 //   await svc.deleteAccount({user:{uid,auth_time}})  -> {status:202,jobId}
-//   await svc.jobStatus(jobId) -> {status:"queued"|"running"|"done"|"failed"}  (name/shape TBD by Riley)
-//   registerAccountDeletion({app,...same deps,firebaseAuth}) mounts DELETE /v2/account  (TBD)
+//   await svc.jobStatus(jobId) -> {status:"queued"|"running"|"done"|"failed"}
+//   registerAccountDeletion({app,...same deps,firebaseAuth}) mounts DELETE /v2/account
 // No credentials or network: in-memory Firestore, recording stubs for Stripe,
 // bucket, Firebase Auth and BYO providers.
 const test=require("node:test"),assert=require("node:assert/strict"),crypto=require("node:crypto");
 const {memoryFirestore}=require("./test_firestore");
-const TODO="DELETE /v2/account not built yet (Riley): expected fail until account_delete.js exists";
 const uid="delete-me",owner=crypto.createHash("sha256").update(uid).digest("hex"),other="d".repeat(64);
 const NOW=1_800_000_000_000;
 function load(){
@@ -61,21 +57,21 @@ function untouched(f){
   assert.equal(f.canceled.length,0);assert.equal(f.auth.deletedUsers.length,0);
   assert.ok(f.db.rows.has("gd_accounts/"+owner+"/workspaces/w1"));assert.ok(f.objects.has("customer/"+owner+"/managed/w1/a.bin"));
 }
-test("account delete: stale authentication (6 min) is refused immediately with no job and nothing deleted",{todo:TODO},async()=>{
+test("account delete: stale authentication (6 min) is refused immediately with no job and nothing deleted",async()=>{
   const f=fixture();
   await assert.rejects(f.svc.deleteAccount(f.at(6)),e=>(e.status===401||e.status===403)&&!e.jobId);
   untouched(f);
 });
-test("account delete: 5-minute window boundary: 4 min accepted (202), 6 min refused",{todo:TODO},async()=>{
+test("account delete: 5-minute window boundary: 4 min accepted (202), 6 min refused",async()=>{
   const f=fixture();await assert.rejects(f.svc.deleteAccount(f.at(6)),e=>e.status===401||e.status===403);untouched(f);
   await runToDone(f,f.at(4));assert.deepEqual(f.auth.deletedUsers,[uid]);
 });
-test("account delete: after the job completes every Stripe subscription is cancelled and no charges are created",{todo:TODO},async()=>{
+test("account delete: after the job completes every Stripe subscription is cancelled and no charges are created",async()=>{
   const f=fixture();await runToDone(f,f.fresh);
   assert.deepEqual([...f.canceled].sort(),["sub_b1","sub_p1","sub_s1"]);
   assert.ok(f.subs.every(s=>s.status==="canceled"));
 });
-test("account delete: after the job completes no hosted workspace records and zero objects remain under the account prefix",{todo:TODO},async()=>{
+test("account delete: after the job completes no hosted workspace records and zero objects remain under the account prefix",async()=>{
   const f=fixture();await runToDone(f,f.fresh);
   const left=[...f.db.rows.keys()].filter(k=>k.includes(owner)&&k.includes("/workspaces/")&&!k.endsWith("/b1"));
   assert.deepEqual(left,[]);
@@ -83,21 +79,21 @@ test("account delete: after the job completes no hosted workspace records and ze
   assert.ok(f.objects.has("customer/"+other+"/managed/x1/keep.bin"),"other accounts untouched");
   assert.ok(f.db.rows.has("gd_accounts/"+other+"/workspaces/x1"));
 });
-test("account delete: after the job completes the Firebase user is deleted and the old token is rejected",{todo:TODO},async()=>{
+test("account delete: after the job completes the Firebase user is deleted and the old token is rejected",async()=>{
   const f=fixture();await runToDone(f,f.fresh);
   assert.deepEqual(f.auth.deletedUsers,[uid]);
   await assert.rejects(f.auth.verifyIdToken(uid));
 });
-test("account delete: bring-your-own storage is never touched",{todo:TODO},async()=>{
+test("account delete: bring-your-own storage is never touched",async()=>{
   const f=fixture();await runToDone(f,f.fresh);
   assert.deepEqual(f.byoCalls,[],"no calls to BYO provider stubs");
 });
-test("account delete: second call returns 401 (user gone) and repeats no side effects",{todo:TODO},async()=>{
+test("account delete: second call returns 401 (user gone) and repeats no side effects",async()=>{
   const f=fixture();await runToDone(f,f.fresh);const before=f.canceled.length;
   await assert.rejects(f.svc.deleteAccount(f.fresh),{status:401});
   assert.equal(f.canceled.length,before);assert.deepEqual(f.auth.deletedUsers,[uid]);
 });
-test("route: DELETE /v2/account answers 202 with a job id",{todo:TODO},async()=>{
+test("route: DELETE /v2/account answers 202 with a job id",async()=>{
   let register;try{({registerAccountDeletion:register}=require("./account_delete"));}catch(e){if(e.code==="MODULE_NOT_FOUND")assert.fail("account_delete.js not implemented");throw e;}
   assert.equal(typeof register,"function","registerAccountDeletion export (name TBD by Riley)");
   const express=require("express"),app=express();
