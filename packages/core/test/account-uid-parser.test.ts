@@ -17,18 +17,18 @@ const call = (t: unknown) => { let o: unknown = "threw"; expect(() => { o = acco
 
 describe("PR #4 parser rules ahead of the rebase (Avery's review)", () => {
   it("16384-char token is accepted", () => { expect(call(sized(16384))).toBe("user-1"); });
-  it.fails("16385-char token -> null (16 KB cap)", () => { const t = sized(16385); expect(call(t)).toBeNull(); });
+  it("16385-char token -> null (16 KB cap)", () => { const t = sized(16385); expect(call(t)).toBeNull(); });
   it("sub of 128 printable ASCII chars is accepted", () => { expect(call(tokSub("a".repeat(128)))).toBe("a".repeat(128)); });
   it("empty sub -> null", () => { expect(call(tokSub(""))).toBeNull(); });
-  it.fails("sub of 129 chars -> null", () => { expect(call(tokSub("a".repeat(129)))).toBeNull(); });
-  it.fails("sub with a space -> null", () => { expect(call(tokSub("user 1"))).toBeNull(); });
-  it.fails("whitespace-only sub -> null", () => { expect(call(tokSub("   "))).toBeNull(); });
-  it.fails("non-ASCII sub -> null", () => { expect(call(tokSub("usér"))).toBeNull(); });
-  it.fails("control char in sub -> null", () => { expect(call(tokSub("user\u0001"))).toBeNull(); });
-  it.fails("DEL (0x7F) in sub -> null", () => { expect(call(tokSub("user\u007f"))).toBeNull(); });
+  it("sub of 129 chars -> null", () => { expect(call(tokSub("a".repeat(129)))).toBeNull(); });
+  it("sub with a space -> null", () => { expect(call(tokSub("user 1"))).toBeNull(); });
+  it("whitespace-only sub -> null", () => { expect(call(tokSub("   "))).toBeNull(); });
+  it("non-ASCII sub -> null", () => { expect(call(tokSub("usér"))).toBeNull(); });
+  it("control char in sub -> null", () => { expect(call(tokSub("user\u0001"))).toBeNull(); });
+  it("DEL (0x7F) in sub -> null", () => { expect(call(tokSub("user\u007f"))).toBeNull(); });
   it("boundary chars 0x21 and 0x7E accepted", () => { expect(call(tokSub("!~"))).toBe("!~"); });
-  it.fails("empty signature part -> null", () => { expect(call(tokSub("user-1", ""))).toBeNull(); });
-  it.fails("signature with non-base64url chars -> null", () => { expect(call(tokSub("user-1", "ab+/="))).toBeNull(); });
+  it("empty signature part -> null", () => { expect(call(tokSub("user-1", ""))).toBeNull(); });
+  it("signature with non-base64url chars -> null", () => { expect(call(tokSub("user-1", "ab+/="))).toBeNull(); });
   it("header with non-base64url chars -> null (pins header regex; survivor mutant)", () => { expect(call(`ab+/.${b64url(JSON.stringify({ sub: "user-1" }))}.sig`)).toBeNull(); });
   it("payload in std base64 with + or / -> null (pins payload regex; survivor mutant)", () => {
     const p = Buffer.from(JSON.stringify({ sub: "user-1", p: "\u00fb\u00ff\u00bf" })).toString("base64").replace(/=+$/, "");
