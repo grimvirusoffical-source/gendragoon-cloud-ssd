@@ -610,50 +610,68 @@ def install_worker(pid=0,quiet=True,relaunch=False,expected_stage=None,safety_ch
             return emit("postponed",99,None,"App or cloud mount became active. Update postponed.",quiet=quiet)
         backup=APP.parent/("GenDragoon Cloud SSD.previous-"+uuid.uuid4().hex+".app")
         safe_path(backup,directory=True)
-        installed=False
-        launched=[]
-        try:
-            os.replace(APP,backup)
+        # Red-XAI owns the swap: move the installed app aside, install, relaunch,
+        # and on any failure put the previous app back and relaunch it. These hooks
+        # keep this worker's verification, status records, backup and failed copy.
+        import redxai_updater
+        state={"installed":False,"launched":[],"restored":[],"failedCopy":None,"error":None,"readiness":"not_requested"}
+        def replace_app(entry,staged):
             os.replace(candidate,APP)
-            installed=True
+            state["installed"]=True
             validate_app(APP,meta["version"])
             write_status("installed",version=meta["version"],backupPath=str(backup),
                          build=meta.get("build"),request_id=request_id,channel=CHANNEL,
                          launchStatus="pending" if relaunch else "not_requested")
-            if relaunch:launched=launch_app(APP)
-            records=process_records(APP,launched) if launched else []
-            readiness = confirm_relaunch_health(APP, records) if relaunch else "not_requested"
+        def relaunch_new(entry,app):
+            launched=launch_app(app) if relaunch else []
+            state["launched"]=launched
+            records=process_records(app,launched) if launched else []
+            state["readiness"]=confirm_relaunch_health(app,records) if relaunch else "not_requested"
             write_status("installed",version=meta["version"],backupPath=str(backup),
-                         build=build_of(APP),request_id=request_id,channel=CHANNEL,launchedProcesses=records,
+                         build=build_of(app),request_id=request_id,channel=CHANNEL,launchedProcesses=records,
                          launchStatus="exact_executable_observed" if launched else "not_requested",
-                         functionalReadiness=readiness)
-        except Exception as failure:
-            failed_copy=None
-            try:
-                if installed:
-                    stop_failed_launch(APP)
-                    if safety_check is not None:safety_check()
-                    failed_copy=APP.parent/("GenDragoon Cloud SSD.failed-"+uuid.uuid4().hex+".app")
-                    safe_path(failed_copy,directory=True)
-                    os.replace(APP,failed_copy)
-                if backup.exists():os.replace(backup,APP)
-                validate_app(APP,"v"+previous_version)
-                if original_digest is not None and bundle_digest(APP)!=original_digest:
-                    raise RuntimeError("Restored application differs from the original verified bundle")
-                restored=[]
-                if relaunch:
-                    if safety_check is not None:safety_check()
-                    restored=process_records(APP,launch_app(APP))
-                write_status("rolled_back",version="v"+previous_version,build=previous_build,
-                             request_id=request_id,failedVersion=meta["version"],failedCopyPath=str(failed_copy) if failed_copy else None,
-                             launchStatus="exact_executable_observed" if restored else "not_requested",launchedProcesses=restored,
-                             functionalReadiness="not_tested",error=str(failure)[:220])
-            except Exception as rollback_failure:
-                write_status("attention",version=meta["version"],request_id=request_id,backupPath=str(backup),
-                             failedCopyPath=str(failed_copy) if failed_copy else None,launchStatus="unconfirmed",
-                             error="The update did not complete and automatic recovery needs attention.")
-                raise RuntimeError("Update failed; rollback needs attention. Keep backup "+str(backup)
-                                   +". "+str(rollback_failure)) from failure
+                         functionalReadiness=state["readiness"])
+            return launched
+        def discard_failed(app):
+            if not state["installed"] and not os.path.lexists(app):return
+            if state["installed"]:
+                stop_failed_launch(app)
+                if safety_check is not None:safety_check()
+            failed_copy=app.parent/("GenDragoon Cloud SSD.failed-"+uuid.uuid4().hex+".app")
+            safe_path(failed_copy,directory=True)
+            os.replace(app,failed_copy)
+            state["failedCopy"]=failed_copy
+        def verify_previous(app):
+            validate_app(app,"v"+previous_version)
+            if original_digest is not None and bundle_digest(app)!=original_digest:
+                raise RuntimeError("Restored application differs from the original verified bundle")
+        def relaunch_previous(entry,app):
+            if relaunch:
+                if safety_check is not None:safety_check()
+                state["restored"]=process_records(app,launch_app(app))
+        def log(record):
+            if record.get("event") in ("redxai_install_failed","redxai_relaunch_new_failed") and state["error"] is None:
+                state["error"]=record.get("error","")
+            if record.get("event")=="redxai_relaunch_previous_failed":
+                state["rollbackError"]=record.get("error","")
+        entry={"bundleId":BUNDLE_ID,"installPath":str(APP)}
+        code=redxai_updater.apply_and_report(entry,candidate,quit_app=lambda entry:None,replace_app=replace_app,
+            relaunch_app=relaunch_new,relaunch_previous=relaunch_previous,previous_path=backup,keep_previous=True,
+            discard_failed=discard_failed,verify_previous=verify_previous,log=log)
+        launched=state["launched"]
+        failed_copy=state["failedCopy"]
+        if code==2:
+            write_status("attention",version=meta["version"],request_id=request_id,backupPath=str(backup),
+                         failedCopyPath=str(failed_copy) if failed_copy else None,launchStatus="unconfirmed",
+                         error="The update did not complete and automatic recovery needs attention.")
+            raise RuntimeError("Update failed; rollback needs attention. Keep backup "+str(backup)
+                               +". "+str(state.get("rollbackError") or state["error"] or ""))
+        if code!=0:
+            restored=state["restored"]
+            write_status("rolled_back",version="v"+previous_version,build=previous_build,
+                         request_id=request_id,failedVersion=meta["version"],failedCopyPath=str(failed_copy) if failed_copy else None,
+                         launchStatus="exact_executable_observed" if restored else "not_requested",launchedProcesses=restored,
+                         functionalReadiness="not_tested",error=str(state["error"] or "")[:220])
             return emit("rolled_back",100,None,"Update failed. The previous verified app was restored"+
                         (" and its relaunched process was observed." if restored else "."),quiet=quiet)
     message="Updated to "+meta["version"]+"."

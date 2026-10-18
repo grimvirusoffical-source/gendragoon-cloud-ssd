@@ -527,6 +527,59 @@ class AutoUpdateTests(unittest.TestCase):
                 self.assertRaisesRegex(RuntimeError, "Download size mismatch"):
             updater.download("https://example.invalid/update.zip", self.root / "download", 1024, 0, 10, True)
 
+    # The real install path (schedule-restart -> worker -> install_worker) swaps
+    # and relaunches through Red-XAI's apply_and_report and acts on its exit code.
+    def redxai(self):
+        sys.path.insert(0, str(SCRIPT.parent))
+        self.addCleanup(sys.path.remove, str(SCRIPT.parent))
+        import redxai_updater
+        return redxai_updater
+
+    def test_install_worker_applies_through_redxai_and_relaunches_the_new_app(self):
+        redxai = self.redxai()
+        self.stage()
+        with self.mac(), mock.patch.object(redxai, "apply_and_report", wraps=redxai.apply_and_report) as applied:
+            self.assertEqual(updater.install_worker(relaunch=True)["event"], "installed")
+        applied.assert_called_once()
+        entry = applied.call_args.args[0]
+        self.assertEqual(entry["installPath"], str(self.app))
+        self.assertEqual(entry["bundleId"], updater.BUNDLE_ID)
+        self.assertEqual((self.app / "Contents/marker").read_text(), "new-good")
+        self.assertIn(["/usr/bin/open", "-n", str(self.app)], self.calls)
+        self.assertEqual(json.loads(self.status.read_text())["launchStatus"], "exact_executable_observed")
+
+    def test_install_worker_uses_redxai_exit_code_one_as_rolled_back(self):
+        redxai = self.redxai()
+        self.stage()
+        with self.mac(), mock.patch.object(redxai, "apply_and_report", return_value=1) as applied:
+            self.assertEqual(updater.install_worker(relaunch=True)["event"], "rolled_back")
+        applied.assert_called_once()
+        self.assertEqual(json.loads(self.status.read_text())["state"], "rolled_back")
+
+    def test_install_worker_uses_redxai_exit_code_two_as_attention(self):
+        redxai = self.redxai()
+        self.stage()
+        with self.mac(), mock.patch.object(redxai, "apply_and_report", return_value=2), \
+                self.assertRaisesRegex(RuntimeError, "rollback needs attention"):
+            updater.install_worker(relaunch=True, request_id="e" * 32)
+        self.assertEqual(json.loads(self.status.read_text())["state"], "attention")
+
+    def test_failed_new_launch_relaunches_the_old_app_through_redxai(self):
+        redxai = self.redxai()
+        self.stage()
+        opened = []
+        def fail_new_launch(arguments, timeout=80):
+            if arguments[0] == "/usr/bin/open":
+                opened.append((self.app / "Contents/marker").read_text())
+                if opened[-1] == "new-good":
+                    raise RuntimeError("fixture open failed")
+            return self.commands(arguments, timeout)
+        with self.mac(fail_new_launch), mock.patch.object(redxai, "apply_and_report", wraps=redxai.apply_and_report) as applied:
+            self.assertEqual(updater.install_worker(relaunch=True)["event"], "rolled_back")
+        applied.assert_called_once()
+        self.assertEqual(opened, ["new-good", "original-good"], "the old app is relaunched")
+        self.assert_original()
+
     # Failure injection: an interrupted or truncated download never stages,
     # extracts, installs or relaunches, and leaves the installed app untouched.
     def test_download_truncated_below_declared_length_fails_cleanly(self):
