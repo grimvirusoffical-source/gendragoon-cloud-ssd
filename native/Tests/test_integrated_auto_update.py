@@ -115,11 +115,21 @@ class AutoUpdateTests(unittest.TestCase):
 
     @contextmanager
     def mac(self, command=None):
+        clock = {"now": 0.0}
+
+        def health_now():
+            return clock["now"]
+
+        def health_sleep(seconds):
+            clock["now"] += float(seconds)
+
         with mock.patch.object(updater, "subprocess_ok", side_effect=command or self.commands), \
                 mock.patch.object(updater.platform, "machine", return_value="arm64"), \
                 mock.patch.object(updater.platform, "mac_ver", return_value=("14.5", (), "")), \
                 mock.patch.object(updater, "app_pids", side_effect=lambda app=None: self.running.copy()), \
                 mock.patch.object(updater.time, "sleep"), \
+                mock.patch.object(updater, "_health_now", health_now), \
+                mock.patch.object(updater, "_health_sleep", health_sleep), \
                 mock.patch.object(updater, "sufficient_space"):
             yield
 

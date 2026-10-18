@@ -299,12 +299,6 @@ private struct GDDraftWorkspace: Identifiable, Codable {
         VStack(alignment:.leading,spacing:20) {
             GDHeading(kicker:"STORAGE + PERFORMANCE",title:"Choose your cloud plan.",subtitle:"Select a server-listed tier, retain your choice, and review the exact amount in secure checkout.")
             GenDragoonStripePurchases(focus:"bundle")
-            GDPanel {
-                Label("Bring your own S3-compatible bucket",systemImage:"server.rack").font(.headline)
-                Text("Connect an S3-compatible bucket: Amazon S3, Cloudflare R2, Backblaze B2, Wasabi, MinIO, or Google Cloud with S3/HMAC keys. The workspace is \(GDWorkspaceOffer.monthlyLabel). SFTP, Azure, and WebDAV are coming soon. Performance features cost extra unless you stay on the free performance tier.")
-                    .font(.caption).foregroundStyle(gdSecondary)
-            }
-            GenDragoonStripePurchases(focus:"byo")
         }
     }
     private var storagePage: some View {
@@ -518,6 +512,7 @@ private struct GDDraftWorkspace: Identifiable, Codable {
             GenDragoonStripePurchases(focus:"ads")
             GenDragoonAutomaticUpdateStatus()
             GDPanel { GDSortMapEditor() }
+            GDPanel { GDPassphraseSection() }
             GDPanel { GDAccountDeletionSection() }
             GenDragoonAPIKeysPanel()
         }

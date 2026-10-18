@@ -12,10 +12,10 @@
   },
   "response": {
     "body": {
-      "status": "deleting",
-      "jobId": "3f2b8c1e-6a4d-4e7b-9c2a-1d5e8f0a7b36",
-      "statusToken": "ERERERERERERERERERERERERERERERERERERERERERE"
+      "error": "account_deleted",
+      "jobId": "00000000-0000-4000-8000-000000000005",
+      "statusToken": "<redacted>"
     },
-    "status": 202
+    "status": 410
   }
 }

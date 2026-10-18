@@ -75,9 +75,9 @@ struct GDWorkspaceLockScreen: View {
                 Button("Download") { downloadSelected() }
                     .disabled(busy || selected == nil)
                 Button("Merge") { mergeSelected() }
-                    .disabled(busy || selected == nil || targetID.isEmpty || targetID == sourceID)
+                    .disabled(busy || selected == nil || targetID.isEmpty || targetID == sourceID || !GDStorageContract.canMergeOrDelete(reason: lock.reason))
                 Button("Delete") { deleteSelected() }
-                    .disabled(busy || selected == nil)
+                    .disabled(busy || selected == nil || !GDStorageContract.canMergeOrDelete(reason: lock.reason))
                 Button("Review workspaces") { Task { await reload() } }
                     .buttonStyle(.borderedProminent)
                     .tint(.purple)

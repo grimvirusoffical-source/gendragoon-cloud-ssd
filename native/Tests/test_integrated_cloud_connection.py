@@ -77,7 +77,7 @@ class ConnectionTests(unittest.TestCase):
         self.assertEqual(state["destination"],{"project":"project-one","bucket":"bucket-one","remote":"gendragoon","prefix":"GenDragoon-App-Library"})
         self.assertEqual(self.mock_reply.call_args.kwargs["workspace"],state)
         self.assertEqual(self.mock_reply.call_args.kwargs["context"],state["destination"])
-        self.assertEqual(self.mock_api.call_count,4)
+        self.assertEqual(self.mock_api.call_count,2)
         self.assertIn(b"[existing]",self.config.read_bytes())
         self.assertIn(b"env_auth = true",self.config.read_bytes())
         self.assertEqual(self.config.stat().st_mode&0o777,0o600)
@@ -179,17 +179,15 @@ class ConnectionTests(unittest.TestCase):
         self.assertEqual(len(creation),1)
         self.assertIn("create",creation[0]);self.assertIn("google cloud storage",creation[0])
 
-    def test_bucket_outside_an_owned_project_is_rejected(self):
-        before=self.selected()
+    def test_bucket_in_the_selected_project_does_not_require_an_owner_role(self):
         def foreign(gcloud,url,body=None):
             if "userinfo" in url:return {"email":"owner@example.com"}
             if "getIamPolicy" in url:return {"bindings":[{"role":"roles/viewer","members":["user:owner@example.com"]}]}
             if "cloudresourcemanager" in url:return {"projectId":"project-one","projectNumber":"123456","lifecycleState":"ACTIVE"}
             return {"name":"bucket-one","projectNumber":"123456"}
         with patch.object(connect,"google_json",side_effect=foreign):
-            with self.assertRaisesRegex(RuntimeError,"not owned by the signed-in account.*bring-your-own Google Cloud"):connect.configure("project-one","bucket-one")
-        self.assertEqual(self.selected(),before);self.assertEqual(self.config.read_bytes(),self.original)
-        self.mock_command.assert_not_called()
+            connect.configure("project-one","bucket-one")
+        self.assertEqual(self.selected()["destination"]["bucket"], "bucket-one")
 
     def test_project_list_keeps_only_owned_google_cloud_destinations(self):
         def listing(gcloud, url, body=None):
@@ -208,7 +206,7 @@ class ConnectionTests(unittest.TestCase):
         with patch.object(connect, "google_json", side_effect=listing):
             connect.projects()
         payload = self.mock_reply.call_args.kwargs
-        self.assertEqual([item["id"] for item in payload["projects"]], ["owned-proj"])
+        self.assertEqual([item["id"] for item in payload["projects"]], ["owned-proj", "shared-proj"])
         self.assertIn("bring-your-own Google Cloud", payload["message"])
 
     def test_custom_native_install_uses_adjacent_bundle_rclone(self):

@@ -264,8 +264,6 @@ enum GDNativeHelper {
                     HStack {
                         Label(cloud.mounted ? "Mounted in Finder" : "Drive disconnected", systemImage: "externaldrive.fill")
                         Spacer()
-                        Button("Mount SSD") { cloud.mountDrive() }
-                            .disabled(cloud.mounted || cloud.busy || native.selectedDestination == nil || !GDUpdateActivity.shared.canStart(excluding: cloud))
                         Button("Open Finder") { cloud.openMount() }.disabled(!cloud.mounted)
                         Button("Unmount") { cloud.unmountDrive() }.disabled(!cloud.mounted || cloud.busy || !GDUpdateActivity.shared.canStart(excluding: cloud))
                     }
@@ -274,8 +272,6 @@ enum GDNativeHelper {
                         Picker("Cache allowance", selection: Binding(get: { cloud.cacheGB }, set: { cloud.cacheGB = $0 })) {
                             ForEach([10, 30, 60, 100], id: \.self) { Text("\($0) GB").tag($0) }
                         }.frame(width: 240).disabled(cloud.mounted || native.maintenanceBusy)
-                        Button("Open Cache") { cloud.openCache() }
-                        Button("View Mount Log") { cloud.openLog() }
                     }
                     Text(cloud.status).font(.caption).foregroundStyle(.secondary)
                     if !cloud.lastError.isEmpty { Text(GDNativeMessage.safe(cloud.lastError)).font(.caption).foregroundStyle(.orange) }
@@ -422,7 +418,6 @@ enum GDNativeHelper {
                 Text("Connect Amazon S3, Cloudflare R2, Backblaze B2, Wasabi, MinIO, or Google Cloud with S3/HMAC keys. This is $5/month per workspace. SFTP, Azure, and WebDAV are shown as coming soon and have no connect flow. Performance features cost extra unless you stay on the free performance tier.")
                     .font(.caption).foregroundStyle(.secondary)
                 HStack {
-                    Button("Open Provider Configuration") { library.openProviderSetup() }
                     Button("Refresh Providers") { library.refresh() }
                 }
                 Picker("Provider", selection: $library.remote) {
@@ -430,10 +425,8 @@ enum GDNativeHelper {
                     ForEach(library.remotes, id: \.self) { Text($0).tag($0) }
                 }
                 TextField("Provider bucket / folder", text: $library.folder).textFieldStyle(.roundedBorder)
-                Toggle("Move original to Trash after verified upload and restore", isOn: $library.offloadOriginal).font(.caption)
                 HStack {
                     Button("Add Applications / Files / Folders") { library.chooseApp() }.disabled(library.remote.isEmpty || library.folder.isEmpty)
-                    Button("Scan Provider") { library.scanCloud() }.disabled(library.remote.isEmpty || library.folder.isEmpty)
                 }
                 ForEach(library.apps) { item in
                     HStack {

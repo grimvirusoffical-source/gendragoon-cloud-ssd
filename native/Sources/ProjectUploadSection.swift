@@ -233,9 +233,7 @@ struct ProjectUploadSection: View {
                         }
                     }.frame(maxHeight: 180)
                 }
-                Toggle("Move originals to Trash after a verified cloud backup and restore check", isOn: $workspace.offload)
-                    .disabled(workspace.controlsLocked(externalBusy: externalBusy))
-                Text("Leave unchecked to keep originals on this computer. Verification failures keep originals in place.")
+                Text("Originals stay on this computer. Verification failures keep originals in place.")
                     .font(.caption).foregroundStyle(.secondary)
                 HStack {
                     if mode != .backup {

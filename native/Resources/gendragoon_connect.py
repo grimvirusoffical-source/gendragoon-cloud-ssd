@@ -258,27 +258,11 @@ def signed_in_email(gcloud):
     return email
 
 
-def assert_project_owner(gcloud, project, email=None):
-    """Fail closed unless the signed-in account is roles/owner on this project."""
-    email = email or signed_in_email(gcloud)
-    policy = google_json(gcloud, "https://cloudresourcemanager.googleapis.com/v1/projects/"
-                         + urllib.parse.quote(project, safe="") + ":getIamPolicy", {})
-    member = "user:" + email
-    bindings = policy.get("bindings") if isinstance(policy, dict) else None
-    if not isinstance(bindings, list) or not any(
-            item.get("role") == "roles/owner" and member in (item.get("members") or []) for item in bindings if isinstance(item, dict)):
-        raise RuntimeError(
-            "This Google Cloud project is not owned by the signed-in account. "
-            "A GCP Owner role is required only for a bring-your-own Google Cloud destination. "
-            "Hosted workspaces and other cloud or VPS destinations do not use this check.")
-    return email
-
-
 def projects():
     gcloud = find_executable("gcloud")
     if not gcloud:
         raise RuntimeError("Click Connect Google Cloud to install tools and authorize first.")
-    email = signed_in_email(gcloud)
+    signed_in_email(gcloud)
     data = []
     url = "https://cloudresourcemanager.googleapis.com/v1/projects?pageSize=100"
     for _ in range(10):
@@ -287,10 +271,6 @@ def projects():
         for project in obj.get("projects", []):
             project_id = str(project.get("projectId", ""))
             if not project_id or project.get("lifecycleState") != "ACTIVE":
-                continue
-            try:
-                assert_project_owner(gcloud, project_id, email)
-            except RuntimeError:
                 continue
             owned.append({"id": project_id, "name": str(project.get("name", ""))})
         data += owned
@@ -318,7 +298,6 @@ def buckets(project):
     gcloud = find_executable("gcloud")
     if not gcloud:
         raise RuntimeError("Connect Google Cloud first.")
-    assert_project_owner(gcloud, project)
     data = []
     url = "https://storage.googleapis.com/storage/v1/b?project=" + urllib.parse.quote(project) + "&maxResults=1000"
     for _ in range(10):
@@ -413,7 +392,6 @@ def configure(project, bucket, remote="gendragoon", prefix=None, expected_revisi
         number=str(owner.get("projectNumber",""))
         if owner.get("projectId")!=project or not number.isdecimal() or owner.get("lifecycleState","ACTIVE")!="ACTIVE":
             raise RuntimeError("Selected Google Cloud project could not be verified.")
-        assert_project_owner(gcloud, project)
         allowed=google_json(gcloud,"https://storage.googleapis.com/storage/v1/b/"+urllib.parse.quote(bucket,safe=""))
         if allowed.get("name")!=bucket or str(allowed.get("projectNumber",""))!=number:
             raise RuntimeError("Selected bucket does not belong to the selected Google Cloud project. Previous configuration was preserved.")

@@ -506,21 +506,44 @@ def launch_app(app=None,timeout=20):
         raise RuntimeError("Updated app launch was not observed at its exact executable path")
     except RuntimeError as error:
         import redxai_updater
-        handled=redxai_updater.offer_relaunch(app)
-        if not handled:raise
+        try:
+            handled=redxai_updater.offer_relaunch(app)
+        except Exception:
+            raise error
+        if not handled:
+            raise error
         return handled
 
-def confirm_relaunch_health(app, records):
-    """The replacement stays only when the same processes are still that app."""
+STABILITY_WINDOW = 60
+
+
+def _health_now():
+    return time.monotonic()
+
+
+def _health_sleep(seconds):
+    time.sleep(seconds)
+
+
+def confirm_relaunch_health(app, records, window=None, sleep=None, now=None):
+    """The replacement stays only when it remains that app for the whole stability window."""
+    window = STABILITY_WINDOW if window is None else window
+    sleep = _health_sleep if sleep is None else sleep
+    now = _health_now if now is None else now
     if not records:
         raise RuntimeError("Updated app failed its health check")
-    live = process_records(app, [item["pid"] for item in records])
-    expected = [(item["pid"], item["executable"], item["started"]) for item in records]
-    seen = [(item["pid"], item["executable"], item["started"]) for item in live]
-    if seen != expected:
-        raise RuntimeError("Updated app failed its health check")
-    validate_app(app, "v" + version_of(app))
-    return "healthy"
+    deadline = now() + window
+    while True:
+        live = process_records(app, [item["pid"] for item in records])
+        expected = [(item["pid"], item["executable"], item["started"]) for item in records]
+        seen = [(item["pid"], item["executable"], item["started"]) for item in live]
+        if seen != expected:
+            raise RuntimeError("Updated app failed its health check")
+        validate_app(app, "v" + version_of(app))
+        if now() >= deadline:
+            return "healthy"
+        remaining = deadline - now()
+        sleep(remaining if remaining < 1 else 1)
 
 
 def process_records(app,pids):

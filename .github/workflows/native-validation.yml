@@ -132,6 +132,14 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+  release-support-contact:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Fail the release while the support contact is a placeholder
+        run: python3 native/Tests/check_support_contact_release.py
+
   ios:
     runs-on: macos-latest
     timeout-minutes: 25

@@ -580,7 +580,7 @@ struct GDManagedAppSession: Identifiable {
             Task { @MainActor in
                 guard let self else { return }
                 guard response == .OK else { self.busy = false; return }
-                let sources = picker.urls, context = self.context, destination = self.folder, offload = self.offloadOriginal
+                let sources = picker.urls, context = self.context, destination = self.folder, offload = false
                 let scoped = sources.filter { $0.startAccessingSecurityScopedResource() }
                 defer { scoped.forEach { $0.stopAccessingSecurityScopedResource() } }
                 do {
@@ -688,7 +688,6 @@ struct GDManagedAppSession: Identifiable {
         Panel(title: "S3-compatible storage") {
             Text("Connect Amazon S3, Cloudflare R2, Backblaze B2, Wasabi, MinIO, or Google Cloud with S3/HMAC keys. The workspace fee is $5/month. SFTP, Azure, and WebDAV are coming soon and have no connect flow. Keys stay in the macOS Keychain. The challenge sends a presigned GET, not the nonce.").font(.system(size: 12)).foregroundStyle(.gray)
             HStack {
-                ActionButton(title: "Open Manual Terminal Configuration", systemName: "terminal", action: library.openProviderSetup, isPrimary: true)
                 ActionButton(title: "Refresh Providers", systemName: "arrow.clockwise", action: library.refresh, isDisabled: library.busy)
             }
             if !library.remotes.isEmpty {
@@ -707,9 +706,7 @@ struct GDManagedAppSession: Identifiable {
         Panel(title: "Cloud Library · Files, Folders & Apps") {
             Text("Archive a copy of a Mac .app bundle to a chosen provider. To run it later, GenDragoon restores a checksum-verified local copy. Apps with separate installers, helpers or license requirements may need more setup.").font(.system(size: 12)).foregroundStyle(.gray)
             TextField("Cloud storage folder",text:$library.folder).textFieldStyle(.roundedBorder)
-            Toggle("Offload original after verifying cloud backup (moves original to Trash)", isOn: $library.offloadOriginal)
-                .font(.system(size: 12))
-            Text("Offload is recoverable until Trash is emptied. Running apps, system apps, and protected locations are blocked.")
+            Text("Originals stay on this Mac. Running apps, system apps, and protected locations are blocked.")
                 .font(.system(size: 11)).foregroundStyle(.gray)
             HStack {
                 ActionButton(title: "Add File / Folder / App", systemName: "plus.app", action: library.chooseApp, isPrimary: true, isDisabled:library.busy || library.remotes.isEmpty)
@@ -868,11 +865,3 @@ private struct WelcomePanel: View {
     }
 }
 
-@main
-struct GenDragoonCloudSSDApp: App {
-    @NSApplicationDelegateAdaptor(GDAppLifetime.self) private var appLifetime
-    var body: some Scene {
-        WindowGroup { GenDragoonStartupRoot() }
-            .windowStyle(.titleBar)
-    }
-}

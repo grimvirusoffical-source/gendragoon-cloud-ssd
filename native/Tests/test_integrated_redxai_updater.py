@@ -34,8 +34,9 @@ class RedXAITests(unittest.TestCase):
             ("relaunch", "GenDragoon Cloud SSD")])
         self.assertEqual(result, [4321])
 
-    def test_linux_relaunch_offer_stays_with_the_caller(self):
-        self.assertIsNone(redxai.offer_relaunch(Path("/tmp/GenDragoon Cloud SSD.app")))
+    def test_linux_relaunch_offer_raises_instead_of_returning_none(self):
+        with self.assertRaises(RuntimeError):
+            redxai.offer_relaunch(Path("/tmp/GenDragoon Cloud SSD.app"))
 
 
 if __name__ == "__main__":

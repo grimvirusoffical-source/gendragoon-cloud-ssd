@@ -48,13 +48,30 @@ def apply_ready_update(entry, staged, *, quit_app, replace_app, relaunch_app):
 
 
 def offer_relaunch(app):
-    """Ask the companion to relaunch. Tests and Linux return None so the caller keeps its own error."""
+    """Relaunch through the companion bundle. Never returns None."""
+    app = Path(app)
+    companion = app / "Contents/Resources/Red-XAI Updater.app"
+    if companion.is_symlink():
+        raise RuntimeError("Red-XAI Updater must be a real bundle, not a symlink")
+    if not companion.is_dir():
+        raise RuntimeError("Red-XAI Updater is not installed beside this app")
+    info = companion / "Contents/Info.plist"
+    if not info.is_file() or info.is_symlink():
+        raise RuntimeError("Red-XAI Updater bundle is incomplete")
     if platform.system() != "Darwin":
-        return None
-    companion = Path(app) / "Contents/Resources/Red-XAI Updater.app"
-    if not companion.is_dir() or companion.is_symlink():
-        return None
-    return None
+        raise RuntimeError("Red-XAI Updater can relaunch only on macOS")
+    import plistlib
+    bundle_id = plistlib.loads(info.read_bytes()).get("CFBundleIdentifier")
+    if bundle_id != "app.gendragoon.redxai.updater":
+        raise RuntimeError("Red-XAI Updater bundle id does not match")
+    import subprocess
+    verified = subprocess.run(["/usr/bin/codesign", "--verify", "--strict", str(companion)], capture_output=True)
+    if verified.returncode != 0:
+        raise RuntimeError("Red-XAI Updater failed codesign verification")
+    launched = subprocess.run(["/usr/bin/open", "-n", str(app)], capture_output=True)
+    if launched.returncode != 0:
+        raise RuntimeError("Red-XAI Updater could not relaunch the app")
+    return [app]
 
 
 def main(argv=None):

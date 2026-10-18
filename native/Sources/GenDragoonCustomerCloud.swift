@@ -292,7 +292,7 @@ enum GDProjectContent: String { case files, applications }
         if let replacing, selected.count != 1 || selected.first?.lastPathComponent != replacing.displayName {
             status = "Choose one updated item named \(replacing.displayName). The existing cloud copy is unchanged."; return
         }
-        let workspace = selectedWorkspace, scope = transferScope, constrained = dataSaver, offload = offloadOriginal
+        let workspace = selectedWorkspace, scope = transferScope, constrained = dataSaver
         let account = connectedID
         busy = true; uploadProgress = 0; canPause = true
         operation = Task { defer { finishOperation() }; do {
@@ -359,14 +359,9 @@ enum GDProjectContent: String { case files, applications }
                     }
                     activityTitle = "Verifying complete restore · \(copy.prepared.name)"
                     transferDetail = "Checking restored bytes, complete folder structure and metadata."
-                    var arguments = ["verify-remote", "--package", copy.downloaded.path, "--scope", scope, "--key", copy.prepared.key]
-                    if offload { arguments.append("--offload") }
+                    let arguments = ["verify-remote", "--package", copy.downloaded.path, "--scope", scope, "--key", copy.prepared.key]
                     let verified = try await GDNativeHelper.invoke("gendragoon_project_files", arguments: arguments)
                     await client.acknowledgeUpload(fileID: copy.saved.id)
-                    if let replacing, replacing.id != copy.saved.id {
-                        // The explicit Update action replaces only after roundtrip verification.
-                        try await client.delete(fileID: replacing.id, workspace: workspace)
-                    }
                     completed += 1
                     status = verified["message"] as? String ?? "Cloud upload and complete restore verified."
                 }
@@ -550,9 +545,7 @@ struct GenDragoonFreeCloudPanel: View {
                 Spacer()
                 Toggle("Data saver", isOn: $customer.dataSaver).toggleStyle(.switch).font(.system(size: 11)).disabled(customer.busy)
             }
-            Toggle("Move originals to Trash after cloud upload and a verified restore", isOn: $customer.offloadOriginal)
-                .toggleStyle(.checkbox).font(.system(size: 11)).disabled(customer.busy)
-            Text(content == .applications ? "Project application backups restore complete app bundles. Launch, preloading and automatic managed-cache cleanup are available in the connected Mac application library." : "Folders keep their nested files, empty folders, relative links and macOS metadata. Originals move only when the checkbox is selected and the restored copy matches.")
+            Text(content == .applications ? "Project application backups restore complete app bundles. Launch, preloading and automatic managed-cache cleanup are available in the connected Mac application library." : "Folders keep their nested files, empty folders, relative links and macOS metadata. Originals stay on this Mac.")
                 .font(.system(size: 11)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
         }
     }

@@ -26,6 +26,8 @@ struct GDSignedObject: Equatable {
     var url: URL
     var method: String
     var expiresAt: Date
+    /// Decimal generation from `urls[].generation`. Absent when the URL does not carry one.
+    var generation: String? = nil
 }
 
 struct GDStorageSession: Equatable {
@@ -50,13 +52,33 @@ enum GDStorageContract {
     ]
 
     static func uploadBody(objectIDs: [String], ifGeneration: String? = nil) -> [String: Any] {
-        var body: [String: Any] = ["op": "upload", "objects": objectIDs]
+        putBody(objectIDs: objectIDs, ifGeneration: ifGeneration)
+    }
+
+    static func downloadBody(objectIDs: [String]) -> [String: Any] {
+        getBody(objectIDs: objectIDs)
+    }
+
+    static func putBody(objectIDs: [String], ifGeneration: String? = nil) -> [String: Any] {
+        var body: [String: Any] = ["op": "put", "objects": objectIDs]
         if let ifGeneration { body["ifGeneration"] = ifGeneration }
         return body
     }
 
-    static func downloadBody(objectIDs: [String]) -> [String: Any] {
-        ["op": "download", "objects": objectIDs]
+    static func getBody(objectIDs: [String]) -> [String: Any] {
+        ["op": "get", "objects": objectIDs]
+    }
+
+    static func deleteBody(objectIDs: [String]) -> [String: Any] {
+        ["op": "delete", "objects": objectIDs]
+    }
+
+    /// GCS generations are int64 and can exceed 2^53. Only a decimal string is accepted.
+    static func decimalGeneration(_ value: Any?) -> String? {
+        guard let text = value as? String else { return nil }
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.range(of: #"^(0|[1-9][0-9]*)$"#, options: .regularExpression) != nil else { return nil }
+        return trimmed
     }
 
     static func rejectsPlaintext(_ body: [String: Any]) -> Bool {
@@ -96,9 +118,16 @@ enum GDStorageContract {
             return "A workspace merge is still in progress. Wait for it to finish before uploading. Downloads stay available."
         case "scope_unavailable":
             return "This workspace is outside the current allowance. Review it before uploading. Downloads stay available."
+        case "lapsed", "over_cap_and_lapsed":
+            return "This workspace needs payment before uploads can continue. Pay the workspace fee to unlock it. Downloads stay available."
         default:
             return "This account is over its workspace limit. Delete or merge the extra workspaces. Downloads stay available."
         }
+    }
+
+    /// Merge and delete stay off while a merge is running. Downloads stay available.
+    static func canMergeOrDelete(reason: String) -> Bool {
+        reason != "merge_in_progress"
     }
 
     static func downloadStaysAvailable(method: String) -> Bool {
@@ -172,8 +201,8 @@ enum GDStorageContract {
 
     static func parseSession(workspace: String, json: [String: Any], now: Date = Date()) throws -> GDStorageSession {
         try rejectSecrets(json)
-        guard let mode = json["mode"] as? String, mode == "write" || mode == "read" else {
-            throw GDStorageContractError.message("Storage session did not say whether this is a read or a write.")
+        guard let mode = json["mode"] as? String, mode == "write" || mode == "read" || mode == "delete" else {
+            throw GDStorageContractError.message("Storage session did not say whether this is a read, a write, or a delete.")
         }
         if let prefix = json["prefix"] as? String {
             guard pathContainsWorkspace(prefix, workspace: workspace), !prefix.hasPrefix("/"), !prefix.contains("..") else {
@@ -192,11 +221,23 @@ enum GDStorageContract {
                 throw GDStorageContractError.message("A signed URL is outside this workspace.")
             }
             let expires = try expiry(row["expiresAt"], now: now)
-            let allowed = mode == "write" ? ["PUT", "POST"] : ["GET", "HEAD"]
+            let allowed: [String]
+            switch mode {
+            case "write": allowed = ["PUT", "POST"]
+            case "delete": allowed = ["DELETE"]
+            default: allowed = ["GET", "HEAD"]
+            }
             guard allowed.contains(method) else {
                 throw GDStorageContractError.message("A signed URL has an unexpected method.")
             }
-            return GDSignedObject(object: object, url: url, method: method, expiresAt: expires)
+            var generation: String?
+            if row["generation"] != nil {
+                guard let decimal = decimalGeneration(row["generation"]) else {
+                    throw GDStorageContractError.message("A signed URL generation must be a decimal string.")
+                }
+                generation = decimal
+            }
+            return GDSignedObject(object: object, url: url, method: method, expiresAt: expires, generation: generation)
         }
         return GDStorageSession(mode: mode, urls: urls)
     }

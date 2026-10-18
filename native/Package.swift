@@ -8,13 +8,7 @@ let package = Package(
         .target(
             name: "GenDragoonContract",
             path: "Sources",
-            sources: [
-                "GDAccountContract.swift",
-                "GDStorageContract.swift",
-                "GDArgon2.swift",
-                "GDChunkCrypto.swift",
-                "GDSealedManifest.swift",
-            ]
+            exclude: ["GenDragoonMain.swift"]
         ),
         .testTarget(
             name: "GenDragoonContractTests",

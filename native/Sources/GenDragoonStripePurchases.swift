@@ -406,7 +406,7 @@ struct GenDragoonStripePurchases: View {
                     .buttonStyle(.borderedProminent).tint(.cyan).disabled(blocked || !billing.workspaces.contains { $0.id == selected.workspaceID && $0.supportsPerformance })
             }
             Text("Paid performance is separate from the workspace fee and applies to hosted and bring-your-own workspaces. The free performance tier (\(GDWorkspaceOffer.freePerformanceWorkers) transfer worker) stays included.").font(.system(size: 11)).foregroundStyle(.secondary)
-        } else if focus == "byo" {
+        } else if focus == "byo-hidden" {
             projectPicker
             Text(GDWorkspaceOffer.byoSummary).font(.system(size: 12)).foregroundStyle(.secondary)
             Picker("S3-compatible storage", selection: $selected.provider) {

@@ -5,7 +5,7 @@
       "authorization": "<redacted>"
     },
     "method": "GET",
-    "path": "/v2/account/deletions/3f2b8c1e-6a4d-4e7b-9c2a-1d5e8f0a7b36"
+    "path": "/v2/workspaces/11111111-1111-4111-8111-000000000001/key-envelope"
   },
   "response": {
     "body": {

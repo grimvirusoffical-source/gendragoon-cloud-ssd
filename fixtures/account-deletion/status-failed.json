@@ -5,13 +5,13 @@
       "authorization": "<redacted>"
     },
     "method": "GET",
-    "path": "/v2/account/deletions/3f2b8c1e-6a4d-4e7b-9c2a-1d5e8f0a7b36"
+    "path": "/v2/account/deletions/00000000-0000-4000-8000-000000000004"
   },
   "response": {
     "body": {
-      "jobId": "3f2b8c1e-6a4d-4e7b-9c2a-1d5e8f0a7b36",
-      "status": "failed",
-      "retryable": true
+      "jobId": "00000000-0000-4000-8000-000000000004",
+      "retryable": true,
+      "status": "failed"
     },
     "status": 200
   }

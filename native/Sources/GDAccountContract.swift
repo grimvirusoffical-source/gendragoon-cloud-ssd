@@ -3,6 +3,8 @@ import Foundation
 /// Server failures put the code in `error` and sometimes also in `code`.
 /// Readers take `error` first.
 enum GDServerCode {
+    /// `error` wins whenever it is a non-empty string. The value is not pattern-matched:
+    /// uppercase codes such as `PROJECT_NOT_FOUND` are valid. An empty `error` falls through to `code`.
     static func read(_ json: [String: Any]) -> String {
         if let error = text(json["error"]) { return error }
         if let code = text(json["code"]) { return code }
@@ -24,8 +26,11 @@ enum GDAccountDecision: Equatable {
     case poll(jobId: String, statusToken: String)
     case polling(status: String, retryable: Bool)
     case wipe
-    case failed(String)
+    /// `retryable` is the server flag. A retryable failure keeps the job and offers Retry.
+    case failed(String, retryable: Bool)
     case hold(String)
+    /// A 202 or 410 arrived without a usable token. Retry may be offered. DELETE must not be sent again.
+    case retryWithoutDelete(String)
     /// A 404 while polling. The saved job stays until `done` or the user dismisses it.
     case notFound(String)
 }
@@ -59,11 +64,43 @@ enum GDDeletionIntent: Equatable {
     case sendDelete
 }
 
+enum GDDeletionCredential: Equatable {
+    /// DELETE /v2/account, authorized with the owner's Firebase token.
+    case firebase
+    /// GET /v2/account/deletions/:jobId, authorized with the saved statusToken.
+    case statusToken
+}
+
+/// Both auth failures share this callback.
+/// `signed_out` is a Firebase-token `invalid_token`. `reauth_required` is a status-token `invalid_token`.
+enum GDDeletionAuthFailure: Equatable {
+    case signedOut
+    case reauthRequired
+
+    var signal: String {
+        switch self {
+        case .signedOut: return "signed_out"
+        case .reauthRequired: return "reauth_required"
+        }
+    }
+}
+
 struct GDUnauthorizedDeletion: Equatable {
     var wipe: Bool
     var showSignIn: Bool
     var keepSavedJob: Bool
     var retryDelete: Bool
+    /// Clear only the session. The saved job and its status token stay.
+    var signOut: Bool
+    /// Keep polling with the saved status token so `done` can wipe without a relaunch.
+    var keepPolling: Bool
+    /// Set only for the two `invalid_token` cases. Other 401s leave this nil.
+    var signal: GDDeletionAuthFailure?
+}
+
+/// Raised from a 409 `deletion_not_retryable`. The job id is the one in that body.
+struct GDDeletionNotRetryable: Error, Equatable {
+    var jobId: String
 }
 
 enum GDAccountContract {
@@ -75,10 +112,18 @@ enum GDAccountContract {
         if status == 401 {
             return .reauthenticate(code: errorCode(json))
         }
+        if status == 404 {
+            return .notFound("This deletion could not be found. Local keys and caches were kept.")
+        }
+        if status == 413 {
+            return .hold("Account deletion was rejected because the request was too large. Local keys and caches were kept.")
+        }
         if status == 410 {
-            guard GDServerCode.read(json) == "account_deleted",
-                  let saved = savedJob(json) else {
+            guard GDServerCode.read(json) == "account_deleted" else {
                 return .hold("Account deletion did not return a job. Local keys and caches were kept.")
+            }
+            guard let saved = savedJob(json) else {
+                return .retryWithoutDelete("Account deletion did not return a usable status token. Retry the status check. Local keys and caches were kept.")
             }
             return .poll(jobId: saved.jobId, statusToken: saved.statusToken)
         }
@@ -89,7 +134,7 @@ enum GDAccountContract {
             return .hold("Account deletion status path is invalid. Local keys and caches were kept.")
         }
         guard let saved = savedJob(json) else {
-            return .hold("Account deletion did not return a job. Local keys and caches were kept.")
+            return .retryWithoutDelete("Account deletion did not return a usable status token. Retry the status check. Local keys and caches were kept.")
         }
         return .poll(jobId: saved.jobId, statusToken: saved.statusToken)
     }
@@ -99,14 +144,14 @@ enum GDAccountContract {
             return .reauthenticate(code: errorCode(json))
         }
         if status == 404 {
-            return .notFound("This deletion could not be found. Retry the status check, or dismiss it. Local keys and caches were kept.")
+            return .notFound("This deletion could not be found. Sign in again to retry it. Local keys and caches were kept.")
         }
         guard status == 200 else {
             return .hold("Account deletion status could not be read. Local keys and caches were kept.")
         }
         // The contract field is `status`. A legacy `state` value is not a result.
         guard let reported = json["status"] as? String, !reported.isEmpty else {
-            return .failed("Account deletion returned an unknown status. Local keys and caches were kept.")
+            return .failed("Account deletion returned an unknown status. Local keys and caches were kept.", retryable: false)
         }
         let retryable = (json["retryable"] as? Bool) ?? (json["retryable"] as? NSNumber)?.boolValue ?? false
         switch reported {
@@ -114,13 +159,13 @@ enum GDAccountContract {
             return .wipe
         case "failed":
             let message = (json["failure"] as? String) ?? (json["message"] as? String) ?? "Account deletion did not finish."
-            return .failed(String(message.prefix(200)))
+            return .failed(String(message.prefix(200)), retryable: retryable)
         case "queued", "running":
             return .polling(status: reported, retryable: retryable)
         case "completed":
-            return .failed("Account deletion returned an unknown status. Local keys and caches were kept.")
+            return .failed("Account deletion returned an unknown status. Local keys and caches were kept.", retryable: false)
         default:
-            return .failed("Account deletion returned an unknown status. Local keys and caches were kept.")
+            return .failed("Account deletion returned an unknown status. Local keys and caches were kept.", retryable: false)
         }
     }
 
@@ -150,12 +195,43 @@ enum GDAccountContract {
         return .sendDelete
     }
 
-    /// 401 never wipes. `invalid_token` and `reauth_required` both return to sign-in.
-    /// A saved job stays in the Keychain. DELETE is retried only when nothing is saved.
-    static func unauthorizedDeletion(json: [String: Any], savedJobExists: Bool) -> GDUnauthorizedDeletion {
+    static let deletionNotRetryableMessage = "This deletion can't be retried. Contact GenDragoon support. Dismiss it when you no longer want to watch the job. Local keys and caches were kept."
+
+    /// 401 never wipes.
+    /// A Firebase `invalid_token` sends `signed_out`, clears only the session, keeps the job,
+    /// and keeps polling with the saved status token until `done` wipes.
+    /// A status-token `invalid_token` sends `reauth_required`, stops the poll, keeps the job, and asks for sign-in.
+    /// After that sign-in, DELETE is sent again so the 410 can supply a fresh status token.
+    /// `reauth_required` and a bare 401 ask for sign-in. A saved Firebase job keeps polling.
+    static func unauthorizedDeletion(json: [String: Any], savedJobExists: Bool, credential: GDDeletionCredential = .firebase) -> GDUnauthorizedDeletion {
         let code = errorCode(json)
-        return GDUnauthorizedDeletion(wipe: false, showSignIn: true, keepSavedJob: savedJobExists,
-                                      retryDelete: code == "reauth_required" && !savedJobExists)
+        if credential == .statusToken {
+            return GDUnauthorizedDeletion(wipe: false, showSignIn: true, keepSavedJob: savedJobExists,
+                                          retryDelete: savedJobExists, signOut: false, keepPolling: false,
+                                          signal: code == "invalid_token" ? .reauthRequired : nil)
+        }
+        switch code {
+        case "invalid_token":
+            return GDUnauthorizedDeletion(wipe: false, showSignIn: false, keepSavedJob: savedJobExists,
+                                          retryDelete: false, signOut: true, keepPolling: savedJobExists,
+                                          signal: .signedOut)
+        case "reauth_required":
+            return GDUnauthorizedDeletion(wipe: false, showSignIn: true, keepSavedJob: savedJobExists,
+                                          retryDelete: !savedJobExists, signOut: false, keepPolling: savedJobExists,
+                                          signal: nil)
+        default:
+            return GDUnauthorizedDeletion(wipe: false, showSignIn: true, keepSavedJob: savedJobExists,
+                                          retryDelete: false, signOut: false, keepPolling: savedJobExists,
+                                          signal: nil)
+        }
+    }
+
+    /// A 409 `deletion_not_retryable` raises `GDDeletionNotRetryable` with the body's `jobId`.
+    /// Any other status returns without throwing.
+    static func deletionNotRetryable(status: Int, json: [String: Any]) throws {
+        guard status == 409, GDServerCode.read(json) == "deletion_not_retryable" else { return }
+        let jobId = (json["jobId"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        throw GDDeletionNotRetryable(jobId: jobId)
     }
 
     static func reauthFollowUp(expectedUID: String, signedInUID: String, authTime: TimeInterval?, now: TimeInterval, freshSeconds: TimeInterval, retryDelete: Bool) -> GDReauthFollowUp {
@@ -179,10 +255,16 @@ enum GDAccountContract {
     static func pollRecovery(for decision: GDAccountDecision) -> GDPollRecovery {
         switch decision {
         case .notFound:
-            return GDPollRecovery(wipe: false, keepSavedJob: true, showRetry: true, allowDismiss: true, sendDelete: false)
+            return GDPollRecovery(wipe: false, keepSavedJob: true, showRetry: true, allowDismiss: false, sendDelete: true)
         case .wipe:
             return GDPollRecovery(wipe: true, keepSavedJob: false, showRetry: false, allowDismiss: false, sendDelete: false)
-        default:
+        case .failed(_, true):
+            return GDPollRecovery(wipe: false, keepSavedJob: true, showRetry: true, allowDismiss: false, sendDelete: true)
+        case .failed:
+            return GDPollRecovery(wipe: false, keepSavedJob: true, showRetry: false, allowDismiss: true, sendDelete: false)
+        case .retryWithoutDelete:
+            return GDPollRecovery(wipe: false, keepSavedJob: false, showRetry: true, allowDismiss: true, sendDelete: false)
+        case .reauthenticate, .poll, .polling, .hold:
             return GDPollRecovery(wipe: false, keepSavedJob: true, showRetry: false, allowDismiss: false, sendDelete: false)
         }
     }
@@ -192,10 +274,15 @@ enum GDAccountContract {
         GDPollRecovery(wipe: false, keepSavedJob: false, showRetry: false, allowDismiss: false, sendDelete: false)
     }
 
-    /// Switch the session only when the incoming account is the one that started the saved job.
-    static func adoptSignIn(incomingUID: String, savedOwnerUID: String?) -> GDSignInAdoption {
+    /// Switch the session only for the account that is already signed in, and for the account that started a saved job.
+    /// `currentUID` is captured before logout, so the check runs even when no deletion has been saved yet.
+    static func adoptSignIn(incomingUID: String, savedOwnerUID: String?, currentUID: String? = nil) -> GDSignInAdoption {
         let incoming = incomingUID.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !incoming.isEmpty else {
+            return .reject("Sign in again with the same account. Local keys and caches were kept.")
+        }
+        let current = currentUID?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if !current.isEmpty && current != incoming {
             return .reject("Sign in again with the same account. Local keys and caches were kept.")
         }
         let saved = savedOwnerUID?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
@@ -223,11 +310,12 @@ enum GDAccountContract {
         return (jobId, statusToken)
     }
 
+    /// `jobId` and `statusToken` are opaque. The only check is that the value is non-empty.
     static func isJobID(_ value: String) -> Bool {
-        value.range(of: #"^[A-Za-z0-9_-]{8,80}$"#, options: .regularExpression) != nil
+        !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     static func isStatusToken(_ value: String) -> Bool {
-        value.range(of: #"^[A-Za-z0-9_-]{43}$"#, options: .regularExpression) != nil
+        !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 }

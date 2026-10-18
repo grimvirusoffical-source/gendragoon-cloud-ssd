@@ -62,6 +62,10 @@ class CandidateDeploymentTests(unittest.TestCase):
                 self.assertFalse((staged / name).exists())
             self.assertFalse(list(staged.rglob("*.test.js")))
             self.assertFalse((staged / "node_modules").exists())
+            mapped = staged / "mobile" / "extension-map.json"
+            self.assertTrue(mapped.is_file())
+            self.assertFalse(mapped.is_symlink())
+            self.assertEqual(mapped.read_bytes(), (deploy_free.BASE / "mobile" / "extension-map.json").resolve().read_bytes())
 
     def test_dry_run_does_not_authenticate_or_deploy(self):
         output = io.StringIO()

@@ -22,6 +22,8 @@ import Foundation
     private var renewTimer:Timer?
     private var activationObserver:NSObjectProtocol?
     @Published private(set) var userID = ""
+    /// Captured before logout so a new sign-in can be compared with the account already on this Mac.
+    private var accountUIDBeforeSignIn = ""
     var firebaseIDToken: String { idToken }
     private var bridge:Process?
     private var pipe:Pipe?
@@ -45,6 +47,7 @@ import Foundation
             status="The Google sign-in helper requires Node.js on this Mac. Sign-in remains locked until it is available."
             stage = .error;return
         }
+        accountUIDBeforeSignIn = userID
         logout(preserveStatus:true)
         stage = .waiting
         status="Opening your browser for secure Google sign-in…"
@@ -113,7 +116,7 @@ import Foundation
                 providers.contains(where:{$0["providerId"] as? String=="google.com"}) else {
                 self.stage = .login;self.status="Firebase rejected the account. Sign in using Google, not email/password.";return
             }
-            switch GDAccountContract.adoptSignIn(incomingUID: uid, savedOwnerUID: GDAccountDeletionMonitor.loadJob()?.ownerUID) {
+            switch GDAccountContract.adoptSignIn(incomingUID: uid, savedOwnerUID: GDAccountDeletionMonitor.loadJob()?.ownerUID, currentUID: accountUIDBeforeSignIn) {
             case .reject(let message):
                 self.stage = .login
                 self.status = message
