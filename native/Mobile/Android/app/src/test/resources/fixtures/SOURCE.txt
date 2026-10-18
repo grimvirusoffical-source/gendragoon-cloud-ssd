@@ -1,7 +1,10 @@
-Copied from grimvirusoffical-source/gendragoon-cloud-ssd fixtures/ on fix/backend-workspace-policy at 4dfde4b.
+Copied from grimvirusoffical-source/gendragoon-cloud-ssd fixtures/ on fix/backend-workspace-policy at da39276.
 Each file is {request, response:{status, body}}. Do not edit these JSON files by hand.
 Tests read the repo-root fixtures/ directory when this branch has it, and this copy otherwise.
 Account-deletion fixtures are not in that set yet. Those bodies stay in
 native/Mobile/fixtures/backend-http.json, copied from native/Backend at 84f6fff.
 A repeat DELETE after done is 410 {error:"account_deleted",jobId,statusToken}, never 401.
 Up to 5 status tokens for one job stay valid.
+byo/verify-proof-required is gone. Every byo/verify-* request except verify-missing-url sends {presignedUrl}.
+verify-missing-url sends {} and returns 400 {error:"presigned_url_required"}.
+Never send readBack or proofUrl.

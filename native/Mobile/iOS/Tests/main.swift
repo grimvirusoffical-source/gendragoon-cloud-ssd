@@ -210,19 +210,35 @@ final class AccountLogicTests: XCTestCase {
         XCTAssertTrue(resumed.requestsWipe())
     }
 
-    func testPollNotFoundDoesNotWipe() {
+    func testPollNotFoundKeepsPairUntilDismissed() {
         var flow=AccountDeletion.resume(DeletionReceipt.of(jobId:"job_404",statusToken:token))
         let missing=AccountHttp.parse(status:404,data:Data(BackendFixtures.body("pollNotFound").utf8))
         flow.onPollHttp(status:missing.status,jobStatus:missing.jobStatus,errorCode:missing.error,retryable:missing.retryable)
         XCTAssertEqual(flow.step,.failed)
-        XCTAssertTrue(flow.refuseDelete)
-        flow.retry()
-        XCTAssertEqual(flow.step,.failed)
-        XCTAssertFalse(flow.allowsDelete())
-        XCTAssertTrue(flow.dropReceipt)
+        XCTAssertTrue(flow.canDismiss())
+        XCTAssertEqual(flow.jobId,"job_404")
+        XCTAssertEqual(flow.statusToken,token)
+        XCTAssertFalse(flow.dropReceipt)
         XCTAssertFalse(flow.requestsWipe())
         XCTAssertFalse((flow.message ?? "").contains(token))
         XCTAssertTrue(LocalWipePlan.keychainServicesRemoved(wipe:flow.requestsWipe()).isEmpty)
+        flow.retry()
+        XCTAssertEqual(flow.step,.polling)
+        XCTAssertEqual(flow.jobId,"job_404")
+        XCTAssertEqual(flow.statusToken,token)
+        XCTAssertFalse(flow.allowsDelete())
+        flow.onPollHttp(status:404,jobStatus:nil,errorCode:"not_found",retryable:nil)
+        XCTAssertTrue(flow.dismissError())
+        XCTAssertTrue(flow.dropReceipt)
+        XCTAssertNil(flow.jobId)
+        XCTAssertNil(flow.statusToken)
+        XCTAssertFalse(flow.requestsWipe())
+        XCTAssertTrue(LocalWipePlan.keychainServicesRemoved(wipe:flow.requestsWipe()).isEmpty)
+        let attempts=flow.deleteAttempts
+        flow.retry()
+        XCTAssertEqual(flow.step,.failed)
+        XCTAssertEqual(flow.deleteAttempts,attempts)
+        XCTAssertFalse(flow.allowsDelete())
     }
 
     func testLockAndUnauthorizedDoNotWipe() {
@@ -242,10 +258,31 @@ final class AccountLogicTests: XCTestCase {
         XCTAssertEqual(flow.step,.polling)
         XCTAssertFalse(flow.requestsWipe())
         var unsigned=ready()
-        let empty=AccountHttp.parse(status:401,data:Data("{}".utf8))
-        unsigned.onDeleteHttp(status:empty.status,jobId:empty.jobId,errorCode:empty.error,statusToken:empty.statusToken)
-        XCTAssertEqual(unsigned.step,.signedOut)
+        unsigned.onDeleteHttp(status:202,jobId:"job_auth",errorCode:nil,statusToken:token)
+        unsigned.onPollHttp(status:401,jobStatus:nil,errorCode:nil,retryable:nil)
+        XCTAssertEqual(unsigned.step,.reauth)
+        XCTAssertNotEqual(unsigned.step,.signedOut)
+        XCTAssertEqual(unsigned.jobId,"job_auth")
+        XCTAssertEqual(unsigned.statusToken,token)
         XCTAssertFalse(unsigned.requestsWipe())
+        XCTAssertFalse(unsigned.allowsDelete())
+    }
+
+    func testReauthRequiredRejectsADifferentAccount() {
+        var flow=ready()
+        let reauth=AccountHttp.parse(status:401,data:Data(BackendFixtures.body("reauth401").utf8))
+        flow.onDeleteHttp(status:reauth.status,jobId:reauth.jobId,errorCode:reauth.error,statusToken:reauth.statusToken)
+        XCTAssertEqual(flow.step,.reauth)
+        let attempts=flow.deleteAttempts
+        XCTAssertFalse(flow.rejectDifferentAccount(expectedUid:"uid-1",actualUid:"uid-1",expectedEmail:"owner@example.com",actualEmail:"owner@example.com"))
+        XCTAssertEqual(flow.step,.reauth)
+        XCTAssertTrue(flow.rejectDifferentAccount(expectedUid:"uid-1",actualUid:"uid-2",expectedEmail:"owner@example.com",actualEmail:"owner@example.com"))
+        XCTAssertEqual(flow.step,.failed)
+        XCTAssertEqual(flow.message,AccountDeletion.differentAccount)
+        XCTAssertEqual(flow.deleteAttempts,attempts)
+        XCTAssertFalse(flow.allowsDelete())
+        XCTAssertFalse(flow.requestsWipe())
+        XCTAssertTrue(LocalWipePlan.keychainServicesRemoved(wipe:flow.requestsWipe()).isEmpty)
     }
 
     func testUnsafeJobAndAuthTime() {
@@ -267,7 +304,7 @@ final class AccountLogicTests: XCTestCase {
     }
 
     func testSameAccountLockNamesMergeAndByo() throws {
-        XCTAssertEqual(BackendFixtures.sharedFixtureSHA,"4dfde4b")
+        XCTAssertEqual(BackendFixtures.sharedFixtureSHA,"da39276")
         XCTAssertTrue(AccountMatch.same(expectedUid:"uid-1",expectedEmail:"owner@example.com",actualUid:"uid-1",actualEmail:"owner@example.com"))
         XCTAssertFalse(AccountMatch.same(expectedUid:"uid-1",expectedEmail:"owner@example.com",actualUid:"uid-2",actualEmail:"owner@example.com"))
         XCTAssertFalse(AccountMatch.same(expectedUid:"uid-1",expectedEmail:"owner@example.com",actualUid:"uid-1",actualEmail:"other@example.com"))
@@ -288,6 +325,25 @@ final class AccountLogicTests: XCTestCase {
             XCTAssertEqual(route.destination,.lockScreen)
             XCTAssertNil(route.toast)
             XCTAssertEqual(CloudSignals.jsonString(BackendFixtures.responseBodyString(area:"workspace-lock",name:name),"error"),"workspace_lock")
+            let shown=WorkspaceLock.fromLockBody(BackendFixtures.responseBodyString(area:"workspace-lock",name:name)).named(cache)
+            XCTAssertEqual(shown.reasonText,CloudSignals.jsonString(BackendFixtures.responseBodyString(area:"workspace-lock",name:name),"reason"))
+            XCTAssertFalse(shown.reasonText.isEmpty)
+            XCTAssertEqual(shown.overByText,"Over by \(shown.overBy)")
+            if shown.reasonText=="merge_in_progress" {
+                XCTAssertEqual(shown.detailText,WorkspaceLock.detailMerge)
+                XCTAssertFalse(shown.detailText.contains("did not include a workspace list"))
+                XCTAssertTrue(shown.workspaces.isEmpty)
+            } else if shown.reasonText=="scope_unavailable" {
+                XCTAssertEqual(shown.detailText,WorkspaceLock.detailScope)
+                XCTAssertFalse(shown.detailText.contains("did not include a workspace list"))
+                XCTAssertTrue(shown.workspaces.isEmpty)
+            } else {
+                XCTAssertTrue(shown.detailText.isEmpty)
+                XCTAssertFalse(shown.workspaces.isEmpty)
+            }
+            XCTAssertEqual(WorkspaceLock.actionDelete,"Delete")
+            XCTAssertEqual(WorkspaceLock.actionMerge,"Merge")
+            XCTAssertEqual(WorkspaceLock.actionDownload,"Download files")
         }
         let mergePath=BackendFixtures.requestPath(area:"merge",name:"completed")
         let prefix="/v2/workspaces/"
@@ -333,6 +389,37 @@ final class AccountLogicTests: XCTestCase {
         XCTAssertTrue(ByoMessages.comingSoonProvider("Azure"))
         XCTAssertTrue(ByoMessages.comingSoonProvider("WebDAV"))
         XCTAssertFalse(ByoMessages.comingSoonProvider("s3"))
+        XCTAssertFalse(ByoFeature.showInSettings)
+        for name in ["verify-expired","verify-host-mismatch","verify-mismatch","verify-used","verify-missing-url","verify-success"] {
+            let request=BackendFixtures.requestBodyString(area:"byo",name:name)
+            XCTAssertFalse(request.contains("readBack"))
+            XCTAssertFalse(request.contains("proofUrl"))
+            let response=BackendFixtures.responseBodyString(area:"byo",name:name)
+            let status=BackendFixtures.responseStatus(area:"byo",name:name)
+            let code=CloudSignals.jsonString(response,"error")
+            if name=="verify-missing-url" {
+                XCTAssertFalse(request.contains("presignedUrl"))
+                XCTAssertEqual(status,400)
+                XCTAssertEqual(code,"presigned_url_required")
+            } else {
+                XCTAssertTrue(request.contains("presignedUrl"))
+            }
+            if let code {
+                let friendly=ByoMessages.friendly(status:status,error:code)
+                XCTAssertNotNil(friendly)
+                XCTAssertFalse(friendly?.contains(code) ?? true)
+                let mapped=CloudSignals.route(status:status,body:BackendFixtures.responseBodyData(area:"byo",name:name),method:"POST")
+                XCTAssertEqual(mapped.toast,friendly)
+            }
+        }
+        let sent=try XCTUnwrap(AccountDeletion.byoVerifyBody(presignedUrl:"https://bucket.example/object"))
+        let sentJson=try XCTUnwrap(JSONSerialization.jsonObject(with:sent) as? [String:String])
+        XCTAssertEqual(sentJson["presignedUrl"],"https://bucket.example/object")
+        XCTAssertEqual(sentJson.count,1)
+        let sentText=String(data:sent,encoding:.utf8) ?? ""
+        XCTAssertFalse(sentText.contains("readBack"))
+        XCTAssertFalse(sentText.contains("proofUrl"))
+        XCTAssertEqual(AccountDeletion.byoVerifyPath(workspaceID:"11111111-1111-4111-8111-000000000001"),"v2/workspaces/11111111-1111-4111-8111-000000000001/byo/verify")
     }
 
     func testChunkLockHasNoToast() {
@@ -375,11 +462,11 @@ final class AccountLogicTests: XCTestCase {
 }
 
 /// Deletion bodies stay in `native/Mobile/fixtures/backend-http.json` (84f6fff).
-/// Lock, merge, BYO, workspace, and ownership cases are `fixtures/<area>/<case>.json` at 4dfde4b.
+/// Lock, merge, BYO, workspace, and ownership cases are `fixtures/<area>/<case>.json` at da39276.
 /// The repo-root `fixtures/` directory wins when this branch has it.
 private enum BackendFixtures {
     static let accountDeletionSHA="84f6fff"
-    static let sharedFixtureSHA="4dfde4b"
+    static let sharedFixtureSHA="da39276"
 
     static func body(_ name:String)->String {
         guard let value=deletionObject()[name] as? String, !value.isEmpty else {

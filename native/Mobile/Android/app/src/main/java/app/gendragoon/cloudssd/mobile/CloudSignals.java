@@ -182,6 +182,20 @@ final class WorkspaceLock {
         }
         return new WorkspaceLock(items,raw,overBy,unpaidIds);
     }
+    static final String ACTION_DELETE="Delete";
+    static final String ACTION_MERGE="Merge";
+    static final String ACTION_DOWNLOAD="Download files";
+    static final String DETAIL_MERGE="A merge is already running. Wait until it finishes. Your files stay available to download.";
+    static final String DETAIL_SCOPE="This action is not available for the current workspace scope. Your files stay available to download.";
+    String reasonText(){String reason=JsonFields.string(raw,"reason");return reason==null?"":reason;}
+    /** Clear copy for reasons that do not include a workspace list. */
+    String detailText(){
+        String reason=reasonText();
+        if("merge_in_progress".equals(reason))return DETAIL_MERGE;
+        if("scope_unavailable".equals(reason))return DETAIL_SCOPE;
+        return "";
+    }
+    String overByText(){return "Over by "+overBy;}
     String chooseMessage(){return overBy>0?"Choose "+overBy+" workspaces to remove.":"";}
     String summary(){return "Workspaces locked";}
     String issueSummary(){
@@ -319,9 +333,19 @@ final class JsonFields {
 final class ByoMessages {
     static final String COMING_SOON="Coming soon";
     static final String UNSUPPORTED="That storage provider isn't available yet. S3-compatible storage is supported.";
+    static final String PRESIGNED_URL_REQUIRED="A presigned URL is required to verify this storage.";
+    static final String CHALLENGE_EXPIRED="This storage check expired. Start the check again.";
+    static final String HOST_MISMATCH="The presigned URL does not match the storage you registered.";
+    static final String CHALLENGE_MISMATCH="The storage check did not match. Start the check again.";
+    static final String CHALLENGE_USED="This storage check was already used. Start a new check.";
     private ByoMessages(){}
     static String friendly(int status,String error){
         if(status==422&&"byo_provider_unsupported".equals(error))return UNSUPPORTED;
+        if(status==400&&"presigned_url_required".equals(error))return PRESIGNED_URL_REQUIRED;
+        if(status==400&&"BYO_CHALLENGE_EXPIRED".equals(error))return CHALLENGE_EXPIRED;
+        if(status==400&&"BYO_ENDPOINT_HOST_MISMATCH".equals(error))return HOST_MISMATCH;
+        if(status==400&&"BYO_CHALLENGE_MISMATCH".equals(error))return CHALLENGE_MISMATCH;
+        if(status==400&&"BYO_CHALLENGE_USED".equals(error))return CHALLENGE_USED;
         return null;
     }
     static boolean comingSoon(String provider){
@@ -329,6 +353,17 @@ final class ByoMessages {
         String name=provider.toLowerCase(java.util.Locale.ROOT);
         return "sftp".equals(name)||"azure".equals(name)||"webdav".equals(name);
     }
+}
+
+/**
+ * Bring-your-own storage ships only as the server register, challenge, and verify flow.
+ * The on-device SigV4 proof is not green, so the settings entry stays hidden.
+ * There is no key-only fallback.
+ */
+final class ByoFeature {
+    static final boolean SERVER_FLOW_ENABLED=false;
+    private ByoFeature(){}
+    static boolean showInSettings(){return SERVER_FLOW_ENABLED;}
 }
 
 /** Re-sign-in must be the same Google account that started deletion. */

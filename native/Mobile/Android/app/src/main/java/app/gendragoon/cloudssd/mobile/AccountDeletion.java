@@ -103,12 +103,10 @@ final class AccountDeletion {
         if(status==423&&CloudSignals.CODE_LOCK.equals(errorCode)){wipe=false;return;}
         if(status==401){onUnauthorized(errorCode);return;}
         if(status==404){
+            // Keep the saved job and token. Retry polls again. Dismiss is the only clear.
             wipe=false;
             refuseDelete=true;
-            dropReceipt=true;
-            this.jobId=null;
-            this.statusToken=null;
-            this.statusPath=null;
+            dropReceipt=false;
             fail("This deletion could not be confirmed. Nothing on this device was erased.");
             return;
         }
@@ -148,8 +146,14 @@ final class AccountDeletion {
 
     private void onUnauthorized(String errorCode){
         wipe=false;
-        if(errorCode==null||errorCode.isEmpty()||"invalid_token".equals(errorCode)){
+        if("invalid_token".equals(errorCode)){
             step=Step.SIGNED_OUT;
+            message="Sign in again to continue.";
+            return;
+        }
+        // A 401 with no code goes back to sign-in and keeps any saved job and token.
+        if(errorCode==null||errorCode.isEmpty()){
+            step=Step.REAUTH;
             message="Sign in again to continue.";
             return;
         }
@@ -169,7 +173,7 @@ final class AccountDeletion {
 
     /** Keeps a known job id and token and resumes polling. Never sends DELETE, including after a 404. */
     void retry(){
-        if(step!=Step.FAILED||refuseDelete)return;
+        if(step!=Step.FAILED)return;
         wipe=false;
         message=null;
         polls=0;
@@ -179,10 +183,39 @@ final class AccountDeletion {
             dropReceipt=false;
             return;
         }
+        if(refuseDelete)return;
         jobId=null;
         statusToken=null;
         statusPath=null;
         step=Step.REAUTH;
+    }
+
+    /** True after a 404 while the saved pair is still held. */
+    boolean canDismiss(){return step==Step.FAILED&&refuseDelete;}
+
+    /**
+     * The user dismissed the 404 error. Clears the saved pair and wipes nothing.
+     * The pair is otherwise cleared only after {@code done}.
+     */
+    boolean dismissError(){
+        if(!canDismiss())return false;
+        wipe=false;
+        dropReceipt=true;
+        jobId=null;
+        statusToken=null;
+        statusPath=null;
+        message="Nothing on this device was erased.";
+        return true;
+    }
+
+    static final String DIFFERENT_ACCOUNT="Sign in with the same Google account. Nothing was deleted.";
+
+    /** A {@code reauth_required} sign-in for a different uid is rejected. Nothing is deleted or wiped. */
+    boolean rejectDifferentAccount(String expectedUid,String actualUid,String expectedEmail,String actualEmail){
+        if(step!=Step.REAUTH)return false;
+        if(AccountMatch.same(expectedUid,expectedEmail,actualUid,actualEmail))return false;
+        fail(DIFFERENT_ACCOUNT);
+        return true;
     }
 
     void noteWiped(){if(step==Step.DONE&&wipe){wiped=true;step=Step.WIPED;}}
@@ -287,6 +320,17 @@ final class AccountActions {
         return "/v2/workspaces/"+sourceId+"/merge";
     }
 
+    static String byoVerifyPath(String workspaceId){
+        if(workspaceId==null||(!"free".equals(workspaceId)&&!workspaceId.matches("[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}")))return null;
+        return "/v2/workspaces/"+workspaceId+"/byo/verify";
+    }
+
+    /** {@code POST /byo/verify} body is {@code {"presignedUrl"}}. Never {@code readBack} or {@code proofUrl}. */
+    static String byoVerifyBody(String presignedUrl){
+        if(presignedUrl==null||presignedUrl.isEmpty()||presignedUrl.indexOf('"')>=0||presignedUrl.indexOf('\\')>=0)return null;
+        return "{\"presignedUrl\":\""+presignedUrl+"\"}";
+    }
+
     static String mergeBody(String targetId,String confirmName){
         if(targetId==null||confirmName==null||confirmName.isEmpty())return null;
         if(!"free".equals(targetId)&&!targetId.matches("[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}"))return null;
@@ -303,14 +347,19 @@ final class AccountActions {
     }
 }
 
-/** Job id plus the single-job status token. The token is never written into a log line. */
+/** Job id, status token, and the account uid that started the job. The token is never written into a log line. */
 final class DeletionReceipt {
     final String jobId;
     final String statusToken;
-    private DeletionReceipt(String jobId,String statusToken){this.jobId=jobId;this.statusToken=statusToken;}
-    static DeletionReceipt of(String jobId,String statusToken){
+    /** Firebase uid of the account being deleted. Not a secret. Empty when an older receipt has none. */
+    final String accountUid;
+    private DeletionReceipt(String jobId,String statusToken,String accountUid){
+        this.jobId=jobId;this.statusToken=statusToken;this.accountUid=accountUid==null?"":accountUid;
+    }
+    static DeletionReceipt of(String jobId,String statusToken){return of(jobId,statusToken,"");}
+    static DeletionReceipt of(String jobId,String statusToken,String accountUid){
         if(!AccountActions.validJob(jobId)||!AccountActions.validToken(statusToken))return null;
-        return new DeletionReceipt(jobId,statusToken);
+        return new DeletionReceipt(jobId,statusToken,accountUid);
     }
     @Override public String toString(){return "DeletionReceipt("+jobId+")";}
 }
@@ -322,8 +371,60 @@ final class DeletionReceiptMemory {
         if(receipt==null)return;
         values.put("jobId",receipt.jobId);
         values.put("statusToken",receipt.statusToken);
+        values.put("accountUid",receipt.accountUid==null?"":receipt.accountUid);
     }
-    DeletionReceipt read(){return DeletionReceipt.of(values.get("jobId"),values.get("statusToken"));}
+    DeletionReceipt read(){return DeletionReceipt.of(values.get("jobId"),values.get("statusToken"),values.get("accountUid"));}
     void clear(){values.clear();}
     boolean containsToken(String token){return token!=null&&token.equals(values.get("statusToken"));}
+}
+
+/**
+ * Google re-sign-in for account deletion. The Google account id and email are checked
+ * before {@code signInWithCredential}. A Google subject is not a Firebase uid, so the
+ * subject is compared only with a saved Google id. The Firebase uid on the receipt is
+ * what a resumed job checks after the credential exchange.
+ */
+final class DeletionSignIn {
+    private DeletionSignIn(){}
+
+    static String claim(String jwt,String key){
+        if(jwt==null||key==null)return null;
+        String[] parts=jwt.split("\\.");
+        if(parts.length<2)return null;
+        try{
+            byte[] json=java.util.Base64.getUrlDecoder().decode(pad(parts[1]));
+            return JsonFields.string(new String(json,java.nio.charset.StandardCharsets.UTF_8),key);
+        }catch(RuntimeException error){return null;}
+    }
+
+    /**
+     * True when {@code signInWithCredential} must not be called.
+     * An email mismatch, or a Google id mismatch against the saved Google id, blocks the call.
+     */
+    static boolean blocksCredential(String expectedGoogleId,String expectedEmail,String googleId,String googleEmail){
+        boolean emailKnown=expectedEmail!=null&&!expectedEmail.isEmpty();
+        boolean idKnown=expectedGoogleId!=null&&!expectedGoogleId.isEmpty();
+        if(emailKnown&&(googleEmail==null||!expectedEmail.equalsIgnoreCase(googleEmail)))return true;
+        if(idKnown&&(googleId==null||!expectedGoogleId.equals(googleId)))return true;
+        return false;
+    }
+
+    /** The uid stored with the job wins over whoever happens to be signed in after a restart. */
+    static String ownerUid(DeletionReceipt receipt,String signedInUid){
+        if(receipt!=null&&receipt.accountUid!=null&&!receipt.accountUid.isEmpty())return receipt.accountUid;
+        return signedInUid==null?"":signedInUid;
+    }
+
+    static boolean switchedAccount(String expectedUid,String signedUid){
+        if(expectedUid==null||expectedUid.isEmpty())return false;
+        return signedUid==null||!expectedUid.equals(signedUid);
+    }
+
+    /** Cancel must not open the library of an account that replaced the one being deleted. */
+    static boolean cancelOpensLibrary(boolean foreignSession){return !foreignSession;}
+
+    private static String pad(String value){
+        int mod=value.length()%4;
+        return mod==0?value:value+"====".substring(mod);
+    }
 }

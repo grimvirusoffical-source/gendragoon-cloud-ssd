@@ -9,6 +9,7 @@ import java.util.List;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotEquals;
+import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 
@@ -244,22 +245,38 @@ public final class AccountDeletionTest {
         assertNull(memory.read());
     }
 
-    @Test public void pollNotFoundDoesNotWipe(){
+    @Test public void pollNotFoundKeepsPairUntilDismissed(){
         DeletionReceiptMemory memory=new DeletionReceiptMemory();
         memory.save(DeletionReceipt.of("job_404",TOKEN));
         AccountDeletion flow=AccountDeletion.resume(memory.read());
         AccountActions.HttpBody missing=AccountActions.parse(404,BackendFixtures.body("pollNotFound"));
         flow.onPollHttp(missing.status,missing.jobStatus,missing.error,missing.retryable);
         assertEquals(AccountDeletion.Step.FAILED,flow.step);
-        assertTrue(flow.refuseDelete);
-        flow.retry();
-        assertEquals(AccountDeletion.Step.FAILED,flow.step);
-        assertFalse(flow.allowsDelete());
-        assertTrue(flow.dropReceipt);
+        assertTrue(flow.canDismiss());
+        assertEquals("job_404",flow.jobId);
+        assertEquals(TOKEN,flow.statusToken);
+        assertFalse(flow.dropReceipt);
         assertFalse(flow.requestsWipe());
         assertTrue(flow.message!=null&&!flow.message.isEmpty());
         assertFalse(flow.message.contains(TOKEN));
         assertTrue(LocalDataWipe.secretsRemoved(flow.requestsWipe(),ALIASES).isEmpty());
+        flow.retry();
+        assertEquals(AccountDeletion.Step.POLLING,flow.step);
+        assertEquals("job_404",flow.jobId);
+        assertEquals(TOKEN,flow.statusToken);
+        assertFalse(flow.allowsDelete());
+        flow.onPollHttp(404,null,"not_found",null);
+        assertTrue(flow.dismissError());
+        assertTrue(flow.dropReceipt);
+        assertNull(flow.jobId);
+        assertNull(flow.statusToken);
+        assertFalse(flow.requestsWipe());
+        assertTrue(LocalDataWipe.secretsRemoved(flow.requestsWipe(),ALIASES).isEmpty());
+        int attempts=flow.deleteAttempts;
+        flow.retry();
+        assertEquals(AccountDeletion.Step.FAILED,flow.step);
+        assertEquals(attempts,flow.deleteAttempts);
+        assertFalse(flow.allowsDelete());
     }
 
     @Test public void lockDuringDeleteOrPollDoesNotWipe(){
@@ -284,14 +301,36 @@ public final class AccountDeletionTest {
 
     @Test public void unauthorizedWithoutCodeGoesToSignIn(){
         AccountDeletion flow=ready();
-        flow.onDeleteHttp(401,null,null,null);
-        assertEquals(AccountDeletion.Step.SIGNED_OUT,flow.step);
+        flow.onDeleteHttp(202,"job_auth",null,TOKEN);
+        flow.onPollHttp(401,null,null,null);
+        assertEquals(AccountDeletion.Step.REAUTH,flow.step);
+        assertNotEquals(AccountDeletion.Step.SIGNED_OUT,flow.step);
+        assertEquals("job_auth",flow.jobId);
+        assertEquals(TOKEN,flow.statusToken);
         assertFalse(flow.requestsWipe());
+        assertFalse(flow.allowsDelete());
         assertTrue(LocalDataWipe.secretsRemoved(flow.requestsWipe(),ALIASES).isEmpty());
         AccountDeletion named=ready();
         named.onDeleteHttp(401,null,"reauth_required",null);
         assertEquals(AccountDeletion.Step.REAUTH,named.step);
         assertFalse(named.requestsWipe());
+    }
+
+    @Test public void reauthRequiredRejectsADifferentAccount(){
+        AccountDeletion flow=ready();
+        AccountActions.HttpBody reauth=AccountActions.parse(401,BackendFixtures.body("reauth401"));
+        flow.onDeleteHttp(reauth.status,reauth.jobId,reauth.error,reauth.statusToken);
+        assertEquals(AccountDeletion.Step.REAUTH,flow.step);
+        int attempts=flow.deleteAttempts;
+        assertFalse(flow.rejectDifferentAccount("uid-1","uid-1","owner@example.com","owner@example.com"));
+        assertEquals(AccountDeletion.Step.REAUTH,flow.step);
+        assertTrue(flow.rejectDifferentAccount("uid-1","uid-2","owner@example.com","owner@example.com"));
+        assertEquals(AccountDeletion.Step.FAILED,flow.step);
+        assertEquals(AccountDeletion.DIFFERENT_ACCOUNT,flow.message);
+        assertEquals(attempts,flow.deleteAttempts);
+        assertFalse(flow.allowsDelete());
+        assertFalse(flow.requestsWipe());
+        assertTrue(LocalDataWipe.secretsRemoved(flow.requestsWipe(),ALIASES).isEmpty());
     }
 
     @Test public void unsafeJobAndSingularPathAreRefused(){
@@ -328,7 +367,7 @@ public final class AccountDeletionTest {
     }
 
     @Test public void lockNamesComeFromTheWorkspaceList(){
-        assertEquals(BackendFixtures.SHARED_FIXTURE_SHA,"4dfde4b");
+        assertEquals(BackendFixtures.SHARED_FIXTURE_SHA,"da39276");
         List<WorkspaceLock.Item> cache=BackendFixtures.listedWorkspaces();
         assertEquals("Fixture Project",cache.get(0).name);
         String overCap=BackendFixtures.responseBody("workspace-lock","over-cap");
@@ -349,6 +388,25 @@ public final class AccountDeletionTest {
             assertEquals(CloudSignals.Destination.LOCK_SCREEN,route.destination);
             assertNull(route.toast);
             assertEquals("workspace_lock",JsonFields.string(raw,"error"));
+            WorkspaceLock shown=WorkspaceLock.fromLockBody(raw).named(cache);
+            assertEquals(JsonFields.string(raw,"reason"),shown.reasonText());
+            assertFalse(shown.reasonText().isEmpty());
+            assertEquals("Over by "+JsonFields.number(raw,"overBy"),shown.overByText());
+            if("merge_in_progress".equals(shown.reasonText())){
+                assertEquals(WorkspaceLock.DETAIL_MERGE,shown.detailText());
+                assertFalse(shown.detailText().contains("did not include a workspace list"));
+                assertTrue(shown.workspaces.isEmpty());
+            }else if("scope_unavailable".equals(shown.reasonText())){
+                assertEquals(WorkspaceLock.DETAIL_SCOPE,shown.detailText());
+                assertFalse(shown.detailText().contains("did not include a workspace list"));
+                assertTrue(shown.workspaces.isEmpty());
+            }else{
+                assertTrue(shown.detailText().isEmpty());
+                assertFalse(shown.workspaces.isEmpty());
+            }
+            assertEquals("Delete",WorkspaceLock.ACTION_DELETE);
+            assertEquals("Merge",WorkspaceLock.ACTION_MERGE);
+            assertEquals("Download files",WorkspaceLock.ACTION_DOWNLOAD);
         }
         String mergePath=BackendFixtures.requestPath("merge","completed");
         String source=mergePath.substring("/v2/workspaces/".length(),mergePath.lastIndexOf("/merge"));
@@ -390,6 +448,56 @@ public final class AccountDeletionTest {
         CloudSignals.Route route=CloudSignals.route(422,raw,"POST");
         assertEquals(ByoMessages.UNSUPPORTED,route.toast);
         assertFalse(route.toast.contains("byo_provider_unsupported"));
+        assertFalse(ByoFeature.showInSettings());
+        for(String name:List.of("verify-expired","verify-host-mismatch","verify-mismatch","verify-used","verify-missing-url","verify-success")){
+            String request=BackendFixtures.requestBody("byo",name);
+            assertFalse(request.contains("readBack"));
+            assertFalse(request.contains("proofUrl"));
+            String response=BackendFixtures.responseBody("byo",name);
+            int status=BackendFixtures.responseStatus("byo",name);
+            String code=JsonFields.string(response,"error");
+            if("verify-missing-url".equals(name)){
+                assertFalse(request.contains("presignedUrl"));
+                assertEquals(400,status);
+                assertEquals("presigned_url_required",code);
+            }else assertTrue(request.contains("\"presignedUrl\""));
+            if(code==null)continue;
+            String friendly=ByoMessages.friendly(status,code);
+            assertNotNull(friendly);
+            assertFalse(friendly.contains(code));
+            CloudSignals.Route mapped=CloudSignals.route(status,response,"POST");
+            assertEquals(friendly,mapped.toast);
+        }
+        String sent=AccountActions.byoVerifyBody("https://bucket.example/object");
+        assertTrue(sent.contains("\"presignedUrl\""));
+        assertFalse(sent.contains("readBack"));
+        assertFalse(sent.contains("proofUrl"));
+        assertEquals("/v2/workspaces/11111111-1111-4111-8111-000000000001/byo/verify",AccountActions.byoVerifyPath("11111111-1111-4111-8111-000000000001"));
+    }
+
+    @Test public void googleIdentityMismatchBlocksSignInAndForeignCancelStaysOut(){
+        assertTrue(DeletionSignIn.blocksCredential("google-a","a@example.com","google-b","b@example.com"));
+        assertTrue(DeletionSignIn.blocksCredential("google-a","a@example.com","google-b","a@example.com"));
+        assertFalse(DeletionSignIn.blocksCredential("google-a","a@example.com","google-a","A@example.com"));
+        assertFalse(DeletionSignIn.blocksCredential("","a@example.com","google-sub","a@example.com"));
+        assertTrue(DeletionSignIn.switchedAccount("uid-a","uid-b"));
+        assertFalse(DeletionSignIn.switchedAccount("uid-a","uid-a"));
+        assertFalse(DeletionSignIn.cancelOpensLibrary(true));
+        assertTrue(DeletionSignIn.cancelOpensLibrary(false));
+        DeletionReceipt saved=DeletionReceipt.of("job_saved",TOKEN,"uid-a");
+        DeletionReceiptMemory memory=new DeletionReceiptMemory();
+        memory.save(saved);
+        DeletionReceipt loaded=memory.read();
+        assertEquals("uid-a",loaded.accountUid);
+        assertEquals("uid-a",DeletionSignIn.ownerUid(loaded,"uid-b"));
+        assertFalse(loaded.toString().contains(TOKEN));
+        AccountDeletion flow=new AccountDeletion();
+        flow.continueFromExplain();
+        flow.confirmPhrase("DELETE");
+        assertTrue(flow.rejectDifferentAccount("uid-a","uid-b","a@example.com","b@example.com"));
+        assertEquals(AccountDeletion.DIFFERENT_ACCOUNT,flow.message);
+        assertFalse(flow.requestsWipe());
+        assertFalse(flow.allowsDelete());
     }
 
     private static AccountDeletion ready(){

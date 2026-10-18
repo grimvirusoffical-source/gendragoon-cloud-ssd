@@ -143,9 +143,13 @@ struct MobileExport:Identifiable {let id=UUID();let url:URL}
         let transport:GDTransferClient
         if let client {transport=client}
         else {
-            guard let made=try? GDTransferClient(endpoint:URL(string:"https://gendragoon-free-10068843866.us-central1.run.app")!,accountID:"lock"){_ in
-                throw GDTransferError(message:"Sign in again to continue.",status:401)
-            } else {return}
+            let endpoint=URL(string:"https://gendragoon-free-10068843866.us-central1.run.app")!
+            let made:GDTransferClient
+            do {
+                made=try GDTransferClient(endpoint:endpoint,accountID:"lock"){_ in
+                    throw GDTransferError(message:"Sign in again to continue.",status:401)
+                }
+            } catch {return}
             transport=made
         }
         do {

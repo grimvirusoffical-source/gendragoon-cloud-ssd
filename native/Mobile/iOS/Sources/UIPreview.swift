@@ -43,20 +43,22 @@ enum UIPreview {
                 Button("Delete account",role:.destructive){delete()}.disabled(cloud.busy||cloud.transferring).accessibilityIdentifier("delete-account")
                 Button("Sign out",role:.destructive){cloud.pause();close();session.signOut()}.disabled(cloud.busy)
             }
-            Section("Bring-your-own storage"){
-                TextField("S3-compatible endpoint",text:$endpoint).textInputAutocapitalization(.never).autocorrectionDisabled()
-                TextField("Bucket",text:$bucket).textInputAutocapitalization(.never).autocorrectionDisabled()
-                TextField("Access key",text:$access).textInputAutocapitalization(.never).autocorrectionDisabled()
-                SecureField("Secret key",text:$secret)
-                Button("Save on this device"){
-                    do { try session.saveByo(endpoint:endpoint,bucket:bucket,access:access,secret:secret);secret="";notice="S3-compatible keys are stored on this device." }
-                    catch { notice=error.localizedDescription }
+            if ByoFeature.showInSettings {
+                Section("Bring-your-own storage"){
+                    TextField("S3-compatible endpoint",text:$endpoint).textInputAutocapitalization(.never).autocorrectionDisabled()
+                    TextField("Bucket",text:$bucket).textInputAutocapitalization(.never).autocorrectionDisabled()
+                    TextField("Access key",text:$access).textInputAutocapitalization(.never).autocorrectionDisabled()
+                    SecureField("Secret key",text:$secret)
+                    Button("Save on this device"){
+                        do { try session.saveByo(endpoint:endpoint,bucket:bucket,access:access,secret:secret);secret="";notice="S3-compatible keys are stored on this device." }
+                        catch { notice=error.localizedDescription }
+                    }
+                    Text("SFTP — \(ByoMessages.comingSoon)").foregroundStyle(.secondary)
+                    Text("Azure — \(ByoMessages.comingSoon)").foregroundStyle(.secondary)
+                    Text("WebDAV — \(ByoMessages.comingSoon)").foregroundStyle(.secondary)
+                    Text("Keys stay on this device. SFTP, Azure, and WebDAV are not available yet.").font(.footnote).foregroundStyle(.secondary)
+                    if !notice.isEmpty { Text(notice).font(.footnote) }
                 }
-                Text("SFTP — \(ByoMessages.comingSoon)").foregroundStyle(.secondary)
-                Text("Azure — \(ByoMessages.comingSoon)").foregroundStyle(.secondary)
-                Text("WebDAV — \(ByoMessages.comingSoon)").foregroundStyle(.secondary)
-                Text("Keys stay on this device. SFTP, Azure, and WebDAV are not available yet.").font(.footnote).foregroundStyle(.secondary)
-                if !notice.isEmpty { Text(notice).font(.footnote) }
             }
             Section("Transfers"){
                 Toggle("Data saver",isOn:$cloud.dataSaver)

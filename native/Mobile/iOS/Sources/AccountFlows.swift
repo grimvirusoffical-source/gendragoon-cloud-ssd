@@ -28,6 +28,11 @@ struct AccountDeletedScreen:View {
     func resume(_ receipt:DeletionReceipt){flow=AccountDeletion.resume(receipt);syncReceipt()}
     func preview(_ step:AccountDeletion.Step){var next=AccountDeletion();next.step=step;flow=next}
     func askForSignIn(_ text:String){flow.askForSignIn(text)}
+    func dismissError(){flow.dismissError();syncReceipt()}
+    @discardableResult func rejectDifferentAccount(expectedUid:String,actualUid:String,expectedEmail:String,actualEmail:String?)->Bool {
+        let rejected=flow.rejectDifferentAccount(expectedUid:expectedUid,actualUid:actualUid,expectedEmail:expectedEmail,actualEmail:actualEmail)
+        return rejected
+    }
     func syncReceipt(){
         if flow.dropReceipt && !flow.requestsWipe() {DeletionReceiptVault.clear();return}
         if flow.step == .polling,let receipt=flow.receipt() {DeletionReceiptVault.save(jobId:receipt.jobId,token:receipt.statusToken)}
@@ -75,6 +80,7 @@ struct AccountDeletedScreen:View {
                     case .failed:
                         Text(model.flow.message ?? "Account deletion did not finish. You can retry.")
                         Button("Retry"){model.retry()}
+                        if model.flow.canDismiss() { Button("Dismiss"){model.dismissError();dismiss()} }
                     case .signedOut:
                         Text(model.flow.message ?? "Sign in again to continue.")
                         Button("Return to sign-in"){session.signOut();dismiss()}.buttonStyle(.borderedProminent)
@@ -107,6 +113,8 @@ struct AccountDeletedScreen:View {
                 cloud.noteLock(WorkspaceLock.decode(http.raw))
                 if model.flow.step != .polling {dismiss()}
             }
+        }catch let error as GDTransferError where error.message==AccountDeletion.differentAccount {
+            model.rejectDifferentAccount(expectedUid:session.uid,actualUid:"",expectedEmail:session.email.contains("@") ? session.email : "",actualEmail:nil)
         }catch let error as GDTransferError where error.status==401 {
             model.askForSignIn(error.message)
         }catch{model.fail(error.localizedDescription)}
@@ -151,17 +159,20 @@ struct AccountDeletedScreen:View {
                 VStack(alignment:.leading,spacing:16){
                     Text("Workspaces locked").font(.largeTitle.bold()).accessibilityIdentifier("workspaces-locked")
                     Text("Your files are still readable and downloadable. Uploads are paused until you delete or merge workspaces down to your plan limit.")
+                    if !resolved.reasonText.isEmpty { Text(resolved.reasonText).font(.headline) }
+                    Text(resolved.overByText).font(.headline)
+                    if !resolved.detailText.isEmpty { Text(resolved.detailText) }
                     if !resolved.chooseMessage.isEmpty { Text(resolved.chooseMessage).font(.headline) }
                     if !resolved.issueSummary.isEmpty { Text(resolved.issueSummary).font(.headline) }
                     Text("Duplicates are kept as name (from <source>).").font(.footnote).foregroundStyle(.secondary)
-                    if resolved.workspaces.isEmpty { Text("The server did not include a workspace list.").foregroundStyle(.secondary) }
+                    if resolved.workspaces.isEmpty && resolved.detailText.isEmpty { Text("The server did not include a workspace list.").foregroundStyle(.secondary) }
                     ForEach(resolved.workspaces){item in
                         VStack(alignment:.leading,spacing:10){
                             Text(item.label).font(.headline)
                             HStack{
-                                Button("Delete",role:.destructive){pendingDelete=item}.disabled(item.workspaceID==nil || cloud.busy)
+                                Button(WorkspaceLock.actionDelete,role:.destructive){pendingDelete=item}.disabled(item.workspaceID==nil || cloud.busy)
                                 mergeControl(item)
-                                Button("Download files"){Task{await list(item)}}.disabled(item.workspaceID==nil || cloud.busy || !CloudSignals.allowsTransfer(method:"GET",locked:true))
+                                Button(WorkspaceLock.actionDownload){Task{await list(item)}}.disabled(item.workspaceID==nil || cloud.busy || !CloudSignals.allowsTransfer(method:"GET",locked:true))
                             }
                             if listing==item.workspaceID {
                                 if files.isEmpty { Text("No files to download in this workspace.").font(.caption).foregroundStyle(.secondary) }
@@ -185,7 +196,7 @@ struct AccountDeletedScreen:View {
     private var resolved:WorkspaceLock { lock.named(cloud.knownWorkspaces()) }
     private func mergeControl(_ item:WorkspaceLock.Item)->some View {
         let others=resolved.workspaces.filter{$0.workspaceID != nil && $0.workspaceID != item.workspaceID}
-        return Menu("Merge"){
+        return Menu(WorkspaceLock.actionMerge){
             if others.isEmpty {Button("No other workspace"){notice=AccountDeletion.mergeNote(item.name ?? "workspace")}}
             else {ForEach(others){target in Button("Into "+target.label){Task{await merge(item,into:target)}}}}
         }.disabled(cloud.busy)

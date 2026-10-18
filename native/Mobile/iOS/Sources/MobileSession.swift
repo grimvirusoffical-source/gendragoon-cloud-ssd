@@ -119,7 +119,7 @@ private enum SessionVault {
         let nextEmail=result["email"] as? String
         let expectedEmail=email.contains("@") ? email : ""
         if !uid.isEmpty && !AccountMatch.same(expectedUid:uid,expectedEmail:expectedEmail,actualUid:id,actualEmail:nextEmail) {
-            throw GDTransferError(message:"Sign in with the same Google account. Nothing was deleted.",status:401)
+            throw GDTransferError(message:AccountDeletion.differentAccount,status:401)
         }
         generation=UUID();uid=id;email=nextEmail ?? "Google account"
         self.bearer=access;self.refresh=refresh;expires=Date().addingTimeInterval(3300)
@@ -190,6 +190,9 @@ private enum SessionVault {
     }
     func signOut(){renewal?.cancel();renewal=nil;generation=UUID();bearer="";refresh="";uid="";email="";expires = .distantPast;resumedDeletion=nil;SessionVault.clear();GIDSignIn.sharedInstance.signOut();stage = .login;status="Signed out."}
     func saveByo(endpoint:String,bucket:String,access:String,secret:String) throws {
+        guard ByoFeature.serverFlowEnabled else {
+            throw GDTransferError(message:"Bring-your-own storage is not available.",status:0)
+        }
         try ByoVault.save(endpoint:endpoint,bucket:bucket,access:access,secret:secret)
     }
     /// Clears the session, saved workspace selection, transfer checkpoints, exports and future bring-your-own secrets.

@@ -23,6 +23,7 @@ final class DeletionReceiptVault {
     static final boolean STORES_PLAINTEXT=false;
     private static final String KEY_JOB="job";
     private static final String KEY_TOKEN="token";
+    private static final String KEY_UID="uid";
 
     private DeletionReceiptVault(){}
 
@@ -31,7 +32,8 @@ final class DeletionReceiptVault {
             SharedPreferences prefs=context.getSharedPreferences(PREF,Context.MODE_PRIVATE);
             String job=decrypt(prefs.getString(KEY_JOB,null));
             String token=decrypt(prefs.getString(KEY_TOKEN,null));
-            return DeletionReceipt.of(job,token);
+            String uid=decrypt(prefs.getString(KEY_UID,null));
+            return DeletionReceipt.of(job,token,uid);
         }catch(Exception error){return null;}
     }
 
@@ -39,7 +41,7 @@ final class DeletionReceiptVault {
         if(context==null||receipt==null)return;
         try{
             SharedPreferences prefs=context.getSharedPreferences(PREF,Context.MODE_PRIVATE);
-            prefs.edit().putString(KEY_JOB,encrypt(receipt.jobId)).putString(KEY_TOKEN,encrypt(receipt.statusToken)).commit();
+            prefs.edit().putString(KEY_JOB,encrypt(receipt.jobId)).putString(KEY_TOKEN,encrypt(receipt.statusToken)).putString(KEY_UID,encrypt(receipt.accountUid==null?"":receipt.accountUid)).commit();
         }catch(Exception error){/* keep the in-memory job; do not log the token */ }
     }
 

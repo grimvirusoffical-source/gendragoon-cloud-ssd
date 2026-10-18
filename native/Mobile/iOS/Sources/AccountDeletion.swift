@@ -90,7 +90,8 @@ struct AccountDeletion:Equatable {
         if status==423 && errorCode==CloudSignals.lockCode {wipe=false;return}
         if status==401 {onUnauthorized(errorCode);return}
         if status==404 {
-            wipe=false;refuseDelete=true;dropReceipt=true;self.jobId=nil;self.statusToken=nil;self.statusPath=nil
+            // Keep the saved job and token. Retry polls again. Dismiss is the only clear.
+            wipe=false;refuseDelete=true;dropReceipt=false
             fail("This deletion could not be confirmed. Nothing on this device was erased.")
             return
         }
@@ -119,8 +120,12 @@ struct AccountDeletion:Equatable {
     }
     private mutating func onUnauthorized(_ errorCode:String?){
         wipe=false
-        if errorCode==nil || errorCode?.isEmpty==true || errorCode=="invalid_token" {
+        if errorCode=="invalid_token" {
             step = .signedOut;message="Sign in again to continue.";return
+        }
+        // A 401 with no code goes back to sign-in and keeps any saved job and token.
+        if errorCode==nil || errorCode?.isEmpty==true {
+            step = .reauth;message="Sign in again to continue.";return
         }
         step = .reauth
         message="Sign in again. The server only accepts a sign-in from the last 5 minutes."
@@ -129,12 +134,30 @@ struct AccountDeletion:Equatable {
     mutating func nextPollDelayMillis()->Int { let delay=1000<<min(polls,3);polls+=1;return delay }
     mutating func fail(_ text:String){step = .failed;wipe=false;message=text}
     mutating func retry(){
-        guard step == .failed, !refuseDelete else {return}
+        guard step == .failed else {return}
         wipe=false;message=nil;polls=0
         if let jobId,let statusToken,Self.validJob(jobId),Self.validToken(statusToken),let path=Self.statusPath(jobId:jobId) {
             statusPath=path;step = .polling;dropReceipt=false;return
         }
+        if refuseDelete {return}
         jobId=nil;statusToken=nil;statusPath=nil;step = .reauth
+    }
+    /// True after a 404 while the saved pair is still held.
+    func canDismiss()->Bool { step == .failed && refuseDelete }
+    /// The user dismissed the 404 error. Clears the saved pair and wipes nothing.
+    mutating func dismissError()->Bool {
+        guard canDismiss() else {return false}
+        wipe=false;dropReceipt=true;jobId=nil;statusToken=nil;statusPath=nil
+        message="Nothing on this device was erased."
+        return true
+    }
+    static let differentAccount="Sign in with the same Google account. Nothing was deleted."
+    /// A `reauth_required` sign-in for a different uid is rejected. Nothing is deleted or wiped.
+    mutating func rejectDifferentAccount(expectedUid:String,actualUid:String,expectedEmail:String,actualEmail:String?)->Bool {
+        guard step == .reauth else {return false}
+        if AccountMatch.same(expectedUid:expectedUid,expectedEmail:expectedEmail,actualUid:actualUid,actualEmail:actualEmail) {return false}
+        fail(Self.differentAccount)
+        return true
     }
     mutating func noteWiped(){if step == .done && wipe {wiped=true;step = .wiped}}
     mutating func noteWipeFailed(_ text:String){if step == .done {message=text}}
@@ -168,6 +191,15 @@ struct AccountDeletion:Equatable {
     static func resumesBeforeSignOut(_ receipt:DeletionReceipt?)->Bool {
         guard let receipt else {return false}
         return validJob(receipt.jobId) && validToken(receipt.statusToken)
+    }
+    static func byoVerifyPath(workspaceID:String)->String? {
+        guard workspaceID=="free" || UUID(uuidString:workspaceID) != nil else {return nil}
+        return "v2/workspaces/"+workspaceID.lowercased()+"/byo/verify"
+    }
+    /// `POST /byo/verify` body is `{"presignedUrl"}`. Never `readBack` or `proofUrl`.
+    static func byoVerifyBody(presignedUrl:String)->Data? {
+        guard !presignedUrl.isEmpty,!presignedUrl.contains("\""),!presignedUrl.contains("\\") else {return nil}
+        return try? JSONSerialization.data(withJSONObject:["presignedUrl":presignedUrl])
     }
     static func mergePath(sourceID:String)->String? {
         guard sourceID=="free" || UUID(uuidString:sourceID) != nil else {return nil}
@@ -268,11 +300,29 @@ enum AccountMatch {
     }
 }
 
+/// Bring-your-own storage ships only as the server register, challenge, and verify flow.
+/// The on-device SigV4 proof is not green, so the settings entry stays hidden.
+/// There is no key-only fallback.
+enum ByoFeature {
+    static let serverFlowEnabled=false
+    static var showInSettings:Bool { serverFlowEnabled }
+}
+
 enum ByoMessages {
     static let comingSoon="Coming soon"
     static let unsupported="That storage provider isn't available yet. S3-compatible storage is supported."
+    static let presignedUrlRequired="A presigned URL is required to verify this storage."
+    static let challengeExpired="This storage check expired. Start the check again."
+    static let hostMismatch="The presigned URL does not match the storage you registered."
+    static let challengeMismatch="The storage check did not match. Start the check again."
+    static let challengeUsed="This storage check was already used. Start a new check."
     static func friendly(status:Int,error:String?)->String? {
         if status==422 && error=="byo_provider_unsupported" {return unsupported}
+        if status==400 && error=="presigned_url_required" {return presignedUrlRequired}
+        if status==400 && error=="BYO_CHALLENGE_EXPIRED" {return challengeExpired}
+        if status==400 && error=="BYO_ENDPOINT_HOST_MISMATCH" {return hostMismatch}
+        if status==400 && error=="BYO_CHALLENGE_MISMATCH" {return challengeMismatch}
+        if status==400 && error=="BYO_CHALLENGE_USED" {return challengeUsed}
         return nil
     }
     static func comingSoonProvider(_ provider:String)->Bool {

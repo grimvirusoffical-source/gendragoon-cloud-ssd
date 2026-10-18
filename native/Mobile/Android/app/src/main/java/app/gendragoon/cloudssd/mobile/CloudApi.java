@@ -121,6 +121,13 @@ final class CloudApi {
         if(path==null||body==null)throw new Failure(400,"Invalid merge.");
         request(path,"POST",new JSONObject(body));
     }
+    /** {@code POST /v2/workspaces/{id}/byo/verify} with {@code {"presignedUrl"}}. */
+    void verifyByo(String workspaceId,String presignedUrl)throws Exception{
+        String path=AccountActions.byoVerifyPath(workspaceId);
+        String body=AccountActions.byoVerifyBody(presignedUrl);
+        if(path==null||body==null)throw new Failure(400,"Invalid bring-your-own verification.");
+        request(path,"POST",new JSONObject(body));
+    }
     JSONObject get(String path)throws Exception{return request(path,"GET",(JSONObject)null).json();}
     List<JSONObject> files(String workspace)throws Exception{
         List<JSONObject> files=new ArrayList<>();String cursor="";Set<String> seen=new HashSet<>();

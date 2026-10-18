@@ -100,6 +100,21 @@ struct WorkspaceLock:Identifiable,Equatable,Sendable {
     var overBy:Int=0
     var unpaidIds:[String]=[]
     var id:String { raw.isEmpty ? "workspace-lock" : raw }
+    static let actionDelete="Delete"
+    static let actionMerge="Merge"
+    static let actionDownload="Download files"
+    static let detailMerge="A merge is already running. Wait until it finishes. Your files stay available to download."
+    static let detailScope="This action is not available for the current workspace scope. Your files stay available to download."
+    var reasonText:String { CloudSignals.jsonString(raw,"reason") ?? "" }
+    /// Clear copy for reasons that do not include a workspace list.
+    var detailText:String {
+        switch reasonText {
+        case "merge_in_progress": return WorkspaceLock.detailMerge
+        case "scope_unavailable": return WorkspaceLock.detailScope
+        default: return ""
+        }
+    }
+    var overByText:String { "Over by \(overBy)" }
     var chooseMessage:String { overBy>0 ? "Choose \(overBy) workspaces to remove." : "" }
     var issueSummary:String {
         let cap=workspaces.contains{$0.issue=="over_cap"}

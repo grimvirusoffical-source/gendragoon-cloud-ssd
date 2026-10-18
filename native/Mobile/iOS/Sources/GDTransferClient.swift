@@ -342,6 +342,14 @@ actor GDTransferClient {
         }
         _=try await send(path,method:"POST",data:body)
     }
+    /// `POST v2/workspaces/{id}/byo/verify` with `{"presignedUrl"}`.
+    func verifyByo(workspaceID:String,presignedUrl:String) async throws {
+        guard let path=AccountDeletion.byoVerifyPath(workspaceID:workspaceID),
+              let body=AccountDeletion.byoVerifyBody(presignedUrl:presignedUrl) else {
+            throw GDTransferError(message:"Invalid bring-your-own verification.",status:400)
+        }
+        _=try await send(path,method:"POST",data:body)
+    }
     private func once(path:String,method:String,token:String,body:Data?=nil) async throws -> (Data,HTTPURLResponse) {
         guard !path.isEmpty,!path.hasPrefix("/"),!path.contains(".."),!path.contains("\\"),!path.contains("//") else {
             throw GDTransferError(message:"Invalid cloud route.",status:400)

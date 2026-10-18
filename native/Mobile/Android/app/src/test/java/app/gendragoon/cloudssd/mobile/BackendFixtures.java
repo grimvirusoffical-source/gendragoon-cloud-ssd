@@ -8,13 +8,13 @@ import java.util.List;
 
 /**
  * Account-deletion bodies are copied from native/Backend at 84f6fff until PR #6 publishes fixtures.
- * Lock, workspace, merge, BYO, and ownership cases are the shared fixtures at 4dfde4b
+ * Lock, workspace, merge, BYO, and ownership cases are the shared fixtures at da39276
  * ({@code fixtures/<area>/<case>.json}, shape {@code {request, response:{status, body}}}).
  * The repo-root {@code fixtures/} directory wins when this branch has it.
  */
 final class BackendFixtures {
     static final String ACCOUNT_DELETION_SHA="84f6fff";
-    static final String SHARED_FIXTURE_SHA="4dfde4b";
+    static final String SHARED_FIXTURE_SHA="da39276";
 
     private BackendFixtures(){}
 
