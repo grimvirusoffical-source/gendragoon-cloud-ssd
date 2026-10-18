@@ -382,7 +382,7 @@ final class AccountLogicTests: XCTestCase {
             let shown=WorkspaceLock.fromLockBody(BackendFixtures.responseBodyString(area:"workspace-lock",name:name)).named(cache)
             XCTAssertEqual(shown.reasonText,CloudSignals.jsonString(BackendFixtures.responseBodyString(area:"workspace-lock",name:name),"reason"))
             XCTAssertFalse(shown.reasonText.isEmpty)
-            XCTAssertEqual(shown.overByText,"Over by \(shown.overBy)")
+            XCTAssertEqual(shown.overByText,shown.overBy>0 ? "Over by \(shown.overBy)" : "")
             if shown.reasonText=="merge_in_progress" {
                 XCTAssertEqual(shown.detailText,WorkspaceLock.detailMerge)
                 XCTAssertFalse(shown.detailText.contains("did not include a workspace list"))
@@ -1198,7 +1198,9 @@ final class AccountLogicTests: XCTestCase {
         XCTAssertEqual(pricedLabel(waived),"Owner Benefit · Included")
         var missing=waived
         missing.removeValue(forKey:"feeWaived")
-        XCTAssertThrowsError(try JSONDecoder().decode(MobileWorkspace.self,from:JSONSerialization.data(withJSONObject:missing)))
+        // feeWaived is optional per row and defaults to false, so one bad row cannot break the list.
+        let lenient=try JSONDecoder().decode(MobileWorkspace.self,from:JSONSerialization.data(withJSONObject:missing))
+        XCTAssertFalse(lenient.feeWaived)
         let ended=BackendFixtures.sharedBody("workspaces","byo-register-ends-grandfathered")
         XCTAssertEqual(ended["grandfatheringEnded"] as? Bool,true)
         XCTAssertEqual(ended["grandfathered"] as? Bool,false)
@@ -1210,6 +1212,81 @@ final class AccountLogicTests: XCTestCase {
     }
 
     /// Riley PR #5 at 0715b1a. Busy and deleting use the documented status strings. Lock and grace use the fixtures.
+    // Avery's review on e5f1982: a lapsed lock is per workspace and is never a dead end.
+    private let lapsedID="11111111-1111-4111-8111-000000000022"
+    private let openID="11111111-1111-4111-8111-000000000024"
+    private func lapsedLock()->WorkspaceLock { WorkspaceLock.decode(BackendFixtures.responseBodyString(area:"workspace-lock",name:"byo-lapsed")) }
+
+    func testLapsedLockHasItsOwnTextWithoutPlanLimitOrOverByZero() {
+        let lock=lapsedLock()
+        XCTAssertTrue(lock.isLapsed)
+        XCTAssertEqual(lock.overBy,0)
+        XCTAssertEqual(lock.overByText,"")
+        XCTAssertEqual(lock.title,WorkspaceLock.lapsedTitle)
+        XCTAssertFalse(lock.bodyText.contains("plan limit"))
+        XCTAssertFalse(lock.bodyText.contains("Over by"))
+        XCTAssertEqual(WorkspaceLock.decode(BackendFixtures.responseBodyString(area:"workspace-lock",name:"over-cap")).bodyText,WorkspaceLock.limitBody)
+    }
+
+    func testLapsedWorkspaceCanStillPayAndSwitch() {
+        XCTAssertEqual(WorkspacePolicy.checkoutURL(" https://billing.example.test/checkout/22 ")?.absoluteString,"https://billing.example.test/checkout/22")
+        XCTAssertNil(WorkspacePolicy.checkoutURL(nil),"no URL hides Pay")
+        XCTAssertNil(WorkspacePolicy.checkoutURL(""))
+        XCTAssertNil(WorkspacePolicy.checkoutURL("http://billing.example.test/checkout"))
+        let known=[WorkspaceLock.Item(workspaceID:"free",name:WorkspaceNames.freeName("Ignored",isFree:true),issue:nil),
+                   WorkspaceLock.Item(workspaceID:lapsedID,name:"Lapsed BYO",issue:nil),
+                   WorkspaceLock.Item(workspaceID:openID,name:"Open BYO",issue:nil)]
+        let targets=lapsedLock().switchTargets(known)
+        XCTAssertEqual(targets.map(\.workspaceID),["free",openID])
+        XCTAssertEqual(targets.first?.name,"Free")
+    }
+
+    @MainActor func testSwitchingClearsTheLockAndSavesTheSelection() {
+        let cloud=MobileCloudModel()
+        cloud.selected=lapsedID
+        cloud.setLock(lapsedLock())
+        XCTAssertNotNil(cloud.workspaceLock)
+        XCTAssertEqual(cloud.lockedWorkspaceID,lapsedID)
+        XCTAssertTrue(cloud.lockBlocksSelected)
+        cloud.switchWorkspace(openID)
+        XCTAssertNil(cloud.workspaceLock)
+        XCTAssertNil(cloud.lockedWorkspaceID)
+        XCTAssertEqual(cloud.selected,openID)
+        XCTAssertFalse(cloud.lockBlocksSelected)
+        // Changing the selection directly also clears a lock raised for another workspace.
+        cloud.setLock(lapsedLock())
+        XCTAssertNotNil(cloud.workspaceLock)
+        cloud.selected="free"
+        XCTAssertNil(cloud.workspaceLock)
+    }
+
+    @MainActor func testLapsedLockIsKeyedByWorkspace() {
+        let lock=lapsedLock()
+        XCTAssertTrue(lock.applies(to:lapsedID))
+        XCTAssertFalse(lock.applies(to:openID))
+        XCTAssertFalse(lock.applies(to:"free"))
+        XCTAssertTrue(WorkspaceLock.decode(BackendFixtures.responseBodyString(area:"workspace-lock",name:"over-cap")).applies(to:openID),"over-cap stays account-wide")
+        let cloud=MobileCloudModel()
+        cloud.selected=lapsedID
+        cloud.setLock(lock)
+        cloud.workspaceLock=nil // swipe-dismiss
+        cloud.afterLockDismissed()
+        XCTAssertEqual(cloud.selected,"free","dismissing a lapsed lock leaves the lapsed workspace")
+    }
+
+    func testFreeNameComesFromIsFree() {
+        XCTAssertEqual(WorkspaceNames.freeName("Starter",isFree:true),"Free")
+        XCTAssertEqual(WorkspaceNames.freeName("Starter",isFree:false),"Starter")
+        XCTAssertEqual(WorkspaceNames.freeName(nil,isFree:nil),"Workspace")
+    }
+
+    func testLowLevelSenderRefusesMissingOrBlankTokens() {
+        for token in [nil,""," ","\t\n"] as [String?] {
+            XCTAssertThrowsError(try GDTransferClient.bearer(token)){error in XCTAssertEqual((error as? GDTransferError)?.status,0)}
+        }
+        XCTAssertEqual(try? GDTransferClient.bearer("abc"),"Bearer abc")
+    }
+
     func testThemeContrastIsAA() {
         let pairs:[(UInt32,UInt32)]=[
             (GDTheme.textHex,GDTheme.bgHex),(GDTheme.textHex,GDTheme.surfaceHex),(GDTheme.mutedHex,GDTheme.surfaceHex),
@@ -1259,20 +1336,20 @@ final class AccountLogicTests: XCTestCase {
         let graceEnd=(demoted?["graceEndsAt"] as? NSNumber)?.int64Value ?? 0
         // #5 is still blocked; this fixture may be regenerated. Use graceEndsAt as sent.
         XCTAssertGreaterThan(graceEnd,through)
-        XCTAssertTrue(WorkspacePolicy.isPaymentDue(graceEndsAtMs:graceEnd,nowMs:through,lapsed:false))
-        XCTAssertTrue(WorkspacePolicy.isPaymentDue(graceEndsAtMs:graceEnd,nowMs:graceEnd-1,lapsed:false))
-        XCTAssertFalse(WorkspacePolicy.isPaymentDue(graceEndsAtMs:graceEnd,nowMs:graceEnd,lapsed:false))
-        XCTAssertFalse(WorkspacePolicy.isPaymentDue(graceEndsAtMs:graceEnd,nowMs:through,lapsed:true))
-        XCTAssertFalse(WorkspacePolicy.isPaymentDue(graceEndsAtMs:nil,nowMs:through,lapsed:false))
-        XCTAssertTrue(WorkspacePolicy.isPaymentDue(graceEndsAtMs:graceEnd+86_400_000*10,nowMs:graceEnd+1,lapsed:false))
-        XCTAssertEqual(WorkspacePolicy.paymentDueText(graceEndsAtMs:graceEnd),"Payment due. Pay by Nov 20, 2023 to keep using this workspace.")
+        // Shown whenever graceEndsAt is present and lapsed is false; no device-clock check.
+        XCTAssertTrue(WorkspacePolicy.isPaymentDue(graceEndsAtMs:graceEnd,lapsed:false))
+        XCTAssertFalse(WorkspacePolicy.isPaymentDue(graceEndsAtMs:graceEnd,lapsed:true))
+        XCTAssertFalse(WorkspacePolicy.isPaymentDue(graceEndsAtMs:nil,lapsed:false))
+        // Local time zone: 1700518400000 is Nov 20 22:13 UTC, which is Nov 21 in Tokyo.
+        XCTAssertEqual(WorkspacePolicy.paymentDueText(graceEndsAtMs:graceEnd,timeZone:TimeZone(identifier:"America/New_York")!),"Payment due. Pay by Nov 20, 2023 to keep using this workspace.")
+        XCTAssertEqual(WorkspacePolicy.paymentDueText(graceEndsAtMs:graceEnd,timeZone:TimeZone(identifier:"Asia/Tokyo")!),"Payment due. Pay by Nov 21, 2023 to keep using this workspace.")
         XCTAssertEqual(WorkspacePolicy.paymentDue,"Payment due")
         XCTAssertEqual(BackendFixtures.responseStatus(area:"workspaces",name:"byo-in-grace"),201)
         XCTAssertTrue(BackendFixtures.requestPath(area:"workspaces",name:"byo-in-grace").contains("11111111-1111-4111-8111-000000000021"))
     }
 
     private func pricedLabel(_ row:[String:Any],enabled:Bool=true)->String {
-        guard let feeWaived=row["feeWaived"] as? Bool else {preconditionFailure("feeWaived is required")}
+        let feeWaived=row["feeWaived"] as? Bool ?? false
         return WorkspacePrice.pickerText(name:row["name"] as? String ?? "Workspace",isFree:row["isFree"] as? Bool,grandfathered:(row["grandfathered"] as? Bool)==true,feeWaived:feeWaived,cents:(row["monthlyPriceCents"] as? NSNumber)?.intValue,enabled:enabled)
     }
 
@@ -1480,7 +1557,7 @@ final class InvalidTokenDeletionTests: XCTestCase {
     }
 }
 
-/// The repo-root `fixtures/` directory wins when this branch has it.
+/// Fixtures are read only from `native/Mobile/fixtures/shared`.
 /// `singular-path.json` is JSON. A non-JSON body in a test is synthetic.
 /// Support responses are Riley's d33970c `support-*` files in `fixtures/account-deletion`.
 /// Each request is `POST /v2/account/deletions/:jobId/support-request` with no body.
@@ -1574,8 +1651,7 @@ private enum BackendFixtures {
 
     private static func sharedURL(area:String,name:String)->URL {
         let relative=area+"/"+name+".json"
-        let root=repoFixtures().appendingPathComponent(relative)
-        if FileManager.default.fileExists(atPath:root.path) {return root}
+        // One pinned copy: native/Mobile/fixtures/shared. No repo-root switch.
         return mobileFixtures().appendingPathComponent("shared").appendingPathComponent(relative)
     }
 
@@ -1587,14 +1663,5 @@ private enum BackendFixtures {
             .appendingPathComponent("fixtures")
     }
 
-    private static func repoFixtures()->URL {
-        URL(fileURLWithPath:#filePath)
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-            .appendingPathComponent("fixtures")
-    }
 
 }

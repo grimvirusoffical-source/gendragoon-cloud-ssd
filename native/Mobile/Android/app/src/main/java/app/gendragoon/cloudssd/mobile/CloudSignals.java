@@ -164,8 +164,8 @@ final class WorkspacePrice {
         String raw=JsonFields.number(workspaceJson,"monthlyPriceCents");
         if(raw!=null){try{cents=Integer.parseInt(raw);}catch(NumberFormatException ignored){cents=null;}}
         boolean grandfathered=Boolean.TRUE.equals(JsonFields.bool(workspaceJson,"grandfathered"));
-        Boolean feeWaived=JsonFields.bool(workspaceJson,"feeWaived");
-        if(feeWaived==null)throw new IllegalArgumentException("feeWaived is required");
+        // Optional per row; missing is false so one bad row cannot break the list.
+        boolean feeWaived=Boolean.TRUE.equals(JsonFields.bool(workspaceJson,"feeWaived"));
         return pickerText(JsonFields.string(workspaceJson,"name"),JsonFields.bool(workspaceJson,"isFree"),grandfathered,feeWaived,cents,enabled);
     }
     static String pickerText(String name,Boolean isFree,boolean grandfathered,Integer monthlyPriceCents,boolean enabled){
@@ -198,6 +198,12 @@ final class WorkspacePolicy {
         return pricedLabel==null||pricedLabel.isEmpty()?"Workspace":pricedLabel;
     }
     static boolean actionsEnabled(String projectStatus){return !isDeleting(projectStatus);}
+    /** The workspace's server {@code checkoutUrl}, only when it is https. Null hides Pay. */
+    static String checkoutUrl(String raw){
+        if(raw==null)return null;
+        String url=raw.trim();
+        return url.startsWith("https://")&&url.length()>"https://".length()?url:null;
+    }
     /** Free and current paid workspaces stay open. Only an id in {@code unpaidIds} is locked. */
     static boolean locksThisWorkspace(String id,String kind,Boolean isFree,List<String> unpaidIds){
         if(id==null||id.isEmpty())return false;
@@ -210,15 +216,15 @@ final class WorkspacePolicy {
         if(!"lapsed".equals(lock.reasonText()))return true;
         return locksThisWorkspace(selectedId,kind,isFree,lock.unpaidIds);
     }
-    /** Due while {@code now < graceEndsAt} from the server, and the workspace is not already lapsed. */
-    static boolean paymentDue(Long graceEndsAtMs,long nowMs,boolean lapsed){
-        if(lapsed||graceEndsAtMs==null||graceEndsAtMs<=0)return false;
-        return nowMs<graceEndsAtMs;
+    /** Shown whenever the server sends {@code graceEndsAt} and {@code lapsed} is false. No device-clock check. */
+    static boolean paymentDue(Long graceEndsAtMs,boolean lapsed){
+        return !lapsed&&graceEndsAtMs!=null&&graceEndsAtMs>0;
     }
-    /** Banner copy. The date is the server {@code graceEndsAt}, formatted in UTC. */
-    static String paymentDueText(long graceEndsAtMs){
+    /** Banner copy. The date is the server {@code graceEndsAt} in the user's local time zone. */
+    static String paymentDueText(long graceEndsAtMs){return paymentDueText(graceEndsAtMs,java.time.ZoneId.systemDefault());}
+    static String paymentDueText(long graceEndsAtMs,java.time.ZoneId zone){
         String date=java.time.format.DateTimeFormatter.ofPattern("MMM d, yyyy",java.util.Locale.US)
-                .withZone(java.time.ZoneOffset.UTC).format(java.time.Instant.ofEpochMilli(graceEndsAtMs));
+                .withZone(zone).format(java.time.Instant.ofEpochMilli(graceEndsAtMs));
         return PAYMENT_DUE+". Pay by "+date+" to keep using this workspace.";
     }
 }
@@ -296,7 +302,27 @@ final class WorkspaceLock {
         if(requiresPayment())return DETAIL_PAY;
         return "";
     }
-    String overByText(){return "Over by "+overBy;}
+    /** Empty when nothing is over the plan, so the screen never shows "Over by 0". */
+    String overByText(){return overBy>0?"Over by "+overBy:"";}
+    static final String LAPSED_TITLE="Payment lapsed";
+    static final String LAPSED_BODY="This workspace's payment has lapsed. Your files can still be downloaded. Pay to restore it, or switch to another workspace.";
+    static final String LIMIT_BODY="Your files are still readable and downloadable. Uploads are paused until you delete or merge workspaces down to your plan limit.";
+    /** Only a plain {@code lapsed} lock is per workspace. */
+    boolean isLapsed(){return "lapsed".equals(reasonText());}
+    String title(){return isLapsed()?LAPSED_TITLE:summary();}
+    String bodyText(){return isLapsed()?LAPSED_BODY:LIMIT_BODY;}
+    /** A lapsed lock applies only to its unpaid workspace; other locks apply to the account. */
+    boolean appliesTo(String selectedId){
+        if(!isLapsed())return true;
+        return selectedId!=null&&unpaidIds.contains(selectedId);
+    }
+    /** Where the user can go instead: Free or any listed workspace that is not unpaid. */
+    List<Item> switchTargets(List<Item> known){
+        List<Item> out=new java.util.ArrayList<>();
+        if(known==null)return out;
+        for(Item item:known)if(item.id!=null&&!item.id.isEmpty()&&!unpaidIds.contains(item.id))out.add(item);
+        return out;
+    }
     String chooseMessage(){return overBy>0?"Choose "+overBy+" workspaces to remove.":"";}
     String summary(){return "Workspaces locked";}
     String issueSummary(){

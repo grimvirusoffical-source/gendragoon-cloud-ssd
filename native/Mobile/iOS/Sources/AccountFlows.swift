@@ -203,9 +203,7 @@ struct CloudDeletionTransport:DeletionTransport {
                 session.clearSessionKeepingDeletion()
                 model.acknowledgeClearedSession()
             }
-            if model.flow.step == .polling,let http=model.flow.lastHttp,http.status==423 && http.error==CloudSignals.lockCode {
-                cloud.noteLock(WorkspaceLock.decode(http.raw))
-            }
+            // A 423 while deletion is polling never raises the workspace lock.
         }
     }
     private func wipe() async {
@@ -229,15 +227,16 @@ struct CloudDeletionTransport:DeletionTransport {
         NavigationStack {
             ScrollView {
                 VStack(alignment:.leading,spacing:16){
-                    Text("Workspaces locked").font(.largeTitle.bold()).accessibilityIdentifier("workspaces-locked")
-                    Text("Your files are still readable and downloadable. Uploads are paused until you delete or merge workspaces down to your plan limit.")
-                    if !resolved.reasonText.isEmpty { Text(resolved.reasonText).font(.headline) }
-                    Text(resolved.overByText).font(.headline)
-                    if !resolved.detailText.isEmpty { Text(resolved.detailText) }
+                    Text(resolved.title).font(.largeTitle.bold()).foregroundStyle(GDTheme.text).accessibilityIdentifier("workspaces-locked").accessibilityAddTraits(.isHeader)
+                    Text(resolved.bodyText).foregroundStyle(GDTheme.muted)
+                    if resolved.isLapsed { lapsedActions }
+                    else if !resolved.reasonText.isEmpty { Text(resolved.reasonText).font(.headline) }
+                    if !resolved.overByText.isEmpty { Text(resolved.overByText).font(.headline) }
+                    if !resolved.isLapsed && !resolved.detailText.isEmpty { Text(resolved.detailText) }
                     if !resolved.chooseMessage.isEmpty { Text(resolved.chooseMessage).font(.headline) }
                     if !resolved.issueSummary.isEmpty { Text(resolved.issueSummary).font(.headline) }
-                    Text("Duplicates are kept as name (from <source>).").font(.footnote).foregroundStyle(.secondary)
-                    if resolved.workspaces.isEmpty && resolved.detailText.isEmpty { Text("The server did not include a workspace list.").foregroundStyle(.secondary) }
+                    if !resolved.isLapsed { Text("Duplicates are kept as name (from <source>).").font(.footnote).foregroundStyle(.secondary) }
+                    if resolved.workspaces.isEmpty && resolved.detailText.isEmpty && !resolved.isLapsed { Text("The server did not include a workspace list.").foregroundStyle(.secondary) }
                     ForEach(resolved.workspaces){item in
                         let rowDeleting=cloud.deletingIDs.contains(item.workspaceID ?? "")
                         VStack(alignment:.leading,spacing:10){
@@ -259,8 +258,10 @@ struct CloudDeletionTransport:DeletionTransport {
                     Button("Check again"){Task{await recheck()}}.buttonStyle(.borderedProminent)
                 }.padding(24)
             }.background(GDTheme.bg)
+            .toolbar { if resolved.isLapsed { ToolbarItem(placement:.cancellationAction){ Button("Close"){cloud.switchWorkspace("free")}.accessibilityLabel("Close and open Free").frame(minWidth:44,minHeight:44) } } }
         }
-        .interactiveDismissDisabled(true)
+        // Lapsed locks can be swiped away; over-cap locks stay until resolved.
+        .interactiveDismissDisabled(!lock.isLapsed)
         .task{if lock.workspaces.contains(where:{$0.name==nil || $0.name?.isEmpty==true}){await cloud.refreshLockNames()}}
         .sheet(item:$cloud.export){value in NativeShare(url:value.url)}
         .confirmationDialog("Delete workspace?",isPresented:Binding(get:{pendingDelete != nil},set:{if !$0 {pendingDelete=nil}}),titleVisibility:.visible){
@@ -269,37 +270,54 @@ struct CloudDeletionTransport:DeletionTransport {
         } message:{ Text("This permanently deletes the hosted workspace and its files. Bring-your-own storage is not changed.") }
     }
     private var resolved:WorkspaceLock { lock.named(cloud.knownWorkspaces()) }
+    /// Pay (only with the server checkoutUrl) and switch-workspace for a lapsed workspace.
+    @ViewBuilder private var lapsedActions:some View {
+        ForEach(resolved.unpaidIds,id:\.self){id in
+            if let url=cloud.checkoutURLs[id] {
+                Button("Pay"){UIApplication.shared.open(url)}.buttonStyle(GDButtonStyle(tone:.primary)).accessibilityLabel("Pay for "+label(id)).accessibilityIdentifier("lock-pay")
+            }
+        }
+        let targets=resolved.switchTargets(cloud.knownWorkspaces())
+        if !targets.isEmpty {
+            Text("Switch workspace").font(.headline).foregroundStyle(GDTheme.text)
+            ForEach(targets){target in
+                Button("Open "+target.label){cloud.switchWorkspace(target.workspaceID ?? "free")}.buttonStyle(GDButtonStyle(tone:.secondary)).accessibilityLabel("Switch to "+target.label).accessibilityIdentifier("lock-switch-"+(target.workspaceID ?? ""))
+            }
+        }
+    }
+    private func label(_ id:String)->String { cloud.knownWorkspaces().first{$0.workspaceID==id}?.label ?? "this workspace" }
     private func mergeControl(_ item:WorkspaceLock.Item)->some View {
         let others=resolved.workspaces.filter{$0.workspaceID != nil && $0.workspaceID != item.workspaceID}
-        return Menu(WorkspaceLock.actionMerge){
-            if others.isEmpty {Button("No other workspace"){notice=AccountDeletion.mergeNote(item.name ?? "workspace")}}
-            else {ForEach(others){target in Button("Into "+target.label){Task{await merge(item,into:target)}}}}
-        }.disabled(cloud.busy)
+        return Group {
+            if !others.isEmpty {
+                Menu(WorkspaceLock.actionMerge){ForEach(others){target in Button("Into "+target.label){Task{await merge(item,into:target)}}}}.disabled(cloud.busy)
+            }
+        }
     }
     private func merge(_ item:WorkspaceLock.Item,into target:WorkspaceLock.Item) async {
         notice=AccountDeletion.mergeNote(item.name ?? "workspace")
         do {
             try await cloud.mergeWorkspace(source:item.workspaceID ?? "",target:target.workspaceID ?? "",confirmName:item.name ?? "")
             notice=AccountDeletion.mergeNote(item.name ?? "workspace")
-        } catch let locked as WorkspaceLocked { cloud.workspaceLock=locked.lock }
+        } catch let locked as WorkspaceLocked { cloud.setLock(locked.lock) }
         catch { notice=error.localizedDescription }
     }
     private func list(_ item:WorkspaceLock.Item) async {
         guard let id=item.workspaceID else {return}
         do { files=try await cloud.filesForDownload(workspace:id);listing=id;notice="" }
-        catch let locked as WorkspaceLocked { cloud.workspaceLock=locked.lock }
+        catch let locked as WorkspaceLocked { cloud.setLock(locked.lock) }
         catch { notice=error.localizedDescription }
     }
     private func remove(_ item:WorkspaceLock.Item) async {
         guard let id=item.workspaceID else {return}
         do { try await cloud.deleteHostedWorkspace(id);try await cloud.reloadLibrary() }
         catch let error as GDTransferError where WorkspacePolicy.keepsWorkspace(status:error.status,error:error.message) { notice=WorkspacePolicy.busy }
-        catch let locked as WorkspaceLocked { cloud.workspaceLock=locked.lock }
+        catch let locked as WorkspaceLocked { cloud.setLock(locked.lock) }
         catch { notice=error.localizedDescription }
     }
     private func recheck() async {
         do { try await cloud.reloadLibrary() }
-        catch let locked as WorkspaceLocked { cloud.workspaceLock=locked.lock }
+        catch let locked as WorkspaceLocked { cloud.setLock(locked.lock) }
         catch { notice=error.localizedDescription }
     }
 }

@@ -53,7 +53,7 @@ public final class MainActivity extends AppCompatActivity {
     private boolean deletionSignInStarted=false,deletionAuthBusy=false,wiping=false;private int deletionEpoch=0;
     private String deletionOwnerUid="",deletionOwnerEmail="",deletionOwnerGoogleId="";
     private boolean foreignSession=false;
-    private final List<WorkspaceLock.Item> knownSpaces=new ArrayList<>();private boolean lockNamesRequested=false;
+    private final List<WorkspaceLock.Item> knownSpaces=new ArrayList<>();private final Map<String,String> checkoutUrls=new java.util.concurrent.ConcurrentHashMap<>();private volatile List<JSONObject> lastRows=List.of();private boolean lockNamesRequested=false;
     private final List<JSONObject> lockFiles=new ArrayList<>();private String lockFilesFor="";
     private ActivityResultLauncher<String[]> picker;private ActivityResultLauncher<Uri> folderPicker;private ActivityResultLauncher<String> notifications;
     private CloudApi api(){return new CloudApi(uid);}
@@ -141,18 +141,18 @@ public final class MainActivity extends AppCompatActivity {
     }
     private void load(){if(uid.isEmpty())return;String owner=uid,chosen=workspace;long serial=++loadSerial;loading=true;updateButtons();
         io.execute(()->{try{
-            CloudApi api=new CloudApi(owner);JSONObject catalog=api.get("/v2/workspaces");JSONArray all=catalog.getJSONArray("workspaces");List<String> unpaid=catalog.optJSONObject("policy")==null?List.of():JsonFields.stringList(catalog.optJSONObject("policy").toString(),"unpaidWorkspaceIds");List<JSONObject> spaces=new ArrayList<>();String freeLabel="Workspace";JSONObject selectedRow=null;for(int n=0;n<all.length();n++){JSONObject s=all.getJSONObject(n);if("free".equals(s.optString("id")))freeLabel=WorkspacePolicy.rowTitle(WorkspacePrice.pickerText(s.toString()),s.optString("projectStatus"));if("paid".equals(s.optString("kind"))&&s.optBoolean("storageActive")&&s.optBoolean("provisioned"))spaces.add(s);if(chosen.equals(s.optString("id")))selectedRow=s;}
+            CloudApi api=new CloudApi(owner);JSONObject catalog=api.get("/v2/workspaces");JSONArray all=catalog.getJSONArray("workspaces");List<String> unpaid=catalog.optJSONObject("policy")==null?List.of():JsonFields.stringList(catalog.optJSONObject("policy").toString(),"unpaidWorkspaceIds");List<JSONObject> spaces=new ArrayList<>();List<JSONObject> rows=new ArrayList<>();String freeLabel="Workspace";JSONObject selectedRow=null;for(int n=0;n<all.length();n++){JSONObject s=all.getJSONObject(n);rows.add(s);if("free".equals(s.optString("id")))freeLabel=WorkspacePolicy.rowTitle(WorkspacePrice.pickerText(s.toString()),s.optString("projectStatus"));if("paid".equals(s.optString("kind"))&&s.optBoolean("storageActive")&&s.optBoolean("provisioned"))spaces.add(s);if(chosen.equals(s.optString("id")))selectedRow=s;}
             String effective=chosen;boolean found=chosen.equals("free")||selectedRow!=null;for(JSONObject entry:spaces)if(chosen.equals(entry.optString("id")))found=true;if(!found)effective="free";
             JSONObject openRow=selectedRow;if(openRow==null)for(int n=0;n<all.length();n++){JSONObject s=all.getJSONObject(n);if(effective.equals(s.optString("id")))openRow=s;}
             boolean deleting=openRow!=null&&WorkspacePolicy.isDeleting(openRow.optString("projectStatus"));
             boolean lockedHere=WorkspacePolicy.locksThisWorkspace(effective,openRow==null?null:openRow.optString("kind"),openRow==null?null:boolOrNull(openRow,"isFree"),unpaid);
             Long graceEnds=null;if(openRow!=null&&openRow.has("graceEndsAt")&&!openRow.isNull("graceEndsAt"))graceEnds=openRow.optLong("graceEndsAt");
-            boolean due=openRow!=null&&WorkspacePolicy.paymentDue(graceEnds,System.currentTimeMillis(),openRow.optBoolean("lapsed"));
+            boolean due=openRow!=null&&WorkspacePolicy.paymentDue(graceEnds,openRow.optBoolean("lapsed"));
             long dueAt=due?graceEnds:0L;String dueCheckout=openRow==null?"":openRow.optString("checkoutUrl","");
-            boolean known=openRow!=null;Set<String> deletingRows=new HashSet<>();for(int n=0;n<all.length();n++){JSONObject s=all.getJSONObject(n);if(WorkspacePolicy.isDeleting(s.optString("projectStatus")))deletingRows.add(s.optString("id"));}
+            lastRows=rows;boolean known=openRow!=null;Set<String> deletingRows=new HashSet<>();for(int n=0;n<all.length();n++){JSONObject s=all.getJSONObject(n);if(WorkspacePolicy.isDeleting(s.optString("projectStatus")))deletingRows.add(s.optString("id"));}
             JSONObject config=null;List<JSONObject> list=new ArrayList<>();try{config=api.get(CloudApi.workspace(effective)+"/config");list=api.files(effective);}catch(WorkspaceLocked locked){if(WorkspacePolicy.blocksLibrary(effective,openRow==null?null:openRow.optString("kind"),openRow==null?null:boolOrNull(openRow,"isFree"),locked.lock))throw locked;}catch(CloudApi.Failure e){if(e.status!=404||!effective.equals("free"))throw e;}
-            JSONObject cfg=config;List<JSONObject> loaded=list;String verifiedWorkspace=effective;String verifiedFreeLabel=freeLabel;runOnUiThread(()->{if(serial!=loadSerial||!owner.equals(uid))return;loading=false;activeLock=null;lockFiles.clear();lockFilesFor="";if(deletion==null||deletion.step!=AccountDeletion.Step.POLLING)deletion=null;workspace=verifiedWorkspace;freeWorkspaceLabel=verifiedFreeLabel;selectedDeleting=deleting;selectedLocked=lockedHere;paymentDue=due;paymentDueAt=dueAt;paymentCheckout=dueCheckout;listedWorkspace=known;deletingIds.clear();deletingIds.addAll(deletingRows);rememberSpaces(spaces);getSharedPreferences("gd-settings",MODE_PRIVATE).edit().putString("workspace:"+uid,workspace).apply();files=loaded;if(deletion!=null&&deletion.step==AccountDeletion.Step.POLLING)return;showLibrary(spaces,cfg);});
-        }catch(Exception e){runOnUiThread(()->{if(serial!=loadSerial||!owner.equals(uid))return;loading=false;if(e instanceof WorkspaceLocked locked){showLock(locked.lock);return;}updateButtons();say(e.getMessage());});}});
+            JSONObject cfg=config;List<JSONObject> loaded=list;String verifiedWorkspace=effective;String verifiedFreeLabel=freeLabel;runOnUiThread(()->{if(serial!=loadSerial||!owner.equals(uid))return;loading=false;activeLock=null;lockFiles.clear();lockFilesFor="";if(deletion==null||deletion.step!=AccountDeletion.Step.POLLING)deletion=null;workspace=verifiedWorkspace;freeWorkspaceLabel=verifiedFreeLabel;selectedDeleting=deleting;selectedLocked=lockedHere;paymentDue=due;paymentDueAt=dueAt;paymentCheckout=dueCheckout;listedWorkspace=known;deletingIds.clear();deletingIds.addAll(deletingRows);rememberSpaces(rows);getSharedPreferences("gd-settings",MODE_PRIVATE).edit().putString("workspace:"+uid,workspace).apply();files=loaded;if(deletion!=null&&deletion.step==AccountDeletion.Step.POLLING)return;showLibrary(spaces,cfg);});
+        }catch(Exception e){runOnUiThread(()->{if(serial!=loadSerial||!owner.equals(uid))return;loading=false;if(e instanceof WorkspaceLocked locked){rememberSpaces(lastRows);showLock(locked.lock);return;}updateButtons();say(e.getMessage());});}});
     }
     private void showLibrary(List<JSONObject> spaces,JSONObject cfg){
         boolean dataSaver=getPreferences(MODE_PRIVATE).getBoolean("data-saver",false);shell();TextView eyebrow=text("YOUR DIGITAL SPACE",9,true);eyebrow.setTextColor(accent);eyebrow.setLetterSpacing(.18f);content.addView(eyebrow);space(content,10);content.addView(text("My cloud",38,true));TextView subtitle=text("Everything you need. Nothing in your way.",13,false);subtitle.setTextColor(muted);content.addView(subtitle);space(content,20);
@@ -203,7 +203,7 @@ public final class MainActivity extends AppCompatActivity {
     private OneTimeWorkRequest request(String action,Data.Builder input,String where){return new OneTimeWorkRequest.Builder(TransferWorker.class).setInputData(input.putString("uid",uid).putString("workspace",where).putString("action",action).putBoolean("dataSaver",saver!=null&&saver.isChecked()).build()).setConstraints(new Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED).build()).addTag("GenDragoon").build();}
     private void enqueueDownload(JSONObject file){enqueueDownload(file,workspace);}
     private void enqueueDownload(JSONObject file,String where){if(workBusy||where==null||where.isEmpty()||!CloudSignals.allowsTransfer("GET",activeLock!=null))return;OneTimeWorkRequest work=request("download",new Data.Builder().putString("file",file.toString()),where);WorkManager.getInstance(this).enqueueUniqueWork("GenDragoonTransfer",ExistingWorkPolicy.KEEP,work);workBusy=true;updateButtons();if(Build.VERSION.SDK_INT>=33)notifications.launch(Manifest.permission.POST_NOTIFICATIONS);}
-    private boolean uploadsPaused(){return activeLock!=null||selectedLocked||selectedDeleting;}
+    private boolean uploadsPaused(){return (activeLock!=null&&activeLock.appliesTo(workspace))||selectedLocked||selectedDeleting;}
     private static Boolean boolOrNull(JSONObject row,String key){if(row==null||!row.has(key)||row.isNull(key))return null;return row.optBoolean(key);}
     private void updateButtons(){boolean uploads=!workBusy&&!loading&&CloudSignals.allowsTransfer("PUT",uploadsPaused())&&WorkspacePolicy.actionsEnabled(selectedDeleting?"deleting":null);if(upload!=null)upload.setEnabled(uploads);if(folderUpload!=null)folderUpload.setEnabled(uploads);if(removeOriginals!=null)removeOriginals.setEnabled(uploads);if(refresh!=null)refresh.setEnabled(!workBusy&&!loading);if(saver!=null)saver.setEnabled(!workBusy);if(pause!=null)pause.setVisibility(workBusy?View.VISIBLE:View.GONE);if(transferProgress!=null)transferProgress.setVisibility(workBusy?View.VISIBLE:View.GONE);}
     private void showSaved(String path){if(path==null||uid.isEmpty())return;File file=new File(path);try{String allowed=new File(getFilesDir(),"exports/"+CloudApi.sha(uid.getBytes(StandardCharsets.UTF_8))).getCanonicalPath()+File.separator;if(!file.getCanonicalPath().startsWith(allowed)||!file.isFile())return;}catch(Exception e){say("Restored file is unavailable.");return;}
@@ -246,23 +246,31 @@ public final class MainActivity extends AppCompatActivity {
         shown[0]=new MaterialAlertDialogBuilder(this).setTitle(user.getEmail()==null?"Account":user.getEmail()).setView(box).setNegativeButton("Done",null).create();shown[0].show();
     }
     private void rememberSpaces(List<JSONObject> spaces){
-        knownSpaces.clear();knownSpaces.add(new WorkspaceLock.Item("free","Free",null));
-        for(JSONObject space:spaces)knownSpaces.add(new WorkspaceLock.Item(space.optString("id"),space.optString("name"),null));
+        knownSpaces.clear();checkoutUrls.clear();boolean freeListed=false;
+        for(JSONObject row:spaces){
+            String id=row.optString("id");String checkout=WorkspacePolicy.checkoutUrl(row.optString("checkoutUrl",null));if(checkout!=null&&!id.isEmpty())checkoutUrls.put(id,checkout);
+            if("free".equals(id)){freeListed=true;knownSpaces.add(0,new WorkspaceLock.Item("free",WorkspaceNames.freeName(row.optString("name",""),boolOrNull(row,"isFree")),null));continue;}
+            if(!"paid".equals(row.optString("kind"))||!row.optBoolean("storageActive")||!row.optBoolean("provisioned"))continue;
+            knownSpaces.add(new WorkspaceLock.Item(id,row.optString("name"),null));
+        }
+        if(!freeListed)knownSpaces.add(0,new WorkspaceLock.Item("free",WorkspaceNames.freeName(freeWorkspaceLabel,null),null));
     }
     private void showLock(WorkspaceLock lock){
         WorkspaceLock resolved=(lock==null?new WorkspaceLock(List.of(),""):lock).named(knownSpaces);
-        if(deletion!=null&&deletion.step==AccountDeletion.Step.POLLING){activeLock=resolved;return;}
+        // A 423 while account deletion is polling never opens the lock screen.
+        if(deletion!=null&&deletion.step==AccountDeletion.Step.POLLING)return;
         activeLock=resolved;loadSerial++;deletion=null;shell();
-        content.addView(text("Workspaces locked",30,true));space(content,12);
-        TextView body=text("Your files are still readable and downloadable. Uploads are paused until you delete or merge workspaces down to your plan limit.",15,false);body.setTextColor(muted);content.addView(body);
-        String reason=activeLock.reasonText();if(!reason.isEmpty()){space(content,10);content.addView(text(reason,16,true));}
-        space(content,8);content.addView(text(activeLock.overByText(),16,true));
-        String detail=activeLock.detailText();if(!detail.isEmpty()){space(content,8);content.addView(text(detail,15,false));}
+        TextView title=text(activeLock.title(),30,true);title.setContentDescription(activeLock.title());content.addView(title);space(content,12);
+        TextView body=text(activeLock.bodyText(),15,false);body.setTextColor(muted);content.addView(body);
+        if(activeLock.isLapsed())showLapsedActions(activeLock);
+        else{String reason=activeLock.reasonText();if(!reason.isEmpty()){space(content,10);content.addView(text(reason,16,true));}}
+        String over=activeLock.overByText();if(!over.isEmpty()){space(content,8);content.addView(text(over,16,true));}
+        String detail=activeLock.isLapsed()?"":activeLock.detailText();if(!detail.isEmpty()){space(content,8);content.addView(text(detail,15,false));}
         String choose=activeLock.chooseMessage();if(!choose.isEmpty()){space(content,10);content.addView(text(choose,16,true));}
         String issues=activeLock.issueSummary();if(!issues.isEmpty()){space(content,10);content.addView(text(issues,14,true));}
         if(knownSpaces.isEmpty()&&(activeLock.overBy>0||!activeLock.unpaidIds.isEmpty()))fetchLockNames();
-        space(content,8);TextView note=text("Duplicates are kept as name (from <source>).",12,false);note.setTextColor(muted);content.addView(note);space(content,8);
-        if(activeLock.workspaces.isEmpty()&&detail.isEmpty())content.addView(text("The server did not include a workspace list.",14,false));
+        if(!activeLock.isLapsed()){space(content,8);TextView note=text("Duplicates are kept as name (from <source>).",12,false);note.setTextColor(muted);content.addView(note);}space(content,8);
+        if(activeLock.workspaces.isEmpty()&&detail.isEmpty()&&!activeLock.isLapsed())content.addView(text("The server did not include a workspace list.",14,false));
         for(WorkspaceLock.Item item:activeLock.workspaces){
             boolean rowDeleting=item.id!=null&&deletingIds.contains(item.id);
             LinearLayout panel=inside(card(content));panel.addView(text(rowDeleting?WorkspacePolicy.DELETING:item.label(),16,true));space(panel,8);
@@ -279,6 +287,27 @@ public final class MainActivity extends AppCompatActivity {
             }
         }
         space(content,12);content.addView(button("Check again",this::load));status();
+    }
+    /** Pay (only with the server checkoutUrl) and switch-workspace for a lapsed workspace. */
+    private void showLapsedActions(WorkspaceLock lock){
+        space(content,12);
+        for(String id:lock.unpaidIds){
+            String checkout=checkoutUrls.get(id);if(checkout==null)continue;
+            MaterialButton pay=button("Pay",()->startActivity(new Intent(Intent.ACTION_VIEW,Uri.parse(checkout))));
+            pay.setContentDescription("Pay for "+WorkspaceNames.label(knownSpaces,id));pay.setTag("lock-pay");content.addView(pay);space(content,8);
+        }
+        List<WorkspaceLock.Item> targets=lock.switchTargets(knownSpaces);
+        if(targets.isEmpty())return;
+        TextView heading=text("Switch workspace",16,true);content.addView(heading);space(content,6);
+        for(WorkspaceLock.Item target:targets){
+            MaterialButton go=button("Open "+target.label(),()->switchWorkspace(target.id));tone(go,Theme.Tone.SECONDARY);
+            go.setContentDescription("Switch to "+target.label());go.setTag("lock-switch-"+target.id);content.addView(go);space(content,6);
+        }
+    }
+    /** Resets the saved selection so the next launch opens the chosen workspace, not the lapsed one. */
+    private void switchWorkspace(String id){
+        workspace=WorkspaceNames.switchTo((key,value)->getSharedPreferences("gd-settings",MODE_PRIVATE).edit().putString(key,value).apply(),uid,id);
+        activeLock=null;lockFiles.clear();lockFilesFor="";query="";load();
     }
     private void confirmDeleteWorkspace(WorkspaceLock.Item item){
         if(item.id==null)return;
@@ -418,7 +447,7 @@ public final class MainActivity extends AppCompatActivity {
         }
     }
     private void noteLockDuringDeletion(WorkspaceLock lock){
-        activeLock=(lock==null?new WorkspaceLock(List.of(),""):lock).named(knownSpaces);
+        // Only the DELETE itself can open the lock screen; a 423 while polling never does.
         if(deletion!=null&&deletion.step==AccountDeletion.Step.POLLING)return;
         showLock(lock);
     }
@@ -496,7 +525,6 @@ public final class MainActivity extends AppCompatActivity {
             deletion.completePoll(exchange);
             if(deletion.openSupportMailto){deletion.openSupportMailto=false;openDeletionMailto(deletion.jobId);}
             AccountActions.HttpBody body=deletion.lastBody;
-            if(body!=null&&body.status==423&&CloudSignals.CODE_LOCK.equals(body.error))activeLock=WorkspaceLock.decode(body.raw).named(knownSpaces);
             advanceDeletion();
         });
     }

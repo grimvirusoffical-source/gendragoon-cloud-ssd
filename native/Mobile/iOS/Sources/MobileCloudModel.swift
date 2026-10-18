@@ -3,12 +3,24 @@ import SwiftUI
 import Network
 
 struct MobileWorkspace:Decodable,Identifiable,Sendable {
-    let id:String;let name:String;let kind:String;let storageActive:Bool;let provisioned:Bool;let isFree:Bool?;let grandfathered:Bool?;let feeWaived:Bool;let monthlyPriceCents:Int?;let projectStatus:String?;let lapsed:Bool?;let paidThroughMs:Int64?;let graceEndsAt:Int64?;let checkoutUrl:String?
+    let id:String;let name:String;let kind:String;let storageActive:Bool;let provisioned:Bool;let isFree:Bool?;let grandfathered:Bool?;let feeWaivedValue:Bool?;let monthlyPriceCents:Int?;let projectStatus:String?;let lapsed:Bool?;let paidThroughMs:Int64?;let graceEndsAt:Int64?;let checkoutUrl:String?
+    /// Optional per row; a missing value is false so one bad row cannot break the list.
+    var feeWaived:Bool { feeWaivedValue ?? false }
+    enum CodingKeys:String,CodingKey { case id,name,kind,storageActive,provisioned,isFree,grandfathered,feeWaivedValue="feeWaived",monthlyPriceCents,projectStatus,lapsed,paidThroughMs,graceEndsAt,checkoutUrl }
     var pickerLabel:String { WorkspacePolicy.rowTitle(WorkspacePrice.pickerText(name:name,isFree:isFree,grandfathered:grandfathered==true,feeWaived:feeWaived,cents:monthlyPriceCents),projectStatus:projectStatus) }
 }
 struct MobileExport:Identifiable {let id=UUID();let url:URL}
 @MainActor final class MobileCloudModel:ObservableObject {
-    @Published var selected="free"
+    /// Changing the selection clears any lock that was raised for the previous workspace.
+    @Published var selected="free" {didSet{if selected != oldValue && lockedWorkspaceID != selected {workspaceLock=nil;lockedWorkspaceID=nil}}}
+    /// The workspace that was selected when `workspaceLock` was raised.
+    @Published private(set) var lockedWorkspaceID:String?
+    private(set) var lastLockLapsed=false
+    /// Server `checkoutUrl` per workspace id, https only. Drives Pay on the lapsed lock screen.
+    @Published var checkoutURLs:[String:URL]=[:]
+    /// Server name and `isFree` for the free slot.
+    @Published var freeServerName:String?
+    @Published var freeIsFree:Bool?
     @Published var removeOriginals=false
     private var selectionKey:String { "GenDragoon.workspace."+GDTransferClient.digest(Data(owner.utf8)) }
     @Published var choices:[MobileWorkspace]=[]
@@ -60,7 +72,7 @@ struct MobileExport:Identifiable {let id=UUID();let url:URL}
         }catch{report(error)}
     }
     private func report(_ error:Error){
-        if let locked=error as? WorkspaceLocked {workspaceLock=locked.lock;return}
+        if let locked=error as? WorkspaceLocked {setLock(locked.lock);return}
         status=error.localizedDescription
     }
     private func load() async throws {
@@ -69,8 +81,11 @@ struct MobileExport:Identifiable {let id=UUID();let url:URL}
         struct Response:Decodable{let workspaces:[MobileWorkspace];let ownerBenefits:Bool?;let policy:PolicyBody?}
         let response=try JSONDecoder().decode(Response.self,from:await client.json("v2/workspaces"))
         ownerBenefits=response.ownerBenefits == true
-        if let free=response.workspaces.first(where:{$0.id=="free"}) {freePickerLabel=free.pickerLabel}
-        else {freePickerLabel="Workspace"}
+        if let free=response.workspaces.first(where:{$0.id=="free"}) {freePickerLabel=free.pickerLabel;freeServerName=free.name;freeIsFree=free.isFree}
+        else {freePickerLabel="Workspace";freeServerName=nil;freeIsFree=nil}
+        var urls:[String:URL]=[:]
+        for row in response.workspaces {if let url=WorkspacePolicy.checkoutURL(row.checkoutUrl){urls[row.id]=url}}
+        checkoutURLs=urls
         choices=response.workspaces.filter{$0.kind=="paid"&&$0.storageActive&&$0.provisioned}
         if ownerBenefits && !didChooseOwnerWorkspace {if let ownerSpace=choices.first(where:{$0.name=="Owner • All features"}){selected=ownerSpace.id};didChooseOwnerWorkspace=true}
         if selected != "free" && !choices.contains(where:{$0.id==selected}){selected="free"}
@@ -79,7 +94,7 @@ struct MobileExport:Identifiable {let id=UUID();let url:URL}
         let open=response.workspaces.first{$0.id==selected}
         actionsEnabled=WorkspacePolicy.actionsEnabled(open?.projectStatus)
         selectedLocked=WorkspacePolicy.locksThisWorkspace(id:selected,kind:open?.kind,isFree:open?.isFree,unpaidIds:unpaid)
-        paymentDueBanner=WorkspacePolicy.isPaymentDue(graceEndsAtMs:open?.graceEndsAt,nowMs:Int64(Date().timeIntervalSince1970*1000),lapsed:open?.lapsed==true)
+        paymentDueBanner=WorkspacePolicy.isPaymentDue(graceEndsAtMs:open?.graceEndsAt,lapsed:open?.lapsed==true)
         paymentDueText=paymentDueBanner ? WorkspacePolicy.paymentDueText(graceEndsAtMs:open?.graceEndsAt ?? 0) : ""
         paymentCheckout=open?.checkoutUrl.flatMap{URL(string:$0)}.flatMap{$0.scheme=="https" ? $0 : nil}
         deletingIDs=Set(response.workspaces.filter{WorkspacePolicy.isDeleting($0.projectStatus)}.map(\.id))
@@ -100,7 +115,7 @@ struct MobileExport:Identifiable {let id=UUID();let url:URL}
     }catch{report(error)}}}
     private func progress(_ p:GDTransferProgress){fraction=p.fraction;detail=p.phase+(p.bytesPerSecond>0 ? String(format:" · %.1f MB/s",p.bytesPerSecond/1e6):"");if let eta=p.secondsRemaining{detail+=String(format:" · ~%.0fs",eta)}}
     func upload(_ urls:[URL]){
-        guard CloudSignals.allowsTransfer(method:"PUT",locked:workspaceLock != nil || selectedLocked || !actionsEnabled) else{return}
+        guard CloudSignals.allowsTransfer(method:"PUT",locked:lockBlocksSelected || selectedLocked || !actionsEnabled) else{return}
         guard !busy,let client,let config,!urls.isEmpty else{return};busy=true;transferring=true;fraction=0
         let workspace=selected,constrained=dataSaver||constrainedNetwork,remove=removeOriginals,limit=config.maxFileBytes
         task=Task{defer{busy=false;transferring=false;removeOriginals=false};do{
@@ -136,7 +151,7 @@ struct MobileExport:Identifiable {let id=UUID();let url:URL}
         catch{status=error.localizedDescription}
     }
     func restore(_ file:GDCloudItem, from workspaceID:String?=nil){
-        guard CloudSignals.allowsTransfer(method:"GET",locked:workspaceLock != nil) else{return}
+        guard CloudSignals.allowsTransfer(method:"GET",locked:lockBlocksSelected) else{return}
         guard !busy,let client else{return};busy=true;transferring=true;fraction=0
         let workspace=workspaceID ?? selected,constrained=dataSaver||constrainedNetwork
         task=Task{defer{busy=false;transferring=false};do{
@@ -162,10 +177,31 @@ struct MobileExport:Identifiable {let id=UUID();let url:URL}
         try await client.deleteWorkspace(id:id)
     }
     func reloadLibrary() async throws {
-        try await load();workspaceLock=nil
+        try await load();workspaceLock=nil;lockedWorkspaceID=nil
+    }
+    /// Keyed by workspace: a lapsed lock only blocks its own workspace. Other locks are account-wide.
+    var lockBlocksSelected:Bool { workspaceLock?.applies(to:selected) ?? false }
+    func setLock(_ lock:WorkspaceLock?) {
+        guard let lock else {workspaceLock=nil;lockedWorkspaceID=nil;return}
+        lastLockLapsed=lock.isLapsed
+        lockedWorkspaceID=selected
+        workspaceLock=lock.named(knownWorkspaces())
+    }
+    /// Opens another workspace and saves it, so the next launch does not relock on the lapsed one.
+    func switchWorkspace(_ id:String) {
+        let target=id.isEmpty ? "free" : id
+        workspaceLock=nil;lockedWorkspaceID=nil
+        selected=target
+        UserDefaults.standard.set(target,forKey:selectionKey)
+        refresh()
+    }
+    /// Swiping a lapsed lock away leaves the lapsed workspace, so it does not reopen on the next load.
+    func afterLockDismissed() {
+        guard workspaceLock==nil,lastLockLapsed,let locked=lockedWorkspaceID,locked==selected else {return}
+        switchWorkspace("free")
     }
     func knownWorkspaces()->[WorkspaceLock.Item] {
-        var items=[WorkspaceLock.Item(workspaceID:"free",name:"Free",issue:nil)]
+        var items=[WorkspaceLock.Item(workspaceID:"free",name:WorkspaceNames.freeName(freeServerName,isFree:freeIsFree),issue:nil)]
         items+=choices.map{WorkspaceLock.Item(workspaceID:$0.id,name:$0.name,issue:nil)}
         return items
     }
@@ -186,10 +222,10 @@ struct MobileExport:Identifiable {let id=UUID();let url:URL}
             struct Response:Decodable{let workspaces:[MobileWorkspace]}
             let response=try JSONDecoder().decode(Response.self,from:await transport.json("v2/workspaces"))
             choices=response.workspaces.filter{$0.kind=="paid"&&$0.storageActive&&$0.provisioned}
-        } catch let locked as WorkspaceLocked { workspaceLock=locked.lock }
+        } catch let locked as WorkspaceLocked { setLock(locked.lock) }
         catch {}
     }
-    func noteLock(_ lock:WorkspaceLock){workspaceLock=lock.named(knownWorkspaces())}
+    func noteLock(_ lock:WorkspaceLock){setLock(lock)}
     func deleteAccount(freshToken:String) async throws -> AccountHttp {
         guard let client else{throw GDTransferError(message:"Sign in again to continue.",status:401)}
         return try await client.deleteAccount(freshToken:freshToken)
@@ -224,4 +260,14 @@ struct MobileExport:Identifiable {let id=UUID();let url:URL}
         try await client.mergeWorkspaces(sourceID:source,targetID:target,sourceName:confirmName)
     }
     func pause(){task?.cancel()}
+}
+
+/// Workspace names for the lock screen.
+enum WorkspaceNames {
+    /// The free slot's name comes from the server `isFree`, not a hard-coded "Free".
+    static func freeName(_ serverName:String?,isFree:Bool?)->String {
+        if isFree==true {return WorkspacePrice.free}
+        let trimmed=serverName?.trimmingCharacters(in:.whitespaces) ?? ""
+        return trimmed.isEmpty ? "Workspace" : trimmed
+    }
 }

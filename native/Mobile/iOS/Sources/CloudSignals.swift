@@ -129,6 +129,11 @@ enum WorkspacePolicy {
         return pricedLabel
     }
     static func actionsEnabled(_ projectStatus:String?)->Bool { !isDeleting(projectStatus) }
+    /// The workspace's server `checkoutUrl`, only when it is https. Nil hides Pay.
+    static func checkoutURL(_ raw:String?)->URL? {
+        guard let raw=raw?.trimmingCharacters(in:.whitespaces),raw.hasPrefix("https://"),raw.count>8,let url=URL(string:raw) else {return nil}
+        return url
+    }
     /// Free and current paid workspaces stay open. Only an id in `unpaidIds` is locked.
     static func locksThisWorkspace(id:String?,kind:String?,isFree:Bool?,unpaidIds:[String])->Bool {
         guard let id,!id.isEmpty else {return false}
@@ -141,16 +146,16 @@ enum WorkspacePolicy {
         if lock.reasonText != "lapsed" {return true}
         return locksThisWorkspace(id:selectedId,kind:kind,isFree:isFree,unpaidIds:lock.unpaidIds)
     }
-    /// Due while `now < graceEndsAt` from the server, and the workspace is not already lapsed.
-    static func isPaymentDue(graceEndsAtMs:Int64?,nowMs:Int64,lapsed:Bool)->Bool {
-        guard !lapsed,let graceEndsAtMs,graceEndsAtMs>0 else {return false}
-        return nowMs<graceEndsAtMs
+    /// Shown whenever the server sends `graceEndsAt` and `lapsed` is false. No device-clock check.
+    static func isPaymentDue(graceEndsAtMs:Int64?,lapsed:Bool)->Bool {
+        guard !lapsed,let graceEndsAtMs else {return false}
+        return graceEndsAtMs>0
     }
-    /// Banner copy. The date is the server `graceEndsAt`, formatted in UTC.
-    static func paymentDueText(graceEndsAtMs:Int64)->String {
+    /// Banner copy. The date is the server `graceEndsAt` in the user's local time zone.
+    static func paymentDueText(graceEndsAtMs:Int64,timeZone:TimeZone = .current)->String {
         let formatter=DateFormatter()
         formatter.locale=Locale(identifier:"en_US_POSIX")
-        formatter.timeZone=TimeZone(identifier:"UTC")
+        formatter.timeZone=timeZone
         formatter.dateFormat="MMM d, yyyy"
         let date=formatter.string(from:Date(timeIntervalSince1970:TimeInterval(graceEndsAtMs)/1000))
         return paymentDue+". Pay by "+date+" to keep using this workspace."
@@ -193,7 +198,23 @@ struct WorkspaceLock:Identifiable,Equatable,Sendable {
         default: return ""
         }
     }
-    var overByText:String { "Over by \(overBy)" }
+    /// Empty when nothing is over the plan, so the screen never shows "Over by 0".
+    var overByText:String { overBy>0 ? "Over by \(overBy)" : "" }
+    static let lapsedTitle="Payment lapsed"
+    static let lapsedBody="This workspace's payment has lapsed. Your files can still be downloaded. Pay to restore it, or switch to another workspace."
+    static let limitBody="Your files are still readable and downloadable. Uploads are paused until you delete or merge workspaces down to your plan limit."
+    /// Only a plain `lapsed` lock is per workspace.
+    var isLapsed:Bool { reasonText=="lapsed" }
+    var title:String { isLapsed ? WorkspaceLock.lapsedTitle : "Workspaces locked" }
+    var bodyText:String { isLapsed ? WorkspaceLock.lapsedBody : WorkspaceLock.limitBody }
+    /// A lapsed lock applies only to its unpaid workspace; other locks apply to the account.
+    func applies(to selectedId:String?)->Bool {
+        guard isLapsed else {return true}
+        guard let selectedId else {return false}
+        return unpaidIds.contains(selectedId)
+    }
+    /// Where the user can go instead: Free or any listed workspace that is not unpaid.
+    func switchTargets(_ known:[Item])->[Item] { known.filter{ ($0.workspaceID?.isEmpty==false) && !unpaidIds.contains($0.workspaceID ?? "") } }
     var chooseMessage:String { overBy>0 ? "Choose \(overBy) workspaces to remove." : "" }
     var issueSummary:String {
         let cap=workspaces.contains{$0.issue=="over_cap"}

@@ -65,7 +65,7 @@ final class DeletionSupport {
 
     /** Reads the saved job from the Keystore-backed vault. Any failure returns null, which falls back to mailto. */
     static String savedJob(java.util.concurrent.Callable<String> read){
-        try{return read.call();}catch(Throwable error){return null;}
+        try{return read.call();}catch(Exception error){return null;}
     }
 
     static Call call(String jobId,String statusToken){return call(jobId,jobId,statusToken,ENABLED);}

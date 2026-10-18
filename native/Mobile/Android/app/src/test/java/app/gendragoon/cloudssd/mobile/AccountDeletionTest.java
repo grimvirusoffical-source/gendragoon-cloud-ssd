@@ -439,7 +439,7 @@ public final class AccountDeletionTest {
             WorkspaceLock shown=WorkspaceLock.fromLockBody(raw).named(cache);
             assertEquals(JsonFields.string(raw,"reason"),shown.reasonText());
             assertFalse(shown.reasonText().isEmpty());
-            assertEquals("Over by "+JsonFields.number(raw,"overBy"),shown.overByText());
+            assertEquals(shown.overBy>0?"Over by "+shown.overBy:"",shown.overByText());
             if("merge_in_progress".equals(shown.reasonText())){
                 assertEquals(WorkspaceLock.DETAIL_MERGE,shown.detailText());
                 assertFalse(shown.detailText().contains("did not include a workspace list"));
@@ -1198,12 +1198,8 @@ public final class AccountDeletionTest {
         assertEquals("500",JsonFields.number(ended,"monthlyPriceCents"));
         assertEquals("Workspace · $5/mo",WorkspacePrice.pickerText(ended,true));
         assertFalse(WorkspacePrice.pickerText(ended,true).contains("Included"));
-        try{
-            WorkspacePrice.pickerText("{\"name\":\"Missing\",\"isFree\":false,\"grandfathered\":false,\"monthlyPriceCents\":500}",true);
-            throw new AssertionError("feeWaived is required");
-        }catch(IllegalArgumentException expected){
-            assertTrue(expected.getMessage().contains("feeWaived"));
-        }
+        // feeWaived is optional per row and defaults to false.
+        assertEquals("Missing · $5/mo",WorkspacePrice.pickerText("{\"name\":\"Missing\",\"isFree\":false,\"grandfathered\":false,\"monthlyPriceCents\":500}",true));
     }
 
     /** Riley PR #5 at 0715b1a. Busy and deleting use the documented status strings. Lock and grace use the fixtures. */
@@ -1245,14 +1241,13 @@ public final class AccountDeletionTest {
         // #5 is still blocked; this fixture may be regenerated. The client uses graceEndsAt as sent
         // and never adds a grace length to paidThroughMs.
         assertTrue(graceEnd>through);
-        assertTrue(WorkspacePolicy.paymentDue(graceEnd,through,false));
-        assertTrue(WorkspacePolicy.paymentDue(graceEnd,graceEnd-1,false));
-        assertFalse(WorkspacePolicy.paymentDue(graceEnd,graceEnd,false));
-        assertFalse(WorkspacePolicy.paymentDue(graceEnd,through,true));
-        assertFalse(WorkspacePolicy.paymentDue(null,through,false));
-        // A different server date moves the banner with it.
-        assertTrue(WorkspacePolicy.paymentDue(graceEnd+86_400_000L*10,graceEnd+1,false));
-        assertEquals("Payment due. Pay by Nov 20, 2023 to keep using this workspace.",WorkspacePolicy.paymentDueText(graceEnd));
+        // Shown whenever graceEndsAt is present and lapsed is false; no device-clock check.
+        assertTrue(WorkspacePolicy.paymentDue(graceEnd,false));
+        assertFalse(WorkspacePolicy.paymentDue(graceEnd,true));
+        assertFalse(WorkspacePolicy.paymentDue(null,false));
+        // Local time zone: 1700518400000 is Nov 20 22:13 UTC, which is Nov 21 in Tokyo.
+        assertEquals("Payment due. Pay by Nov 20, 2023 to keep using this workspace.",WorkspacePolicy.paymentDueText(graceEnd,java.time.ZoneId.of("America/New_York")));
+        assertEquals("Payment due. Pay by Nov 21, 2023 to keep using this workspace.",WorkspacePolicy.paymentDueText(graceEnd,java.time.ZoneId.of("Asia/Tokyo")));
         assertEquals("Payment due",WorkspacePolicy.PAYMENT_DUE);
         assertEquals(201,BackendFixtures.responseStatus("workspaces","byo-in-grace"));
         assertTrue(BackendFixtures.requestPath("workspaces","byo-in-grace").contains("11111111-1111-4111-8111-000000000021"));

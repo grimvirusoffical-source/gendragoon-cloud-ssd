@@ -56,13 +56,19 @@ final class CloudApi {
     Response exchange(String url,String method,byte[] body,Map<String,String> headers,boolean force)throws Exception{
         return exchangeAuthorized(url,method,body,headers,token(force));
     }
+    /** Every sender builds its header here. A missing, empty or whitespace-only token sends nothing. */
+    static String authorization(String bearer)throws Failure{
+        if(!AccountActions.validToken(bearer))throw new Failure(0,"No sign-in token. Nothing was sent.");
+        return "Bearer "+bearer;
+    }
     Response exchangeAuthorized(String url,String method,byte[] body,Map<String,String> headers,String bearer)throws Exception{
+        String authorization=authorization(bearer);
         URL target=new URL(url);
         if(!target.getProtocol().equals("https")||!Set.of("gendragoon-free-10068843866.us-central1.run.app","firestore.googleapis.com").contains(target.getHost()))throw new Failure(400,"Untrusted endpoint.");
         HttpsURLConnection c=(HttpsURLConnection)target.openConnection();
         try{
             c.setInstanceFollowRedirects(false);c.setConnectTimeout(30000);c.setReadTimeout(120000);            c.setRequestMethod(method);c.setUseCaches(false);
-            c.setRequestProperty("Authorization","Bearer "+bearer);c.setRequestProperty("Accept","application/json");c.setRequestProperty("Accept-Encoding","identity");
+            c.setRequestProperty("Authorization",authorization);c.setRequestProperty("Accept","application/json");c.setRequestProperty("Accept-Encoding","identity");
             for(Map.Entry<String,String> e:headers.entrySet())c.setRequestProperty(e.getKey(),e.getValue());
             if(body!=null){c.setDoOutput(true);c.setRequestMethod(method);c.setFixedLengthStreamingMode(body.length);try(OutputStream out=c.getOutputStream()){out.write(body);}}
             int status=c.getResponseCode();byte[] bytes=new byte[0];

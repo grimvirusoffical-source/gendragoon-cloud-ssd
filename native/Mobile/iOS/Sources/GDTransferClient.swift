@@ -93,7 +93,7 @@ actor GDTransferClient {
             do {
                 var request=URLRequest(url:endpoint.appendingPathComponent(path))
                 request.httpMethod=method;request.httpBody=data
-                request.setValue("Bearer "+(try await tokens(attempt>0)),forHTTPHeaderField:"Authorization")
+                request.setValue(try Self.bearer(try await tokens(attempt>0)),forHTTPHeaderField:"Authorization")
                 request.setValue("identity",forHTTPHeaderField:"Accept-Encoding")
                 request.setValue("application/json",forHTTPHeaderField:"Accept")
                 if data != nil {request.setValue("application/json",forHTTPHeaderField:"Content-Type")}
@@ -150,7 +150,7 @@ actor GDTransferClient {
         var parts=URLComponents(url:url,resolvingAgainstBaseURL:false)!
         parts.queryItems=[URLQueryItem(name:"cursor",value:cursor)]
         var request=URLRequest(url:parts.url!)
-        request.setValue("Bearer "+(try await tokens(false)),forHTTPHeaderField:"Authorization")
+        request.setValue(try Self.bearer(try await tokens(false)),forHTTPHeaderField:"Authorization")
         let(data,response)=try await session.data(for:request)
         let http=response as? HTTPURLResponse
         let routed=CloudSignals.route(status:http?.statusCode ?? 0,body:data,method:"GET")
@@ -361,13 +361,19 @@ actor GDTransferClient {
         }
         _=try await send(path,method:"POST",data:body)
     }
+    /// Every sender builds its header here. A missing, empty or whitespace-only token sends nothing.
+    static func bearer(_ token:String?) throws -> String {
+        guard let token,AccountDeletion.validToken(token) else {throw GDTransferError(message:"No sign-in token. Nothing was sent.",status:0)}
+        return "Bearer "+token
+    }
     private func once(path:String,method:String,token:String,body:Data?=nil) async throws -> (Data,HTTPURLResponse) {
+        let authorization=try Self.bearer(token)
         guard !path.isEmpty,!path.hasPrefix("/"),!path.contains(".."),!path.contains("\\"),!path.contains("//") else {
             throw GDTransferError(message:"Invalid cloud route.",status:400)
         }
         var request=URLRequest(url:endpoint.appendingPathComponent(path))
         request.httpMethod=method;request.httpBody=body;request.timeoutInterval=120
-        request.setValue("Bearer "+token,forHTTPHeaderField:"Authorization")
+        request.setValue(authorization,forHTTPHeaderField:"Authorization")
         request.setValue("application/json",forHTTPHeaderField:"Accept")
         request.setValue("identity",forHTTPHeaderField:"Accept-Encoding")
         if body != nil {request.setValue("application/json",forHTTPHeaderField:"Content-Type")}

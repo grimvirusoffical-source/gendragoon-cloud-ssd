@@ -233,7 +233,7 @@ private struct MobileLibrary:View {
         .sheet(item:$cloud.export){value in NativeShare(url:value.url).presentationDetents([.medium,.large])}
         .sheet(isPresented:$settings){NavigationStack{AccountSettingsForm(confirmReset:$confirmReset,close:{settings=false},delete:{settings=false;DispatchQueue.main.async{deleteAccount=true}}).alert("Reset App?",isPresented:$confirmReset){Button("Reset",role:.destructive){cloud.resetLocalState();settings=false};Button("Cancel",role:.cancel){}}message:{Text("Clear local transfer cache and selected workspace. Cloud files and exported documents stay in place.")}.toolbar{ToolbarItem(placement:.confirmationAction){Button("Done"){settings=false}}}}}
         .fullScreenCover(isPresented:$deleteAccount){DeleteAccountView().environmentObject(session).environmentObject(cloud)}
-        .fullScreenCover(item:$cloud.workspaceLock){lock in WorkspaceLockView(lock:lock).environmentObject(session).environmentObject(cloud)}
+        .sheet(item:$cloud.workspaceLock,onDismiss:{cloud.afterLockDismissed()}){lock in WorkspaceLockView(lock:lock).environmentObject(session).environmentObject(cloud)}
         .alert("Delete cloud copy?",isPresented:Binding(get:{removing != nil},set:{if !$0{removing=nil}})){Button("Delete",role:.destructive){if let removing{cloud.delete(removing)};removing=nil};Button("Cancel",role:.cancel){removing=nil}}message:{Text("This removes \(removing?.name ?? "this file") from cloud storage. Local copies are not changed.")}
     }}
 }

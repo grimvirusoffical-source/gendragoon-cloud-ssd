@@ -15,7 +15,7 @@ import static org.junit.Assert.assertTrue;
  * An owner-token DELETE {@code invalid_token} signs out, keeps the job, and keeps polling.
  * {@code reauth_required} and a 401 with no code go to sign-in. None of them wipe.
  *
- * Generated fixtures are vendored under src/test/resources/fixtures/account-deletion.
+ * Generated fixtures are read from native/Mobile/fixtures/shared/account-deletion (the one pinned copy).
  * {@code status-invalid-token} and {@code status-unauthorized} are from fff0a84.
  * The export redacts tokens to {@code "<redacted>"}; that string is the opaque token here.
  */

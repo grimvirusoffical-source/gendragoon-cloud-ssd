@@ -159,12 +159,11 @@ final class BackendFixtures {
 
     private static String shared(String area,String name){
         String relative=area+"/"+name+".json";
+        // One pinned copy: native/Mobile/fixtures/shared. Gradle runs unit tests from Android/app.
         Path found=firstExisting(
-                Path.of("fixtures",relative),
-                Path.of("..","..","..","fixtures",relative),
-                Path.of("native","Mobile","fixtures","shared",relative),
+                Path.of("..","..","fixtures","shared",relative),
                 Path.of("..","fixtures","shared",relative),
-                Path.of("src","test","resources","fixtures",relative));
+                Path.of("native","Mobile","fixtures","shared",relative));
         try{return read(found);}
         catch(Exception error){throw new IllegalStateException("Could not read "+found,error);}
     }
