@@ -541,8 +541,13 @@ function registerAccountDeletion({app,firebaseAuth,...deps}){
   res.json({jobId,status:fresh.status,retryable:fresh.retryable===true});
  }
 }
+function jwtBearer(req){
+ const bearer=(req?.headers?.authorization||"").replace(/^Bearer /,"");
+ return /^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(bearer);
+}
 function continueWithFirebase(firebaseAuth,req,res,onOk){
  let done=false;
+ const firebaseToken=jwtBearer(req);
  const probe={
   statusCode:200,
   status(code){this.statusCode=code;return this;},
@@ -551,6 +556,9 @@ function continueWithFirebase(firebaseAuth,req,res,onOk){
   json(){
    if(done||res.headersSent)return this;
    done=true;
+   // A rejected Firebase ID token is 401. A missing header, a bad status
+   // token, an expired token, and another job's token stay 404.
+   if(firebaseToken&&this.statusCode===401)return res.status(401).json({error:"invalid_token"});
    res.status(404).json({error:"not_found"});
    return this;
   },

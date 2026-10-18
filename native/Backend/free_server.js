@@ -312,6 +312,7 @@ app.delete("/v1/files/:id",auth,requireWrite,async(req,res)=>{
    res.json({deleted:true});
  }catch(_){res.status(503).json({error:"Unable to remove file"})}
 });
+require("./v2_errors").installV2Errors(app);
 function start(port=Number(process.env.PORT||8080)){
  firestore();
  return app.listen(port,()=>console.log("GenDragoon free storage API ready"));

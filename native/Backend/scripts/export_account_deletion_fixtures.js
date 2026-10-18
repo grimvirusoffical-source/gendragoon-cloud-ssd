@@ -19,6 +19,7 @@ const path=require("node:path");
 const express=require("express");
 const {memoryFirestore}=require("../test_firestore");
 const {registerAccountDeletion,STATUS_TOKEN_TTL_MS}=require("../account_delete");
+const {installV2Errors}=require("../v2_errors");
 
 const NOW=1_700_000_000_000;
 const outDir=path.resolve(process.argv[2]||path.join(__dirname,"../../../fixtures"));
@@ -98,6 +99,7 @@ async function listen({now=()=>NOW,stripe,rows=[],holdRunner=false}={}){
  const bucket={deleteFiles:async()=>{}};
  const auth={revokeRefreshTokens:async()=>{},deleteUser:async()=>{}};
  registerAccountDeletion({app,db,stripe:stripe||stripeDouble(),bucket,auth,hash,now,firebaseAuth:authFor(now)});
+ installV2Errors(app);
  const server=app.listen(0,"127.0.0.1");
  await new Promise(resolve=>server.once("listening",resolve));
  return {base:"http://127.0.0.1:"+server.address().port,releaseRunner,close:()=>new Promise(resolve=>server.close(resolve))};
@@ -128,8 +130,11 @@ async function main(){
   if(wrong.response.status!==400||wrong.response.body?.error!=="confirm_required")throw Error("wrong confirm "+JSON.stringify(wrong.response));
   publish("confirm-wrong",wrong);
   const singular=await capture(errors.base,"GET","/v2/account/deletion/00000000-0000-4000-8000-000000000099",{token:null});
-  if(singular.response.status!==404)throw Error("singular "+JSON.stringify(singular.response));
+  if(singular.response.status!==404||singular.response.body?.error!=="not_found")throw Error("singular "+JSON.stringify(singular.response));
   publish("singular-path",singular);
+  const oversized=await capture(errors.base,"POST","/v2/account",{body:{pad:"x".repeat(20*1024)}});
+  if(oversized.response.status!==413||oversized.response.body?.error!=="payload_too_large")throw Error("413 "+JSON.stringify(oversized.response));
+  writeCase("errors","payload-too-large",redactValue(oversized));
  }finally{await errors.close();}
 
  const accepted=await listen();
@@ -209,5 +214,18 @@ async function main(){
   await pollUntil(crossed.base,first.response.body.jobId,first.response.body.statusToken,"done");
   await pollUntil(crossed.base,second.response.body.jobId,second.response.body.statusToken,"done");
  }finally{await crossed.close();}
+
+ const polled=await listen();
+ try{
+  const created=await capture(polled.base,"DELETE","/v2/account",{body:{confirm:"DELETE"}});
+  if(created.response.status!==202)throw Error("status auth create "+JSON.stringify(created.response));
+  const rejected=await capture(polled.base,"GET","/v2/account/deletions/"+created.response.body.jobId,{token:"revoked.firebase.token"});
+  if(rejected.response.status!==401||rejected.response.body?.error!=="invalid_token")throw Error("status 401 "+JSON.stringify(rejected.response));
+  publish("status-invalid-token",rejected,[created.response.body.statusToken]);
+  const missingHeader=await capture(polled.base,"GET","/v2/account/deletions/"+created.response.body.jobId,{token:null});
+  if(missingHeader.response.status!==404||missingHeader.response.body?.error!=="not_found")throw Error("status no header "+JSON.stringify(missingHeader.response));
+  publish("status-unauthorized",missingHeader,[created.response.body.statusToken]);
+  await pollUntil(polled.base,created.response.body.jobId,created.response.body.statusToken,"done");
+ }finally{await polled.close();}
 }
 main().catch(error=>{console.error(error);process.exit(1);});
