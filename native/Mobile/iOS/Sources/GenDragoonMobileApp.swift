@@ -42,9 +42,22 @@ private struct UIPreviewHost:View {
             DeleteAccountView(previewSupport:true).environmentObject(session).environmentObject(cloud)
         case "locked":
             WorkspaceLockView(lock:UIPreview.lock).environmentObject(session).environmentObject(cloud)
+        case "lapsed":
+            WorkspaceLockView(lock:UIPreview.byoLapsed).environmentObject(session).environmentObject(cloud)
+        case "grace":
+            GraceBannerPreview()
         default:
             MobileLogin()
         }
+    }
+}
+private struct GraceBannerPreview:View {
+    var body:some View {
+        ScrollView{VStack(alignment:.leading,spacing:20){
+            Text("My cloud").font(.largeTitle.weight(.bold)).accessibilityIdentifier("payment-grace")
+            HStack{Text(WorkspacePolicy.paymentDue).font(.headline);Spacer();Button("Pay"){}.accessibilityIdentifier("payment-due")}.padding(14).background(panel,in:RoundedRectangle(cornerRadius:12))
+            Text("Uploads stay available during the grace period.").foregroundStyle(.secondary)
+        }.padding(20)}.background(canvas)
     }
 }
 private struct MobileLogin:View {

@@ -968,9 +968,41 @@ public final class AccountDeletionTest {
         assertTrue(SupportContact.mailto(flow.jobId).startsWith("mailto:SUPPORT_CONTACT_PLACEHOLDER@invalid"));
     }
 
-    /** Riley PR #5 at 4c3dd13, including `grandfathered-plus-new`. Labels come from the server fields. */
+    /**
+     * Provisional. Riley's {@code support-unauthorized} fixture has not landed on PR #6
+     * ({@code d33970c}), so this 401 body is local.
+     */
+    @Test public void provisionalSupportUnauthorizedOpensMailtoAndNeverSignIn(){
+        assertFalse(DeletionSupport.ENABLED);
+        String unauthorized="{\"error\":\"unauthorized\"}";
+        DeletionSupport.Result coded=DeletionSupport.interpret(401,unauthorized,false);
+        DeletionSupport.Result blank=DeletionSupport.interpret(401,"",false);
+        DeletionSupport.Result noCode=DeletionSupport.interpret(401,"{}",false);
+        assertEquals(DeletionSupport.Kind.MAILTO,coded.kind);
+        assertEquals(coded.kind,blank.kind);
+        assertEquals(coded.kind,noCode.kind);
+        assertTrue(coded.opensMailto());
+        assertEquals(DeletionSupport.Kind.HOLD,DeletionSupport.interpret(401,"{\"error\":\"invalid_token\"}",false).kind);
+
+        AccountActions.HttpBody dead=fixture("status-failed-not-retryable");
+        AccountDeletion flow=AccountDeletion.resume(DeletionReceipt.of(dead.jobId,TOKEN));
+        flow.pollThrough(new Script().respond(dead));
+        assertEquals(AccountDeletion.Step.FAILED,flow.step);
+        String kept=flow.message;
+        assertTrue(flow.applySupport(coded));
+        assertEquals(AccountDeletion.Step.FAILED,flow.step);
+        assertNotEquals(AccountDeletion.Step.REAUTH,flow.step);
+        assertNotEquals(AccountDeletion.Step.SIGNED_OUT,flow.step);
+        assertFalse(flow.repeatDelete);
+        assertFalse(flow.clearSession);
+        assertEquals(kept,flow.message);
+        assertFalse(flow.message.contains("Sign in"));
+        assertTrue(SupportContact.mailto(flow.jobId).startsWith("mailto:SUPPORT_CONTACT_PLACEHOLDER@invalid"));
+    }
+
+    /** Riley PR #5 at 0715b1a. Labels come from the server fields. {@code feeWaived} is required. */
     @Test public void workspacePriceUsesRileyFixturesAndNeverCounts(){
-        assertEquals("4c3dd13",BackendFixtures.WORKSPACE_PRICE_SHA);
+        assertEquals("0715b1a",BackendFixtures.WORKSPACE_PRICE_SHA);
         assertFalse(WorkspacePrice.ENABLED);
         String freeFirst=BackendFixtures.pricedWorkspaces("free-first").get(0);
         assertEquals("Free Hosted",WorkspacePrice.pickerText(freeFirst));
@@ -1009,13 +1041,31 @@ public final class AccountDeletionTest {
         assertEquals(CloudSignals.Destination.LOCK_SCREEN,route.destination);
         assertEquals("lapsed",route.lock.reasonText());
         assertTrue(route.lock.requiresPayment());
+        String waived=BackendFixtures.pricedWorkspaces("owner-fee-waived").get(0);
+        assertEquals(Boolean.TRUE,JsonFields.bool(waived,"feeWaived"));
+        assertEquals("0",JsonFields.number(waived,"monthlyPriceCents"));
+        assertEquals("Owner Benefit",WorkspacePrice.pickerText(waived));
+        assertEquals("Owner Benefit · Included",WorkspacePrice.pickerText(waived,true));
+        String ended=BackendFixtures.responseBody("workspaces","byo-register-ends-grandfathered");
+        assertEquals(Boolean.TRUE,JsonFields.bool(ended,"grandfatheringEnded"));
+        assertEquals(Boolean.FALSE,JsonFields.bool(ended,"grandfathered"));
+        assertEquals(Boolean.FALSE,JsonFields.bool(ended,"feeWaived"));
+        assertEquals("500",JsonFields.number(ended,"monthlyPriceCents"));
+        assertEquals("Workspace · $5/mo",WorkspacePrice.pickerText(ended,true));
+        assertFalse(WorkspacePrice.pickerText(ended,true).contains("Included"));
+        try{
+            WorkspacePrice.pickerText("{\"name\":\"Missing\",\"isFree\":false,\"grandfathered\":false,\"monthlyPriceCents\":500}",true);
+            throw new AssertionError("feeWaived is required");
+        }catch(IllegalArgumentException expected){
+            assertTrue(expected.getMessage().contains("feeWaived"));
+        }
     }
 
-    /**
-     * Provisional until PR #5 lands its fix. The busy, deleting, per-workspace lock, and grace
-     * cases are synthetic because those fixtures are not in 4c3dd13.
-     */
-    @Test public void provisionalWorkspaceBusyDeletingLockAndGrace(){
+    /** Riley PR #5 at 0715b1a. Busy and deleting use the documented status strings. Lock and grace use the fixtures. */
+    @Test public void workspaceBusyDeletingLockAndGrace(){
+        assertFalse(WorkspacePrice.ENABLED);
+        assertFalse(EncryptedWorkspace.ENCRYPTED_WORKSPACE_ENABLED);
+        assertFalse(ByoFeature.showInSettings());
         assertTrue(WorkspacePolicy.keepsWorkspace(409,"workspace_busy"));
         assertEquals("busy, try again",WorkspacePolicy.deleteNotice(409,"workspace_busy"));
         assertFalse(WorkspacePolicy.keepsWorkspace(200,"workspace_busy"));
@@ -1028,51 +1078,35 @@ public final class AccountDeletionTest {
         assertTrue(WorkspacePolicy.actionsEnabled("active"));
         assertTrue(WorkspacePolicy.actionsEnabled(null));
 
-        List<String> unpaid=List.of("byo-1","hosted-2");
-        assertTrue(WorkspacePolicy.locksThisWorkspace("byo-1","byo",false,unpaid));
-        assertTrue(WorkspacePolicy.locksThisWorkspace("hosted-2","paid",false,unpaid));
-        assertFalse(WorkspacePolicy.locksThisWorkspace("free","free",true,unpaid));
-        assertFalse(WorkspacePolicy.locksThisWorkspace("free","paid",false,unpaid));
-        assertFalse(WorkspacePolicy.locksThisWorkspace("paid-ok","free",false,unpaid));
-        assertFalse(WorkspacePolicy.locksThisWorkspace("paid-ok","paid",true,unpaid));
-        assertFalse(WorkspacePolicy.locksThisWorkspace("paid-ok","paid",false,unpaid));
-
-        WorkspaceLock lapsed=new WorkspaceLock(List.of(),"{\"error\":\"workspace_lock\",\"reason\":\"lapsed\"}",0,unpaid);
-        assertFalse(WorkspacePolicy.blocksLibrary("free","free",true,lapsed));
-        assertFalse(WorkspacePolicy.blocksLibrary("paid-ok","paid",false,lapsed));
-        assertTrue(WorkspacePolicy.blocksLibrary("byo-1","byo",false,lapsed));
-        assertTrue(WorkspacePolicy.blocksLibrary("hosted-2","paid",false,lapsed));
-        WorkspaceLock cap=new WorkspaceLock(List.of(),"{\"error\":\"workspace_lock\",\"reason\":\"over_cap\"}",1,List.of());
+        String lapsedBody=BackendFixtures.responseBody("workspace-lock","byo-lapsed");
+        assertEquals(423,BackendFixtures.responseStatus("workspace-lock","byo-lapsed"));
+        WorkspaceLock lapsed=WorkspaceLock.fromLockBody(lapsedBody);
+        assertEquals("lapsed",lapsed.reasonText());
+        String unpaidId="11111111-1111-4111-8111-000000000022";
+        assertEquals(List.of(unpaidId),lapsed.unpaidIds);
+        assertTrue(WorkspacePolicy.locksThisWorkspace(unpaidId,"byo",false,lapsed.unpaidIds));
+        assertTrue(WorkspacePolicy.blocksLibrary(unpaidId,"byo",false,lapsed));
+        String sibling="11111111-1111-4111-8111-000000000024";
+        assertFalse(WorkspacePolicy.locksThisWorkspace(sibling,"paid",false,lapsed.unpaidIds));
+        assertFalse(WorkspacePolicy.blocksLibrary(sibling,"paid",false,lapsed));
+        assertEquals(201,BackendFixtures.responseStatus("workspaces","byo-lapsed-others-open"));
+        assertTrue(BackendFixtures.requestPath("workspaces","byo-lapsed-others-open").contains(sibling));
+        WorkspaceLock cap=WorkspaceLock.fromLockBody(BackendFixtures.responseBody("workspace-lock","over-cap"));
         assertTrue(WorkspacePolicy.blocksLibrary("free","free",true,cap));
-        assertTrue(WorkspacePolicy.blocksLibrary("paid-ok","paid",false,cap));
 
-        long through=1_700_000_000_000L;
+        String hosted=BackendFixtures.responseBody("workspaces","make-hosted");
+        long through=Long.parseLong(JsonFields.number(hosted,"paidThroughMs"));
+        long graceEnd=Long.parseLong(JsonFields.number(hosted,"graceEndsAt"));
+        assertEquals(through+WorkspacePolicy.GRACE_MS,graceEnd);
         assertTrue(WorkspacePolicy.paymentDue(through,through,false));
-        assertTrue(WorkspacePolicy.paymentDue(through,through+WorkspacePolicy.GRACE_MS-1,false));
-        assertFalse(WorkspacePolicy.paymentDue(through,through+WorkspacePolicy.GRACE_MS,false));
+        assertTrue(WorkspacePolicy.paymentDue(through,graceEnd-1,false));
+        assertFalse(WorkspacePolicy.paymentDue(through,graceEnd,false));
         assertFalse(WorkspacePolicy.paymentDue(through,through-1,false));
         assertFalse(WorkspacePolicy.paymentDue(through,through,true));
         assertFalse(WorkspacePolicy.paymentDue(null,through,false));
         assertEquals("Payment due",WorkspacePolicy.PAYMENT_DUE);
-    }
-
-    /**
-     * Provisional until PR #5 lands its billing fix. {@code feeWaived} and {@code grandfatheringEnded}
-     * are not in the 4c3dd13 fixtures, so these bodies are synthetic.
-     */
-    @Test public void provisionalFeeWaivedAndGrandfatheringEnded(){
-        assertEquals("Included",WorkspacePrice.priceLabel(false,false,true,0));
-        assertEquals("Included",WorkspacePrice.priceLabel(false,true,false,0));
-        assertEquals("Free",WorkspacePrice.priceLabel(true,true,true,0));
-        assertNull(WorkspacePrice.formatCents(0));
-        String waived="{\"name\":\"Waived\",\"isFree\":false,\"grandfathered\":false,\"feeWaived\":true,\"monthlyPriceCents\":0}";
-        assertEquals("Waived",WorkspacePrice.pickerText(waived));
-        assertEquals("Waived · Included",WorkspacePrice.pickerText(waived,true));
-        String ended="{\"grandfatheringEnded\":true,\"grandfathered\":false,\"feeWaived\":false,\"isFree\":false,\"monthlyPriceCents\":500}";
-        assertEquals(Boolean.TRUE,JsonFields.bool(ended,"grandfatheringEnded"));
-        assertEquals("$5/mo",WorkspacePrice.priceLabel(false,false,false,500));
-        assertEquals("Workspace · $5/mo",WorkspacePrice.pickerText(ended,true));
-        assertFalse(WorkspacePrice.pickerText(ended,true).contains("Included"));
+        assertEquals(201,BackendFixtures.responseStatus("workspaces","byo-in-grace"));
+        assertTrue(BackendFixtures.requestPath("workspaces","byo-in-grace").contains("11111111-1111-4111-8111-000000000021"));
     }
 
     private static FileReplacement.Manifest manifest(){

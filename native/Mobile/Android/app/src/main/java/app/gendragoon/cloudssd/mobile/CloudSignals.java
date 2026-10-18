@@ -164,7 +164,8 @@ final class WorkspacePrice {
         String raw=JsonFields.number(workspaceJson,"monthlyPriceCents");
         if(raw!=null){try{cents=Integer.parseInt(raw);}catch(NumberFormatException ignored){cents=null;}}
         boolean grandfathered=Boolean.TRUE.equals(JsonFields.bool(workspaceJson,"grandfathered"));
-        boolean feeWaived=Boolean.TRUE.equals(JsonFields.bool(workspaceJson,"feeWaived"));
+        Boolean feeWaived=JsonFields.bool(workspaceJson,"feeWaived");
+        if(feeWaived==null)throw new IllegalArgumentException("feeWaived is required");
         return pickerText(JsonFields.string(workspaceJson,"name"),JsonFields.bool(workspaceJson,"isFree"),grandfathered,feeWaived,cents,enabled);
     }
     static String pickerText(String name,Boolean isFree,boolean grandfathered,Integer monthlyPriceCents,boolean enabled){
@@ -179,9 +180,9 @@ final class WorkspacePrice {
 }
 
 /**
- * Provisional until PR #5 lands its fix. A 409 {@code workspace_busy} keeps the workspace.
- * A {@code deleting} row shows "Deleting..." and disables its actions. An unpaid BYO or hosted
- * workspace locks only itself. The 3-day grace period is a non-blocking "Payment due" banner.
+ * A 409 {@code workspace_busy} keeps the workspace. A {@code deleting} row shows "Deleting..."
+ * and disables its actions. An unpaid BYO workspace locks only itself. The 3-day grace period
+ * is a non-blocking "Payment due" banner with a Pay button.
  */
 final class WorkspacePolicy {
     static final String BUSY="busy, try again";

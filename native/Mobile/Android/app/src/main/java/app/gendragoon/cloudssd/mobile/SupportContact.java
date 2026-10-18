@@ -76,15 +76,23 @@ final class DeletionSupport {
     /**
      * 202 {@code received} (including a repeat with the same {@code requestId}) shows "Request sent."
      * 409 {@code support_not_needed} refreshes deletion status. 429 shows "Request already sent."
-     * and does not open mailto. A 404, a transport failure, or HTTP 5xx opens mailto and does not
-     * ask for sign-in. The account may already be deleted.
+     * and does not open mailto. A 404, a 401 {@code unauthorized}, a 401 with no code, a transport
+     * failure, or HTTP 5xx opens mailto and does not ask for sign-in. The account may already be deleted.
      */
     static Result interpret(int status,String raw,boolean transportFailed){
-        if(transportFailed||status>=500||status==404)return new Result(Kind.MAILTO,null,null);
+        if(transportFailed||status>=500||status==404||unauthorized(status,raw))return new Result(Kind.MAILTO,null,null);
         String requestId=JsonFields.string(raw,"requestId");
         if(status==202&&"received".equals(JsonFields.string(raw,"status"))&&requestId!=null&&!requestId.isEmpty())return new Result(Kind.SENT,requestId,SENT);
         if(status==409&&"support_not_needed".equals(JsonFields.string(raw,"error")))return new Result(Kind.REFRESH,null,null);
         if(status==429)return new Result(Kind.ALREADY,null,ALREADY);
         return new Result(Kind.HOLD,null,null);
+    }
+
+    /** A support-request 401 {@code unauthorized}, or a 401 with no code, matches a 404. */
+    private static boolean unauthorized(int status,String raw){
+        if(status!=401)return false;
+        String code=JsonFields.string(raw,"error");
+        if(code==null||code.isEmpty())code=JsonFields.string(raw,"code");
+        return code==null||code.isEmpty()||"unauthorized".equals(code);
     }
 }

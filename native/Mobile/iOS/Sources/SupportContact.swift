@@ -54,10 +54,12 @@ enum DeletionSupport {
     }
     /// 202 `received` (including a repeat with the same `requestId`) shows "Request sent."
     /// 409 `support_not_needed` refreshes deletion status. 429 shows "Request already sent."
-    /// and does not open mailto. A 404, a transport failure, or HTTP 5xx opens mailto and does not
-    /// ask for sign-in. The account may already be deleted.
+    /// and does not open mailto. A 404, a 401 `unauthorized`, a 401 with no code, a transport
+    /// failure, or HTTP 5xx opens mailto and does not ask for sign-in. The account may already be deleted.
     static func interpret(status:Int,body:String,transportFailed:Bool)->Result {
-        if transportFailed || status>=500 || status==404 {return Result(kind:.mailto,requestId:nil,message:nil)}
+        if transportFailed || status>=500 || status==404 || unauthorized(status:status,body:body) {
+            return Result(kind:.mailto,requestId:nil,message:nil)
+        }
         let requestId=CloudSignals.jsonString(body,"requestId")
         if status==202,CloudSignals.jsonString(body,"status")=="received",let requestId,!requestId.isEmpty {
             return Result(kind:.sent,requestId:requestId,message:sent)
@@ -67,5 +69,11 @@ enum DeletionSupport {
         }
         if status==429 {return Result(kind:.already,requestId:nil,message:already)}
         return Result(kind:.hold,requestId:nil,message:nil)
+    }
+    /// A support-request 401 `unauthorized`, or a 401 with no code, matches a 404.
+    private static func unauthorized(status:Int,body:String)->Bool {
+        guard status==401 else {return false}
+        let code=CloudSignals.jsonString(body,"error") ?? CloudSignals.jsonString(body,"code")
+        return code==nil || code?.isEmpty==true || code=="unauthorized"
     }
 }

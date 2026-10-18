@@ -12,6 +12,8 @@ final class ScreenPreviewTests: XCTestCase {
         try capture("confirm-delete",file:"confirm-delete.png",identifier:"delete-confirm")
         try capture("deletion-support",file:"deletion-support.png",identifier:"deletion-support")
         try capture("locked",file:"workspaces-locked.png",identifier:"workspaces-locked")
+        try capture("lapsed",file:"byo-lapsed.png",identifier:"workspaces-locked")
+        try capture("grace",file:"payment-due.png",identifier:"payment-due")
     }
 
     private func capture(_ mode:String,file:String,identifier:String) throws {

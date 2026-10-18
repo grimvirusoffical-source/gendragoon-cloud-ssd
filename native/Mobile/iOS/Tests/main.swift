@@ -961,9 +961,39 @@ final class AccountLogicTests: XCTestCase {
         XCTAssertTrue(SupportContact.mailto(jobId:flow.jobId)?.absoluteString.hasPrefix("mailto:SUPPORT_CONTACT_PLACEHOLDER@invalid") ?? false)
     }
 
-    /// Riley PR #5 at 4c3dd13, including `grandfathered-plus-new`. Labels come from the server fields.
+    /// Provisional. Riley's `support-unauthorized` fixture has not landed on PR #6 (`d33970c`), so this 401 body is local.
+    func testProvisionalSupportUnauthorizedOpensMailtoAndNeverSignIn() async {
+        XCTAssertFalse(DeletionSupport.enabled)
+        let unauthorized="{\"error\":\"unauthorized\"}"
+        let coded=DeletionSupport.interpret(status:401,body:unauthorized,transportFailed:false)
+        let blank=DeletionSupport.interpret(status:401,body:"",transportFailed:false)
+        let noCode=DeletionSupport.interpret(status:401,body:"{}",transportFailed:false)
+        XCTAssertEqual(coded.kind,.mailto)
+        XCTAssertEqual(blank.kind,coded.kind)
+        XCTAssertEqual(noCode.kind,coded.kind)
+        XCTAssertTrue(coded.opensMailto)
+        XCTAssertEqual(DeletionSupport.interpret(status:401,body:"{\"error\":\"invalid_token\"}",transportFailed:false).kind,.hold)
+        let dead=fixture("status-failed-not-retryable")
+        var flow=AccountDeletion.resume(DeletionReceipt.of(jobId:dead.jobId ?? "",statusToken:token))
+        let script=ScriptedDeletionTransport()
+        script.respond(dead)
+        await flow.pollThrough(script)
+        XCTAssertEqual(flow.step,.failed)
+        let kept=flow.message
+        XCTAssertTrue(flow.applySupport(coded))
+        XCTAssertEqual(flow.step,.failed)
+        XCTAssertNotEqual(flow.step,.reauth)
+        XCTAssertNotEqual(flow.step,.signedOut)
+        XCTAssertFalse(flow.repeatDelete)
+        XCTAssertFalse(flow.clearSession)
+        XCTAssertEqual(flow.message,kept)
+        XCTAssertFalse(flow.message?.contains("Sign in") ?? true)
+        XCTAssertTrue(SupportContact.mailto(jobId:flow.jobId)?.absoluteString.hasPrefix("mailto:SUPPORT_CONTACT_PLACEHOLDER@invalid") ?? false)
+    }
+
+    /// Riley PR #5 at 0715b1a. Labels come from the server fields. `feeWaived` is required.
     func testWorkspacePriceUsesRileyFixturesAndNeverCounts() throws {
-        XCTAssertEqual(BackendFixtures.workspacePriceSHA,"4c3dd13")
+        XCTAssertEqual(BackendFixtures.workspacePriceSHA,"0715b1a")
         XCTAssertFalse(WorkspacePrice.enabled)
         let freeFirst=BackendFixtures.pricedWorkspaces("free-first")[0]
         let shown=try JSONDecoder().decode(MobileWorkspace.self,from:JSONSerialization.data(withJSONObject:freeFirst))
@@ -1003,11 +1033,31 @@ final class AccountLogicTests: XCTestCase {
         XCTAssertEqual(lapsed.destination,.lockScreen)
         XCTAssertEqual(lapsed.lock?.reasonText,"lapsed")
         XCTAssertTrue(lapsed.lock?.requiresPayment==true)
+        let waived=BackendFixtures.pricedWorkspaces("owner-fee-waived")[0]
+        XCTAssertEqual(waived["feeWaived"] as? Bool,true)
+        XCTAssertEqual((waived["monthlyPriceCents"] as? NSNumber)?.intValue,0)
+        let waivedModel=try JSONDecoder().decode(MobileWorkspace.self,from:JSONSerialization.data(withJSONObject:waived))
+        XCTAssertTrue(waivedModel.feeWaived)
+        XCTAssertEqual(pricedLabel(waived,enabled:false),"Owner Benefit")
+        XCTAssertEqual(pricedLabel(waived),"Owner Benefit · Included")
+        var missing=waived
+        missing.removeValue(forKey:"feeWaived")
+        XCTAssertThrowsError(try JSONDecoder().decode(MobileWorkspace.self,from:JSONSerialization.data(withJSONObject:missing)))
+        let ended=BackendFixtures.sharedBody("workspaces","byo-register-ends-grandfathered")
+        XCTAssertEqual(ended["grandfatheringEnded"] as? Bool,true)
+        XCTAssertEqual(ended["grandfathered"] as? Bool,false)
+        XCTAssertEqual(ended["feeWaived"] as? Bool,false)
+        XCTAssertEqual((ended["monthlyPriceCents"] as? NSNumber)?.intValue,500)
+        let endedLabel=WorkspacePrice.pickerText(name:"Workspace",isFree:ended["isFree"] as? Bool,grandfathered:(ended["grandfathered"] as? Bool)==true,feeWaived:ended["feeWaived"] as! Bool,cents:(ended["monthlyPriceCents"] as? NSNumber)?.intValue,enabled:true)
+        XCTAssertEqual(endedLabel,"Workspace · $5/mo")
+        XCTAssertFalse(endedLabel.contains("Included"))
     }
 
-    /// Provisional until PR #5 lands its fix. The busy, deleting, per-workspace lock, and grace
-    /// cases are synthetic because those fixtures are not in 4c3dd13.
-    func testProvisionalWorkspaceBusyDeletingLockAndGrace() {
+    /// Riley PR #5 at 0715b1a. Busy and deleting use the documented status strings. Lock and grace use the fixtures.
+    func testWorkspaceBusyDeletingLockAndGrace() {
+        XCTAssertFalse(WorkspacePrice.enabled)
+        XCTAssertFalse(EncryptedWorkspace.ENCRYPTED_WORKSPACE_ENABLED)
+        XCTAssertFalse(ByoFeature.showInSettings)
         XCTAssertTrue(WorkspacePolicy.keepsWorkspace(status:409,error:"workspace_busy"))
         XCTAssertEqual(WorkspacePolicy.deleteNotice(status:409,error:"workspace_busy"),"busy, try again")
         XCTAssertFalse(WorkspacePolicy.keepsWorkspace(status:200,error:"workspace_busy"))
@@ -1020,51 +1070,41 @@ final class AccountLogicTests: XCTestCase {
         XCTAssertTrue(WorkspacePolicy.actionsEnabled("active"))
         XCTAssertTrue(WorkspacePolicy.actionsEnabled(nil))
 
-        let unpaid=["byo-1","hosted-2"]
-        XCTAssertTrue(WorkspacePolicy.locksThisWorkspace(id:"byo-1",kind:"byo",isFree:false,unpaidIds:unpaid))
-        XCTAssertTrue(WorkspacePolicy.locksThisWorkspace(id:"hosted-2",kind:"paid",isFree:false,unpaidIds:unpaid))
-        XCTAssertFalse(WorkspacePolicy.locksThisWorkspace(id:"free",kind:"free",isFree:true,unpaidIds:unpaid))
-        XCTAssertFalse(WorkspacePolicy.locksThisWorkspace(id:"free",kind:"paid",isFree:false,unpaidIds:unpaid))
-        XCTAssertFalse(WorkspacePolicy.locksThisWorkspace(id:"paid-ok",kind:"free",isFree:false,unpaidIds:unpaid))
-        XCTAssertFalse(WorkspacePolicy.locksThisWorkspace(id:"paid-ok",kind:"paid",isFree:true,unpaidIds:unpaid))
-        XCTAssertFalse(WorkspacePolicy.locksThisWorkspace(id:"paid-ok",kind:"paid",isFree:false,unpaidIds:unpaid))
-
-        let lapsed=WorkspaceLock(workspaces:[],raw:"{\"reason\":\"lapsed\"}",overBy:0,unpaidIds:unpaid)
-        XCTAssertFalse(WorkspacePolicy.blocksLibrary(selectedId:"free",kind:"free",isFree:true,lock:lapsed))
-        XCTAssertFalse(WorkspacePolicy.blocksLibrary(selectedId:"paid-ok",kind:"paid",isFree:false,lock:lapsed))
-        XCTAssertTrue(WorkspacePolicy.blocksLibrary(selectedId:"byo-1",kind:"byo",isFree:false,lock:lapsed))
-        XCTAssertTrue(WorkspacePolicy.blocksLibrary(selectedId:"hosted-2",kind:"paid",isFree:false,lock:lapsed))
-        let cap=WorkspaceLock(workspaces:[],raw:"{\"reason\":\"over_cap\"}",overBy:1,unpaidIds:[])
+        let lapsedBody=BackendFixtures.responseBodyData(area:"workspace-lock",name:"byo-lapsed")
+        XCTAssertEqual(BackendFixtures.responseStatus(area:"workspace-lock",name:"byo-lapsed"),423)
+        let lapsed=WorkspaceLock.fromLockBody(String(data:lapsedBody,encoding:.utf8) ?? "")
+        XCTAssertEqual(lapsed.reasonText,"lapsed")
+        let unpaidId="11111111-1111-4111-8111-000000000022"
+        XCTAssertEqual(lapsed.unpaidIds,[unpaidId])
+        XCTAssertTrue(WorkspacePolicy.locksThisWorkspace(id:unpaidId,kind:"byo",isFree:false,unpaidIds:lapsed.unpaidIds))
+        XCTAssertTrue(WorkspacePolicy.blocksLibrary(selectedId:unpaidId,kind:"byo",isFree:false,lock:lapsed))
+        let sibling="11111111-1111-4111-8111-000000000024"
+        XCTAssertFalse(WorkspacePolicy.locksThisWorkspace(id:sibling,kind:"paid",isFree:false,unpaidIds:lapsed.unpaidIds))
+        XCTAssertFalse(WorkspacePolicy.blocksLibrary(selectedId:sibling,kind:"paid",isFree:false,lock:lapsed))
+        XCTAssertEqual(BackendFixtures.responseStatus(area:"workspaces",name:"byo-lapsed-others-open"),201)
+        XCTAssertTrue(BackendFixtures.requestPath(area:"workspaces",name:"byo-lapsed-others-open").contains(sibling))
+        let cap=WorkspaceLock.fromLockBody(BackendFixtures.responseBodyString(area:"workspace-lock",name:"over-cap"))
         XCTAssertTrue(WorkspacePolicy.blocksLibrary(selectedId:"free",kind:"free",isFree:true,lock:cap))
-        XCTAssertTrue(WorkspacePolicy.blocksLibrary(selectedId:"paid-ok",kind:"paid",isFree:false,lock:cap))
 
-        let through:Int64=1_700_000_000_000
+        let hosted=BackendFixtures.sharedBody("workspaces","make-hosted")
+        let demoted=hosted["demoted"] as? [String:Any]
+        let through=(demoted?["paidThroughMs"] as? NSNumber)?.int64Value ?? 0
+        let graceEnd=(demoted?["graceEndsAt"] as? NSNumber)?.int64Value ?? 0
+        XCTAssertEqual(graceEnd,through+WorkspacePolicy.graceMs)
         XCTAssertTrue(WorkspacePolicy.isPaymentDue(paidThroughMs:through,nowMs:through,lapsed:false))
-        XCTAssertTrue(WorkspacePolicy.isPaymentDue(paidThroughMs:through,nowMs:through+WorkspacePolicy.graceMs-1,lapsed:false))
-        XCTAssertFalse(WorkspacePolicy.isPaymentDue(paidThroughMs:through,nowMs:through+WorkspacePolicy.graceMs,lapsed:false))
+        XCTAssertTrue(WorkspacePolicy.isPaymentDue(paidThroughMs:through,nowMs:graceEnd-1,lapsed:false))
+        XCTAssertFalse(WorkspacePolicy.isPaymentDue(paidThroughMs:through,nowMs:graceEnd,lapsed:false))
         XCTAssertFalse(WorkspacePolicy.isPaymentDue(paidThroughMs:through,nowMs:through-1,lapsed:false))
         XCTAssertFalse(WorkspacePolicy.isPaymentDue(paidThroughMs:through,nowMs:through,lapsed:true))
         XCTAssertFalse(WorkspacePolicy.isPaymentDue(paidThroughMs:nil,nowMs:through,lapsed:false))
         XCTAssertEqual(WorkspacePolicy.paymentDue,"Payment due")
-    }
-
-    /// Provisional until PR #5 lands its billing fix. `feeWaived` and `grandfatheringEnded`
-    /// are not in the 4c3dd13 fixtures, so these bodies are synthetic.
-    func testProvisionalFeeWaivedAndGrandfatheringEnded() {
-        XCTAssertEqual(WorkspacePrice.priceLabel(isFree:false,grandfathered:false,feeWaived:true,cents:0),"Included")
-        XCTAssertEqual(WorkspacePrice.priceLabel(isFree:false,grandfathered:true,feeWaived:false,cents:0),"Included")
-        XCTAssertEqual(WorkspacePrice.priceLabel(isFree:true,grandfathered:true,feeWaived:true,cents:0),"Free")
-        XCTAssertNil(WorkspacePrice.formatCents(0))
-        XCTAssertEqual(WorkspacePrice.pickerText(name:"Waived",isFree:false,grandfathered:false,feeWaived:true,cents:0,enabled:false),"Waived")
-        XCTAssertEqual(WorkspacePrice.pickerText(name:"Waived",isFree:false,grandfathered:false,feeWaived:true,cents:0,enabled:true),"Waived · Included")
-        let ended=WorkspacePrice.pickerText(name:"Workspace",isFree:false,grandfathered:false,feeWaived:false,cents:500,enabled:true)
-        XCTAssertEqual(ended,"Workspace · $5/mo")
-        XCTAssertFalse(ended.contains("Included"))
-        XCTAssertEqual(WorkspacePrice.priceLabel(isFree:false,grandfathered:false,feeWaived:false,cents:500),"$5/mo")
+        XCTAssertEqual(BackendFixtures.responseStatus(area:"workspaces",name:"byo-in-grace"),201)
+        XCTAssertTrue(BackendFixtures.requestPath(area:"workspaces",name:"byo-in-grace").contains("11111111-1111-4111-8111-000000000021"))
     }
 
     private func pricedLabel(_ row:[String:Any],enabled:Bool=true)->String {
-        WorkspacePrice.pickerText(name:row["name"] as? String ?? "Workspace",isFree:row["isFree"] as? Bool,grandfathered:(row["grandfathered"] as? Bool)==true,feeWaived:(row["feeWaived"] as? Bool)==true,cents:(row["monthlyPriceCents"] as? NSNumber)?.intValue,enabled:enabled)
+        guard let feeWaived=row["feeWaived"] as? Bool else {preconditionFailure("feeWaived is required")}
+        return WorkspacePrice.pickerText(name:row["name"] as? String ?? "Workspace",isFree:row["isFree"] as? Bool,grandfathered:(row["grandfathered"] as? Bool)==true,feeWaived:feeWaived,cents:(row["monthlyPriceCents"] as? NSNumber)?.intValue,enabled:enabled)
     }
 
     private func fixture(_ name:String)->AccountHttp {
@@ -1275,13 +1315,15 @@ final class InvalidTokenDeletionTests: XCTestCase {
 /// `singular-path.json` is JSON. A non-JSON body in a test is synthetic.
 /// Support responses are Riley's d33970c `support-*` files in `fixtures/account-deletion`.
 /// Each request is `POST /v2/account/deletions/:jobId/support-request` with no body.
-/// Workspace price fixtures are the `workspaces/` files from PR #5 at 4c3dd13,
-/// including `grandfathered-plus-new`. `list.json`, `create.json`, and
-/// `cap-reached.json` stay on the shared fixtures at da39276.
+/// Workspace and pricing fixtures are the `workspaces/` files from PR #5 at 0715b1a,
+/// including `owner-fee-waived`, `byo-register-ends-grandfathered`, `byo-in-grace`,
+/// `byo-lapsed-others-open`, `make-hosted`, `list.json`, and `create.json`.
+/// `cap-reached.json` stays on the shared fixtures at da39276.
+/// `workspace-lock/byo-lapsed` is from 0715b1a. The other lock fixtures stay at da39276.
 private enum BackendFixtures {
     static let accountDeletionSHA="fff0a84"
     static let supportFixtureSHA="d33970c"
-    static let workspacePriceSHA="4c3dd13"
+    static let workspacePriceSHA="0715b1a"
     static let keyEnvelopeSHA="ee4f76f"
     static let sharedFixtureSHA="da39276"
 
@@ -1338,7 +1380,7 @@ private enum BackendFixtures {
         return String(data:data,encoding:.utf8) ?? ""
     }
 
-    /// Named rows from a 4c3dd13 workspace fixture: each `workspaces[]` item, or `project`.
+    /// Named rows from a 0715b1a workspace fixture: each `workspaces[]` item, or `project`.
     static func pricedWorkspaces(_ name:String)->[[String:Any]] {
         let body=sharedBody("workspaces",name)
         if let rows=body["workspaces"] as? [[String:Any]],!rows.isEmpty {return rows}

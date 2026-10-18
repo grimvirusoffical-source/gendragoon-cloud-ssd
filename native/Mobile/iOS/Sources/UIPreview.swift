@@ -1,7 +1,7 @@
 import Foundation
 import SwiftUI
 
-/// DEBUG-only launch argument `-GenDragoonUIPreview` with `sign-in`, `account`, `confirm-delete`, `deletion-support`, or `locked`.
+/// DEBUG-only launch argument `-GenDragoonUIPreview` with `sign-in`, `account`, `confirm-delete`, `deletion-support`, `locked`, `lapsed`, or `grace`.
 /// Screenshot runs use mock data and never contact Google or the cloud.
 enum UIPreview {
     static var screen:String? {
@@ -10,7 +10,7 @@ enum UIPreview {
         guard let index=args.firstIndex(of:"-GenDragoonUIPreview"),index+1<args.count else {return nil}
         let value=args[index+1]
         switch value {
-        case "sign-in","account","confirm-delete","deletion-support","locked": return value
+        case "sign-in","account","confirm-delete","deletion-support","locked","lapsed","grace": return value
         default: return nil
         }
         #else
@@ -21,6 +21,12 @@ enum UIPreview {
         let raw="{\"error\":\"workspace_lock\",\"reason\":\"over_cap\",\"overBy\":1,\"unpaidWorkspaceIds\":[\"11111111-1111-1111-1111-111111111111\"]}"
         let photos=WorkspaceLock.Item(workspaceID:"11111111-1111-1111-1111-111111111111",name:"Photos",issue:nil)
         return WorkspaceLock.fromLockBody(raw).named([photos])
+    }
+    /// `workspace-lock/byo-lapsed` at 0715b1a. One unpaid BYO workspace.
+    static var byoLapsed:WorkspaceLock {
+        let raw="{\"error\":\"workspace_lock\",\"reason\":\"lapsed\",\"overBy\":0,\"unpaidWorkspaceIds\":[\"11111111-1111-4111-8111-000000000022\"]}"
+        let byo=WorkspaceLock.Item(workspaceID:"11111111-1111-4111-8111-000000000022",name:"BYO storage",issue:nil)
+        return WorkspaceLock.fromLockBody(raw).named([byo])
     }
 }
 
