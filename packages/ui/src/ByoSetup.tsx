@@ -1,4 +1,4 @@
-import { LAUNCH_BYO_PROVIDERS, type ByoProviderId } from "@gendragoon/core";
+import { COMING_SOON_BYO_PROVIDERS, LAUNCH_BYO_PROVIDERS, type ByoProviderId } from "@gendragoon/core";
 import { useState } from "react";
 
 export function ByoSetup(props: {
@@ -15,8 +15,8 @@ export function ByoSetup(props: {
       <header className="topbar">
         <div>
           <div className="kicker"><span className="dot" /> CONNECT YOUR OWN STORAGE</div>
-          <h2>Bring your own cloud or VPS</h2>
-          <p className="sub">The workspace fee is the same $5 per month. Credentials stay in the OS keychain on this device and are never sent to GenDragoon.</p>
+          <h2>Bring your own S3-compatible bucket</h2>
+          <p className="sub">Google Cloud Storage connects with its S3 HMAC keys. Credentials stay in the OS keychain on this device and are never sent to GenDragoon.</p>
         </div>
       </header>
       <div className="panel stack">
@@ -32,18 +32,29 @@ export function ByoSetup(props: {
               {item.label}
             </button>
           ))}
+          {COMING_SOON_BYO_PROVIDERS.map((item) => (
+            <button
+              key={item.id}
+              type="button"
+              disabled
+              data-testid={`provider-${item.id}`}
+            >
+              {item.label}
+              <span className="kind"> Coming soon</span>
+            </button>
+          ))}
         </div>
         <label className="field">Endpoint
           <input data-testid="byo-endpoint" value={endpoint} onChange={(event) => setEndpoint(event.target.value)} />
         </label>
-        <label className="field">Bucket or directory
+        <label className="field">Bucket
           <input data-testid="byo-bucket" value={bucket} onChange={(event) => setBucket(event.target.value)} />
         </label>
-        <label className="field">Access key or SFTP key
+        <label className="field">Access key
           <input data-testid="byo-secret" type="password" placeholder="Stored only in the OS keychain" autoComplete="off" value={secret} onChange={(event) => setSecret(event.target.value)} />
         </label>
         <p className="help">
-          Setup writes a server-generated challenge file, reads it back, and deletes it. The server checks the read-back. The workspace stays inactive until that proof succeeds. The server stores the provider type, endpoint, and a bucket fingerprint only.
+          Setup writes .gendragoon-challenge/&lt;nonce&gt; to your bucket, then sends a short-lived presigned GET for that object. The link is created on this device. Stored credentials are not included. Connecting the storage again runs a new challenge. The server stores the provider type, endpoint, and a bucket fingerprint only.
         </p>
         <div className="actions">
           <button

@@ -145,14 +145,16 @@ export async function* sealStream(
 ): AsyncGenerator<Uint8Array> {
   if (!Number.isSafeInteger(chunkBytes) || chunkBytes <= 0) throw new Error("Invalid chunk size");
   let pending = new Uint8Array(0);
+  let index = 0;
   for await (const piece of source) {
     pending = concatBytes([pending, piece]);
     while (pending.byteLength >= chunkBytes) {
-      yield frame(await sealChunk(pending.subarray(0, chunkBytes), key));
+      yield frame(await sealChunk(pending.subarray(0, chunkBytes), key, index));
+      index += 1;
       pending = copyBytes(pending.subarray(chunkBytes));
     }
   }
-  if (pending.byteLength > 0) yield frame(await sealChunk(pending, key));
+  if (pending.byteLength > 0) yield frame(await sealChunk(pending, key, index));
 }
 
 export async function sealBytes(plaintext: Uint8Array, key: CryptoKey, chunkBytes = CHUNK_BYTES): Promise<Uint8Array> {
@@ -167,6 +169,7 @@ export async function sealBytes(plaintext: Uint8Array, key: CryptoKey, chunkByte
 export async function openBytes(ciphertext: Uint8Array, key: CryptoKey): Promise<Uint8Array> {
   const parts: Uint8Array[] = [];
   let offset = 0;
+  let index = 0;
   while (offset < ciphertext.byteLength) {
     if (offset + 4 > ciphertext.byteLength) throw new Error("Ciphertext is truncated");
     const view = new DataView(ciphertext.buffer, ciphertext.byteOffset + offset, 4);
@@ -175,7 +178,8 @@ export async function openBytes(ciphertext: Uint8Array, key: CryptoKey): Promise
     if (length < IV_BYTES + TAG_BYTES || offset + length > ciphertext.byteLength) {
       throw new Error("Ciphertext is truncated");
     }
-    parts.push(await openChunk(ciphertext.subarray(offset, offset + length), key));
+    parts.push(await openChunk(ciphertext.subarray(offset, offset + length), key, index));
+    index += 1;
     offset += length;
   }
   return concatBytes(parts);
@@ -193,19 +197,34 @@ async function unwrapFileKey(wrapped: Uint8Array, iv: Uint8Array, workspaceKey: 
   return crypto.subtle.importKey("raw", raw, { name: AES }, false, ["encrypt", "decrypt"]);
 }
 
-async function sealChunk(plaintext: Uint8Array, key: CryptoKey): Promise<Uint8Array> {
+function chunkAad(index: number): Uint8Array {
+  if (!Number.isSafeInteger(index) || index < 0 || index > 0xffffffff) throw new Error("Invalid chunk index");
+  const aad = new Uint8Array(4);
+  new DataView(aad.buffer).setUint32(0, index);
+  return aad;
+}
+
+async function sealChunk(plaintext: Uint8Array, key: CryptoKey, index: number): Promise<Uint8Array> {
   const iv = crypto.getRandomValues(new Uint8Array(IV_BYTES));
-  const cipher = new Uint8Array(await crypto.subtle.encrypt({ name: AES, iv }, key, copyBytes(plaintext)));
+  const cipher = new Uint8Array(await crypto.subtle.encrypt(
+    { name: AES, iv, additionalData: chunkAad(index) },
+    key,
+    copyBytes(plaintext),
+  ));
   const out = new Uint8Array(iv.byteLength + cipher.byteLength);
   out.set(iv, 0);
   out.set(cipher, iv.byteLength);
   return out;
 }
 
-async function openChunk(bytes: Uint8Array, key: CryptoKey): Promise<Uint8Array> {
+async function openChunk(bytes: Uint8Array, key: CryptoKey, index: number): Promise<Uint8Array> {
   const iv = bytes.subarray(0, IV_BYTES);
   const cipher = bytes.subarray(IV_BYTES);
-  return new Uint8Array(await crypto.subtle.decrypt({ name: AES, iv: copyBytes(iv) }, key, copyBytes(cipher)));
+  return new Uint8Array(await crypto.subtle.decrypt(
+    { name: AES, iv: copyBytes(iv), additionalData: chunkAad(index) },
+    key,
+    copyBytes(cipher),
+  ));
 }
 
 function frame(payload: Uint8Array): Uint8Array {

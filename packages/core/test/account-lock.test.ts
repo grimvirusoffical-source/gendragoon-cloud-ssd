@@ -2,30 +2,32 @@ import { describe, expect, it } from "vitest";
 import {
   accountFromAssessment,
   applyApiFailure,
-  assessLock,
+  deleteAccountAndWipe,
+  MemorySecretStore,
   reduceAccount,
   viewAfterFailure,
   WorkspaceLockedError,
-  type WorkspaceRecord,
+  workspaceKeyId,
+  type LockAssessment,
 } from "../src/index.js";
 
-const NOW = Date.parse("2026-10-18T00:00:00.000Z");
+const ready = accountFromAssessment({ locked: false, overCap: false, unpaidIds: [] });
 
-function paid(id: string): WorkspaceRecord {
-  return {
-    id,
-    name: id,
-    kind: "paid",
-    projectStatus: "active",
-    projectFeeStatus: "paid",
-    feeIsOneTime: true,
-    storage: { kind: "gendragoon", storageTier: "100GB" },
-  };
-}
+const clear: LockAssessment = {
+  locked: false,
+  cap: 10,
+  activeCount: 1,
+  overCap: false,
+  unpaidIds: [],
+  lapsedIds: [],
+  readable: true,
+  downloadsAllowed: true,
+  uploadsBlocked: false,
+  normalUseBlocked: false,
+  highTier: false,
+};
 
 describe("account state machine", () => {
-  const ready = accountFromAssessment(assessLock([paid("a")], NOW));
-
   it("moves a ready account to delete-or-merge when a write returns workspace_lock", () => {
     const next = applyApiFailure(ready, new WorkspaceLockedError());
     expect(next).toEqual({ phase: "delete_or_merge", reason: "server_lock" });
@@ -43,17 +45,71 @@ describe("account state machine", () => {
 
   it("clears the lock only from a server assessment that is no longer locked", () => {
     const locked = applyApiFailure(ready, new WorkspaceLockedError());
-    const cleared = reduceAccount(locked, {
-      type: "assessment",
-      assessment: assessLock([paid("a")], NOW),
-    });
+    const cleared = reduceAccount(locked, { type: "assessment", assessment: clear });
     expect(cleared).toEqual({ phase: "ready", reason: "clear" });
   });
 
   it("keeps over-cap as the reason when another write is rejected", () => {
-    const crowd = Array.from({ length: 11 }, (_, index) => paid(`p-${index}`));
-    const over = accountFromAssessment(assessLock(crowd, NOW));
+    const over = accountFromAssessment({ locked: true, overCap: true, unpaidIds: [] });
     expect(over.reason).toBe("over_cap");
     expect(reduceAccount(over, { type: "write_locked" }).reason).toBe("over_cap");
+  });
+});
+
+describe("delete account polling", () => {
+  it("polls GET status until the job is done, then wipes local keys", async () => {
+    const secrets = new MemorySecretStore();
+    await secrets.set(workspaceKeyId("w1"), new Uint8Array([1]));
+    const states = ["accepted", "running", "done"] as const;
+    let reads = 0;
+    const client = {
+      deleteAccount: async () => ({ jobId: "job-1" }),
+      deletionStatus: async (jobId: string) => {
+        expect(jobId).toBe("job-1");
+        const status = states[Math.min(reads, states.length - 1)] ?? "done";
+        reads += 1;
+        return { jobId, status };
+      },
+    };
+    const result = await deleteAccountAndWipe({
+      client,
+      reauthenticatedAt: new Date().toISOString(),
+      workspaceIds: ["w1"],
+      secrets,
+      sleep: async () => undefined,
+    });
+    expect(result.status).toBe("done");
+    expect(reads).toBe(3);
+    expect(await secrets.get(workspaceKeyId("w1"))).toBeNull();
+  });
+
+  it("stops on failed without wiping and times out while the job is still running", async () => {
+    const secrets = new MemorySecretStore();
+    await secrets.set(workspaceKeyId("w1"), new Uint8Array([1]));
+    const failed = await deleteAccountAndWipe({
+      client: {
+        deleteAccount: async () => ({ jobId: "job-2" }),
+        deletionStatus: async () => ({ jobId: "job-2", status: "failed" as const }),
+      },
+      reauthenticatedAt: new Date().toISOString(),
+      workspaceIds: ["w1"],
+      secrets,
+      sleep: async () => undefined,
+    });
+    expect(failed.status).toBe("failed");
+    expect(await secrets.get(workspaceKeyId("w1"))).not.toBeNull();
+
+    await expect(deleteAccountAndWipe({
+      client: {
+        deleteAccount: async () => ({ jobId: "job-3" }),
+        deletionStatus: async () => ({ jobId: "job-3", status: "running" as const }),
+      },
+      reauthenticatedAt: new Date().toISOString(),
+      workspaceIds: ["w1"],
+      secrets,
+      sleep: async () => undefined,
+      timeoutMs: 300,
+      backoffMs: [200, 200],
+    })).rejects.toMatchObject({ code: "DELETION_TIMEOUT" });
   });
 });

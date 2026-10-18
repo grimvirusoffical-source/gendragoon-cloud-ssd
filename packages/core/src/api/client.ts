@@ -1,6 +1,7 @@
-import { assertNoCredentialFields } from "../byo.js";
-import { ApiError, WorkspaceLockedError } from "./errors.js";
-import { assertStorageUrlResponse, reauthIsRecent } from "../storage.js";
+import { assertNoCredentialFields, BYO_UNSUPPORTED_MESSAGE, BYO_UNVERIFIABLE_MESSAGE } from "../byo.js";
+import { assertKeyEnvelope } from "../envelope.js";
+import { AccountDeletedError, ApiError, InvalidTokenError, ReauthRequiredError, WorkspaceLockedError, deletionAuthFailure, isAccountDeleted, isInvalidToken, isReauthRequired } from "./errors.js";
+import { assertStorageUrlResponse, reauthIsRecent, reauthenticatedAtForDelete } from "../storage.js";
 import type {
   AccessResponse,
   BillingStatusResponse,
@@ -27,9 +28,20 @@ import type {
   DeleteAccountRequest,
   DeleteAccountAccepted,
   AccountDeletionStatus,
+  KeyEnvelope,
 } from "./types.js";
 
-export { ApiError, WorkspaceLockedError };
+export {
+  AccountDeletedError,
+  ApiError,
+  InvalidTokenError,
+  ReauthRequiredError,
+  WorkspaceLockedError,
+  deletionAuthFailure,
+  isAccountDeleted,
+  isInvalidToken,
+  isReauthRequired,
+};
 
 export interface ClientOptions {
   baseUrl: string;
@@ -180,18 +192,32 @@ export class GenDragoonClient {
     return response;
   }
 
-  /** Requires a re-auth newer than one hour. Returns the 202 job. Does not send key material. */
+  /**
+   * DELETE /v2/account. The body is only `{confirm:"DELETE"}`.
+   * A recent sign-in is required first. An ID token is judged by `auth_time`, not by a refresh `iat`.
+   */
   async deleteAccount(body: DeleteAccountRequest): Promise<DeleteAccountAccepted> {
-    if (!reauthIsRecent(body.reauthenticatedAt)) {
-      throw new ApiError(401, "REAUTH_REQUIRED", "Sign in again before deleting the account");
-    }
-    const accepted = await this.request<DeleteAccountAccepted>("DELETE", "/v2/account", body);
+    if (!reauthIsRecent(reauthenticatedAtForDelete(body))) throw new ReauthRequiredError();
+    const accepted = await this.request<DeleteAccountAccepted>("DELETE", "/v2/account", { confirm: "DELETE" });
     if (!accepted?.jobId) throw new ApiError(502, "DELETION_UNCONFIRMED", "Account deletion was not accepted");
     return accepted;
   }
 
+  /** Plural path. Poll until `done` or `failed`. */
   deletionStatus(jobId: string): Promise<AccountDeletionStatus> {
-    return this.request("GET", `/v2/account/deletion/${encodeURIComponent(jobId)}`);
+    return this.request("GET", `/v2/account/deletions/${encodeURIComponent(jobId)}`);
+  }
+
+  /** Server stores this envelope and nothing else about the workspace key. */
+  async getKeyEnvelope(id: string): Promise<KeyEnvelope> {
+    const envelope = await this.request<KeyEnvelope>("GET", `/v2/workspaces/${encodeURIComponent(id)}/key-envelope`);
+    assertKeyEnvelope(envelope);
+    return envelope;
+  }
+
+  async putKeyEnvelope(id: string, envelope: KeyEnvelope): Promise<KeyEnvelope> {
+    assertKeyEnvelope(envelope);
+    return this.request("PUT", `/v2/workspaces/${encodeURIComponent(id)}/key-envelope`, envelope);
   }
 
   /** Proposed. Recurring workspace fee, distinct from one-time project activation. */
@@ -271,9 +297,21 @@ function safeJson(text: string): unknown {
 }
 
 function toError(status: number, parsed: unknown): ApiError {
-  const record = parsed && typeof parsed === "object" ? parsed as { error?: unknown; code?: unknown } : {};
+  const record = parsed && typeof parsed === "object" ? parsed as { error?: unknown; code?: unknown; jobId?: unknown } : {};
   const code = typeof record.code === "string" ? record.code : "";
+  const jobId = typeof record.jobId === "string" ? record.jobId : "";
+  if (status === 410 && code === "account_deleted" && jobId) return new AccountDeletedError(jobId);
   if (status === 423 || code === "workspace_lock") return new WorkspaceLockedError();
+  if (status === 401 && code === "reauth_required") return new ReauthRequiredError();
+  if (status === 401 && code === "invalid_token") return new InvalidTokenError();
+  if (status === 422 && code === "byo_provider_unsupported") {
+    return new ApiError(422, "byo_provider_unsupported", BYO_UNSUPPORTED_MESSAGE);
+  }
+  // Fallback only. The server does not send 409 byo_unverifiable.
+  // SFTP and the other coming-soon providers return 422 at registration.
+  if (status === 409 && code === "byo_unverifiable") {
+    return new ApiError(409, "byo_unverifiable", BYO_UNVERIFIABLE_MESSAGE);
+  }
   if (status === 404 || code === "PROJECT_FORBIDDEN") {
     return new ApiError(404, "NOT_FOUND", "Not found");
   }

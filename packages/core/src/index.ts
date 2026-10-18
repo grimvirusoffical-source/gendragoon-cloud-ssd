@@ -1,37 +1,12 @@
-export {
-  FREE_WORKSPACES,
-  MAX_WORKSPACES_BASE,
-  MAX_WORKSPACES_HIGH,
-  WORKSPACE_MONTHLY_CENTS,
-  LAPSE_GRACE_DAYS,
-  LAPSE_GRACE_MS,
-  QUALIFYING_STORAGE_GB,
-  QUALIFYING_WORKERS,
-  STORAGE_GB,
-  PERFORMANCE_WORKERS,
-  freeWorkspaceAllowance,
-  isArchived,
-  qualifiesForHigherLimit,
-  workspaceCap,
-  freeSlotIds,
-  isGrandfathered,
-  graceEndsAt,
-  isLapsed,
-  isUnpaid,
-  assessLock,
-  workspaceMonthlyCents,
-  performanceAddonAllowed,
-  quoteAdditionalWorkspace,
-} from "./policy.js";
+export { planSummary } from "./policy.js";
 export type {
-  FreeWorkspaceAllowance,
   ProjectStatus,
   ProjectFeeStatus,
   WorkspaceKind,
   WorkspaceRecord,
   WorkspaceStorage,
   LockAssessment,
-  WorkspaceQuote,
+  PlanSummary,
 } from "./policy.js";
 
 export { foreignAccount, renderableWorkspaces, foreignWorkspaceStatus, hidesWorkspaceExistence } from "./ownership.js";
@@ -39,14 +14,22 @@ export type { SessionIdentity, HttpErrorLike } from "./ownership.js";
 
 export {
   LAUNCH_BYO_PROVIDERS,
+  COMING_SOON_BYO_PROVIDERS,
   LATER_BYO_PROVIDERS,
+  CHALLENGE_PREFIX,
+  CHALLENGE_URL_MAX_MS,
+  BYO_UNSUPPORTED_MESSAGE,
+  BYO_UNVERIFIABLE_MESSAGE,
   isLaunchProvider,
+  byoErrorMessage,
   assertNoCredentialFields,
   bucketFingerprint,
   normalizeEndpoint,
   toServerByoRegistration,
-  performOwnershipProof,
-  proofMatches,
+  challengeObjectKey,
+  registrationRequiresChallenge,
+  performOwnershipChallenge,
+  assertChallengeGetUrl,
   byoMayActivate,
 } from "./byo.js";
 export type {
@@ -59,7 +42,7 @@ export type {
   ServerByoRegistration,
   ByoChallenge,
   ByoProof,
-  ByoProbe,
+  ByoObjectWriter,
 } from "./byo.js";
 
 export { SORT_CATEGORIES, isSortCategory, extensionOf, categorize, applySortOverride } from "./sorting.js";
@@ -90,7 +73,18 @@ export type { TransferKind, ChunkPlan, TransferMetadata } from "./transfer.js";
 export { libraryDestination, libraryKey } from "./library.js";
 export type { LibraryDestination } from "./library.js";
 
-export { ApiError, WorkspaceLockedError, GenDragoonClient } from "./api/client.js";
+export {
+  AccountDeletedError,
+  ApiError,
+  InvalidTokenError,
+  ReauthRequiredError,
+  WorkspaceLockedError,
+  deletionAuthFailure,
+  isAccountDeleted,
+  isInvalidToken,
+  isReauthRequired,
+  GenDragoonClient,
+} from "./api/client.js";
 export type { ClientOptions } from "./api/client.js";
 export {
   accountFromAssessment,
@@ -105,6 +99,8 @@ export {
   SIGNED_URL_MAX_MS,
   REAUTH_WINDOW_MS,
   reauthIsRecent,
+  authTimeMsFromIdToken,
+  reauthenticatedAtForDelete,
   storageOperations,
   assertStorageUrlResponse,
   putSignedObject,
@@ -125,7 +121,15 @@ export {
   sealStream,
   sealBytes,
   openBytes,
+  bytesToBase64,
 } from "./seal.js";
+export {
+  PASSPHRASE_LOSS_WARNING,
+  createKeyEnvelope,
+  unwrapWorkspaceKey,
+  assertKeyEnvelope,
+  openWorkspaceKey,
+} from "./envelope.js";
 export type { SecretStore, SealedName, LibraryManifest } from "./seal.js";
 export type {
   HealthResponse,
@@ -158,4 +162,5 @@ export type {
   DeleteAccountRequest,
   DeleteAccountAccepted,
   AccountDeletionStatus,
+  KeyEnvelope,
 } from "./api/types.js";

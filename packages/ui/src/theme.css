@@ -207,6 +207,7 @@ input:focus, select:focus { border-color: var(--purple); box-shadow: 0 0 0 3px r
   padding: 8px 12px;
 }
 .providers button.active { border-color: var(--purple); background: var(--soft); }
+.providers button:disabled { opacity: 0.45; cursor: not-allowed; }
 .preview {
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-size: 12px;

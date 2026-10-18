@@ -12,30 +12,21 @@ Paid and BYO documents store `accountHash`. The legacy free project stores `acco
 
 Customers have logical workspaces inside one shared `CUSTOMER_BUCKET`. They do not receive a GCP project. `gen-dragoon-ssd` is not a customer bucket.
 
-## Billing constants
+## Billing
 
-| Constant | Value |
-| --- | --- |
-| `FREE_WORKSPACES` | `1` by default. `0` is the only other legal value. Grim has not decided. |
-| Workspace fee | $5 per month (`500` cents) for every workspace outside the free allowance that is not grandfathered. |
-| `feeIsOneTime` | `true` on a one-time $5 activation. Those workspaces never lapse. |
-| Lapse | Stripe `current_period_end` + 3 days. The server is the source of truth. |
-| `MAX_WORKSPACES_BASE` | 10 |
-| `MAX_WORKSPACES_HIGH` | 20 when one active project has at least 2 TB and Turbo (8 workers), or an equivalent bundle. Same rule as `qualifiesForHigherLimit` in `projects.js`. |
-| Performance | Add-on on top of the workspace fee. The free workspace cannot buy one. |
-| BYO | Same $5/month, same cap, same lapse, same lock, same `accountHash`. |
+Caps, the monthly fee, grandfathering, and lapse are decided on the server. `packages/core` does not recompute them and does not include `feeIsOneTime` on client types. The client renders `GET /v2/access` and HTTP 423.
 
-The live catalog still reports `feeIsOneTime: true` and `additionalOneTimeCents: 500` for a new project, and `workspaceFeeMonthlyCents: 0` on billing version 2 storage quotes (the old recurring $5 line remains only on legacy storage subscriptions, `legacyWorkspaceFeeMonthlyCents: 500`). New recurring workspace-fee checkout is an addition. Until it exists, the client keeps calling `POST /v2/projects` and `POST /v2/projects/:id/checkout` for the one-time activation.
+`planSummary(access)` copies `activeCount` to `used`, `cap` to `limit`, and `locked`. It copies `paidThroughMs`, `renewsAtMs`, and `lifetime` only when the server sent them. It does not invent a grace period or a lifetime rule.
 
-Recompute the cap on every login and whenever storage or performance changes. If a downgrade drops the account from 20 to 10 and more than 10 workspaces are still active, lock the account. Do not leave the extra workspaces usable.
+The live catalog still sells an extra project as a one-time activation (`additionalOneTimeCents: 500`, `workspaceFeeMonthlyCents: 0` on billing version 2 storage quotes). Recurring workspace-fee checkout is an addition for Riley. Until it exists, the client keeps calling `POST /v2/projects` and `POST /v2/projects/:id/checkout`.
 
 ## Lock
 
-When the account is over the cap or has an unpaid workspace (not free, not `feeIsOneTime`, not owner-complimentary, and past grace if it has `currentPeriodEnd`):
+When `GET /v2/access` says the account is locked:
 
 - Cloud data stays readable and downloadable. Deletes still succeed.
 - Writes return **HTTP 423** `{ "code": "workspace_lock" }`. The client throws `WorkspaceLockedError` and the account state machine moves to delete-or-merge. The UI shows the lock screen. It does not show that payload as a generic error.
-- The user deletes or merges until they are inside the cap and nothing unpaid remains.
+- The user deletes or merges until the next access payload is unlocked.
 
 Proposed `GET /v2/access` (also fine as fields on `GET /v2/workspaces`):
 
@@ -52,7 +43,10 @@ Proposed `GET /v2/access` (also fine as fields on `GET /v2/workspaces`):
   "uploadsBlocked": true,
   "normalUseBlocked": true,
   "highTier": false,
-  "freeWorkspaces": 1
+  "freeWorkspaces": 1,
+  "paidThroughMs": 1800000000000,
+  "renewsAtMs": 1800000000000,
+  "lifetime": false
 }
 ```
 
@@ -140,13 +134,13 @@ Keys do not grant billing, merge, or BYO setup.
 
 `POST /v2/workspaces/:id/checkout/workspace-fee`
 
-Subscription mode, 500 cents per month, metadata `{kind:"workspace_fee", accountHash, workspaceId}`. Do not reuse the one-time project Price. A workspace with `feeIsOneTime: true` gets `{alreadyActivated:true}` and no new Checkout. The free slot (when `FREE_WORKSPACES` is 1 and unclaimed) is created without this fee and without a performance add-on.
-
-Public workspace objects should grow `feeIsOneTime`, `workspaceSubscriptionId`, `currentPeriodEnd`, and server-computed `graceEndsAt` / `lapsed`. Clients render those fields.
+Subscription mode, metadata `{kind:"workspace_fee", accountHash, workspaceId}`. The price, the free slot, and whether a workspace is already paid are server decisions. The client does not send `feeIsOneTime` and does not decide the quote.
 
 ### BYO challenge
 
-Launch `provider` values: `aws`, `r2`, `b2`, `wasabi`, `minio`, `gcs-s3` (Google Cloud Storage via S3-interop HMAC keys, not the native GCS API), `sftp`. Reject `azure-blob`, `webdav`, and `gcs-native` until a later launch.
+Launch `provider` values: `aws`, `r2`, `b2`, `wasabi`, `minio`, `gcs-s3` (Google Cloud Storage via its S3 HMAC keys, not the native GCS API). SFTP, Azure Blob, and WebDAV are coming soon. They are disabled in Connect Storage. Registering one of them, including SFTP, returns **422** `{ "code": "byo_provider_unsupported" }`. The client shows that as “not supported yet / coming soon”.
+
+The server does not send **409** `byo_unverifiable`. The client still maps that code to a verification message as a fallback.
 
 `POST /v2/workspaces/:id/byo/challenge`
 
@@ -154,26 +148,26 @@ Launch `provider` values: `aws`, `r2`, `b2`, `wasabi`, `minio`, `gcs-s3` (Google
 { "provider": "r2", "endpoint": "https://example.r2.cloudflarestorage.com", "bucketFingerprint": "<sha256 hex>" }
 ```
 
-The endpoint must be `https` for S3-compatible providers and `sftp` for SFTP, with no userinfo. Response:
+The endpoint must be `https` with no userinfo. Response:
 
 ```json
 {
   "challengeId": "…",
-  "objectKey": ".gendragoon-verify/<challengeId>",
+  "objectKey": ".gendragoon-challenge/<nonce>",
   "nonce": "…",
   "expiresAt": "…"
 }
 ```
 
-The client writes `nonce` to `objectKey` with credentials that never leave the device, reads the object back, deletes it, then:
+The client writes `nonce` to `.gendragoon-challenge/<nonce>` with credentials that never leave the device. It then generates, on the device, a short-lived presigned GET for exactly that object (https, no userinfo, expiry at most 15 minutes) and sends:
 
 `POST /v2/workspaces/:id/byo/proof`
 
 ```json
-{ "challengeId": "…", "readBack": "…" }
+{ "challengeId": "…", "presignedGetUrl": "https://…" }
 ```
 
-Activate the workspace only when `readBack` equals the stored nonce and the challenge has not expired. Persist `provider`, `endpoint`, and `bucketFingerprint` only. Reject any body that contains credential fields (`secretAccessKey`, `password`, `privateKey`, `token`, and the rest listed in `assertNoCredentialFields`).
+Do not send stored credentials, access keys, or a read-back of the object. Registering the same storage again runs a new challenge. The previous proof is not reused. Activate the workspace only when the server can GET that URL and the challenge has not expired. Persist `provider`, `endpoint`, and `bucketFingerprint` only. Reject any body that contains credential fields (`secretAccessKey`, `password`, `privateKey`, `token`, and the rest listed in `assertNoCredentialFields`).
 
 `POST /v2/workspaces/:id/manual-provider` can stay as a label, but `connectionTested: true` is not this proof.
 
@@ -183,11 +177,11 @@ Activate the workspace only when `readBack` equals the stored nonce and the chal
 
 ## Connect-your-own-storage flow
 
-1. The user picks a launch provider and types an endpoint plus bucket or directory. The secret stays in the OS keychain.
-2. The client hashes `provider + endpoint + bucket` into `bucketFingerprint` and calls `POST .../byo/challenge`. The bucket name itself is not stored on the server.
-3. The client writes, reads, and deletes the challenge object.
-4. `POST .../byo/proof`. The workspace stays inactive on failure.
-5. Billing is the same $5/month workspace fee, plus an optional performance add-on if this workspace is not the free one. The provider's own permissions are only the challenge. Ownership of the GenDragoon workspace remains `accountHash`.
+1. The user picks a launch provider and types an https endpoint plus bucket. SFTP, Azure, and WebDAV stay disabled. The secret stays in the OS keychain.
+2. The client hashes `provider + endpoint + bucket` into `bucketFingerprint` and calls `POST .../byo/challenge`. The bucket name itself is not stored on the server. A provider the server will not register returns 422 `byo_provider_unsupported`.
+3. The client writes `.gendragoon-challenge/<nonce>` and creates a short-lived presigned GET on the device.
+4. `POST .../byo/proof` sends `{ challengeId, presignedGetUrl }`. The workspace stays inactive on failure. Connecting the storage again repeats steps 2–4.
+5. The workspace fee and any performance add-on are whatever `GET /v2/access` reports. The provider's own permissions are only the challenge. Ownership of the GenDragoon workspace remains `accountHash`.
 
 ## Managed bucket links
 
@@ -218,13 +212,31 @@ Object ids are random. Filenames live only in an AES-256-GCM manifest sealed wit
 
 `DELETE /v2/account`
 
-Requires a Firebase re-auth newer than one hour. Body: `{ "reauthenticatedAt": "<iso>" }`. Response **202**:
+Body, exactly:
 
 ```json
-{ "jobId": "<id>", "status": "accepted" }
+{ "confirm": "DELETE" }
 ```
 
-`GET /v2/account/deletion/:jobId` returns `accepted`, `running`, `succeeded`, or `failed`. Success cancels every Stripe subscription, deletes managed-bucket objects, deletes the Firebase user and account records, and leaves BYO buckets untouched. The client wipes local workspace keys and BYO secrets, then signs out. Settings uses a two-step confirm before this call.
+The client does not send `reauthenticatedAt` or the ID token in that body. It still requires a Firebase sign-in whose `auth_time` claim is newer than 5 minutes. A refreshed token's `iat` does not count. If the last sign-in is older, the server returns **401** `{ "code": "reauth_required" }`. The client sends the user to sign in again and retries. It does not wipe local keys.
+
+A session that cannot be used returns **401** `{ "code": "invalid_token" }`. The client signs out and leaves local keys in place.
+
+Response **202**:
+
+```json
+{ "jobId": "<id>" }
+```
+
+A repeat delete can return **410** `{ "code": "account_deleted", "jobId": "<id>" }`. The client polls that job id. It does not wipe local data because of the 410 itself.
+
+`GET /v2/account/deletions/:jobId` is the plural path. The client polls it with backoff until the status is `done` or `failed`, or until a two-minute timeout. `accepted`, `running`, and `succeeded` are not finished. `done` cancels every Stripe subscription, deletes managed-bucket objects, deletes the Firebase user and account records, and leaves BYO buckets untouched. The client wipes local workspace keys and BYO secrets only after `done`, then signs out. Settings uses a two-step confirm before this call.
+
+## Workspace key envelope
+
+`GET /v2/workspaces/:id/key-envelope` and `PUT /v2/workspaces/:id/key-envelope`.
+
+The device that creates the workspace generates one random 256-bit workspace key. It derives a KEK from a recovery passphrase with Argon2id (scrypt if Argon2id throws) and wraps the key with AES-256-GCM. The envelope stores `version`, `kdf`, `salt`, `opsLimit`, `memLimit`, `iv`, and `wrappedKey`. The passphrase and the raw key stay off the server. A new device asks for the passphrase once, unwraps the key, and caches it in the OS keychain. Losing the passphrase loses the files. Per-file keys are wrapped by the workspace key. Filenames, wrapped keys, and sizes live in a sealed manifest. File bytes use chunked AES-GCM with one random nonce per chunk and the chunk index as additional data.
 
 ## What the Windows client does not send
 

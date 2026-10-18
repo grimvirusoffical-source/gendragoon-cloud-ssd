@@ -4,31 +4,35 @@ import {
   LAUNCH_BYO_PROVIDERS,
   LATER_BYO_PROVIDERS,
   MemorySettingsStore,
+  accountFromAssessment,
   actionsForMode,
   applySortOverride,
+  assertNoCredentialFields,
   assertNotInsideApp,
-  assessLock,
   byoMayActivate,
   categorize,
+  challengeObjectKey,
   libraryDestination,
   libraryKey,
-  performOwnershipProof,
+  performOwnershipChallenge,
   planChunks,
   planIncomingPath,
   planMerge,
-  proofMatches,
+  registrationRequiresChallenge,
   sourceDeletionAllowed,
   toServerByoRegistration,
   transferMetadata,
   treeNode,
   updateSortMapping,
-  type WorkspaceRecord,
 } from "../src/index.js";
 
 describe("sorting", () => {
   it("reads the canonical JSON map and lets settings override it", async () => {
     expect(categorize({ name: "vacation.jpg", mime: "image/jpeg" })).toBe("Pictures");
     expect(categorize({ name: "clip.mp4" })).toBe("Videos");
+    expect(categorize({ name: "phone.3gp" })).toBe("Videos");
+    expect(categorize({ name: "phone.3gp", mime: "video/3gpp" })).toBe("Videos");
+    expect(categorize({ name: "clip.bin", mime: "video/3gpp" })).toBe("Videos");
     expect(categorize({ name: "song.flac" })).toBe("Audio");
     expect(categorize({ name: "notes.pdf" })).toBe("Documents");
     expect(categorize({ name: "bundle.zip" })).toBe("Archives");
@@ -116,11 +120,11 @@ describe("tree and transfer", () => {
 });
 
 describe("BYO", () => {
-  it("launches S3-compatible providers and SFTP only", () => {
+  it("launches S3-compatible providers only", () => {
     expect(LAUNCH_BYO_PROVIDERS.map((provider) => provider.id)).toEqual([
-      "aws", "r2", "b2", "wasabi", "minio", "gcs-s3", "sftp",
+      "aws", "r2", "b2", "wasabi", "minio", "gcs-s3",
     ]);
-    expect(LATER_BYO_PROVIDERS).toEqual(["azure-blob", "webdav", "gcs-native"]);
+    expect(LATER_BYO_PROVIDERS).toEqual(["sftp", "azure-blob", "webdav", "gcs-native"]);
     expect(LAUNCH_BYO_PROVIDERS.find((provider) => provider.id === "gcs-s3")?.label).toMatch(/S3-compatible HMAC/);
   });
 
@@ -149,38 +153,68 @@ describe("BYO", () => {
     })).rejects.toThrow(/credential field/);
 
     await expect(toServerByoRegistration({
+      provider: "sftp",
+      endpoint: "sftp://example",
+      bucket: "library",
+    })).rejects.toThrow(/not available/);
+    await expect(toServerByoRegistration({
       provider: "gcs-native",
       endpoint: "https://storage.googleapis.com",
       bucket: "library",
     })).rejects.toThrow(/not available/);
   });
 
-  it("proves control by writing, reading, and deleting the challenge", async () => {
+  it("writes the challenge object and sends only a device-generated presigned GET", async () => {
+    const now = Date.parse("2026-10-18T00:00:00.000Z");
     const objects = new Map<string, string>();
-    const probe = {
+    const writer = {
       async write(key: string, body: string) { objects.set(key, body); },
-      async read(key: string) { return objects.get(key) ?? ""; },
-      async remove(key: string) { objects.delete(key); },
+      async presignGet(key: string) {
+        return `https://s3.example.com/library/${key}?X-Amz-Date=20261018T000000Z&X-Amz-Expires=300&X-Amz-Signature=device`;
+      },
     };
-    const challenge = { objectKey: ".gendragoon-verify/1", nonce: "nonce-1" };
-    const proof = await performOwnershipProof(probe, challenge);
-    expect(proof.readBack).toBe("nonce-1");
-    expect(proof.cleaned).toBe(true);
-    expect(objects.size).toBe(0);
-    expect(proofMatches(challenge, proof.readBack)).toBe(true);
+    const first = await performOwnershipChallenge({
+      challengeId: "c1",
+      nonce: "nonce-1",
+      writer,
+      now,
+    });
+    const second = await performOwnershipChallenge({
+      challengeId: "c2",
+      nonce: "nonce-2",
+      writer,
+      now,
+    });
+    expect(registrationRequiresChallenge()).toBe(true);
+    expect(challengeObjectKey("nonce-1")).toBe(".gendragoon-challenge/nonce-1");
+    expect(objects.get(".gendragoon-challenge/nonce-1")).toBe("nonce-1");
+    expect(objects.get(".gendragoon-challenge/nonce-2")).toBe("nonce-2");
+    expect(first).toEqual({
+      challengeId: "c1",
+      presignedGetUrl: "https://s3.example.com/library/.gendragoon-challenge/nonce-1?X-Amz-Date=20261018T000000Z&X-Amz-Expires=300&X-Amz-Signature=device",
+    });
+    expect(second.presignedGetUrl).toContain(".gendragoon-challenge/nonce-2");
+    expect(JSON.stringify(first)).not.toMatch(/secret|password|token/i);
+    assertNoCredentialFields(first);
     expect(byoMayActivate(false)).toBe(false);
     expect(byoMayActivate(true)).toBe(true);
+    await expect(performOwnershipChallenge({
+      challengeId: "c3",
+      nonce: "nonce-3",
+      now,
+      writer: {
+        async write() { /* stored secret stays on the device */ },
+        async presignGet(key: string) {
+          return `https://key:secret@s3.example.com/${key}?X-Amz-Date=20261018T000000Z&X-Amz-Expires=300`;
+        },
+      },
+    })).rejects.toThrow(/credentials/);
   });
 
-  it("does not let a BYO workspace skip the shared lock", () => {
-    const byo: WorkspaceRecord = {
-      id: "byo",
-      name: "VPS",
-      kind: "byo",
-      projectStatus: "pending_payment",
-      feeIsOneTime: false,
-      storage: { kind: "byo", storageTier: null, provider: "sftp", endpoint: "sftp://example", bucketFingerprint: "ab" },
-    };
-    expect(assessLock([byo], Date.parse("2026-10-18T00:00:00Z")).locked).toBe(true);
+  it("does not let a BYO workspace skip a server lock", () => {
+    expect(accountFromAssessment({ locked: true, overCap: false, unpaidIds: ["byo"] })).toEqual({
+      phase: "delete_or_merge",
+      reason: "unpaid",
+    });
   });
 });

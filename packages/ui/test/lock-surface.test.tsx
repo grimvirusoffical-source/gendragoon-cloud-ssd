@@ -1,9 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
-import { ApiError, WorkspaceLockedError, assessLock, type WorkspaceRecord } from "@gendragoon/core";
+import { ApiError, WorkspaceLockedError, type LockAssessment, type WorkspaceRecord } from "@gendragoon/core";
 import { AccountSurface } from "../src/AccountSurface.js";
-
-const NOW = Date.parse("2026-10-18T00:00:00.000Z");
 
 function workspace(id: string, name: string): WorkspaceRecord {
   return {
@@ -12,14 +10,26 @@ function workspace(id: string, name: string): WorkspaceRecord {
     kind: "paid",
     projectStatus: "active",
     projectFeeStatus: "paid",
-    feeIsOneTime: true,
     storage: { kind: "gendragoon", storageTier: "100GB" },
   };
 }
 
+const clear: LockAssessment = {
+  locked: false,
+  cap: 10,
+  activeCount: 2,
+  overCap: false,
+  unpaidIds: [],
+  lapsedIds: [],
+  readable: true,
+  downloadsAllowed: true,
+  uploadsBlocked: false,
+  normalUseBlocked: false,
+  highTier: false,
+};
+
 describe("AccountSurface", () => {
   const workspaces = [workspace("a", "Personal"), workspace("b", "Library")];
-  const clear = assessLock(workspaces, NOW);
 
   it("shows the delete-or-merge lock screen for HTTP 423 instead of a generic error", () => {
     const html = renderToStaticMarkup(

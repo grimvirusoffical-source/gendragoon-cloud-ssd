@@ -1,6 +1,7 @@
 import { useState } from "react";
 import type { Settings, SortCategory } from "@gendragoon/core";
 import { SORT_CATEGORIES } from "@gendragoon/core";
+import { PassphraseSetup } from "./PassphraseSetup.js";
 
 export function SettingsView(props: {
   settings: Settings;
@@ -8,6 +9,9 @@ export function SettingsView(props: {
   onChange: (extension: string, category: SortCategory) => void;
   onDeleteAccount: () => void;
   deleting?: boolean;
+  reauthRequired?: boolean;
+  onSignInAgain?: () => void;
+  onPassphrase?: (passphrase: string) => void;
 }) {
   const [step, setStep] = useState<"closed" | "review" | "confirm">("closed");
   return (
@@ -36,6 +40,7 @@ export function SettingsView(props: {
         ))}
       </div>
       <p className="footer-note">{Object.keys(props.settings.sortOverrides.extensions).length} extension override(s) stored on this device.</p>
+      {props.onPassphrase ? <PassphraseSetup onSubmit={props.onPassphrase} /> : null}
       <section className="panel stack" data-testid="delete-account-panel" style={{ marginTop: 16 }}>
         <strong>Delete account</strong>
         <p className="help">
@@ -51,7 +56,7 @@ export function SettingsView(props: {
         ) : null}
         {step === "review" ? (
           <div className="stack">
-            <p className="help">Sign in again if it has been more than an hour. You will be signed out when deletion is accepted.</p>
+            <p className="help">Sign in again if it has been more than 5 minutes. You will be signed out when deletion finishes.</p>
             <div className="actions">
               <button type="button" className="btn" data-testid="delete-account-continue" onClick={() => setStep("confirm")}>
                 Continue
@@ -63,6 +68,16 @@ export function SettingsView(props: {
         {step === "confirm" ? (
           <div className="stack">
             <p className="help">Delete the account permanently. This cannot be undone.</p>
+            {props.reauthRequired ? (
+              <div className="stack" data-testid="delete-account-reauth-prompt">
+                <p className="help">Your last sign-in is older than 5 minutes. Sign in again and we will retry deleting the account.</p>
+                <div className="actions">
+                  <button type="button" className="btn" data-testid="delete-account-reauth" onClick={props.onSignInAgain}>
+                    Sign in again
+                  </button>
+                </div>
+              </div>
+            ) : null}
             <div className="actions">
               <button
                 type="button"

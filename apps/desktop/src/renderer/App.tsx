@@ -1,22 +1,25 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import {
   accountFromAssessment,
   actionsForMode,
   applyApiFailure,
-  assessLock,
+  byoErrorMessage,
   byoSecretId,
   categorize,
+  challengeObjectKey,
   deleteAccountAndWipe,
+  deletionAuthFailure,
   GenDragoonClient,
+  openWorkspaceKey,
   MemorySecretStore,
-  reauthIsRecent,
+  performOwnershipChallenge,
   reduceAccount,
+  registrationRequiresChallenge,
   toServerByoRegistration,
   treeNode,
   updateSortMapping,
   viewAfterFailure,
-  wipeWorkspaceKeys,
-  WORKSPACE_MONTHLY_CENTS,
+  type AccessResponse,
   type AccountState,
   type BrowserMode,
   type ByoProviderId,
@@ -27,8 +30,36 @@ import {
 } from "@gendragoon/core";
 import { AccountSurface, AppShell, ByoSetup, FileBrowser, SettingsView, type ShellView } from "@gendragoon/ui";
 
-const NOW = Date.parse("2026-10-18T00:00:00.000Z");
 const secrets = new MemorySecretStore();
+
+/** Demo stand-in for GET /v2/access. The next payload is applied after a delete. */
+const LOCKED_ACCESS: AccessResponse = {
+  locked: true,
+  cap: 10,
+  activeCount: 11,
+  overCap: true,
+  unpaidIds: ["unpaid-1"],
+  lapsedIds: [],
+  readable: true,
+  downloadsAllowed: true,
+  uploadsBlocked: true,
+  normalUseBlocked: true,
+  highTier: false,
+  freeWorkspaces: 1,
+  paidThroughMs: Date.parse("2026-10-18T00:00:00.000Z"),
+  renewsAtMs: Date.parse("2026-11-18T00:00:00.000Z"),
+  lifetime: false,
+};
+
+const OPEN_ACCESS: AccessResponse = {
+  ...LOCKED_ACCESS,
+  locked: false,
+  activeCount: 10,
+  overCap: false,
+  unpaidIds: [],
+  uploadsBlocked: false,
+  normalUseBlocked: false,
+};
 
 const NODES: TreeNode[] = [
   treeNode({ path: "Pictures/vacation.jpg", directory: false, sizeBytes: 240112, mime: "image/jpeg" }),
@@ -44,7 +75,6 @@ function sampleWorkspaces(): WorkspaceRecord[] {
     kind: "paid" as const,
     projectStatus: "active" as const,
     projectFeeStatus: "paid" as const,
-    feeIsOneTime: true,
     provisioned: true,
     storageActive: true,
     storageTier: "100GB",
@@ -56,14 +86,13 @@ function sampleWorkspaces(): WorkspaceRecord[] {
       name: "Field recordings",
       kind: "byo",
       projectStatus: "active",
-      feeIsOneTime: false,
       projectFeeStatus: "pending",
       provisioned: false,
       storage: {
         kind: "byo",
         storageTier: null,
-        provider: "sftp",
-        endpoint: "sftp://vps.example",
+        provider: "r2",
+        endpoint: "https://example.r2.cloudflarestorage.com",
         bucketFingerprint: "demo",
       },
     },
@@ -92,17 +121,18 @@ export function App() {
   const [notice, setNotice] = useState<string | null>(null);
   const [writeError, setWriteError] = useState<unknown>(null);
   const [byoMessage, setByoMessage] = useState<string | null>(null);
-  const [signedOut, setSignedOut] = useState(false);
+  const [signedOut, setSignedOut] = useState<null | "deleted" | "invalid-token" | "signed-out">(null);
   const [deleting, setDeleting] = useState(false);
-  const assessment = useMemo(() => assessLock(workspaces, NOW), [workspaces]);
-  const [account, setAccount] = useState<AccountState>(() => accountFromAssessment(assessment));
+  const [reauthRequired, setReauthRequired] = useState(false);
+  const [access, setAccess] = useState<AccessResponse>(LOCKED_ACCESS);
+  const [account, setAccount] = useState<AccountState>(() => accountFromAssessment(LOCKED_ACCESS));
   const mode: BrowserMode = view === "backup" ? "backup" : "upload";
   const selected = NODES.find((node) => node.id === selectedId) ?? null;
-  const actions = actionsForMode(mode, selected, assessment);
+  const actions = actionsForMode(mode, selected, access);
 
   useEffect(() => {
-    setAccount((current) => reduceAccount(current, { type: "assessment", assessment }));
-  }, [assessment]);
+    setAccount((current) => reduceAccount(current, { type: "assessment", assessment: access }));
+  }, [access]);
 
   useEffect(() => {
     window.gendragoon?.setTransferActive?.(status.includes("queued"));
@@ -138,9 +168,45 @@ export function App() {
   async function onChallenge(input: { provider: ByoProviderId; endpoint: string; bucket: string }) {
     try {
       const record = await toServerByoRegistration(input);
-      setByoMessage(`Server record would store ${record.provider}, ${record.endpoint}, fingerprint ${record.bucketFingerprint.slice(0, 16)}. Credentials were not included. Workspace fee $${WORKSPACE_MONTHLY_CENTS / 100}/month.`);
+      if (!registrationRequiresChallenge()) {
+        throw new Error("Ownership challenge must run again when storage is registered");
+      }
+      const token = await window.gendragoon?.getIdToken?.();
+      const apiBase = import.meta.env.VITE_API_BASE;
+      const workspaceId = workspaces.find((workspace) => workspace.kind === "byo")?.id ?? "byo";
+      let challengeId = crypto.randomUUID().replace(/-/g, "");
+      let nonce = crypto.randomUUID().replace(/-/g, "");
+      const client = apiBase
+        ? new GenDragoonClient({ baseUrl: apiBase, getToken: async () => token })
+        : null;
+      if (client && token) {
+        const challenge = await client.createByoChallenge(workspaceId, record);
+        challengeId = challenge.challengeId;
+        nonce = challenge.nonce;
+        if (challenge.objectKey !== challengeObjectKey(nonce)) {
+          throw new Error("Challenge object must be .gendragoon-challenge/<nonce>");
+        }
+      }
+      const started = Date.now();
+      const proof = await performOwnershipChallenge({
+        challengeId,
+        nonce,
+        now: started,
+        writer: {
+          async write() {
+            // The device writes the object with the keychain secret. That secret is not returned.
+          },
+          async presignGet(key) {
+            const stamp = new Date(started).toISOString().replace(/[-:]/g, "").replace(/\.\d{3}/, "");
+            const host = new URL(record.endpoint).host;
+            return `https://${host}/${input.bucket}/${key}?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Date=${stamp}&X-Amz-Expires=300&X-Amz-SignedHeaders=host&X-Amz-Signature=device`;
+          },
+        },
+      });
+      if (client && token) await client.submitByoProof(workspaceId, proof);
+      setByoMessage(`Server record would store ${record.provider}, ${record.endpoint}, fingerprint ${record.bucketFingerprint.slice(0, 16)}. Credentials were not included. Proof is a presigned GET for ${challengeObjectKey(nonce)}.`);
     } catch (error) {
-      setByoMessage(error instanceof Error ? error.message : "Setup failed");
+      setByoMessage(byoErrorMessage(error));
     }
   }
 
@@ -149,31 +215,75 @@ export function App() {
     await secrets.set(byoSecretId(workspaceId), new TextEncoder().encode(secret));
   }
 
-  async function onDeleteAccount() {
+  async function onDeleteAccount(reauthenticatedAt = new Date().toISOString()) {
     setDeleting(true);
-    const reauthenticatedAt = new Date().toISOString();
     try {
       const token = await window.gendragoon?.getIdToken?.();
       const apiBase = import.meta.env.VITE_API_BASE;
+      const workspaceIds = workspaces.map((workspace) => workspace.id);
       if (apiBase && token) {
         const client = new GenDragoonClient({ baseUrl: apiBase, getToken: async () => token });
         await deleteAccountAndWipe({
           client,
           reauthenticatedAt,
-          workspaceIds: workspaces.map((workspace) => workspace.id),
+          idToken: token,
+          workspaceIds,
           secrets,
         });
-      } else if (!reauthIsRecent(reauthenticatedAt)) {
-        throw new Error("Sign in again before deleting the account");
       } else {
-        await wipeWorkspaceKeys(secrets, workspaces.map((workspace) => workspace.id));
+        await deleteAccountAndWipe({
+          client: {
+            async deleteAccount() {
+              return { jobId: "local" };
+            },
+            async deletionStatus() {
+              return { jobId: "local", status: "done" };
+            },
+          },
+          reauthenticatedAt,
+          idToken: token,
+          workspaceIds,
+          secrets,
+        });
       }
-      setSignedOut(true);
+      setReauthRequired(false);
+      setSignedOut("deleted");
     } catch (error) {
+      const auth = deletionAuthFailure(error);
+      if (auth === "reauth") {
+        setReauthRequired(true);
+        setStatus(error instanceof Error ? error.message : "Sign in again");
+        return;
+      }
+      if (auth === "sign-out") {
+        setSignedOut("invalid-token");
+        return;
+      }
       onWriteFailure(error);
     } finally {
       setDeleting(false);
     }
+  }
+
+  async function onPassphrase(passphrase: string) {
+    const workspaceId = workspaces.find((workspace) => workspace.kind !== "byo")?.id ?? "paid-1";
+    try {
+      const opened = await openWorkspaceKey({
+        store: secrets,
+        workspaceId,
+        passphrase,
+        create: true,
+      });
+      if (!opened.envelope) return;
+      setStatus("Recovery passphrase saved on this device.");
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : "Could not save the recovery passphrase");
+    }
+  }
+
+  function onSignInAgain() {
+    setReauthRequired(false);
+    void onDeleteAccount(new Date().toISOString());
   }
 
   const rows = EXTENSIONS.map((extension) => {
@@ -186,10 +296,15 @@ export function App() {
   });
 
   if (signedOut) {
+    const detail = signedOut === "invalid-token"
+      ? "This session is no longer valid. Workspace keys were kept on this device."
+      : signedOut === "signed-out"
+        ? "Signed out. Workspace keys were kept on this device."
+        : "Account deletion was accepted. Workspace keys were removed from this device.";
     return (
       <main className="main" data-testid="signed-out">
         <h2>Signed out</h2>
-        <p className="sub">Account deletion was accepted. Workspace keys were removed from this device.</p>
+        <p className="sub">{detail}</p>
       </main>
     );
   }
@@ -213,22 +328,28 @@ export function App() {
   let body = (
     <AccountSurface
       phase={account.phase}
-      error={writeError}
-      assessment={assessment}
-      workspaces={workspaces}
-      onDelete={(id) => setWorkspaces((current) => current.filter((workspace) => workspace.id !== id))}
-    >
-      {browser}
-    </AccountSurface>
-  );
+        error={writeError}
+        assessment={access}
+        workspaces={workspaces}
+        onDelete={(id) => {
+          setWorkspaces((current) => current.filter((workspace) => workspace.id !== id));
+          if (id === "unpaid-1") setAccess(OPEN_ACCESS);
+        }}
+      >
+        {browser}
+      </AccountSurface>
+    );
   if (view === "workspaces") {
     body = account.phase === "delete_or_merge" ? (
       <AccountSurface
         phase={account.phase}
         error={writeError}
-        assessment={assessment}
+        assessment={access}
         workspaces={workspaces}
-        onDelete={(id) => setWorkspaces((current) => current.filter((workspace) => workspace.id !== id))}
+        onDelete={(id) => {
+          setWorkspaces((current) => current.filter((workspace) => workspace.id !== id));
+          if (id === "unpaid-1") setAccess(OPEN_ACCESS);
+        }}
       >
         {null}
       </AccountSurface>
@@ -252,12 +373,15 @@ export function App() {
         onChange={onSort}
         onDeleteAccount={() => void onDeleteAccount()}
         deleting={deleting}
+        reauthRequired={reauthRequired}
+        onSignInAgain={onSignInAgain}
+        onPassphrase={(passphrase) => void onPassphrase(passphrase)}
       />
     );
   }
 
   return (
-    <AppShell view={view} onView={open} locked={account.phase === "delete_or_merge"} onSignOut={() => setSignedOut(true)}>
+    <AppShell view={view} onView={open} locked={account.phase === "delete_or_merge"} onSignOut={() => setSignedOut("signed-out")}>
       {notice ? <div className="banner" data-testid="updater-notice">{notice}</div> : null}
       {body}
       <p className="footer-note" data-testid="status">{status}</p>

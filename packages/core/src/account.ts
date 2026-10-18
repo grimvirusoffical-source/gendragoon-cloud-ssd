@@ -1,8 +1,8 @@
-import { ApiError, WorkspaceLockedError } from "./api/errors.js";
+import { AccountDeletedError, ApiError, ReauthRequiredError, WorkspaceLockedError } from "./api/errors.js";
 import type { AccountDeletionStatus } from "./api/types.js";
 import type { LockAssessment } from "./policy.js";
 import { wipeWorkspaceKeys, type SecretStore } from "./seal.js";
-import { reauthIsRecent } from "./storage.js";
+import { reauthIsRecent, reauthenticatedAtForDelete } from "./storage.js";
 
 /**
  * Account session states the shell is allowed to render.
@@ -72,24 +72,74 @@ export function viewAfterFailure(view: string, error: unknown): string {
   return view;
 }
 
+const DELETION_BACKOFF_MS = [250, 500, 1000, 2000, 4000, 8000];
+const DELETION_TIMEOUT_MS = 120_000;
+
+function deletionFinished(status: AccountDeletionStatus["status"]): boolean {
+  return status === "done" || status === "failed";
+}
+
 /**
- * Accepts DELETE /v2/account, wipes local workspace and BYO keys, then reads
- * the deletion job. A stale re-auth fails before anything is deleted.
+ * Accepts DELETE /v2/account, then polls GET /v2/account/deletions/:jobId
+ * until the job is `done` or `failed`, or the timeout is reached.
+ * Local keys are removed only after `done`. A 401 (`reauth_required` or
+ * `invalid_token`) leaves them in place. A repeat delete that returns 410
+ * `account_deleted` is polled by the job id in that body and does not wipe
+ * on the 410 itself.
  */
 export async function deleteAccountAndWipe(input: {
   client: {
-    deleteAccount(body: { reauthenticatedAt: string }): Promise<{ jobId: string }>;
+    deleteAccount(body: { reauthenticatedAt: string; idToken?: string }): Promise<{ jobId: string }>;
     deletionStatus(jobId: string): Promise<AccountDeletionStatus>;
   };
   reauthenticatedAt: string;
+  idToken?: string;
   workspaceIds: readonly string[];
   secrets: SecretStore;
   now?: number;
+  sleep?: (ms: number) => Promise<void>;
+  timeoutMs?: number;
+  backoffMs?: readonly number[];
 }): Promise<AccountDeletionStatus> {
-  if (!reauthIsRecent(input.reauthenticatedAt, input.now ?? Date.now())) {
-    throw new ApiError(401, "REAUTH_REQUIRED", "Sign in again before deleting the account");
+  const at = reauthenticatedAtForDelete({ reauthenticatedAt: input.reauthenticatedAt, idToken: input.idToken });
+  if (!reauthIsRecent(at, input.now ?? Date.now())) {
+    throw new ReauthRequiredError();
   }
-  const accepted = await input.client.deleteAccount({ reauthenticatedAt: input.reauthenticatedAt });
-  await wipeWorkspaceKeys(input.secrets, input.workspaceIds);
-  return input.client.deletionStatus(accepted.jobId);
+  const accepted = await acceptDeletion(input.client, { reauthenticatedAt: at, idToken: input.idToken });
+  const sleep = input.sleep ?? ((ms: number) => new Promise((resolve) => setTimeout(resolve, ms)));
+  const timeoutMs = input.timeoutMs ?? DELETION_TIMEOUT_MS;
+  const backoff = input.backoffMs ?? DELETION_BACKOFF_MS;
+  let waited = 0;
+  let attempt = 0;
+  let latest: AccountDeletionStatus;
+  for (;;) {
+    latest = await input.client.deletionStatus(accepted.jobId);
+    if (deletionFinished(latest.status)) break;
+    const wait = backoff[Math.min(attempt, backoff.length - 1)] ?? backoff[backoff.length - 1] ?? 8000;
+    attempt += 1;
+    if (waited + wait > timeoutMs) {
+      throw new ApiError(504, "DELETION_TIMEOUT", "Account deletion did not finish before the timeout");
+    }
+    await sleep(wait);
+    waited += wait;
+  }
+  if (latest.status === "done") {
+    await wipeWorkspaceKeys(input.secrets, input.workspaceIds);
+  }
+  return latest;
+}
+
+/** 202 `{jobId}` or 410 `account_deleted` with the same job id. Anything else throws. */
+async function acceptDeletion(
+  client: {
+    deleteAccount(body: { reauthenticatedAt: string; idToken?: string }): Promise<{ jobId: string }>;
+  },
+  body: { reauthenticatedAt: string; idToken?: string },
+): Promise<{ jobId: string }> {
+  try {
+    return await client.deleteAccount(body);
+  } catch (error) {
+    if (error instanceof AccountDeletedError && error.jobId) return { jobId: error.jobId };
+    throw error;
+  }
 }

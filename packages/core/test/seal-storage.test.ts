@@ -28,6 +28,8 @@ describe("client-side encryption", () => {
     expect(sealed.oid).not.toContain("vacation");
     expect(new TextDecoder().decode(sealed.ciphertext)).not.toContain(path);
     expect(sealed.entry.path).toBe(path);
+    expect(sealed.entry.wrappedKey.length).toBeGreaterThan(0);
+    expect(sealed.entry.plaintextBytes).toBe(plaintext.byteLength);
     const opened = await openNamedFile(sealed.ciphertext, sealed.entry, workspaceKey);
     expect(new TextDecoder().decode(opened)).toBe("frame-one-hello-frame-two");
 
@@ -55,6 +57,8 @@ describe("client-side encryption", () => {
     }
     const opened = await openBytes(joined, key);
     expect(new TextDecoder().decode(opened)).toBe("abcdefghijklmnop");
+    const swapped = swapFirstFrames(joined);
+    await expect(openBytes(swapped, key)).rejects.toThrow();
   });
 
   it("stores the workspace key in the secret store and wipes it with BYO secrets", async () => {
@@ -112,7 +116,31 @@ describe("storage links", () => {
       return new Response(null, { status: 200 });
     });
     expect(authorization).toBeNull();
-    expect(reauthIsRecent(new Date(now - 30 * 60 * 1000).toISOString(), now)).toBe(true);
-    expect(reauthIsRecent(new Date(now - 2 * 60 * 60 * 1000).toISOString(), now)).toBe(false);
+    expect(reauthIsRecent(new Date(now - 4 * 60 * 1000).toISOString(), now)).toBe(true);
+    expect(reauthIsRecent(new Date(now - 6 * 60 * 1000).toISOString(), now)).toBe(false);
   });
 });
+
+function swapFirstFrames(ciphertext: Uint8Array): Uint8Array {
+  const frames: Uint8Array[] = [];
+  let offset = 0;
+  while (offset < ciphertext.byteLength) {
+    const length = new DataView(ciphertext.buffer, ciphertext.byteOffset + offset, 4).getUint32(0);
+    const next = offset + 4 + length;
+    frames.push(ciphertext.slice(offset, next));
+    offset = next;
+  }
+  const first = frames[0];
+  const second = frames[1];
+  if (!first || !second) throw new Error("expected two frames");
+  frames[0] = second;
+  frames[1] = first;
+  const size = frames.reduce((sum, frame) => sum + frame.byteLength, 0);
+  const out = new Uint8Array(size);
+  let cursor = 0;
+  for (const frame of frames) {
+    out.set(frame, cursor);
+    cursor += frame.byteLength;
+  }
+  return out;
+}

@@ -44,7 +44,6 @@ export interface PricingResponse {
     qualifyingStorageTier: string;
     qualifyingPerformanceTier: string;
     qualifyingWorkers: number;
-    feeIsOneTime?: boolean;
   };
   purchasesEnabled: boolean;
 }
@@ -63,8 +62,6 @@ export interface Workspace {
   projectBillingVersion?: number;
   projectFeeStatus?: "free" | "paid" | "owner" | "pending" | "legacy" | string;
   projectFeeCents?: number;
-  /** Grandfathered one-time activation. Never lapses. */
-  feeIsOneTime?: boolean;
   workspaceSubscriptionId?: string | null;
   /** Stripe current_period_end. Proposed on the public payload. */
   currentPeriodEnd?: string | null;
@@ -91,7 +88,6 @@ export interface ProjectPolicy {
   freeProjectClaimed: boolean;
   freeProjectAvailable: boolean;
   newProjectOneTimeCents: number;
-  feeIsOneTime: boolean;
   defaultLimit: number;
   qualifiedLimit: number;
   projectLimit: number;
@@ -189,14 +185,16 @@ export interface ByoChallengeRequest {
 
 export interface ByoChallengeResponse {
   challengeId: string;
+  /** `.gendragoon-challenge/<nonce>` */
   objectKey: string;
   nonce: string;
   expiresAt: string;
 }
 
+/** Device-generated presigned GET for `.gendragoon-challenge/<nonce>`. No credentials. */
 export interface ByoProofRequest {
   challengeId: string;
-  readBack: string;
+  presignedGetUrl: string;
 }
 
 export interface ByoProofResponse {
@@ -218,6 +216,10 @@ export interface AccessResponse {
   normalUseBlocked: boolean;
   highTier: boolean;
   freeWorkspaces: 0 | 1;
+  /** Server clock. The client does not derive this from a period end. */
+  paidThroughMs?: number;
+  renewsAtMs?: number;
+  lifetime?: boolean;
 }
 
 export type StorageOp = "upload" | "download" | "resumable" | "delete";
@@ -249,23 +251,38 @@ export interface StorageUrlResponse {
   links: StorageLink[];
 }
 
-/** DELETE /v2/account. reauthenticatedAt must be less than one hour old. */
+/**
+ * Local freshness inputs for DELETE /v2/account. Neither field is sent.
+ * The HTTP body is exactly `{ "confirm": "DELETE" }`.
+ * When `idToken` is set, the 5-minute window uses its `auth_time` claim, not `iat`.
+ */
 export interface DeleteAccountRequest {
   reauthenticatedAt: string;
+  idToken?: string;
 }
 
-/** HTTP 202. The deletion continues in the background. */
+/** HTTP 202. Only the job id is required. */
 export interface DeleteAccountAccepted {
   jobId: string;
-  status: "accepted";
 }
 
 export interface AccountDeletionStatus {
   jobId: string;
-  status: "accepted" | "running" | "succeeded" | "failed";
+  status: "accepted" | "running" | "succeeded" | "done" | "failed";
   stripeSubscriptionsCancelled?: number;
   managedObjectsDeleted?: number;
   byoWorkspacesLeftIntact?: number;
   firebaseUserDeleted?: boolean;
   confirmation?: string;
+}
+
+/** PUT/GET /v2/workspaces/:id/key-envelope. No passphrase and no raw key. */
+export interface KeyEnvelope {
+  version: 1;
+  kdf: "argon2id" | "scrypt";
+  salt: string;
+  opsLimit: number;
+  memLimit: number;
+  iv: string;
+  wrappedKey: string;
 }

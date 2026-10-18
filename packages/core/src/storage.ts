@@ -5,13 +5,49 @@ import type { StorageLink, StorageUrlRequest, StorageUrlResponse } from "./api/t
 export const SIGNED_URL_MAX_MS = 15 * 60 * 1000;
 
 /** DELETE /v2/account accepts a Firebase re-auth newer than this. */
-export const REAUTH_WINDOW_MS = 60 * 60 * 1000;
+export const REAUTH_WINDOW_MS = 5 * 60 * 1000;
 
 export function reauthIsRecent(iso: string, now = Date.now()): boolean {
   const at = Date.parse(iso);
   if (!Number.isFinite(at)) return false;
   const age = now - at;
   return age >= 0 && age < REAUTH_WINDOW_MS;
+}
+
+/** Firebase ID token `auth_time` in milliseconds. `iat` from a refresh is ignored. */
+export function authTimeMsFromIdToken(token: string): number | null {
+  const payload = decodeJwtPayload(token);
+  const authTime = payload?.auth_time;
+  if (typeof authTime !== "number" || !Number.isFinite(authTime)) return null;
+  return authTime * 1000;
+}
+
+/**
+ * Timestamp used for the 5-minute delete check.
+ * An ID token wins over `reauthenticatedAt`, and only `auth_time` counts.
+ */
+export function reauthenticatedAtForDelete(input: { reauthenticatedAt?: string; idToken?: string }): string {
+  if (input.idToken) {
+    const authTime = authTimeMsFromIdToken(input.idToken);
+    return authTime === null ? "" : new Date(authTime).toISOString();
+  }
+  return input.reauthenticatedAt ?? "";
+}
+
+function decodeJwtPayload(token: string): { auth_time?: unknown; iat?: unknown } | null {
+  const segment = token.split(".")[1];
+  if (!segment) return null;
+  try {
+    const padded = segment.replace(/-/g, "+").replace(/_/g, "/").padEnd(Math.ceil(segment.length / 4) * 4, "=");
+    const binary = atob(padded);
+    const bytes = new Uint8Array(binary.length);
+    for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
+    const parsed = JSON.parse(new TextDecoder().decode(bytes)) as unknown;
+    if (!parsed || typeof parsed !== "object") return null;
+    return parsed as { auth_time?: unknown; iat?: unknown };
+  } catch {
+    return null;
+  }
 }
 
 /**

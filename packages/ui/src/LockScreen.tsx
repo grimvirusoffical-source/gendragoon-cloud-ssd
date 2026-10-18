@@ -1,5 +1,5 @@
 import type { LockAssessment, WorkspaceRecord } from "@gendragoon/core";
-import { planMerge } from "@gendragoon/core";
+import { planMerge, planSummary } from "@gendragoon/core";
 import { useMemo, useState } from "react";
 
 export function LockScreen(props: {
@@ -19,6 +19,12 @@ export function LockScreen(props: {
       ["Photos/cat.jpg"],
     );
   }, [active, sourceId, targetId]);
+  const plan = planSummary(props.assessment);
+  const paidThrough = plan.lifetime
+    ? "Lifetime"
+    : plan.paidThroughMs !== undefined
+      ? `Paid through ${new Date(plan.paidThroughMs).toISOString().slice(0, 10)}`
+      : null;
 
   return (
     <section data-testid="lock-screen">
@@ -27,13 +33,15 @@ export function LockScreen(props: {
           <div className="kicker"><span className="dot warn" /> SIGNED IN</div>
           <h2>Resolve workspaces to continue</h2>
           <p className="sub">
-            {props.assessment.overCap
-              ? `This account is over the ${props.assessment.cap} workspace cap (${props.assessment.activeCount} active).`
-              : `Cap is ${props.assessment.cap}.`}
+            {plan.locked && props.assessment.overCap
+              ? `This account is over the ${plan.limit} workspace cap (${plan.used} active).`
+              : `Cap is ${plan.limit}.`}
             {props.assessment.unpaidIds.length > 0
               ? ` ${props.assessment.unpaidIds.length} workspace${props.assessment.unpaidIds.length === 1 ? "" : "s"} unpaid.`
               : ""}
             {" "}Downloads stay available. Uploads and normal use stay blocked until you delete or merge down to the cap.
+            {paidThrough ? ` ${paidThrough}.` : ""}
+            {plan.renewsAtMs !== undefined ? ` Renews ${new Date(plan.renewsAtMs).toISOString().slice(0, 10)}.` : ""}
           </p>
         </div>
       </header>
@@ -50,7 +58,7 @@ export function LockScreen(props: {
               <div className="workspace-row" key={workspace.id}>
                 <div>
                   <strong>{workspace.name}</strong>
-                  <div className="sub">{unpaid ? "Unpaid" : workspace.feeIsOneTime ? "One-time, stays paid" : workspace.kind}</div>
+                  <div className="sub">{unpaid ? "Unpaid" : workspace.kind}</div>
                 </div>
                 <span className="kind">{workspace.kind}</span>
                 <button type="button" className="btn-danger" data-testid={`delete-${workspace.id}`} onClick={() => props.onDelete(workspace.id)}>

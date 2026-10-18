@@ -15,5 +15,8 @@
   "devDependencies": {
     "typescript": "5.8.3",
     "vitest": "3.1.4"
+  },
+  "dependencies": {
+    "libsodium-wrappers-sumo": "0.7.15"
   }
 }

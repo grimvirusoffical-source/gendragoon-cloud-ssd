@@ -28,7 +28,7 @@ try {
     args: ["--no-sandbox", "--disable-dev-shm-usage"],
   });
   const page = await browser.newPage();
-  await page.setViewport({ width: 1440, height: 960, deviceScaleFactor: 1 });
+  await page.setViewport({ width: 1440, height: 1280, deviceScaleFactor: 1 });
   await page.goto(`http://127.0.0.1:${port}/#/workspaces`, { waitUntil: "networkidle0" });
   await page.waitForSelector("[data-testid='lock-screen']");
   const previewText = await page.$eval("[data-testid='merge-preview']", (node) => node.textContent ?? "");
@@ -63,12 +63,18 @@ try {
 
   await page.click("[data-testid='nav-workspaces']");
   await page.waitForSelector("[data-testid='provider-gcs-s3']");
-  const providers = await page.$$eval("[data-testid^='provider-']", (nodes) => nodes.map((node) => node.getAttribute("data-testid")));
-  for (const id of ["provider-aws", "provider-r2", "provider-b2", "provider-wasabi", "provider-minio", "provider-gcs-s3", "provider-sftp"]) {
-    if (!providers.includes(id)) throw new Error(`Missing ${id}`);
+  const providers = await page.$$eval("[data-testid^='provider-']", (nodes) => nodes.map((node) => ({
+    id: node.getAttribute("data-testid"),
+    disabled: node.hasAttribute("disabled"),
+    text: node.textContent ?? "",
+  })));
+  for (const id of ["provider-aws", "provider-r2", "provider-b2", "provider-wasabi", "provider-minio", "provider-gcs-s3"]) {
+    const node = providers.find((item) => item.id === id);
+    if (!node || node.disabled) throw new Error(`Missing enabled ${id}`);
   }
-  if (providers.some((id) => id?.includes("azure") || id?.includes("webdav"))) {
-    throw new Error(`Later providers were selectable: ${providers.join(",")}`);
+  for (const id of ["provider-sftp", "provider-azure-blob", "provider-webdav"]) {
+    const node = providers.find((item) => item.id === id);
+    if (!node?.disabled || !node.text.includes("Coming soon")) throw new Error(`${id} should be a disabled Coming soon option`);
   }
   await page.click("[data-testid='byo-challenge']");
   await page.waitForFunction(() => document.querySelector("[data-testid='byo-message']")?.textContent?.includes("Credentials were not included"));

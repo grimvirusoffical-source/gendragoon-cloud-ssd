@@ -1,16 +1,16 @@
 /**
  * Bring-your-own storage.
  *
- * Launch providers are S3-compatible (AWS, R2, B2, Wasabi, MinIO), Google
- * Cloud Storage through its S3-interop HMAC keys (no native GCS adapter),
- * and SFTP. Azure Blob, WebDAV, and native GCS are later.
+ * Launch providers are S3-compatible only: AWS, R2, B2, Wasabi, MinIO, and
+ * Google Cloud Storage through its S3 HMAC keys. SFTP, Azure Blob, and WebDAV
+ * are shown as coming soon and are not selectable. There is no native GCS adapter.
  *
- * Billing matches managed workspaces ($5/month, same cap, lapse, and lock).
- * Credentials stay on the device (OS keychain / secure storage). The server
- * stores only provider type, endpoint, and a bucket fingerprint.
- * Ownership of the GenDragoon workspace is still accountHash. The challenge
- * file proves the user controls the bucket; it is not the ownership rule.
+ * Billing matches whatever the server reports for the workspace. Credentials
+ * stay on the device. The server stores only provider type, endpoint, and a
+ * bucket fingerprint. Ownership of the GenDragoon workspace is still accountHash.
  */
+
+import { ApiError } from "./api/errors.js";
 
 export const LAUNCH_BYO_PROVIDERS = Object.freeze([
   { id: "aws", label: "Amazon S3", protocol: "s3" },
@@ -19,14 +19,31 @@ export const LAUNCH_BYO_PROVIDERS = Object.freeze([
   { id: "wasabi", label: "Wasabi", protocol: "s3" },
   { id: "minio", label: "MinIO", protocol: "s3" },
   { id: "gcs-s3", label: "Google Cloud Storage (S3-compatible HMAC)", protocol: "s3" },
-  { id: "sftp", label: "SFTP (VPS)", protocol: "sftp" },
 ] as const);
 
-/** Documented only. Not selectable at launch. */
-export const LATER_BYO_PROVIDERS = Object.freeze(["azure-blob", "webdav", "gcs-native"] as const);
+/** Disabled in Connect Storage. Not sent as a launch provider. */
+export const COMING_SOON_BYO_PROVIDERS = Object.freeze([
+  { id: "sftp", label: "SFTP" },
+  { id: "azure-blob", label: "Azure Blob" },
+  { id: "webdav", label: "WebDAV" },
+] as const);
+
+/** Not selectable at launch. Includes the coming-soon row plus native GCS. */
+export const LATER_BYO_PROVIDERS = Object.freeze(["sftp", "azure-blob", "webdav", "gcs-native"] as const);
 
 export type ByoProviderId = (typeof LAUNCH_BYO_PROVIDERS)[number]["id"];
 export type LaterByoProviderId = (typeof LATER_BYO_PROVIDERS)[number];
+
+export const BYO_UNSUPPORTED_MESSAGE =
+  "This storage provider is not supported yet. SFTP, Azure, and WebDAV are coming soon.";
+
+/**
+ * Fallback copy only. The server does not return 409 `byo_unverifiable`.
+ * A provider it will not register, including SFTP, returns 422
+ * `byo_provider_unsupported`.
+ */
+export const BYO_UNVERIFIABLE_MESSAGE =
+  "GenDragoon could not verify that you control this bucket.";
 
 export interface StorageProviderManaged {
   kind: "gendragoon";
@@ -58,6 +75,11 @@ export interface ServerByoRegistration {
   bucketFingerprint: string;
 }
 
+export const CHALLENGE_PREFIX = ".gendragoon-challenge/";
+
+/** Presigned GET links for the ownership object expire within this window. */
+export const CHALLENGE_URL_MAX_MS = 15 * 60 * 1000;
+
 export interface ByoChallenge {
   challengeId: string;
   objectKey: string;
@@ -65,9 +87,10 @@ export interface ByoChallenge {
   expiresAt: string;
 }
 
+/** Sent to the server. A presigned GET only. No stored credentials. */
 export interface ByoProof {
   challengeId: string;
-  readBack: string;
+  presignedGetUrl: string;
 }
 
 const CREDENTIAL_KEYS = new Set([
@@ -87,8 +110,32 @@ const CREDENTIAL_KEYS = new Set([
   "secret",
 ]);
 
+const CREDENTIAL_QUERY = new Set([
+  "secret",
+  "password",
+  "passphrase",
+  "secretaccesskey",
+  "sessiontoken",
+  "privatekey",
+  "private_key",
+  "privatekeypem",
+  "token",
+  "apikey",
+  "credentials",
+  "hmacsecret",
+  "x-amz-security-token",
+]);
+
 export function isLaunchProvider(value: string): value is ByoProviderId {
   return LAUNCH_BYO_PROVIDERS.some((provider) => provider.id === value);
+}
+
+export function byoErrorMessage(error: unknown): string {
+  const code = error instanceof ApiError ? error.code : "";
+  if (code === "byo_provider_unsupported") return BYO_UNSUPPORTED_MESSAGE;
+  if (code === "byo_unverifiable") return BYO_UNVERIFIABLE_MESSAGE;
+  if (error instanceof Error && error.message) return error.message;
+  return "Storage setup failed";
 }
 
 export function assertNoCredentialFields(value: unknown, path = "body"): void {
@@ -123,11 +170,8 @@ export function normalizeEndpoint(provider: ByoProviderId, endpoint: string): st
   if (url.username || url.password) {
     throw new Error("Endpoint must not include credentials");
   }
-  const protocol = LAUNCH_BYO_PROVIDERS.find((item) => item.id === provider)?.protocol;
-  if (protocol === "s3") {
-    if (url.protocol !== "https:") throw new Error("S3-compatible endpoints must use https");
-  } else if (url.protocol !== "sftp:") {
-    throw new Error("SFTP endpoints must use sftp");
+  if (!isLaunchProvider(provider) || url.protocol !== "https:") {
+    throw new Error("S3-compatible endpoints must use https");
   }
   url.hash = "";
   url.search = "";
@@ -156,35 +200,99 @@ export async function toServerByoRegistration(input: {
   };
 }
 
-export interface ByoProbe {
+export function challengeObjectKey(nonce: string): string {
+  if (!nonce || nonce.length > 200 || /[^A-Za-z0-9_-]/.test(nonce)) {
+    throw new Error("Challenge nonce is invalid");
+  }
+  return `${CHALLENGE_PREFIX}${nonce}`;
+}
+
+export interface ByoObjectWriter {
   write(key: string, body: string): Promise<void>;
-  read(key: string): Promise<string>;
-  remove(key: string): Promise<void>;
+  /** Short-lived GET for exactly `key`, signed on the device. */
+  presignGet(key: string, expiresInMs: number): Promise<string>;
 }
 
 /**
- * Write the server nonce, read it back, then delete the probe object.
- * The server compares readBack to the nonce it generated. The workspace
- * stays inactive until that verification succeeds.
+ * Every registration runs a new challenge. A previous proof is not reused,
+ * including when the same bucket is connected again.
  */
-export async function performOwnershipProof(
-  probe: ByoProbe,
-  challenge: Pick<ByoChallenge, "objectKey" | "nonce">,
-): Promise<{ readBack: string; cleaned: boolean }> {
-  await probe.write(challenge.objectKey, challenge.nonce);
-  let readBack = "";
-  try {
-    readBack = await probe.read(challenge.objectKey);
-  } finally {
-    await probe.remove(challenge.objectKey);
-  }
-  return { readBack, cleaned: true };
+export function registrationRequiresChallenge(): boolean {
+  return true;
 }
 
-export function proofMatches(challenge: Pick<ByoChallenge, "nonce">, readBack: string): boolean {
-  return readBack === challenge.nonce;
+/**
+ * Write `.gendragoon-challenge/<nonce>` with device credentials, then return
+ * a presigned GET for that object. The returned body is what the server receives.
+ */
+export async function performOwnershipChallenge(input: {
+  challengeId: string;
+  nonce: string;
+  writer: ByoObjectWriter;
+  now?: number;
+}): Promise<ByoProof> {
+  const objectKey = challengeObjectKey(input.nonce);
+  await input.writer.write(objectKey, input.nonce);
+  const presignedGetUrl = await input.writer.presignGet(objectKey, CHALLENGE_URL_MAX_MS);
+  assertChallengeGetUrl(presignedGetUrl, objectKey, input.now ?? Date.now());
+  const proof: ByoProof = { challengeId: input.challengeId, presignedGetUrl };
+  assertNoCredentialFields(proof);
+  return proof;
+}
+
+export function assertChallengeGetUrl(value: string, objectKey: string, now = Date.now()): void {
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    throw new Error("Challenge URL must be https");
+  }
+  if (url.protocol !== "https:") throw new Error("Challenge URL must be https");
+  if (url.username || url.password) throw new Error("Challenge URL must not include credentials");
+  for (const key of url.searchParams.keys()) {
+    if (CREDENTIAL_QUERY.has(key.toLowerCase())) {
+      throw new Error("Challenge URL must not include credentials");
+    }
+  }
+  const path = decodeURIComponent(url.pathname).replace(/\/+$/, "");
+  if (!path.endsWith(`/${objectKey}`)) {
+    throw new Error("Challenge URL must point at exactly the challenge object");
+  }
+  const ttl = presignTtlMs(url, now);
+  if (ttl === null || ttl <= 0 || ttl > CHALLENGE_URL_MAX_MS) {
+    throw new Error("Challenge URL must be a short-lived presigned GET");
+  }
 }
 
 export function byoMayActivate(serverVerified: boolean): boolean {
   return serverVerified === true;
+}
+
+function presignTtlMs(url: URL, now: number): number | null {
+  const expires = url.searchParams.get("X-Amz-Expires") ?? url.searchParams.get("X-Goog-Expires");
+  const date = url.searchParams.get("X-Amz-Date") ?? url.searchParams.get("X-Goog-Date");
+  if (expires && date) {
+    const seconds = Number(expires);
+    const start = parseAmzDate(date);
+    if (!Number.isFinite(seconds) || start === null) return null;
+    return start + seconds * 1000 - now;
+  }
+  const absolute = url.searchParams.get("Expires");
+  if (!absolute) return null;
+  const stamp = Number(absolute);
+  if (!Number.isFinite(stamp)) return null;
+  const ms = stamp > 10_000_000_000 ? stamp : stamp * 1000;
+  return ms - now;
+}
+
+function parseAmzDate(value: string): number | null {
+  const match = /^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})Z$/.exec(value);
+  if (!match) return null;
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const hour = Number(match[4]);
+  const minute = Number(match[5]);
+  const second = Number(match[6]);
+  return Date.UTC(year, month - 1, day, hour, minute, second);
 }

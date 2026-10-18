@@ -145,21 +145,34 @@ describe("GenDragoonClient", () => {
             }],
           });
         }
-        if (init?.method === "DELETE") return jsonResponse(202, { jobId: "job-1", status: "accepted" });
-        return jsonResponse(200, { jobId: "job-1", status: "succeeded", confirmation: "deleted", firebaseUserDeleted: true });
+        if (init?.method === "DELETE") return jsonResponse(202, { jobId: "job-1" });
+        return jsonResponse(200, { jobId: "job-1", status: "done", confirmation: "deleted", firebaseUserDeleted: true });
       },
     });
     const links = await client.storageUrls("ws", { operations: [{ op: "download", oid: "oid" }] });
     expect(links.access).toBe("read-only");
     expect(seen[0]?.url).toBe("https://api.example.test/v2/workspaces/ws/storage-urls");
-    await expect(client.deleteAccount({ reauthenticatedAt: new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString() })).rejects.toMatchObject({
-      code: "REAUTH_REQUIRED",
+    await expect(client.deleteAccount({ reauthenticatedAt: new Date(Date.now() - 6 * 60 * 1000).toISOString() })).rejects.toMatchObject({
+      status: 401,
+      code: "reauth_required",
+    });
+    const staleServer = new GenDragoonClient({
+      baseUrl: "https://api.example.test",
+      getToken: () => "fresh-token",
+      fetch: async () => jsonResponse(401, { error: "sign in again", code: "reauth_required" }),
+    });
+    await expect(staleServer.deleteAccount({ reauthenticatedAt: new Date().toISOString() })).rejects.toMatchObject({
+      status: 401,
+      code: "reauth_required",
+      message: expect.stringMatching(/5 minutes/),
     });
     const accepted = await client.deleteAccount({ reauthenticatedAt: new Date().toISOString() });
-    expect(accepted).toEqual({ jobId: "job-1", status: "accepted" });
-    expect(seen.some((call) => call.method === "DELETE" && call.url === "https://api.example.test/v2/account")).toBe(true);
+    expect(accepted).toEqual({ jobId: "job-1" });
+    const deleted = seen.find((call) => call.method === "DELETE");
+    expect(deleted?.url).toBe("https://api.example.test/v2/account");
+    expect(deleted?.body).toEqual({ confirm: "DELETE" });
     const status = await client.deletionStatus("job-1");
-    expect(status.status).toBe("succeeded");
-    expect(seen.at(-1)?.url).toBe("https://api.example.test/v2/account/deletion/job-1");
+    expect(status.status).toBe("done");
+    expect(seen.at(-1)?.url).toBe("https://api.example.test/v2/account/deletions/job-1");
   });
 });
