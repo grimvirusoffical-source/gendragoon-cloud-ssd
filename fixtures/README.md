@@ -8,6 +8,8 @@ From `native/Backend`:
 npm run fixtures
 ```
 
-The script starts the app with test doubles for Firestore and Cloud Storage, sends real requests, and writes one JSON file per case as `fixtures/<area>/<case>.json`. Each file is `{request, response}`. Tokens in request headers are `<redacted>`.
+The script starts the app with test doubles for Firestore, Stripe, and Cloud Storage, sends real requests, and writes one JSON file per case as `fixtures/<area>/<case>.json`. Each file is `{request, response}`. Tokens in request headers are `<redacted>`.
 
 Error codes are in `error` (never `code`).
+
+Workspace, lock, merge, ownership, and BYO request bodies use only the fields listed for that route under Request fields in `native/Backend/docs/API-workspace-policy.md`. `byo/verify-missing-url` sends an empty body. Every other `byo/verify-*` request sends `{presignedUrl}`.

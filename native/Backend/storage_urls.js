@@ -50,23 +50,28 @@ async function defaultSign({bucket,objectPath,op,expiresAt,extensionHeaders}){
   ...(extensionHeaders?{extensionHeaders}:{})});
  return url;
 }
-// Lock seam. fix/backend-workspace-policy (not merged) exports summarizeProjects.
-// Until that module is on this branch, callers inject isWriteLocked or the
-// workspace record's locked/uploadsBlocked flags are honored.
+// GCS generations are int64 and can pass 2^53. A decimal string is kept
+// exactly. A safe integer is accepted and stringified.
+function generationToken(value){
+ if(typeof value==="number"&&Number.isSafeInteger(value)&&value>=0)return String(value);
+ if(typeof value==="string"&&/^[0-9]+$/.test(value)&&value.length<=20)return value;
+ return null;
+}
+// Real workspace_policy lock. isWriteLocked remains a test seam and, when it
+// returns true, still produces PR #5's lock body.
 async function writeLocked(deps,ctx){
- if(typeof deps.isWriteLocked==="function")return !!await deps.isWriteLocked(ctx);
- let policy=null;
- try{policy=require("./workspace_policy");}
- catch(error){if(error.code!=="MODULE_NOT_FOUND")throw error;}
- if(policy&&typeof policy.listAccountProjects==="function"&&typeof policy.summarizeProjects==="function"){
-  const projects=await policy.listAccountProjects(deps.db,ctx.accountHash);
-  if(Array.isArray(projects)){
-   const summary=policy.summarizeProjects(projects);
-   return !!(summary&&(summary.locked||summary.uploadsBlocked));
-  }
+ const policy=require("./workspace_policy");
+ if(typeof deps.isWriteLocked==="function"){
+  const injected=await deps.isWriteLocked(ctx);
+  if(!injected)return null;
+  if(injected&&typeof injected==="object"&&injected.error==="workspace_lock")return injected;
+  return {error:"workspace_lock",reason:"over_cap",overBy:0,unpaidWorkspaceIds:[]};
  }
- const workspace=ctx.workspace||{};
- return workspace.locked===true||workspace.uploadsBlocked===true;
+ const projects=await policy.listAccountProjects(deps.db,ctx.accountHash);
+ if(!Array.isArray(projects))return policy.LIST_UNAVAILABLE_LOCK;
+ const summary=policy.summarizeProjects(projects);
+ if(!(summary&&(summary.locked||summary.uploadsBlocked)))return null;
+ return policy.lockBody(summary);
 }
 async function loadWorkspace(db,accountHash,id){
  if(id==="free"){
@@ -90,8 +95,8 @@ async function issueStorageUrls(deps,req){
  const wantsManifest=body.objects.includes("manifest");
  let generationMatch=null;
  if(body.op==="put"&&wantsManifest){
-  if(!Number.isSafeInteger(body.ifGeneration)||body.ifGeneration<0)throw refusal(400,"manifest_generation_required");
-  generationMatch=String(body.ifGeneration);
+  generationMatch=generationToken(body.ifGeneration);
+  if(generationMatch===null)throw refusal(400,"manifest_generation_required");
  }
  const accountHash=deps.hash(req.user.uid);
  if(typeof accountHash!=="string"||!/^[a-f0-9]{64}$/.test(accountHash))throw refusal(400,"invalid_account");
@@ -100,7 +105,11 @@ async function issueStorageUrls(deps,req){
  if(!workspace)throw refusal(404,"not_found");
  if(workspace.data.kind==="byo")throw refusal(409,"byo_external");
  const locked=await writeLocked(deps,{db:deps.db,accountHash,workspace:workspace.data,workspaceId:workspace.id});
- if((body.op==="put"||body.op==="delete")&&locked)throw refusal(423,"workspace_lock");
+ if((body.op==="put"||body.op==="delete")&&locked){
+  const error=refusal(423,"workspace_lock");
+  error.body=locked;
+  throw error;
+ }
  const name=bucketName(deps.bucket,env);
  const expiresMs=(typeof deps.now==="function"?deps.now():Date.now())+URL_TTL_MS;
  if(expiresMs-(typeof deps.now==="function"?deps.now():Date.now())>URL_TTL_MS)throw refusal(500,"signing_failed");
@@ -143,7 +152,7 @@ function registerStorageUrls(deps){
   }catch(error){
    const status=Number.isInteger(error?.status)?error.status:500;
    if(status>=500)console.error("storage url request failed",error?.code||"storage_url_failed");
-   res.status(status).json({error:error?.code||"storage_url_failed"});
+   res.status(status).json(error?.body||{error:error?.code||"storage_url_failed"});
   }
  });
 }

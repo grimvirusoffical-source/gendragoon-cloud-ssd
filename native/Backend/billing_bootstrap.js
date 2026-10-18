@@ -10,7 +10,7 @@ const HOOK_ID='we_1UQgwBIpkwStQhHM7YZVubdd';
 const PUBLIC='https://gendragoon-free-10068843866.us-central1.run.app';
 function expectedCatalog(){
  const out={};for(const interval of ['month','year']){const factor=interval==='year'?10:1;
-  out['workspace|'+interval]={cents:500*factor,interval};out['byo|'+interval]={cents:1000*factor,interval};
+  out['workspace|'+interval]={cents:500*factor,interval};out['byo|'+interval]={cents:500*factor,interval};
   for(const [tier,plan]of Object.entries(STORAGE))for(const mode of ['standard','bundle'])out['storage|'+mode+'|'+tier+'|'+interval]={cents:plan[mode]*factor,interval};
   for(const [tier,plan]of Object.entries(PERFORMANCE))out['performance|'+tier+'|'+interval]={cents:plan.cents*factor,interval};
  }

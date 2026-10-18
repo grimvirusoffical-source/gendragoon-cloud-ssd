@@ -18,7 +18,7 @@ Requests that include any of these fields are rejected with `400 {"error":"plain
 
 Firebase ID token required (Google provider, current Terms). API keys cannot call this route. The workspace is loaded only under the caller's `accountHash`. A workspace that belongs to another account is `404 {"error":"not_found"}`. The handler does not look up other accounts.
 
-The request is `{op, objects:[ids]}`. `op` is `get`, `put`, or `delete`. `objects` is 1 to 32 ids. A `put` that includes `manifest` also sends `ifGeneration`: `0` creates the object only, and any other non-negative integer is the current GCS generation.
+The request is `{op, objects:[ids]}`. `op` is `get`, `put`, or `delete`. `objects` is 1 to 32 ids. A `put` that includes `manifest` also sends `ifGeneration`. `0` or `"0"` creates the object only. Any other value is the current GCS generation. GCS generations are int64 and can be larger than `2^53`, so `ifGeneration` may be a safe integer or a decimal string of up to 20 digits. The client must send back exactly the `generation` string from the previous `get`.
 
 `put`:
 
@@ -77,7 +77,13 @@ The request is `{op, objects:[ids]}`. `op` is `get`, `put`, or `delete`. `object
 }
 ```
 
-`manifest` put. The signed URL includes `x-goog-if-generation-match` set to `ifGeneration`. The client must send that header. GCS returns `412` when the generation does not match, so two devices cannot silently overwrite the name list.
+`manifest` put. The signed URL includes `x-goog-if-generation-match` set to the exact `ifGeneration` string. The client must send that header with that exact value. GCS returns `412` when the generation does not match, so two devices cannot silently overwrite the name list.
+
+A generation past `2^53` is sent as a decimal string:
+
+```json
+{"op":"put","objects":["manifest"],"ifGeneration":"9223372036854775807"}
+```
 
 ```json
 {"op":"put","objects":["manifest"],"ifGeneration":0}
@@ -96,7 +102,7 @@ The request is `{op, objects:[ids]}`. `op` is `get`, `put`, or `delete`. `object
 }
 ```
 
-`manifest` get also returns the object's current `generation` from its metadata. A missing object is generation `"0"`.
+`manifest` get also returns the object's current `generation` from its metadata, always as a decimal string. A missing object is generation `"0"`. Send that string back unchanged as `ifGeneration` on the next put.
 
 ```json
 {"op":"get","objects":["manifest"]}
@@ -145,12 +151,12 @@ Expiry is 15 minutes (`expiresAt - now <= 900000` ms). Upload URLs are signed wi
 | Condition | Response |
 | --- | --- |
 | Workspace not under the caller's account | `404 not_found` |
-| Workspace locked and `op` is `put` or `delete` | `423 {"error":"workspace_lock"}` |
+| Workspace locked and `op` is `put` or `delete` | `423 {"error":"workspace_lock","reason","overBy","unpaidWorkspaceIds"}` |
 | Workspace locked and `op` is `get` | `200`, read-only URL |
 | BYO / customer-owned workspace | `409 byo_external` (this route never signs a customer bucket) |
 | Id contains a path, `.`, or a filename | `400 invalid_object_id` |
 
-The lock check is an interface, `isWriteLocked({db, accountHash, workspace, workspaceId})`. When `workspace_policy.js` from `fix/backend-workspace-policy` is deployed, the route uses `listAccountProjects` and `summarizeProjects` (`locked` or `uploadsBlocked`). That module is not on this branch. Until then the stub treats `workspace.locked === true` or `workspace.uploadsBlocked === true` as locked, and tests inject `isWriteLocked`.
+The lock check uses `workspace_policy.listAccountProjects` and `summarizeProjects`. A locked or upload-blocked summary returns `lockBody`: `error`, `reason`, `overBy`, and `unpaidWorkspaceIds`. A workspace list that cannot be read returns `reason: "scope_unavailable"`.
 
 ## At-rest bucket settings
 

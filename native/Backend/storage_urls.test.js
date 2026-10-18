@@ -14,7 +14,9 @@ function hash(value){return crypto.createHash("sha256").update("gd-v1:"+value).d
 function harness({locked=false,present=true,foreign=false,isWriteLocked,generation="17"}={}){
  const prefix="customer/"+owner+"/managed/"+wid+"/objects/";
  const rows=[];
- if(present)rows.push(["gd_accounts/"+owner+"/workspaces/"+wid,{kind:"paid",accountHash:owner,locked,provisioned:true}]);
+ const row={kind:"paid",accountHash:owner,provisioned:true};
+ if(locked)Object.assign(row,{workspaceFeeModel:"monthly",workspaceFeeStatus:"past_due",workspaceFeePaid:false,paidThroughMs:1});
+ if(present)rows.push(["gd_accounts/"+owner+"/workspaces/"+wid,row]);
  if(foreign)rows.push(["gd_accounts/"+other+"/workspaces/"+wid,{kind:"paid",accountHash:other}]);
  const db=memoryFirestore(rows);
  const signed=[];
@@ -75,10 +77,14 @@ test("a locked workspace refuses upload with 423 and still signs a read-only dow
  const upload=await post(h.app,{op:"put",objects:[objectId]});
  assert.equal(upload.status,423);
  assert.equal(upload.body.error,"workspace_lock");
+ assert.equal(upload.body.reason,"lapsed");
+ assert.equal(upload.body.overBy,0);
+ assert.deepEqual(upload.body.unpaidWorkspaceIds,[wid]);
  assert.equal(h.signed.length,0);
  const removed=await post(h.app,{op:"delete",objects:[objectId]});
  assert.equal(removed.status,423);
  assert.equal(removed.body.error,"workspace_lock");
+ assert.equal(removed.body.reason,"lapsed");
  assert.equal(h.signed.length,0);
  const download=await post(h.app,{op:"get",objects:[objectId]});
  assert.equal(download.status,200);
@@ -165,17 +171,20 @@ test("manifest is the reserved encrypted name list and other ids stay validated"
  const replaced=await post(h.app,{op:"put",objects:["manifest"],ifGeneration:42});
  assert.equal(replaced.status,200);
  assert.deepEqual(h.signed[1].opts.extensionHeaders,{"x-goog-if-generation-match":"42"});
+ const wide=await post(h.app,{op:"put",objects:["manifest"],ifGeneration:"9223372036854775807"});
+ assert.equal(wide.status,200);
+ assert.deepEqual(h.signed[2].opts.extensionHeaders,{"x-goog-if-generation-match":"9223372036854775807"});
  const read=await post(h.app,{op:"get",objects:["manifest"]});
  assert.equal(read.status,200);
  assert.equal(read.body.urls[0].method,"GET");
  assert.equal(read.body.urls[0].generation,"42");
- assert.equal(h.signed[2].name,h.prefix+"manifest");
- assert.equal(h.signed[2].opts.extensionHeaders,undefined);
+ assert.equal(h.signed[3].name,h.prefix+"manifest");
+ assert.equal(h.signed[3].opts.extensionHeaders,undefined);
  const removed=await post(h.app,{op:"delete",objects:["manifest"]});
  assert.equal(removed.status,200);
  assert.equal(removed.body.urls[0].method,"DELETE");
- assert.equal(h.signed[3].name,h.prefix+"manifest");
- assert.equal(h.signed[3].opts.action,"delete");
+ assert.equal(h.signed[4].name,h.prefix+"manifest");
+ assert.equal(h.signed[4].opts.action,"delete");
  const bad=await post(h.app,{op:"get",objects:["notes.txt"]});
  assert.equal(bad.status,400);
  assert.equal(bad.body.error,"invalid_object_id");
@@ -188,5 +197,7 @@ test("a locked workspace refuses deleting the manifest",async()=>{
  const res=await post(h.app,{op:"delete",objects:["manifest"]});
  assert.equal(res.status,423);
  assert.equal(res.body.error,"workspace_lock");
+ assert.equal(res.body.reason,"lapsed");
+ assert.deepEqual(res.body.unpaidWorkspaceIds,[wid]);
  assert.equal(h.signed.length,0);
 });
