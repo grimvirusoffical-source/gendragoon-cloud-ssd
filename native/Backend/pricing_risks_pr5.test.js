@@ -378,8 +378,13 @@ test("DELETE returns 409 checkout_open and does not expire the session",async()=
 test("DELETE purges file records once the workspace is idle",async()=>{
  const f=fixture();
  await f.create(1,"Free");f.tick();await f.create(2,"Idle");
- f.db.rows.set(f.path(idFor(2))+"/files/f1",{name:"a.txt",sizeBytes:4,objectKey:"customer/"+owner+"/managed/"+idFor(2)+"/files/f1"});
- const r=await f.service.remove(f.req,idFor(2));
+ const key="customer/"+owner+"/managed/"+idFor(2)+"/files/f1",objects=new Set([key]);
+ f.db.rows.set(f.path(idFor(2))+"/files/f1",{name:"a.txt",sizeBytes:4,objectKey:key});
+ // Purge fails closed without an object store (N4), so this uses an in-memory one.
+ const service=createProjectService({db:f.db,stamp:()=>Date.now(),hash:()=>owner,stripe:f.stripe,env,ensureCustomer:async()=>"cus_own",
+  objectStore:{async delete(k){objects.delete(k);}}});
+ const r=await service.remove(f.req,idFor(2));
+ assert.equal(objects.size,0);
  assert.equal(r.deleted,true);
  assert.equal(f.db.rows.get(f.path(idFor(2))+"/files/f1"),undefined);
  assert.equal(f.record(2),undefined);
@@ -524,7 +529,9 @@ test("makeHosted demotes the previous free workspace onto the monthly fee with g
  assert.deepEqual(priceView(f,inv,2),shown(false,500));
  assert.equal(result.demoted.requiresCheckout,true);
  assert.equal(result.demoted.graceEndsAt,result.demoted.paidThroughMs+LAPSE_GRACE_MS);
- assert.ok(result.demoted.paidThroughMs>=before+LAPSE_GRACE_MS-5);
+ // 3 days in total from the demotion (N8): paid through now, locked at now + LAPSE_GRACE_MS.
+ assert.ok(result.demoted.paidThroughMs>=before&&result.demoted.paidThroughMs<=Date.now());
+ assert.ok(result.demoted.graceEndsAt-before<=LAPSE_GRACE_MS+5000);
  assert.equal(typeof result.demoted.checkoutUrl,"string");
  assert.equal(f.record(2).workspaceFeeCheckoutSessionId,"cs_month");
  assert.equal(inv.policy.locked,false);

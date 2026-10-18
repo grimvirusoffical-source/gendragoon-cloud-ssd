@@ -1,7 +1,7 @@
 "use strict";
 // QA risk tests for PR #5 @ 0715b1a: subscription-cancel outbox, workspace purge, grace, invariants.
 // Local only: in-memory Firestore, recording Stripe double, in-memory object store. No network, no credentials.
-// BUG(pr5-0715b1a): known defect, node:test todo so CI stays green until fixed.
+// Former BUG(pr5-0715b1a) todos: fixed on fix/backend-workspace-policy, all required now.
 const test=require("node:test"),assert=require("node:assert/strict"),crypto=require("node:crypto");
 const fs=require("node:fs"),path=require("node:path");
 const express=require("express");
@@ -11,7 +11,6 @@ const {cancelParams}=require("./billing_jobs");
 const {LAPSE_GRACE_MS}=require("./workspace_policy");
 const {registerBillingV2}=require("./billing_v2");
 
-const BUG="BUG(pr5-0715b1a) expected-fail";
 const owner=crypto.createHash("sha256").update("outbox-risk-owner").digest("hex");
 const idFor=n=>"33333333-3333-4333-8333-"+String(n).padStart(12,"0");
 const AFTER=Date.parse("2026-10-18T00:00:00Z");
@@ -67,11 +66,11 @@ async function paidSecond(f,svc=f.service){
 }
 
 // ---------- Stripe parameters ----------
-test("cancel params are valid for Stripe subscriptions.cancel (only cancellation_details, expand, invoice_now, prorate)",{todo:BUG+": proration_behavior is not a cancel parameter; stripe-mock 0.206 returns 400 and the sweep classifies it as transient"},()=>{
+test("cancel params are valid for Stripe subscriptions.cancel (only cancellation_details, expand, invoice_now, prorate)",()=>{
  const allowed=new Set(["cancellation_details","expand","invoice_now","prorate"]);
  assert.deepEqual(Object.keys(cancelParams()).filter(k=>!allowed.has(k)),[]);
 });
-test("a 400 invalid_request_error on cancel alerts immediately instead of burning 5 retries",{todo:BUG},async()=>{
+test("a 400 invalid_request_error on cancel alerts immediately instead of burning 5 retries",async()=>{
  const {sweepSubscriptionCancels}=require("./billing_jobs");
  const alerts=[];
  const stripe={subscriptions:{cancel:async()=>{throw stripeErr({type:"StripeInvalidRequestError",rawType:"invalid_request_error",code:"parameter_unknown",statusCode:400});}}};
@@ -89,7 +88,7 @@ test("outbox: a crash between commit and the Stripe call leaves the cancel durab
  assert.equal(q.length,1);assert.equal(q[0].subscriptionId,"sub_ws_2");assert.equal(q[0].status,"pending");
  assert.equal(f.record(2).projectFeeStatus,"free");
 });
-test("outbox: after a restart something sweeps the queue without waiting for another user mutation",{todo:BUG+": sweepAccount only runs inline after remove/registerByo/makeHosted/merge/webhook; no scheduled or exported sweep"},async()=>{
+test("outbox: after a restart something sweeps the queue without waiting for another user mutation",async()=>{
  const f=fixture({stripe:{prices:{retrieve:async()=>({...price})}}});
  await paidSecond(f);await f.service.remove(f.req,idFor(1));
  const restarted=f.make(stripeDouble());
@@ -123,7 +122,7 @@ test("outbox: duplicate runs reuse one idempotency key, so Stripe cancels and cr
  assert.equal(stripe.effects.filter(e=>e[1]==="sub_ws_2").length,1);
  void cancelGate;void f;
 });
-test("outbox: a sweep never drops a cancel that another request queued or retried meanwhile (lost update)",{todo:BUG+": sweepAccount reads the account outside a transaction and writes its stale list back with set(merge)"},async()=>{
+test("outbox: a sweep never drops a cancel that another request queued or retried meanwhile (lost update)",async()=>{
  let release;const gate=new Promise(r=>{release=r;});let first=true;
  const stripe=stripeDouble({cancelImpl:async id=>{
   if(id==="sub_ws_2"&&first){first=false;await gate;}                       // sweep #1 is slow on sub_ws_2
@@ -149,7 +148,7 @@ test("race: invoice.paid for the promoted workspace that lands before the cancel
  await f.service.reconcileWorkspaceFee(sub(2),{eventType:"invoice.paid",invoice:inv(in30()+30*86400)});
  assert.equal(f.record(2).projectFeeStatus,"free");assert.notEqual(f.record(2).workspaceFeeModel,"monthly");
 });
-test("race: a stale customer.subscription.deleted for the OLD subscription cannot cancel the NEW one after promote->demote",{todo:BUG+": reconcileWorkspaceFee never checks sub.id against workspaceFeeSubscriptionId"},async()=>{
+test("race: a stale customer.subscription.deleted for the OLD subscription cannot cancel the NEW one after promote->demote",async()=>{
  const stripe=stripeDouble();const f=fixture({stripe});
  await paidSecond(f);                                        // 1 free, 2 paid sub_ws_2
  await f.service.registerByo(f.req,idFor(1),byoBody);        // promote 2 -> free, cancel sub_ws_2 queued+swept
@@ -162,7 +161,7 @@ test("race: a stale customer.subscription.deleted for the OLD subscription canno
  assert.equal(f.record(2).workspaceFeeSubscriptionId,"sub_ws_2_new");
  assert.equal(f.record(2).workspaceFeeStatus,"active");
 });
-test("promote then immediately demote: old subscription cancelled once, demoted gets a new Checkout and a 3-day grace",{todo:BUG+": makeHosted sets paidThroughMs=now+3d and the lapse clock adds another 3d (6 days total)"},async()=>{
+test("promote then immediately demote: old subscription cancelled once, demoted gets a new Checkout and a 3-day grace",async()=>{
  const stripe=stripeDouble();const f=fixture({stripe});
  await paidSecond(f);
  await f.service.registerByo(f.req,idFor(1),byoBody);
@@ -178,7 +177,7 @@ test("promote then immediately demote: old subscription cancelled once, demoted 
 });
 
 // ---------- Delete / purge ----------
-test("delete during grace: a demoted workspace with an unpaid Checkout can still be deleted",{todo:BUG+": busyReason treats any stored CheckoutSessionId + unpaid status as checkout_open, forever"},async()=>{
+test("delete during grace: a demoted workspace with an unpaid Checkout can still be deleted",async()=>{
  const f=fixture();
  await f.create(1,"Oldest");f.tick();await f.create(2,"Second");
  await f.service.registerByo(f.req,idFor(1),byoBody);
@@ -188,7 +187,7 @@ test("delete during grace: a demoted workspace with an unpaid Checkout can still
  assert.equal(reason,null,"409 workspace_busy reason="+reason);
  assert.equal(r.deleted,true);
 });
-test("delete: an abandoned (expired) Checkout on an unpaid second workspace does not block delete forever",{todo:BUG},async()=>{
+test("delete: an abandoned (expired) Checkout on an unpaid second workspace does not block delete forever",async()=>{
  const stripe=stripeDouble();
  stripe.checkout.sessions.retrieve=async id=>({id,status:"expired",metadata:{}});
  const f=fixture({stripe});
@@ -212,12 +211,12 @@ test("delete during BYO grace (no Checkout started) succeeds and cancels nothing
  assert.equal(r.deleted,true);
  assert.equal(stripe.effects.length,0);
 });
-test("production wiring passes an object store to the project service, so delete purges objects",{todo:BUG+": billing_v2.js:62 createProjectService has no objectStore; purge 'objects' step returns early and is marked done"},()=>{
+test("production wiring passes an object store to the project service, so delete purges objects",()=>{
  const src=fs.readFileSync(path.join(__dirname,"billing_v2.js"),"utf8");
  const call=src.match(/createProjectService\(\{([^}]*)\}\)/)[1];
  assert.match(call,/objectStore/);
 });
-test("purge half-done then retry: resumes and finishes",{todo:BUG+": retry re-deletes already-deleted objects; a 404 from the store fails the step forever"},async()=>{
+test("purge half-done then retry: resumes and finishes",async()=>{
  const store=memStore({failOnDeleteNumber:2});
  const f=fixture({objectStore:store});
  await f.create(1,"Free");f.tick();await f.create(2,"Files");
@@ -321,7 +320,7 @@ test("invariant on every priced response: feeWaived boolean present, and cents==
 });
 
 // ---------- No price literals in server code ----------
-test("no $5 / 500-cent literals in server modules (price comes from catalog.WORKSPACE_FEE_CENTS)",{todo:BUG+": gpu_catalog.js:24, billing_bootstrap.js:13/38/50, projects.js:185-299 user-facing \"$5\" strings"},()=>{
+test("no $5 / 500-cent literals in server modules (price comes from catalog.WORKSPACE_FEE_CENTS)",()=>{
  const hits=[];
  for(const file of fs.readdirSync(__dirname).filter(x=>x.endsWith(".js")&&!x.includes("test")&&x!=="catalog.js")){
   fs.readFileSync(path.join(__dirname,file),"utf8").split("\n").forEach((line,i)=>{

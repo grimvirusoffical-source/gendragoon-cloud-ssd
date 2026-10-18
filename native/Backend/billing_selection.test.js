@@ -60,7 +60,7 @@ test('unknown legacy creation intents receive an update requirement before any w
  const f=await fixture(t),before=structuredClone(f.rows);
  for(const body of [selection,{...selection,intentId:undefined},{name:selection.name,mode:'byo',interval:'year',intentId:selection.intentId}]){
    const result=await f.post('/v2/workspaces/draft',body);assert.equal(result.status,426);
-   assert.equal(result.body.error,'CLIENT_UPDATE_REQUIRED');assert.match(result.body.message,/Update GenDragoon.*\$5 once/);
+   assert.equal(result.body.error,'CLIENT_UPDATE_REQUIRED');assert.match(result.body.message,/Update GenDragoon.*\$5 a month/);
    assert.equal(result.body.workspaceId,undefined);assert.equal(result.body.url,undefined);
  }
  assert.deepEqual(f.rows,before);assert.equal(f.created.length,0);assert.equal(f.expired.length,0);
