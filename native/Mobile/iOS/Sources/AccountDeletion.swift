@@ -336,7 +336,8 @@ struct AccountDeletion:Equatable {
     /// Non-empty only. No length or character-set check.
     static func validJob(_ jobId:String)->Bool { !jobId.isEmpty }
     /// Non-empty only. No length or character-set check. Redacted fixture tokens such as `<redacted>` stay valid.
-    static func validToken(_ token:String)->Bool { !token.isEmpty }
+    /// Same as core 4582ae7: empty or whitespace-only never becomes a "Bearer " header.
+    static func validToken(_ token:String)->Bool { !token.trimmingCharacters(in:.whitespacesAndNewlines).isEmpty }
     static func encodeJob(_ jobId:String)->String? {
         guard validJob(jobId) else {return nil}
         var allowed=CharacterSet.alphanumerics

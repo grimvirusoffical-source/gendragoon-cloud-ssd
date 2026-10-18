@@ -1110,6 +1110,26 @@ final class AccountLogicTests: XCTestCase {
         XCTAssertTrue(missing.openSupportMailto)
     }
 
+    func testSupportBlankStatusTokenSendsNothingAndOpensMailto() async {
+        let dead=fixture("status-failed-not-retryable")
+        let job=dead.jobId ?? ""
+        for blank in ["","   ","\t\n "] {
+            let call=DeletionSupport.call(jobId:job,savedJobId:job,statusToken:blank,enabled:true)
+            XCTAssertFalse(call.send)
+            XCTAssertNil(call.path)
+            XCTAssertNil(call.authorization)
+            let script=ScriptedDeletionTransport()
+            var flow=AccountDeletion.resume(DeletionReceipt.of(jobId:job,statusToken:blank))
+            await flow.pollThrough(script)
+            XCTAssertEqual(script.calls.count,0)
+            XCTAssertNotEqual(flow.step,.reauth)
+            XCTAssertNotEqual(flow.step,.signedOut)
+            XCTAssertFalse(flow.clearSession)
+            XCTAssertTrue(SupportContact.mailto(jobId:job)?.absoluteString.hasPrefix("mailto:SUPPORT_CONTACT_PLACEHOLDER@invalid") ?? false)
+        }
+        XCTAssertFalse(DeletionSupport.call(jobId:job,savedJobId:job,statusToken:nil,enabled:true).send)
+    }
+
     func testSupportSavedJobReadFailureFallsBackToMailto() {
         let job=fixture("status-failed-not-retryable").jobId ?? ""
         XCTAssertNil(DeletionSupport.savedJob{throw ReplacementFailure.offline})

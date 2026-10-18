@@ -556,7 +556,8 @@ final class AccountActions {
 
     /** Non-empty only. No length or character-set check. Redacted fixture tokens such as {@code <redacted>} stay valid. */
     static boolean validToken(String token){
-        return token!=null&&!token.isEmpty();
+        // Same as core 4582ae7: null, empty or whitespace-only never becomes a "Bearer " header.
+        return token!=null&&!token.trim().isEmpty();
     }
 
     static String encodeJob(String jobId){

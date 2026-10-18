@@ -1106,6 +1106,26 @@ public final class AccountDeletionTest {
         assertTrue(missing.openSupportMailto);
     }
 
+    @Test public void supportBlankStatusTokenSendsNothingAndOpensMailto(){
+        AccountActions.HttpBody dead=fixture("status-failed-not-retryable");
+        for(String blank:new String[]{"","   ","\t\n ",null}){
+            DeletionSupport.Call call=DeletionSupport.call(dead.jobId,dead.jobId,blank,true);
+            assertFalse(call.send);
+            assertNull(call.path);
+            assertNull(call.authorization());
+            // Polling shares the guard: no GET is sent, nothing asks for sign-in.
+            Script script=new Script();
+            AccountDeletion flow=AccountDeletion.resume(DeletionReceipt.of(dead.jobId,blank));
+            flow.pollThrough(script);
+            assertEquals(0,script.calls.size());
+            assertNotEquals(AccountDeletion.Step.REAUTH,flow.step);
+            assertNotEquals(AccountDeletion.Step.SIGNED_OUT,flow.step);
+            assertFalse(flow.clearSession);
+            assertNull(AccountActions.pollCall("/v2/account/deletions/"+dead.jobId,blank));
+            assertTrue(SupportContact.mailto(dead.jobId).startsWith("mailto:SUPPORT_CONTACT_PLACEHOLDER@invalid"));
+        }
+    }
+
     @Test public void supportSavedJobReadFailureFallsBackToMailto(){
         String job=fixture("status-failed-not-retryable").jobId;
         assertNull(DeletionSupport.savedJob(()->{throw new java.security.KeyStoreException("keystore unavailable");}));
