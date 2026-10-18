@@ -1,0 +1,28 @@
+{
+  "name": "gendragoon-apps",
+  "private": true,
+  "type": "module",
+  "version": "0.1.0",
+  "description": "GenDragoon Cloud SSD clients: shared core, Windows desktop, and Red-XAI Updater.",
+  "packageManager": "pnpm@10.33.4",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "typecheck": "pnpm -r --if-present typecheck",
+    "lint": "eslint .",
+    "test": "pnpm -r --if-present test",
+    "build:desktop": "pnpm --filter @gendragoon/desktop build",
+    "screenshots": "pnpm --filter @gendragoon/desktop screenshots"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": ["electron", "esbuild"]
+  },
+  "devDependencies": {
+    "@eslint/js": "9.26.0",
+    "@types/node": "22.15.21",
+    "eslint": "9.26.0",
+    "typescript": "5.8.3",
+    "typescript-eslint": "8.32.1"
+  }
+}

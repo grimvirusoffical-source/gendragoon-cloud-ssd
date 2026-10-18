@@ -1,0 +1,19 @@
+{
+  "name": "@gendragoon/core",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Shared GenDragoon client core: API types, policy, sorting, merge, and BYO.",
+  "exports": {
+    ".": "./src/index.ts",
+    "./sort-map.json": "./data/sort-map.json"
+  },
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "typescript": "5.8.3",
+    "vitest": "3.1.4"
+  }
+}

@@ -1,0 +1,32 @@
+{
+  "name": "@gendragoon/desktop",
+  "version": "0.1.0",
+  "private": true,
+  "description": "GenDragoon Cloud SSD for Windows. The Mac app stays the SwiftUI client.",
+  "author": "GenDragoon",
+  "main": "dist/main.js",
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "build": "vite build && esbuild src/main/main.ts --bundle --platform=node --format=cjs --outfile=dist/main.js --external:electron && esbuild src/main/preload.ts --bundle --platform=node --format=cjs --outfile=dist/preload.js --external:electron",
+    "dist:win": "pnpm build && electron-builder --win nsis --publish never",
+    "screenshots": "vite build && node scripts/capture.mjs"
+  },
+  "dependencies": {
+    "@gendragoon/core": "workspace:*",
+    "@gendragoon/ui": "workspace:*",
+    "@gendragoon/updater": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/react": "18.3.20",
+    "@types/react-dom": "18.3.6",
+    "@vitejs/plugin-react": "4.4.1",
+    "electron": "33.4.11",
+    "electron-builder": "25.1.8",
+    "esbuild": "0.25.4",
+    "puppeteer-core": "24.8.2",
+    "react": "18.3.1",
+    "react-dom": "18.3.1",
+    "typescript": "5.8.3",
+    "vite": "6.3.5"
+  }
+}
