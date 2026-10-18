@@ -1,6 +1,7 @@
 "use strict";
 const crypto=require("node:crypto");
-const {STORAGE,PERFORMANCE,WORKSPACE_FEE_CENTS,validateWorkspaceName}=require("./catalog");
+const {STORAGE,PERFORMANCE,WORKSPACE_FEE_CENTS,WORKSPACE_FEE_LABEL,validateWorkspaceName}=require("./catalog");
+const {gcsObjectStore}=require("./object_store");
 const {GPU,GPU_READY,gpuQuote,tripleBundleQuote}=require("./gpu_catalog");
 const {createProjectService,ProjectError,projectStatus,activatedBasicProject,effectiveStorageQuota,safeProjectId,hasContinuingBilling,isGrandfathered,evaluateLapse,workspacePrice,byoLapsed}=require("./projects");
 const {rejectProviderSecrets}=require("./workspace_policy");
@@ -53,13 +54,44 @@ function effectiveWorkers(workspace){
  return workspace.performanceActive===true && PERFORMANCE[workspace.performanceTier] ?
   Math.max(base,PERFORMANCE[workspace.performanceTier].workers):base;
 }
- function registerBillingV2({app,db,stripe,admin,auth,agreed,hash,prices,env=process.env,byoFetch=null}){
+const BILLING_SWEEP_INTERVAL_MS=5*60*1000;
+let registeredBillingSweep=null;
+// Cloud Run sets K_SERVICE. There a missing object store is a deployment error, not a test.
+function productionRuntime(env){return typeof env?.K_SERVICE==="string"&&env.K_SERVICE.length>0;}
+// The pre-activation router built by billing_bootstrap has an empty secret key. Stripe calls
+// from it would fail as 401 and mark queued cancels permanently failed, so they wait instead.
+function stripeCallsEnabled(env){return !(Object.hasOwn(env||{},"STRIPE_SECRET_KEY")&&!env.STRIPE_SECRET_KEY);}
+function sweepTokenMatches(env,authorization){
+ const expected=typeof env?.BILLING_SWEEP_TOKEN==="string"?env.BILLING_SWEEP_TOKEN:"";
+ const match=/^Bearer ([A-Za-z0-9._~+\/=-]+)$/.exec(typeof authorization==="string"?authorization:"");
+ const presented=match?match[1]:"";
+ return expected.length>=16&&presented.length===expected.length&&
+  crypto.timingSafeEqual(crypto.createHash("sha256").update(expected).digest(),crypto.createHash("sha256").update(presented).digest());
+}
+function sweepRegisteredBillingJobs(){
+ return registeredBillingSweep?registeredBillingSweep():Promise.resolve({swept:0,failed:0,queryFailed:false,registered:false});
+}
+ function registerBillingV2({app,db,stripe,admin,auth,agreed,hash,prices,env=process.env,byoFetch=null,bucket=null,objectStore=null}){
  const stamp=()=>admin.firestore.FieldValue.serverTimestamp();
  const accounts=db.collection("gd_accounts");
  const accRef=req=>accounts.doc(hash(req.user.uid));
  const coll=req=>accRef(req).collection("workspaces");
  const safeWorkspaceId=safeProjectId;
- const projects=createProjectService({db,stamp,hash,stripe,env,prices,ensureCustomer,byoFetch});
+ // Production purges and merges use the real customer bucket. Tests inject a fake store.
+ const store=objectStore||(bucket?gcsObjectStore(bucket):null);
+ const storeRequired=productionRuntime(env),callsEnabled=stripeCallsEnabled(env);
+ const projects=createProjectService({db,stamp,hash,stripe,env,prices,ensureCustomer,byoFetch,objectStore:store,objectStoreRequired:storeRequired,stripeCallsEnabled:callsEnabled});
+ // Cloud Scheduler calls this with Authorization: Bearer $BILLING_SWEEP_TOKEN (at least 16 characters).
+ app.post("/internal/billing-jobs/sweep",async(req,res)=>{
+  res.setHeader("Cache-Control","private, no-store");
+  if(!sweepTokenMatches(env,req.headers?.authorization))return res.status(401).json({error:"unauthorized"});
+  try{
+   const result=await projects.sweepBillingJobs();
+   if(result.queryFailed)return res.status(503).json({error:"unavailable"});
+   res.json({ok:true,swept:result.swept,failed:result.failed});
+  }catch(_){res.status(503).json({error:"unavailable"});}
+ });
+ registeredBillingSweep=()=>projects.sweepBillingJobs();
  function projectError(res,error){
    if(!(error instanceof ProjectError))return res.status(503).json({error:"PROJECT_UNAVAILABLE"});
    const body={error:error.code};
@@ -232,7 +264,7 @@ function effectiveWorkers(workspace){
      if(intent!==undefined&&(typeof intent!=="string"||!(/^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i).test(intent)))
        return res.status(400).json({error:"Invalid checkout intent"});
      const updateRequired=()=>res.status(426).json({error:"CLIENT_UPDATE_REQUIRED",projectFlow:"/v2/projects",
-       message:"Update GenDragoon to create a project in Cloud, then choose it for storage or performance. Each new project after your first costs $"+(WORKSPACE_FEE_CENTS/100)+" once."});
+       message:"Update GenDragoon to create a project in Cloud, then choose it for storage or performance. Each new workspace after your first costs "+WORKSPACE_FEE_LABEL+" a month."});
      // Older clients cannot complete the separate project-activation flow. This
      // compatibility endpoint may resume an existing legacy intent, but never
      // creates a new project or switches a storage purchase into a project fee.
@@ -469,6 +501,6 @@ function effectiveWorkers(workspace){
  }
  return {reconcileSubscription,reconcileAds,effectiveWorkers,projects};
 }
-module.exports={registerBillingV2,storageQuote,performanceQuote,effectiveWorkers,
+module.exports={registerBillingV2,sweepRegisteredBillingJobs,sweepTokenMatches,BILLING_SWEEP_INTERVAL_MS,storageQuote,performanceQuote,effectiveWorkers,
  FREE_GB,FREE_WORKERS,REMOVE_ADS_CENTS,matchesStripePrices,priceKeysStorage,priceKeysPerformance,
  byoQuote,priceKeysBYO,effectiveStorageQuota};

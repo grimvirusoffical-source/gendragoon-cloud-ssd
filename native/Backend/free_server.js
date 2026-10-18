@@ -320,6 +320,15 @@ app.delete("/v1/files/:id",auth,requireWrite,async(req,res)=>{
 });
 function start(port=Number(process.env.PORT||8080)){
  firestore();
+ // Off Cloud Run an in-process timer drains the billing outbox. On Cloud Run CPU is throttled
+ // between requests, so the Cloud Scheduler job in README.md is required there (release blocker).
+ if(!process.env.K_SERVICE){
+  const billing=require("./billing_v2");
+  const timer=setInterval(()=>{
+   Promise.resolve(billing.sweepRegisteredBillingJobs()).catch(()=>console.error("billing_jobs_sweep_failed"));
+  },billing.BILLING_SWEEP_INTERVAL_MS);
+  if(typeof timer.unref==="function")timer.unref();
+ }
  return app.listen(port,()=>console.log("GenDragoon free storage API ready"));
 }
 if(require.main===module)start();

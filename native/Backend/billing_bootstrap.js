@@ -3,14 +3,14 @@
 // This server reads those two resources with its own scoped identity; no key enters a client or chat.
 const express=require('express'),crypto=require('node:crypto');
 const {GoogleAuth}=require('google-auth-library'),Stripe=require('stripe');
-const {installedBilling,STRIPE_API_VERSION}=require('./billing_gateway'),{STORAGE,PERFORMANCE}=require('./catalog');
+const {installedBilling,STRIPE_API_VERSION}=require('./billing_gateway'),{STORAGE,PERFORMANCE,WORKSPACE_FEE_CENTS}=require('./catalog');
 const PROJECT='gendragood-ssd',ACCOUNT='acct_1TqS8eIpkwStQhHM';
 const API_SECRET='gendragoon-stripe-live-api',HOOK_SECRET='gendragoon-stripe-live-webhook';
 const HOOK_ID='we_1UQgwBIpkwStQhHM7YZVubdd';
 const PUBLIC='https://gendragoon-free-10068843866.us-central1.run.app';
 function expectedCatalog(){
  const out={};for(const interval of ['month','year']){const factor=interval==='year'?10:1;
-  out['workspace|'+interval]={cents:500*factor,interval};out['byo|'+interval]={cents:500*factor,interval};
+  out['workspace|'+interval]={cents:WORKSPACE_FEE_CENTS*factor,interval};out['byo|'+interval]={cents:WORKSPACE_FEE_CENTS*factor,interval};
   for(const [tier,plan]of Object.entries(STORAGE))for(const mode of ['standard','bundle'])out['storage|'+mode+'|'+tier+'|'+interval]={cents:plan[mode]*factor,interval};
   for(const [tier,plan]of Object.entries(PERFORMANCE))out['performance|'+tier+'|'+interval]={cents:plan.cents*factor,interval};
  }
@@ -35,7 +35,7 @@ function validateCatalog(prices,products,{projectPriceId}={}){
  if(projectPriceId||projectMatches.length){
    if(projectMatches.length!==1)throw Error('CATALOG_COUNT:one_time|project_creation');
    const p=projectMatches[0],product=productMap.get(typeof p.product==='string'?p.product:p.product?.id);
-   if(!p.active||!p.livemode||p.type!=='one_time'||p.recurring||p.currency!=='usd'||p.unit_amount!==500||
+   if(!p.active||!p.livemode||p.type!=='one_time'||p.recurring||p.currency!=='usd'||p.unit_amount!==WORKSPACE_FEE_CENTS||
       p.billing_scheme!=='per_unit'||product?.active!==true||!/^price_[A-Za-z0-9]+$/.test(p.id))throw Error('CATALOG_VALUE:one_time|project_creation');
    out['one_time|project_creation']=p.id;
  }
@@ -47,7 +47,7 @@ function projectCheckoutReady(catalog,hook){
      'checkout.session.async_payment_failed','charge.refunded','charge.dispute.created'].every(name=>hook.enabled_events?.includes(name)));
 }
 async function validateUnpaidCheckoutTemplates(stripe,catalog){
- const expected={...expectedCatalog(),'one_time|project_creation':{cents:500}};
+ const expected={...expectedCatalog(),'one_time|project_creation':{cents:WORKSPACE_FEE_CENTS}};
  const scenarios=[['one_time|remove_ads'],['workspace|month','storage|standard|100GB|month'],['workspace|year','storage|bundle|1TB|year']];
  if(catalog['one_time|project_creation'])scenarios.push(['one_time|project_creation']);
  for(const keys of scenarios){

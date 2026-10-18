@@ -4,23 +4,32 @@
 // A sweep cancels each one in Stripe and retries from the stored entry.
 const MAX_ATTEMPTS=5;
 
+// Stripe error classes for DELETE /v1/subscriptions/:id.
+// missing: only code resource_missing (the subscription is already gone). A bare 404 is not proof.
+// permanent: 400 invalid_request_error, 401, 403 and any other non-retryable 4xx. Alert once and stop.
+// transient: 429, 5xx, network errors and timeouts. Retried up to MAX_ATTEMPTS.
+const NETWORK_CODES=["ETIMEDOUT","ECONNRESET","ECONNREFUSED","EAI_AGAIN","ENOTFOUND","EPIPE","ABORT_ERR","UND_ERR_CONNECT_TIMEOUT","UND_ERR_SOCKET"];
 function classifyStripeError(error){
  const code=String(error?.code||error?.raw?.code||"");
- const type=String(error?.type||error?.raw?.type||"");
+ const type=String(error?.type||"");
  const rawType=String(error?.rawType||error?.raw?.type||"");
  const status=Number(error?.statusCode||error?.status||error?.raw?.statusCode||0);
  const message=String(error?.message||"");
- if(code==="resource_missing"||status===404)return "missing";
- if(code==="authentication_error"||code==="permission_error"||
-    rawType==="authentication_error"||rawType==="permission_error"||
-    type==="StripeAuthenticationError"||type==="StripePermissionError"||
-    status===401||status===403)return "permanent";
- if(status===429||status>=500||["ETIMEDOUT","ECONNRESET","ECONNREFUSED","EAI_AGAIN","ENOTFOUND","ABORT_ERR"].includes(code)||
-    /timeout|network|socket|ECONN/i.test(message))return "transient";
+ if(code==="resource_missing")return "missing";
+ if(status===429||status>=500||NETWORK_CODES.includes(code)||
+    type==="StripeConnectionError"||type==="StripeAPIError"||type==="StripeRateLimitError"||
+    (!status&&/timeout|timed out|network|socket|ECONN/i.test(message)))return "transient";
+ if(status===401||status===403||status===400||status===404||
+    rawType==="invalid_request_error"||rawType==="authentication_error"||rawType==="permission_error"||
+    type==="StripeInvalidRequestError"||type==="StripeAuthenticationError"||type==="StripePermissionError"||
+    code==="authentication_error"||code==="permission_error")return "permanent";
+ if(status>=400&&status<500&&status!==409)return "permanent";
  return "transient";
 }
 function backoffMs(attempts){return Math.min(60_000,1000*2**Math.max(0,attempts-1));}
-function cancelParams(){return {invoice_now:true,prorate:true,proration_behavior:"create_prorations"};}
+// DELETE /v1/subscriptions/:id accepts cancellation_details, expand, invoice_now and prorate.
+// proration_behavior belongs to subscription updates and makes Stripe answer 400.
+function cancelParams(){return {invoice_now:true,prorate:true};}
 function idempotencyKey(subscriptionId){return "gd-sub-cancel-"+subscriptionId;}
 
 function queueCancel(pending,entry){
@@ -40,8 +49,8 @@ function queueExpire(pending,entry){
 }
 
 // One pass. Call again after nextAttemptAt for transient failures.
-// resource_missing is success. authentication_error and permission_error stop immediately.
-// Other transient errors retry until MAX_ATTEMPTS, then status "failed" and the same alert.
+// resource_missing is success. A permanent error (400, 401, 403) alerts once and stops.
+// Transient errors (429, 5xx, network, timeout) retry until MAX_ATTEMPTS, then "failed" and the same alert.
 async function sweepSubscriptionCancels({stripe,pending=[],now=Date.now(),alert=()=>{},onCleared=async()=>{}}={}){
  const cancel=stripe&&stripe.subscriptions&&stripe.subscriptions.cancel;
  const next=[];
@@ -50,7 +59,8 @@ async function sweepSubscriptionCancels({stripe,pending=[],now=Date.now(),alert=
   if(item.nextAttemptAt&&item.nextAttemptAt>now){next.push(item);continue;}
   if(typeof cancel!=="function"){next.push(item);continue;}
   try{
-   await cancel(item.subscriptionId,cancelParams(),{idempotencyKey:idempotencyKey(item.subscriptionId)});
+   // Called on the resource, not as a detached function: the Stripe SDK needs its `this`.
+   await stripe.subscriptions.cancel(item.subscriptionId,cancelParams(),{idempotencyKey:idempotencyKey(item.subscriptionId)});
    await onCleared(item);
   }catch(error){
    const kind=classifyStripeError(error);

@@ -4,6 +4,7 @@
 // STRIPE_WORKSPACE_MONTHLY_PRICE_ID or the catalog lookup key below.
 const crypto=require("node:crypto");
 const {STORAGE,PERFORMANCE,WORKSPACE_FEE_CENTS}=require("./catalog");
+const {abandonedCheckout}=require("./workspace_purge");
 
 const FREE_WORKSPACES=1;
 const WORKSPACE_FEE_USD_MONTHLY=WORKSPACE_FEE_CENTS/100;
@@ -157,7 +158,8 @@ function workspacePrice(workspace,freeId){
  const monthlyPriceCents=isFree||grandfathered||waived?0:WORKSPACE_FEE_CENTS;
  return {isFree,monthlyPriceCents,feeWaived:waived};
 }
-function countsTowardCap(w){return !["archived","merged"].includes(projectStatus(w));}
+// An abandoned workspace (first Checkout expired, never paid) does not use a slot.
+function countsTowardCap(w){return !["archived","merged"].includes(projectStatus(w))&&!abandonedCheckout(w);}
 function summarizeProjects(projects){
  const list=Array.isArray(projects)?projects:[];
  const current=list.filter(countsTowardCap);

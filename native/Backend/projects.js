@@ -2,7 +2,7 @@
 // Product projects are logical, account-owned workspaces. Archiving never deletes
 // a Google Cloud project, a bucket, a file record, or an object.
 const crypto=require("node:crypto");
-const {STORAGE,PERFORMANCE,validateWorkspaceName}=require("./catalog");
+const {STORAGE,PERFORMANCE,validateWorkspaceName,WORKSPACE_FEE_LABEL}=require("./catalog");
 const policy=require("./workspace_policy");
 const {FREE_WORKSPACES,WORKSPACE_FEE_CENTS,BASE_CAP,RAISED_CAP,QUALIFYING_STORAGE_GB,QUALIFYING_WORKERS,
  monthlyPriceId,isGrandfathered,evaluateLapse,projectStatus,activatedBasicProject,
@@ -11,7 +11,7 @@ const {FREE_WORKSPACES,WORKSPACE_FEE_CENTS,BASE_CAP,RAISED_CAP,QUALIFYING_STORAG
  listAccountProjects,BYO_CHALLENGE_TTL_MS,isByoWorkspace,subscriptionActive,byoLapsed,
  chooseFreeWorkspaceId,freeWorkspaceId,workspacePrice,LAPSE_GRACE_MS}=policy;
 const {queueCancel,queueExpire,sweepSubscriptionCancels,classifyStripeError}=require("./billing_jobs");
-const {ACTIVE_UPLOADS,busyReason,subscriptionIdsOf,checkoutSessionIdsOf,purgeWorkspace}=require("./workspace_purge");
+const {ACTIVE_UPLOADS,busyReason,subscriptionIdsOf,checkoutSessionIdsOf,purgeWorkspace,abandonedCheckout,storedCheckoutExpired,CHECKOUT_SESSION_TTL_MS}=require("./workspace_purge");
 const PROJECT_FEE_CENTS=WORKSPACE_FEE_CENTS,DEFAULT_PROJECT_LIMIT=BASE_CAP,QUALIFIED_PROJECT_LIMIT=RAISED_CAP;
 const BASIC_QUOTA_BYTES=2_000_000_000;
 const UUID=/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
@@ -73,7 +73,7 @@ function validateSelection(raw){
 }
 function hasContinuingBilling(w){return ["storage","performance","byo"].some(k=>w[k+"SubscriptionId"]&&!["canceled","incomplete_expired"].includes(w[k+"Status"]));}
 
-function createProjectService({db,stamp,hash,stripe,env={},prices={},ensureCustomer,objectStore=null,byoFetch=null}){
+function createProjectService({db,stamp,hash,stripe,env={},prices={},ensureCustomer,objectStore=null,objectStoreRequired=false,byoFetch=null,stripeCallsEnabled=true}){
  const accounts=db.collection("gd_accounts");
  const accountRef=owner=>accounts.doc(owner);
  const collection=owner=>accountRef(owner).collection("workspaces");
@@ -125,37 +125,93 @@ function createProjectService({db,stamp,hash,stripe,env={},prices={},ensureCusto
   return effects;
  }
  function effectsPatch(effects){
-  return {pendingSubscriptionCancels:effects.cancels,pendingCheckoutExpires:effects.expires};
+  return {pendingSubscriptionCancels:effects.cancels,pendingCheckoutExpires:effects.expires,
+   billingJobsPending:jobsPending(effects.cancels,effects.expires)};
+ }
+ // The scheduled sweep finds accounts by this flag (single-field equality, no composite index).
+ function jobsPending(cancels,expires){
+  return (cancels||[]).some(item=>item&&item.status==="pending")||(expires||[]).length>0;
  }
  function recordAlert(code,detail){
   const entry={alert:code,...detail,at:Date.now()};
   console.error(JSON.stringify(entry));
   return entry;
  }
+ // Runs after Stripe confirmed the cancel. The id is retired so a late event for it
+ // can never be bound to this workspace again.
  async function clearSubscriptionId(owner,workspaceId,subscriptionId){
   if(!workspaceId||!subscriptionId)return;
-  const ref=refFor(owner,workspaceId),snap=await ref.get();
-  if(!snap.exists)return;
-  const data=snap.data()||{},patch={};
-  for(const key of ["workspaceFee","storage","performance","byo"])
-   if(data[key+"SubscriptionId"]===subscriptionId)patch[key+"SubscriptionId"]=null;
-  if(Object.keys(patch).length)await ref.update({...patch,updatedAt:stamp()});
+  const ref=refFor(owner,workspaceId);
+  await db.runTransaction(async tx=>{
+   const snap=await tx.get(ref);
+   if(!snap.exists)return;
+   const data=snap.data()||{},patch={};
+   for(const key of ["workspaceFee","storage","performance","byo"])
+    if(data[key+"SubscriptionId"]===subscriptionId)patch[key+"SubscriptionId"]=null;
+   const retired=Array.isArray(data.retiredSubscriptionIds)?data.retiredSubscriptionIds:[];
+   if(!retired.includes(subscriptionId))patch.retiredSubscriptionIds=[...retired,subscriptionId].slice(-20);
+   if(Object.keys(patch).length)tx.update(ref,{...patch,updatedAt:stamp()});
+  });
  }
+ function sameEntry(a,b){
+  return !!a&&!!b&&a.status===b.status&&(a.attempts||0)===(b.attempts||0)&&(a.nextAttemptAt||0)===(b.nextAttemptAt||0);
+ }
+ // Stripe runs outside any transaction. The result is then applied inside a transaction to a
+ // fresh read of the account: entries queued or retried by another request meanwhile are kept,
+ // and only the outbox fields are written.
  async function sweepAccount(owner){
   const ref=accountRef(owner),snap=await ref.get();
-  if(!snap.exists)return;
+  if(!snap.exists)return {swept:false};
   const data=snap.data()||{},alerts=[];
-  const cancels=await sweepSubscriptionCancels({stripe,pending:data.pendingSubscriptionCancels||[],now:Date.now(),
+  const read=(Array.isArray(data.pendingSubscriptionCancels)?data.pendingSubscriptionCancels:[]).filter(Boolean);
+  const cleared=new Set();
+  const outcomes=await sweepSubscriptionCancels({stripe:stripeCallsEnabled?stripe:null,pending:read,now:Date.now(),
    alert:(code,detail)=>alerts.push(recordAlert(code,detail)),
-   onCleared:item=>clearSubscriptionId(owner,item.workspaceId,item.subscriptionId)});
-  const expires=[];
-  for(const item of data.pendingCheckoutExpires||[]){
-   try{if(typeof stripe?.checkout?.sessions?.expire==="function")await stripe.checkout.sessions.expire(item.sessionId);}
-   catch(error){if(classifyStripeError(error)!=="missing")expires.push(item);}
+   onCleared:async item=>{cleared.add(item.subscriptionId);await clearSubscriptionId(owner,item.workspaceId,item.subscriptionId);}});
+  const readById=new Map(read.map(item=>[item.subscriptionId,item]));
+  const outcomeById=new Map(outcomes.map(item=>[item.subscriptionId,item]));
+  const expired=new Set();
+  const expire=stripeCallsEnabled&&typeof stripe?.checkout?.sessions?.expire==="function";
+  for(const item of (Array.isArray(data.pendingCheckoutExpires)?data.pendingCheckoutExpires:[])){
+   if(!item||!expire)continue;
+   try{await stripe.checkout.sessions.expire(item.sessionId);expired.add(item.sessionId);}
+   catch(error){
+    // Only a transient error is retried. Already expired, completed or missing sessions are done.
+    if(classifyStripeError(error)!=="transient")expired.add(item.sessionId);
+   }
   }
-  const patch={pendingSubscriptionCancels:cancels,pendingCheckoutExpires:expires};
-  if(alerts.length)patch.billingAlerts=[...(data.billingAlerts||[]),...alerts];
-  await ref.set(patch,{merge:true});
+  await db.runTransaction(async tx=>{
+   const fresh=await tx.get(ref);
+   if(!fresh.exists)return;
+   const current=fresh.data()||{};
+   const cancels=[];
+   for(const item of (Array.isArray(current.pendingSubscriptionCancels)?current.pendingSubscriptionCancels:[])){
+    if(!item||item.status==="done"||cleared.has(item.subscriptionId))continue;
+    const before=readById.get(item.subscriptionId),after=outcomeById.get(item.subscriptionId);
+    cancels.push(after&&sameEntry(item,before)?after:item);
+   }
+   const expires=(Array.isArray(current.pendingCheckoutExpires)?current.pendingCheckoutExpires:[]).filter(item=>item&&!expired.has(item.sessionId));
+   const patch={pendingSubscriptionCancels:cancels,pendingCheckoutExpires:expires,billingJobsPending:jobsPending(cancels,expires)};
+   if(alerts.length)patch.billingAlerts=[...(Array.isArray(current.billingAlerts)?current.billingAlerts:[]),...alerts].slice(-50);
+   tx.set(ref,patch,{merge:true});
+  });
+  return {swept:true,cleared:cleared.size,alerts:alerts.length};
+ }
+ // Scheduler entry point (Cloud Scheduler on Cloud Run, an in-process timer elsewhere).
+ // A restart never strands a queued cancel: every account with due work is found by its flag.
+ async function sweepBillingJobs({limit=50}={}){
+  let docs;
+  try{docs=(await accounts.where("billingJobsPending","==",true).limit(limit).get()).docs||[];}
+  catch(error){
+   console.error("billing_jobs_sweep_query_failed "+String(error?.code||"query").replace(/[^A-Za-z0-9_.-]/g,"").slice(0,40));
+   return {swept:0,failed:0,queryFailed:true};
+  }
+  let swept=0,failed=0;
+  for(const doc of docs){
+   try{await sweepAccount(doc.id);swept++;}
+   catch(_){failed++;console.error("billing_jobs_sweep_account_failed");}
+  }
+  return {swept,failed,queryFailed:false};
  }
  function touch(tx,owner,state,extra={}){
    tx.set(accountRef(owner),{freeProjectClaimed:state.account.freeProjectClaimed===true||state.records.length>0,
@@ -182,12 +238,12 @@ function createProjectService({db,stamp,hash,stripe,env={},prices={},ensureCusto
        return {project:previous,policy:p,resumed:true};
      }
      if(p.usedProjectSlots>=p.projectLimit)throw new ProjectError(409,"Project limit reached ("+p.projectLimit+"). Archive a project or qualify with 2 TB storage and Turbo performance.","PROJECT_LIMIT_REACHED");
-     if(legacyFree&&!p.freeProjectAvailable)throw new ProjectError(409,"The lifetime free project has already been claimed. Create an additional project for $5 once.","FREE_PROJECT_ALREADY_CLAIMED");
+     if(legacyFree&&!p.freeProjectAvailable)throw new ProjectError(409,"The lifetime free project has already been claimed. Create an additional workspace for "+WORKSPACE_FEE_LABEL+" a month.","FREE_PROJECT_ALREADY_CLAIMED");
      // The free slot is chosen here, while the account row is locked by this transaction.
      const feeStatus=req.ownerBenefits===true?"owner":p.freeProjectAvailable?"free":"pending";
      if(feeStatus==="pending"&&!p.paymentAvailable)throw new ProjectError(503,configuredMonthlyPrice()
-       ?"The $5 monthly workspace price is not configured. Your existing workspaces remain available."
-       :"The $5 one-time project activation price is not configured. Your existing projects remain available.","PROJECT_PAYMENT_UNAVAILABLE");
+       ?"The "+WORKSPACE_FEE_LABEL+" monthly workspace price is not configured. Your existing workspaces remain available."
+       :"The "+WORKSPACE_FEE_LABEL+" one-time project activation price is not configured. Your existing projects remain available.","PROJECT_PAYMENT_UNAVAILABLE");
      const recurring=feeStatus==="pending"&&monthlyReady();
      const data={name,kind:legacyFree?"free":"paid",accountHash:owner,...(legacyFree?{accountKey:owner}:{}),
        projectBillingVersion:2,projectStatus:feeStatus==="pending"?"pending_payment":"active",projectFeeStatus:feeStatus,
@@ -235,22 +291,31 @@ function createProjectService({db,stamp,hash,stripe,env={},prices={},ensureCusto
      await db.runTransaction(async tx=>{const snap=await tx.get(ref);if(snap.exists&&snap.data().checkoutLease?.token===token)tx.update(ref,{checkoutLease:null});});
    }
  }
+ function sessionExpiresAtMs(session){
+   const at=session?.expires_at;
+   if(typeof at==="number"&&Number.isFinite(at))return at<1e12?at*1000:at;
+   return Date.now()+CHECKOUT_SESSION_TTL_MS;
+ }
+ // An abandoned workspace is not counted toward the cap, so paying for it must still fit.
+ function slotsAfterPaying(state,w){
+   return state.policy.usedProjectSlots+(abandonedCheckout(w.data)?1:0);
+ }
  async function verifiedProjectPrice(){
-   if(!paymentAvailable())throw new ProjectError(503,"The $5 one-time project activation price is not configured","PROJECT_PAYMENT_UNAVAILABLE");
+   if(!paymentAvailable())throw new ProjectError(503,"The "+WORKSPACE_FEE_LABEL+" one-time project activation price is not configured","PROJECT_PAYMENT_UNAVAILABLE");
    const id=configuredPrice(),price=await stripe.prices.retrieve(id,{expand:["product"]});
    if(price.id!==id||price.active!==true||price.type!=="one_time"||price.recurring||price.currency!=="usd"||
      price.unit_amount!==PROJECT_FEE_CENTS||price.billing_scheme!=="per_unit"||price.product?.deleted||price.product?.active!==true||
      (env.STRIPE_ENVIRONMENT&&price.livemode!==(env.STRIPE_ENVIRONMENT==="live")))
-     throw new ProjectError(503,"Project activation requires an active one-time USD $5 Price in the configured Stripe environment","PROJECT_PRICE_MISMATCH");
+     throw new ProjectError(503,"Project activation requires an active one-time USD "+WORKSPACE_FEE_LABEL+" Price in the configured Stripe environment","PROJECT_PRICE_MISMATCH");
    return id;
  }
  async function verifiedMonthlyPrice(){
-   if(!monthlyReady())throw new ProjectError(503,"The $5 monthly workspace price is not configured","PROJECT_PAYMENT_UNAVAILABLE");
+   if(!monthlyReady())throw new ProjectError(503,"The "+WORKSPACE_FEE_LABEL+" monthly workspace price is not configured","PROJECT_PAYMENT_UNAVAILABLE");
    const id=configuredMonthlyPrice(),price=await stripe.prices.retrieve(id,{expand:["product"]});
    if(price.id!==id||price.active!==true||price.type!=="recurring"||price.recurring?.interval!=="month"||price.currency!=="usd"||
      price.unit_amount!==WORKSPACE_FEE_CENTS||price.billing_scheme!=="per_unit"||price.product?.deleted||price.product?.active!==true||
      (env.STRIPE_ENVIRONMENT&&price.livemode!==(env.STRIPE_ENVIRONMENT==="live")))
-     throw new ProjectError(503,"Workspace fee requires an active recurring USD $5 monthly Price in the configured Stripe environment","PROJECT_PRICE_MISMATCH");
+     throw new ProjectError(503,"Workspace fee requires an active recurring USD "+WORKSPACE_FEE_LABEL+" monthly Price in the configured Stripe environment","PROJECT_PRICE_MISMATCH");
    return id;
  }
  async function checkoutMonthly(req,w){
@@ -258,7 +323,7 @@ function createProjectService({db,stamp,hash,stripe,env={},prices={},ensureCusto
    if(["active","paid","trialing"].includes(w.data.workspaceFeeStatus)&&w.data.workspaceFeePaid!==false)
      return {workspaceId:id,alreadyActivated:true,message:"The monthly workspace fee is already current."};
    const state=await inventory(req);
-   if(state.policy.usedProjectSlots>state.policy.projectLimit)throw new ProjectError(409,"Archive projects before paying: the current account limit is "+state.policy.projectLimit,"PROJECT_LIMIT_REACHED");
+   if(slotsAfterPaying(state,w)>state.policy.projectLimit)throw new ProjectError(409,"Archive projects before paying: the current account limit is "+state.policy.projectLimit,"PROJECT_LIMIT_REACHED");
    const price=await verifiedMonthlyPrice(),customer=await ensureCustomer(req),origin=new URL(env.PUBLIC_URL);
    if(origin.protocol!=="https:")throw new ProjectError(503,"HTTPS Checkout return address required");
    const priorId=w.data.workspaceFeeCheckoutSessionId;
@@ -267,13 +332,17 @@ function createProjectService({db,stamp,hash,stripe,env={},prices={},ensureCusto
      if(prior.status==="open"&&prior.url)return {url:prior.url,workspaceId:id,workspaceMonthlyCents:WORKSPACE_FEE_CENTS,resumed:true};
      if(prior.status!=="expired")throw new ProjectError(409,"Your workspace payment is being verified. Refresh before retrying.","PAYMENT_PENDING");
    }
+   // A workspace that is already active (demoted from free, or a lapsed renewal) keeps working
+   // through its grace while the Checkout is open. Only a new workspace waits in pending_payment.
+   const inGrace=w.data.projectStatus==="active"&&w.data.provisioned===true;
    const metadata={kind:"workspace_fee",accountHash:hash(req.user.uid),workspaceId:id};
    const session=await stripe.checkout.sessions.create({mode:"subscription",customer,client_reference_id:id,
      line_items:[{price,quantity:1}],metadata,subscription_data:{metadata},
      success_url:origin.origin+"/billing/success?session_id={CHECKOUT_SESSION_ID}",cancel_url:origin.origin+"/billing/cancel"
    },{idempotencyKey:"gd-workspace-fee-"+hash(req.user.uid)+"-"+id+"-"+(priorId||"first")});
-   await w.ref.update({workspaceFeeCheckoutSessionId:session.id,workspaceFeePriceId:price,workspaceFeeModel:"monthly",
-     feeIsOneTime:false,workspaceFeeStatus:"pending",projectStatus:"pending_payment",projectFeeStatus:"pending",updatedAt:stamp()});
+   await w.ref.update({workspaceFeeCheckoutSessionId:session.id,checkoutExpiresAtMs:sessionExpiresAtMs(session),workspaceFeePriceId:price,workspaceFeeModel:"monthly",
+     feeIsOneTime:false,workspaceFeeStatus:inGrace?w.data.workspaceFeeStatus:"pending",
+     ...(inGrace?{}:{projectStatus:"pending_payment",projectFeeStatus:"pending"}),updatedAt:stamp()});
    return {url:session.url,workspaceId:id,workspaceMonthlyCents:WORKSPACE_FEE_CENTS};
  }
  async function checkout(req,id){
@@ -282,7 +351,7 @@ function createProjectService({db,stamp,hash,stripe,env={},prices={},ensureCusto
      if(w.data.projectBillingVersion!==2)throw new ProjectError(409,"This existing project uses legacy billing","LEGACY_PROJECT");
      if(["free","paid","owner"].includes(w.data.projectFeeStatus))return {workspaceId:id,alreadyActivated:true,message:"The project activation fee is already covered."};
      const state=await inventory(req);
-     if(state.policy.usedProjectSlots>state.policy.projectLimit)throw new ProjectError(409,"Archive projects before paying: the current account limit is "+state.policy.projectLimit,"PROJECT_LIMIT_REACHED");
+     if(slotsAfterPaying(state,w)>state.policy.projectLimit)throw new ProjectError(409,"Archive projects before paying: the current account limit is "+state.policy.projectLimit,"PROJECT_LIMIT_REACHED");
      const price=await verifiedProjectPrice(),customer=await ensureCustomer(req),origin=new URL(env.PUBLIC_URL);
      if(origin.protocol!=="https:")throw new ProjectError(503,"HTTPS Checkout return address required");
      const priorId=w.data.projectCheckoutSessionId;
@@ -296,9 +365,9 @@ function createProjectService({db,stamp,hash,stripe,env={},prices={},ensureCusto
      const session=await stripe.checkout.sessions.create({mode:"payment",customer,client_reference_id:id,
        line_items:[{price,quantity:1}],metadata,payment_intent_data:{metadata},
        success_url:origin.origin+"/billing/success?session_id={CHECKOUT_SESSION_ID}",cancel_url:origin.origin+"/billing/cancel",
-       custom_text:{submit:{message:"One-time $5 activation for this new project. Optional storage and performance subscriptions are separate."}}
+       custom_text:{submit:{message:"One-time "+WORKSPACE_FEE_LABEL+" activation for this new project. Optional storage and performance subscriptions are separate."}}
      },{idempotencyKey:"gd-project-"+hash(req.user.uid)+"-"+id+"-"+(priorId||"first")});
-     await w.ref.update({projectCheckoutSessionId:session.id,projectPriceId:price,projectStatus:"pending_payment",
+     await w.ref.update({projectCheckoutSessionId:session.id,checkoutExpiresAtMs:sessionExpiresAtMs(session),projectPriceId:price,projectStatus:"pending_payment",
        projectFeeStatus:"pending",projectPaymentFailed:false,projectPaymentRevoked:false,updatedAt:stamp()});
      return {url:session.url,workspaceId:id,oneTimeCents:PROJECT_FEE_CENTS};
    });
@@ -431,14 +500,31 @@ function createProjectService({db,stamp,hash,stripe,env={},prices={},ensureCusto
    const snap=await ref.collection("files").get();
    return snap.docs.map(d=>({id:d.id,ref:d.ref,data:d.data()}));
  }
+ // Checkout state comes from Stripe, not from the stored session id alone. A lookup
+ // error other than resource_missing fails closed as checkout_open.
+ async function resolveCheckoutSessions(data){
+  const sessions={};
+  if(!data||!(data.projectFeeStatus==="pending"||["pending","unpaid"].includes(data.workspaceFeeStatus||"")))return sessions;
+  const retrieve=stripe?.checkout?.sessions?.retrieve;
+  if(typeof retrieve!=="function")return sessions;
+  for(const sessionId of checkoutSessionIdsOf(data)){
+   try{
+    const session=await stripe.checkout.sessions.retrieve(sessionId);
+    sessions[sessionId]=["open","complete","expired"].includes(session?.status)?session.status:"unknown";
+   }catch(error){sessions[sessionId]=classifyStripeError(error)==="missing"?"expired":"unknown";}
+  }
+  return sessions;
+ }
  async function remove(req,id){
   const owner=hash(req.user.uid),ref=refFor(owner,id);
+  const pre=await ref.get();
+  const sessions=pre.exists&&owned(pre.data(),owner,id)&&projectStatus(pre.data())!=="deleting"?await resolveCheckoutSessions(pre.data()):{};
   const outcome=await db.runTransaction(async tx=>{
     const state=await snapshot(owner,tx),current=state.records.find(w=>w.id===id);
     if(!current)throw new ProjectError(404,"Project not found","PROJECT_NOT_FOUND");
     if(projectStatus(current.data)==="deleting")return {workspaceId:id,resume:true,freeWorkspaceId:state.account.freeWorkspaceId||null};
     const uploads=await tx.get(current.ref.collection("uploads").where("status","in",ACTIVE_UPLOADS).limit(1));
-    const busy=busyReason(current.data,{uploadsEmpty:uploads.empty!==false&&(uploads.docs||[]).length===0});
+    const busy=busyReason(current.data,{uploadsEmpty:uploads.empty!==false&&(uploads.docs||[]).length===0,sessions});
     if(busy){
      const error=new ProjectError(409,"Workspace is busy","workspace_busy");
      error.reason=busy;
@@ -451,13 +537,19 @@ function createProjectService({db,stamp,hash,stripe,env={},prices={},ensureCusto
     if(freeId===id&&nextFree)queuePromotion(tx,state.records.find(w=>w.id===nextFree),effects,"promoted_to_free");
     for(const subscriptionId of subscriptionIdsOf(current.data))
      effects.cancels=queueCancel(effects.cancels,{subscriptionId,workspaceId:id,reason:"workspace_deleted"});
+    // A renewal Checkout still open on a workspace in grace is expired after commit.
+    for(const sessionId of checkoutSessionIdsOf(current.data)){
+     const status=sessions[sessionId];
+     if(status==="expired"||(!status&&storedCheckoutExpired(current.data)))continue;
+     effects.expires=queueExpire(effects.expires,{sessionId,workspaceId:id});
+    }
     tx.update(current.ref,{projectStatus:"deleting",updatedAt:stamp()});
     touch(tx,owner,state,{freeWorkspaceId:nextFree||null,...effectsPatch(effects)});
     return {workspaceId:id,resume:false,freeWorkspaceId:nextFree||null};
   });
   await sweepAccount(owner);
   try{
-   await purgeWorkspace({db,owner,workspaceId:id,workspaceRef:ref,objectStore,now:Date.now(),
+   await purgeWorkspace({db,owner,workspaceId:id,workspaceRef:ref,objectStore,objectStoreRequired,now:Date.now(),
     alert:(code,detail)=>recordAlert(code,detail)});
   }catch(error){
    const wrapped=new ProjectError(503,"Workspace deletion is still removing objects","WORKSPACE_PURGE_PENDING");
@@ -534,7 +626,9 @@ function createProjectService({db,stamp,hash,stripe,env={},prices={},ensureCusto
     if(previous&&previous!==nextFree){
       const loser=state.records.find(w=>w.id===previous);
       if(loser&&loser.data.projectFeeStatus==="free"&&!isGrandfathered(loser.data)){
-        const paidThroughMs=Date.now()+LAPSE_GRACE_MS;
+        // Grace is LAPSE_GRACE_MS in total from the demotion, the same clock as hosted and BYO:
+        // the paid-through point is now, and the workspace locks at now + LAPSE_GRACE_MS.
+        const paidThroughMs=Date.now();
         demoted={workspaceId:previous,paidThroughMs,graceEndsAt:paidThroughMs+LAPSE_GRACE_MS,requiresCheckout:true};
         tx.update(loser.ref,{projectFeeStatus:"pending",projectFeeCents:WORKSPACE_FEE_CENTS,workspaceFeeModel:"monthly",
           feeIsOneTime:false,workspaceFeeStatus:"unpaid",workspaceFeePaid:false,workspaceFeeCents:WORKSPACE_FEE_CENTS,
@@ -648,7 +742,8 @@ function createProjectService({db,stamp,hash,stripe,env={},prices={},ensureCusto
    const workspaceMissing=!workspace.exists||!owned(workspace.data(),owner,id);
    // A deleted workspace must not drop the event. Cancel the subscription instead.
    if(workspaceMissing){
-    await accountRef(owner).set({pendingSubscriptionCancels:queueCancel(account.data().pendingSubscriptionCancels,{subscriptionId:sub.id,workspaceId:id,reason:"workspace_deleted"})},{merge:true});
+    const queued=queueCancel(account.data().pendingSubscriptionCancels,{subscriptionId:sub.id,workspaceId:id,reason:"workspace_deleted"});
+    await accountRef(owner).set({pendingSubscriptionCancels:queued,billingJobsPending:jobsPending(queued,account.data().pendingCheckoutExpires)},{merge:true});
     await sweepAccount(owner);
     return true;
    }
@@ -662,6 +757,13 @@ function createProjectService({db,stamp,hash,stripe,env={},prices={},ensureCusto
      await ref.update({workspaceFeeSubscriptionId:null,updatedAt:stamp()});
     return true;
    }
+   // Events for a cancelled (retired) or replaced subscription never touch the workspace's
+   // current one. A different id is accepted only as a new, active subscription that replaces
+   // one that is no longer active.
+   const retired=Array.isArray(current.retiredSubscriptionIds)&&current.retiredSubscriptionIds.includes(sub.id);
+   const stored=typeof current.workspaceFeeSubscriptionId==="string"&&current.workspaceFeeSubscriptionId?current.workspaceFeeSubscriptionId:null;
+   const replaces=!stored||stored===sub.id||(!subscriptionActive(current)&&["active","trialing"].includes(sub.status||""));
+   if(retired||!replaces)return true;
    // Status comes only from the subscription retrieved for this delivery.
    // The event type must not overwrite a newer status from an older event.
    const status=sub.status||"";
@@ -852,10 +954,11 @@ function createProjectService({db,stamp,hash,stripe,env={},prices={},ensureCusto
    const cancel=stripe&&stripe.subscriptions&&stripe.subscriptions.cancel;
    if(typeof cancel!=="function")return;
    const ids=[...new Set(["workspaceFee","storage","performance","byo"].map(key=>data[key+"SubscriptionId"]).filter(id=>typeof id==="string"&&id))];
-   for(const id of ids)await cancel(id,{},{idempotencyKey:"gd-merge-"+mergeId+"-cancel-"+id});
+   // Called on the resource so the Stripe SDK keeps its `this`.
+   for(const id of ids)await stripe.subscriptions.cancel(id,{},{idempotencyKey:"gd-merge-"+mergeId+"-cancel-"+id});
  }
  return {inventory,get,create,setSelection,checkout,archive,restore,remove,withLease,reconcilePayment,revokePayment,
-   registerByo,makeHosted,issueByoChallenge,verifyByo,reconcileWorkspaceFee,mergePreview,merge,
+   registerByo,makeHosted,issueByoChallenge,verifyByo,reconcileWorkspaceFee,mergePreview,merge,sweepAccount,sweepBillingJobs,
    paymentAvailable,monthlyReady,refFor,legacyRef,policy,hasContinuingBilling};
 }
 module.exports={createProjectService,ProjectError,projectStatus,activatedBasicProject,effectiveStorageQuota,
