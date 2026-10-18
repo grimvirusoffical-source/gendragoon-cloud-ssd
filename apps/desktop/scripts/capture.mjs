@@ -48,7 +48,7 @@ try {
   const uploadButtons = await page.$$eval("button", (nodes) => nodes.map((node) => node.textContent?.trim()).filter((text) => text === "Upload"));
   if (uploadButtons.length !== 0) throw new Error("Backup view still shows an Upload button");
   await page.click("[data-testid='primary-action']");
-  await page.waitForFunction(() => document.querySelector("[data-testid='status']")?.textContent?.includes("Secure backup queued"));
+  await page.waitForFunction(() => document.querySelector("[data-testid='status']")?.textContent?.includes("Make secure backup queued"));
   await shot(page, "backup-manager.png");
 
   await page.click("[data-testid='nav-settings']");
