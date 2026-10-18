@@ -7,6 +7,7 @@
     "start": "node free_server.js",
     "check": "node --check free_server.js && node --check projects.js && node --check billing_v2.js && node --check billing_gateway.js && node --check billing_bootstrap.js && node --check transfer_v3.js && node --check account_delete.js && node --check login_gate.js",
     "test": "node --test --test-concurrency=2 *.test.js",
+    "fixtures": "node scripts/export_fixtures.js",
     "test:billing": "node --test billing_v2.test.js billing_gateway.test.js billing_bootstrap.test.js billing_entitlements.test.js billing_selection.test.js owner_checkout.test.js owner_benefits.test.js ads_fulfillment.test.js projects.test.js project_routes.test.js",
     "test:stress": "node --test transfer_stress.test.js"
   },

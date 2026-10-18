@@ -194,7 +194,9 @@ function createAccountDeletion({db,stripe,bucket,auth,byoProviders,hash,now}){
     if(stored)absorb(job,stored);
     job.lease={owner:instanceId,expiresAtMs:at+LEASE_MS};
     job.statusTokens=tokens;
-    if(job.status!=="done")job.status="running";
+    // Stay queued until the runner renews the lease. That renewal is what
+    // clients observe as running. A failed job retried by DELETE starts running.
+    if(job.status!=="done"&&job.status!=="queued")job.status="running";
     writeBoth(tx,job);
     claimed=true;
     return;

@@ -80,6 +80,8 @@ Authorization: Bearer <statusToken>
 
 `status` is one of `queued`, `running`, `done`, `failed`. The body stays those three fields. It does not include `statusToken`, `accountHash`, or the token hash.
 
+A newly accepted job is stored as `queued`, with the lease already written. The runner sets `running` when it renews that lease and starts a batch. A poll that arrives before the renewal observes `queued`.
+
 This is the only status route. `GET /v2/account/deletion/:jobId` (singular) is not registered and returns `404`. There is no alias and no `Deprecation` header.
 
 A Firebase ID token is accepted when it verifies for the account that owns the job. Terms acceptance is not checked, so polling still works after `accepted_terms/{uid}` is deleted. The five-minute `auth_time` window is enforced on `DELETE` only. A Firebase ID token that still verifies after `deleteUser` reads that owner's job with `200`. The client can also poll with any unexpired `statusToken` issued for the job. A status token is compared with `sha256` of the bearer against each hash in `statusTokens`. A token issued for job A presented to job B, an expired token, a missing bearer, and any other bad bearer all return `404 {"error":"not_found"}`. A missing job returns the same `404`. Responses are `Cache-Control: private, no-store`.
