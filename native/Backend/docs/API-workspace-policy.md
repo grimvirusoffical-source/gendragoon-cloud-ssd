@@ -6,8 +6,8 @@ Server-side rules for GenDragoon workspaces. This note is the source Avery can f
 
 | Constant | Value | Meaning |
 | --- | --- | --- |
-| `FREE_WORKSPACES` | `1` | Lifetime free workspaces per account. The legacy `free` project counts. |
-| `WORKSPACE_FEE_USD_MONTHLY` | `5` | Recurring fee for each workspace beyond `FREE_WORKSPACES`. |
+| `FREE_WORKSPACES` | `1` | One hosted free workspace per account. `freeWorkspaceId(account)` is that workspace. A BYO workspace never fills the slot. |
+| `WORKSPACE_FEE_USD_MONTHLY` | `5` | Recurring fee for every workspace that is not the free hosted slot. BYO is always this price. |
 | `workspaceMonthlyCents` | `500` | Same fee in USD cents. |
 | `BASE_CAP` | `10` | Owned active + pending workspaces (archived and merged do not count). |
 | `RAISED_CAP` | `20` | Cap when one owned active workspace has at least 2 TB storage and Turbo (8 workers), or an equivalent 2 TB-or-larger bundle. |
@@ -36,10 +36,24 @@ Account policy from `GET /v2/projects` and `GET /v2/workspaces` includes:
 - `feeIsOneTime: false`
 - `workspaceMonthlyCents: 500`
 - `freeWorkspaces: 1`
+- `freeWorkspaceId`: the hosted workspace that currently holds the free slot, or `null`
 - `projectLimit`, `usedProjectSlots`, `locked`, `uploadsBlocked`, `reason`, `overBy`, `unpaidWorkspaceIds`
 - `grandfatheredProjects`
 
 `reason` is `over_cap`, `lapsed`, `over_cap_and_lapsed`, `scope_unavailable`, `merge_in_progress`, or `null`.
+
+## Free workspace
+
+`freeWorkspaceId(account)` is the one hosted workspace that does not pay the monthly fee. The choice is made inside the Firestore transaction on create, delete, BYO registration, and merge, so two simultaneous creates cannot both be free.
+
+- The slot is hosted storage only. A BYO workspace (S3 or any bring-your-own provider) is never free: `isFree` is false and `monthlyPriceCents` is 500 even when it is the account's only workspace.
+- The slot is the oldest active hosted workspace. Create assigns it when the account has none. Delete of that workspace assigns the oldest remaining hosted workspace inside the same transaction. If none remain, the next hosted workspace created becomes free.
+- Archive does not release the slot. The stored id stays on the archived workspace.
+- Merge keeps the survivor's fee status. If the deleted source held the slot, the slot moves to another hosted workspace and does not rewrite the survivor. When the survivor is the only one left, the next create takes the slot.
+- Registering BYO on the free hosted workspace makes that workspace the $5 monthly fee and moves the slot to another hosted workspace when one exists.
+- A BYO workspace with no active subscription is locked immediately: **423** `{error:"workspace_lock", reason:"lapsed", unpaidWorkspaceIds:[id]}`. It does not get the hosted grace period.
+- Grandfathered one-time workspaces stay exempt (`monthlyPriceCents` 0) and are not rewritten into the monthly fee.
+- Each workspace list item, and the create response, includes `isFree` and `monthlyPriceCents` (`0` or `500`). Clients use those fields instead of a hardcoded price.
 
 ## Grandfathering
 
@@ -120,6 +134,7 @@ A fixture request body may contain only the fields listed for its route. `byo/ve
 | `POST /v2/projects` | `{name, intentId}` |
 | `GET /v2/workspaces` | none |
 | `GET /v2/projects/:id` | none |
+| `DELETE /v2/projects/:id` | none |
 | `POST /v2/workspaces/:id/cloud/uploads` | `{name, sizeBytes}` |
 | `GET /v2/workspaces/:id/cloud/files` | none |
 | `POST /v2/workspaces/:sourceId/merge` | `{targetId, confirmName}` |
