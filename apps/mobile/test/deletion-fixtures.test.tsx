@@ -1,8 +1,10 @@
 import {
   ApiError,
+  DeletionNotRetryableError,
   GenDragoonClient,
   InvalidTokenError,
   MemorySecretStore,
+  SUPPORT_CONTACT,
   workspaceKeyId,
 } from "@gendragoon/core";
 import { fireEvent, render, waitFor } from "@testing-library/react-native";
@@ -10,7 +12,7 @@ import { Linking } from "react-native";
 import { applyAuthFailureSignal, deletionSessionAction, deleteSignedInAccount, savedDeletionUid } from "../src/account/deleteAccount";
 import { sessionTokenAfterAuthFailure } from "../src/account/session";
 import { DeleteAccountScreen } from "../src/screens";
-import { SUPPORT_CONTACT, supportContactTarget } from "../src/support";
+import { supportContactTarget } from "../src/supportContact";
 import { loadFixture } from "./loadFixture";
 
 function idToken(sub = "user-1"): string {
@@ -165,7 +167,7 @@ describe("deletion fixtures", () => {
     expect(screen.queryByText(SUPPORT_CONTACT.value)).toBeNull();
   });
 
-  it.failing("failed with retryable true keeps the job and the repeat DELETE resumes it", async () => {
+  it("failed with retryable true keeps the job and the repeat DELETE resumes it", async () => {
     const accepted = loadFixture<AcceptedBody>("account-deletion/accepted.json");
     const failed = loadFixture<StatusBody>("account-deletion/status-failed.json");
     const jobId = failed.response.body.jobId;
@@ -203,7 +205,7 @@ describe("deletion fixtures", () => {
     expect(await textOf(secrets, "account-deletion:job-id")).toBe(jobId);
   });
 
-  it.failing("the saved job is cleared only after done or dismiss, not after failed", async () => {
+  it("the saved job is cleared only after done or dismiss, not after failed", async () => {
     const accepted = loadFixture<AcceptedBody>("account-deletion/accepted.json");
     const failed = loadFixture<StatusBody>("account-deletion/status-failed.json");
     const secrets = new MemorySecretStore();
@@ -281,9 +283,10 @@ describe("deletion fixtures", () => {
     });
     fireEvent.press(screen.getByTestId("delete-account-confirm"));
     await waitFor(() => {
-      expect(signedOut).toHaveBeenCalledTimes(1);
+      expect(reauth).toHaveBeenCalledTimes(1);
     });
-    expect(reauth).not.toHaveBeenCalled();
+    expect(signedOut).not.toHaveBeenCalled();
+    expect(screen.getByTestId("deletion-reauth")).toBeTruthy();
     expect(sessionTokenAfterAuthFailure("sign-out", idToken())).toBe("");
     expect(await savedDeletionUid(secrets)).toBe("user-1");
     expect(await textOf(secrets, "account-deletion:job-id")).toBe(accepted.response.body.jobId);
@@ -297,8 +300,8 @@ describe("deletion fixtures", () => {
       workspaceIds: ["ws-1"],
       secrets,
     }).catch((caught: unknown) => caught);
-    expect(deletionSessionAction(again)).toBe("sign-out");
-    expect(methods).toEqual(["GET"]);
+    expect(deletionSessionAction(again)).toBe("reauth");
+    expect(methods).toEqual(["DELETE", "GET"]);
     expect(await secrets.get(workspaceKeyId("ws-1"))).toEqual(new Uint8Array([5]));
     expect(await textOf(secrets, "account-deletion:job-id")).toBe(accepted.response.body.jobId);
   });
@@ -496,11 +499,11 @@ describe("deletion fixtures", () => {
       .catch((caught: unknown) => caught);
     expect(deletionSessionAction(invalidError)).toBe("sign-out");
     expect(deletionSessionAction(reauthError)).toBe("reauth");
-    expect(deletionSessionAction(messageOnly)).toBe("reauth");
+    expect(deletionSessionAction(messageOnly)).toBeNull();
     expect(messageOnly).toBeInstanceOf(ApiError);
   });
 
-  it.failing("prefers the error field when it differs from code, and ignores message text", async () => {
+  it("prefers the error field when it differs from code, and ignores message text", async () => {
     const error = await clientFor(async () => responseFor(401, {
       error: "invalid_token",
       code: "reauth_required",
@@ -512,7 +515,7 @@ describe("deletion fixtures", () => {
   });
 
   it("RELEASE BLOCKER: the support contact shim is still a placeholder", () => {
-    expect(SUPPORT_CONTACT).toEqual({ value: "SUPPORT_CONTACT_PLACEHOLDER@invalid", isPlaceholder: true });
+    expect(SUPPORT_CONTACT).toEqual({ value: "placeholder@example.com", isPlaceholder: true });
   });
 
   it("not-retryable deletion asks the user to contact support and hides the sign-in helper", async () => {
@@ -549,13 +552,12 @@ describe("deletion fixtures", () => {
     openURL.mockRestore();
   });
 
-  it("Retry calls retryDeletion when core provides it and does not send DELETE", async () => {
+  it("Retry on a retryable failure sends DELETE again for the same job", async () => {
     const accepted = loadFixture<AcceptedBody>("account-deletion/accepted.json");
     const failed = loadFixture<StatusBody>("account-deletion/status-failed.json");
     const secrets = new MemorySecretStore();
     await secrets.set(workspaceKeyId("ws-1"), new Uint8Array([7]));
     const methods: string[] = [];
-    const retryDeletion = jest.fn(async () => ({ jobId: accepted.response.body.jobId, status: "running" as const }));
     const client = clientFor(async (_input, init) => {
       methods.push(init?.method ?? "");
       if (init?.method === "DELETE") return responseFor(accepted.response.status, accepted.response.body, "application/json");
@@ -567,7 +569,7 @@ describe("deletion fixtures", () => {
         secrets={secrets}
         workspaceIds={["ws-1"]}
         idToken={idToken()}
-        client={Object.assign(client, { retryDeletion })}
+        client={client}
         onReauth={() => undefined}
         onSignedOut={() => undefined}
         onDone={() => undefined}
@@ -578,10 +580,9 @@ describe("deletion fixtures", () => {
     await waitFor(() => expect(screen.queryByTestId("delete-account-confirm")).not.toBeNull());
     fireEvent.press(screen.getByTestId("delete-account-confirm"));
     await waitFor(() => expect(screen.queryByTestId("deletion-retry")).not.toBeNull());
-    const deletesBeforeRetry = methods.filter((method) => method === "DELETE").length;
     fireEvent.press(screen.getByTestId("deletion-retry"));
-    await waitFor(() => expect(retryDeletion).toHaveBeenCalledTimes(1));
-    expect(methods.filter((method) => method === "DELETE").length).toBe(deletesBeforeRetry);
+    await waitFor(() => expect(methods.filter((method) => method === "DELETE")).toEqual(["DELETE", "DELETE"]));
+    expect(await textOf(secrets, "account-deletion:job-id")).toBe(accepted.response.body.jobId);
     expect(await secrets.get(workspaceKeyId("ws-1"))).toEqual(new Uint8Array([7]));
   });
 
@@ -593,7 +594,7 @@ describe("deletion fixtures", () => {
     const tooLarge = loadFixture<{ error: string }>("errors/payload-too-large.json");
     expect(retry.response.status).toBe(202);
     expect(retry.response.body.jobId).toBe("00000000-0000-4000-8000-000000000004");
-    expect(blocked.response).toEqual({ status: 409, body: { error: "deletion_not_retryable", jobId: "00000000-0000-4000-8000-0000000000aa" } });
+    expect(blocked.response).toEqual({ status: 409, body: { error: "deletion_not_retryable", jobId: "00000000-0000-4000-8000-000000000009" } });
     expect(statusInvalid.request.method).toBe("GET");
     expect(statusInvalid.response).toEqual({ status: 401, body: { error: "invalid_token" } });
     expect(unauthorized.response).toEqual({ status: 401, body: { error: "unauthorized" } });
@@ -611,7 +612,7 @@ describe("deletion fixtures", () => {
     expect(showReauth).toHaveBeenCalledTimes(1);
   });
 
-  it.failing("a status-token invalid_token signals reauth_required, shows re-sign-in, and keeps the job", async () => {
+  it("a status-token invalid_token signals reauth_required, shows re-sign-in, and keeps the job", async () => {
     const accepted = loadFixture<AcceptedBody>("account-deletion/accepted.json");
     const invalid = loadFixture<ErrorBody>("account-deletion/status-invalid-token.json");
     const secrets = new MemorySecretStore();
@@ -648,7 +649,7 @@ describe("deletion fixtures", () => {
     expect(await secrets.get(workspaceKeyId("ws-1"))).toEqual(new Uint8Array([5]));
   });
 
-  it.failing("a Firebase-token invalid_token signals signed_out, clears only the session, and keeps polling", async () => {
+  it("a Firebase-token invalid_token signals signed_out, clears only the session, and keeps polling", async () => {
     const invalid = loadFixture<ErrorBody>("account-deletion/invalid-token.json");
     expect(invalid.request.method).toBe("DELETE");
     const secrets = new MemorySecretStore();
@@ -678,9 +679,8 @@ describe("deletion fixtures", () => {
     expect(screen.queryByTestId("deletion-reauth")).toBeNull();
   });
 
-  it.failing("409 deletion_not_retryable is DeletionNotRetryableError and shows support beside Dismiss", async () => {
-    const core = await import("@gendragoon/core") as { DeletionNotRetryableError?: new (...args: never[]) => Error & { jobId: string } };
-    expect(typeof core.DeletionNotRetryableError).toBe("function");
+  it("409 deletion_not_retryable is DeletionNotRetryableError and shows support beside Dismiss", async () => {
+    expect(DeletionNotRetryableError).toBeInstanceOf(Function);
     const blocked = loadFixture<{ error: string; jobId: string }>("account-deletion/retry-not-retryable.json");
     const jobId = blocked.response.body.jobId;
     const secrets = new MemorySecretStore();
@@ -714,5 +714,100 @@ describe("deletion fixtures", () => {
       expect(await textOf(secrets, "account-deletion:job-id")).toBeNull();
     });
     expect(await secrets.get(workspaceKeyId("ws-1"))).toEqual(new Uint8Array([8]));
+  });
+
+  it("a failed status with retryable false shows Contact support and Dismiss and does not retry", async () => {
+    const accepted = loadFixture<AcceptedBody>("account-deletion/accepted.json");
+    const failed = loadFixture<StatusBody>("account-deletion/status-failed-not-retryable.json");
+    expect(failed.response.status).toBe(200);
+    expect(failed.response.body).toMatchObject({ status: "failed", retryable: false });
+    const secrets = new MemorySecretStore();
+    const methods: string[] = [];
+    const client = clientFor(async (_input, init) => {
+      methods.push(init?.method ?? "");
+      if (init?.method === "DELETE") return responseFor(accepted.response.status, accepted.response.body, "application/json");
+      return responseFor(failed.response.status, failed.response.body, "application/json");
+    });
+    const screen = await render(
+      <DeleteAccountScreen
+        activeTransfers={0}
+        secrets={secrets}
+        workspaceIds={["ws-1"]}
+        idToken={idToken()}
+        client={client}
+        onReauth={() => undefined}
+        onSignedOut={() => undefined}
+        onDone={() => undefined}
+        onError={() => undefined}
+      />,
+    );
+    fireEvent.press(screen.getByTestId("delete-account-continue"));
+    await waitFor(() => expect(screen.queryByTestId("delete-account-confirm")).not.toBeNull());
+    fireEvent.press(screen.getByTestId("delete-account-confirm"));
+    await waitFor(() => expect(screen.getByLabelText("Contact support")).toBeTruthy());
+    expect(screen.getByTestId("deletion-dismiss")).toBeTruthy();
+    expect(screen.queryByTestId("deletion-retry")).toBeNull();
+    expect(methods.filter((method) => method === "DELETE")).toEqual(["DELETE"]);
+    expect(await textOf(secrets, "account-deletion:job-id")).toBe(accepted.response.body.jobId);
+  });
+
+  it("a status GET 401 unauthorized or a bare 401 is reauth_required and keeps the job", async () => {
+    const accepted = loadFixture<AcceptedBody>("account-deletion/accepted.json");
+    const unauthorized = loadFixture<ErrorBody>("account-deletion/status-unauthorized.json");
+    expect(unauthorized.response).toEqual({ status: 401, body: { error: "unauthorized" } });
+    const secrets = new MemorySecretStore();
+    const methods: string[] = [];
+    const client = clientFor(async (_input, init) => {
+      methods.push(init?.method ?? "");
+      if (init?.method === "DELETE") return responseFor(accepted.response.status, accepted.response.body, "application/json");
+      return responseFor(unauthorized.response.status, unauthorized.response.body, "application/json");
+    });
+    const screen = await render(
+      <DeleteAccountScreen
+        activeTransfers={0}
+        secrets={secrets}
+        workspaceIds={["ws-1"]}
+        idToken={idToken()}
+        client={client}
+        onReauth={() => undefined}
+        onSignedOut={() => undefined}
+        onDone={() => undefined}
+        onError={() => undefined}
+      />,
+    );
+    fireEvent.press(screen.getByTestId("delete-account-continue"));
+    await waitFor(() => expect(screen.queryByTestId("delete-account-confirm")).not.toBeNull());
+    fireEvent.press(screen.getByTestId("delete-account-confirm"));
+    await waitFor(() => expect(screen.getByTestId("deletion-reauth")).toBeTruthy());
+    expect(screen.queryByTestId("deletion-progress")).toBeNull();
+    expect(methods.filter((method) => method === "GET")).toHaveLength(1);
+    expect(await textOf(secrets, "account-deletion:job-id")).toBe(accepted.response.body.jobId);
+
+    const bare = new MemorySecretStore();
+    const bareMethods: string[] = [];
+    const bareClient = clientFor(async (_input, init) => {
+      bareMethods.push(init?.method ?? "");
+      if (init?.method === "DELETE") return responseFor(accepted.response.status, accepted.response.body, "application/json");
+      return responseFor(401, {}, "application/json");
+    });
+    const bareScreen = await render(
+      <DeleteAccountScreen
+        activeTransfers={0}
+        secrets={bare}
+        workspaceIds={["ws-1"]}
+        idToken={idToken()}
+        client={bareClient}
+        onReauth={() => undefined}
+        onSignedOut={() => undefined}
+        onDone={() => undefined}
+        onError={() => undefined}
+      />,
+    );
+    fireEvent.press(bareScreen.getByTestId("delete-account-continue"));
+    await waitFor(() => expect(bareScreen.queryByTestId("delete-account-confirm")).not.toBeNull());
+    fireEvent.press(bareScreen.getByTestId("delete-account-confirm"));
+    await waitFor(() => expect(bareScreen.getByTestId("deletion-reauth")).toBeTruthy());
+    expect(bareMethods.filter((method) => method === "GET")).toHaveLength(1);
+    expect(await textOf(bare, "account-deletion:job-id")).toBe(accepted.response.body.jobId);
   });
 });

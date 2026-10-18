@@ -11,7 +11,7 @@ import {
 import { fireEvent, render } from "@testing-library/react-native";
 import { byoServerFlowReady, connectBucket } from "../src/byoReady";
 import { ConnectStorageScreen, LockScreen, SettingsHome, WorkspacesScreen, lockReasonMessage } from "../src/screens";
-import { FIXTURE_SOURCE_SHA, loadFixture } from "./loadFixture";
+import { FIXTURE_SOURCE_SHA, FIXTURE_SOURCE_SHA_BY_AREA, loadFixture } from "./loadFixture";
 
 const LOCKS = [
   "lapsed",
@@ -141,10 +141,11 @@ const LOCK_LEAD: Record<(typeof LOCKS)[number], string> = {
 };
 
 describe("vendored cloud-ssd fixtures", () => {
-  it("records the source SHA from gendragoon-cloud-ssd PR #5", () => {
+  it("records the workspace pricing SHA from gendragoon-cloud-ssd PR #5", () => {
     const fixture = loadFixture("workspaces/list.json");
-    expect(fixture.sourceSha).toBe(FIXTURE_SOURCE_SHA);
-    expect(fixture.sourceSha).toBe("da3927627fee76103981714f9f8ffa954843b74b");
+    expect(fixture.sourceSha).toBe(FIXTURE_SOURCE_SHA_BY_AREA.workspaces);
+    expect(fixture.sourceSha).toBe("568f2236ffe2520758fb8f20cf22566aefc14cf3");
+    expect(FIXTURE_SOURCE_SHA).toBe("da3927627fee76103981714f9f8ffa954843b74b");
     expect(fixture.response.status).toBe(200);
     expect(fixture.request.path).toBe("/v2/workspaces");
   });
@@ -261,28 +262,16 @@ describe("vendored cloud-ssd fixtures", () => {
     }
   });
 
-  it("hides BYO while core cannot register, challenge, and verify", async () => {
-    expect(byoServerFlowReady()).toBe(false);
+  it("shows S3 launch providers and keeps SFTP, Azure, and WebDAV as coming soon", async () => {
+    expect(byoServerFlowReady()).toBe(true);
     const flow = readFileSync(path.join(__dirname, "../src/byoReady.ts"), "utf8");
     const screens = readFileSync(path.join(__dirname, "../src/screens.tsx"), "utf8");
     const app = readFileSync(path.join(__dirname, "../App.tsx"), "utf8");
     expect(flow).toMatch(/registerByo/);
     expect(flow).toMatch(/createByoChallenge/);
     expect(flow).toMatch(/verifyByo/);
-    expect(`${flow}\n${screens}\n${app}`).not.toMatch(/byo\/proof|challengeId|presignedGetUrl|byoSecretId|secretAccessKey|DeviceByoCredentials/);
-    const client = {
-      registerByo: jest.fn(),
-      createByoChallenge: jest.fn(),
-      verifyByo: jest.fn(),
-    };
-    await expect(connectBucket({
-      client,
-      workspaceId: "ws",
-      registration: { provider: "s3", endpoint: "https://bucket.example", bucketFingerprint: "ab" },
-      presignedUrl: "https://bucket.example/object",
-    })).rejects.toThrow(/unavailable/);
-    expect(client.registerByo).not.toHaveBeenCalled();
-    expect(client.verifyByo).not.toHaveBeenCalled();
+    expect(flow).toMatch(/createSigV4ChallengeWriter/);
+    expect(`${flow}\n${screens}\n${app}`).not.toMatch(/byo\/proof|byoSecretId|secretAccessKey|DeviceByoCredentials/);
     const register = loadFixture<RegisterBody>("byo/register.json");
     const challenge = loadFixture<ChallengeBody>("byo/challenge.json");
     const verified = loadFixture<VerifyBody>("byo/verify-success.json");
@@ -311,12 +300,11 @@ describe("vendored cloud-ssd fixtures", () => {
         error={unsupportedError}
       />,
     );
-    expect(screen.getByTestId("byo-unavailable")).toBeTruthy();
-    expect(screen.queryByTestId("byo-aws")).toBeNull();
-    expect(screen.queryByTestId("byo-r2")).toBeNull();
-    expect(screen.queryByTestId("byo-selected")).toBeNull();
+    expect(screen.queryByTestId("byo-unavailable")).toBeNull();
+    expect(screen.getByTestId("byo-aws")).toBeTruthy();
+    expect(screen.getByTestId("byo-r2")).toBeTruthy();
     expect(screen.queryByTestId("byo-sftp")).toBeNull();
-    expect(textOf(screen.getByTestId("byo-soon-sftp"))).toBe("SFTP");
+    expect(textOf(screen.getByTestId("byo-soon-sftp"))).toBe("SFTP · Coming soon");
     expect(screen.getByTestId("byo-soon-azure-blob")).toBeTruthy();
     expect(screen.getByTestId("byo-soon-webdav")).toBeTruthy();
     expect(textOf(screen.getByTestId("byo-registered"))).toContain(register.response.body.endpoint);
@@ -343,7 +331,9 @@ describe("vendored cloud-ssd fixtures", () => {
       const error = await errorFromFixture(`byo/${name}.json`);
       const failed = await render(<ConnectStorageScreen error={error} />);
       expect(failed.getByText(byoErrorMessage(error))).toBeTruthy();
-      expect(failed.queryByTestId("byo-aws")).toBeNull();
+      expect(failed.getByTestId("byo-aws")).toBeTruthy();
+      expect(textOf(failed.getByTestId("byo-soon-azure-blob"))).toContain("Coming soon");
+      expect(textOf(failed.getByTestId("byo-soon-webdav"))).toContain("Coming soon");
       await failed.unmount();
     }
   });
@@ -359,6 +349,57 @@ describe("vendored cloud-ssd fixtures", () => {
     const screen = await render(<ConnectStorageScreen error={missing} />);
     expect(screen.getByText(BYO_PRESIGNED_URL_MESSAGE)).toBeTruthy();
     expect(BYO_PRESIGNED_URL_MESSAGE).not.toBe("presigned_url_required");
-    expect(screen.queryByTestId("byo-aws")).toBeNull();
+    expect(screen.getByTestId("byo-aws")).toBeTruthy();
+    expect(textOf(screen.getByTestId("byo-soon-sftp"))).toContain("Coming soon");
+  });
+
+  it("registers, writes the challenge with a SigV4 writer, and verifies {presignedUrl}", async () => {
+    const register = loadFixture<RegisterBody>("byo/register.json");
+    const registration = register.request.body as { provider: string; endpoint: string; bucketFingerprint: string };
+    const challenge = loadFixture<ChallengeBody>("byo/challenge.json");
+    const verified = loadFixture<VerifyBody>("byo/verify-success.json");
+    const nonce = challenge.response.body.nonce;
+    const objectKey = challengeObjectKey(nonce);
+    const now = Date.parse("2026-01-01T00:00:00.000Z");
+    const presignedUrl = `https://bucket.s3.us-east-1.amazonaws.com/${objectKey}?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Date=20260101T000000Z&X-Amz-Expires=300&X-Amz-Signature=fixture`;
+    const writes: { key: string; body: string }[] = [];
+    const seen: { url: string; body: unknown }[] = [];
+    const client = new GenDragoonClient({
+      baseUrl: "https://api.example.test",
+      getToken: () => "token",
+      fetch: async (input, init) => {
+        const url = String(input);
+        const body = init?.body ? JSON.parse(String(init.body)) as unknown : null;
+        seen.push({ url, body });
+        if (url.endsWith("/byo/register")) {
+          return new Response(JSON.stringify(register.response.body), { status: register.response.status, headers: { "content-type": "application/json" } });
+        }
+        if (url.endsWith("/byo/challenge")) {
+          return new Response(JSON.stringify(challenge.response.body), { status: challenge.response.status, headers: { "content-type": "application/json" } });
+        }
+        return new Response(JSON.stringify(verified.response.body), { status: verified.response.status, headers: { "content-type": "application/json" } });
+      },
+    });
+    const result = await connectBucket({
+      client,
+      workspaceId: "11111111-1111-4111-8111-000000000001",
+      registration,
+      now,
+      writer: {
+        async write(key, body) {
+          writes.push({ key, body });
+        },
+        async presignGet() {
+          return presignedUrl;
+        },
+      },
+    });
+    expect(writes).toEqual([{ key: objectKey, body: nonce }]);
+    expect(result.presignedUrl).toBe(presignedUrl);
+    const verify = seen.find((call) => call.url.endsWith("/byo/verify"));
+    expect(verify?.body).toEqual({ presignedUrl });
+    expect(Object.keys(verify?.body as object)).toEqual(["presignedUrl"]);
+    const registered = seen.find((call) => call.url.endsWith("/byo/register"));
+    expect(registered?.body).toEqual(register.request.body);
   });
 });

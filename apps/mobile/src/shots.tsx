@@ -6,6 +6,8 @@ import {
   DeleteAccountScreen,
   FileTree,
   LockScreen,
+  NewWorkspaceScreen,
+  PassphraseScreen,
   SignInScreen,
   WorkspacesScreen,
   type DeletionFrame,
@@ -16,6 +18,8 @@ export const SHOTS = [
   "sign-in",
   "workspaces",
   "files",
+  "files-encrypted",
+  "passphrase",
   "lock-over-cap",
   "lock-lapsed",
   "lock-over-cap-and-lapsed",
@@ -27,7 +31,9 @@ export const SHOTS = [
   "delete-retry",
   "delete-dismiss",
   "delete-not-retryable",
-  "byo-hidden",
+  "byo-s3",
+  "pricing-free-first",
+  "pricing-hosted-plus-byo",
 ] as const;
 
 export type ShotId = (typeof SHOTS)[number];
@@ -104,7 +110,7 @@ export function ShotFrame(props: { id: ShotId }) {
             onMerge={() => undefined}
           />
         ) : null}
-        {props.id === "files" ? (
+        {props.id === "files" || props.id === "files-encrypted" ? (
           <FileTree
             mode="upload"
             nodes={[file, treeNode({ path: "Documents/notes.pdf", directory: false })]}
@@ -115,6 +121,7 @@ export function ShotFrame(props: { id: ShotId }) {
             onUpload={() => undefined}
           />
         ) : null}
+        {props.id === "passphrase" ? <PassphraseScreen onSubmit={() => undefined} /> : null}
         {lock ? (
           <LockScreen
             workspaces={[WORKSPACE]}
@@ -137,7 +144,39 @@ export function ShotFrame(props: { id: ShotId }) {
             onError={() => undefined}
           />
         ) : null}
-        {props.id === "byo-hidden" ? <ConnectStorageScreen /> : null}
+        {props.id === "byo-s3" ? <ConnectStorageScreen /> : null}
+        {props.id === "pricing-free-first" ? (
+          <NewWorkspaceScreen
+            quote={{ isFree: true, grandfathered: true, monthlyPriceCents: 0 }}
+            onCreate={() => undefined}
+          />
+        ) : null}
+        {props.id === "pricing-hosted-plus-byo" ? (
+          <WorkspacesScreen
+            workspaces={[
+              {
+                id: "11111111-1111-4111-8111-000000000001",
+                name: "Free Hosted",
+                kind: "paid",
+                isFree: false,
+                grandfathered: false,
+                monthlyPriceCents: 500,
+              },
+              {
+                id: "11111111-1111-4111-8111-000000000002",
+                name: "Second Workspace",
+                kind: "paid",
+                isFree: true,
+                grandfathered: true,
+                monthlyPriceCents: 0,
+              },
+            ]}
+            unpaidIds={["11111111-1111-4111-8111-000000000001"]}
+            monthlyCents={500}
+            onDelete={() => undefined}
+            onMerge={() => undefined}
+          />
+        ) : null}
       </View>
     </View>
   );

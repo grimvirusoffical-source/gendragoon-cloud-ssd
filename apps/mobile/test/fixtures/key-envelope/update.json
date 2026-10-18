@@ -1,19 +1,19 @@
-Source-SHA: 24fba029b6674ee4410ececec11b0935ba713960
+Source-SHA: ee4f76f07bc798635002ae2c272fb47d83db7698
 Source-Path: fixtures/key-envelope/update.json
 
 {
   "request": {
     "body": {
-      "iv": "AwMDAwMDAwMDAwMD",
+      "iv": "+/v7+/v7+/v7+/v7",
       "kdf": {
         "alg": "argon2id",
         "iterations": 2,
         "memoryKiB": 19456,
         "parallelism": 1
       },
-      "salt": "AgICAgICAgICAgICAgICAg",
+      "salt": "/////////////////////w==",
       "version": 2,
-      "wrappedKey": "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcH"
+      "wrappedKey": "+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7"
     },
     "headers": {
       "authorization": "<redacted>",
@@ -25,16 +25,16 @@ Source-Path: fixtures/key-envelope/update.json
   },
   "response": {
     "body": {
-      "iv": "AwMDAwMDAwMDAwMD",
+      "iv": "-_v7-_v7-_v7-_v7",
       "kdf": {
         "alg": "argon2id",
         "iterations": 2,
         "memoryKiB": 19456,
         "parallelism": 1
       },
-      "salt": "AgICAgICAgICAgICAgICAg",
+      "salt": "_____________________w",
       "version": 2,
-      "wrappedKey": "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcH"
+      "wrappedKey": "-_v7-_v7-_v7-_v7-_v7-_v7-_v7-_v7-_v7-_v7-_v7-_v7-_v7-_v7-_v7-_v7"
     },
     "status": 200
   }

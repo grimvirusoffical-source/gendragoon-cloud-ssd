@@ -1,35 +1,40 @@
 import {
+  DeletionNotRetryableError,
   accountUidFromIdToken,
   deleteAccountAndWipe,
   deletionAuthFailure,
   dismissAccountDeletion,
+  resumeAccountDeletion,
+  retryDeletion,
+  type DeletionAuthSignal,
   type GenDragoonClient,
   type SecretStore,
 } from "@gendragoon/core";
-import * as coreExports from "@gendragoon/core";
 
 /** Same SecureStore as core's deletion job. The uid is the account that started it. */
 const DELETION_UID_KEY = "account-deletion:uid";
 const DELETION_JOB_KEY = "account-deletion:job-id";
+const DELETION_TOKEN_KEY = "account-deletion:status-token";
 
-type DeletionNotRetryableCtor = new (...args: never[]) => Error & { jobId: string };
+type DeletionClient = Pick<GenDragoonClient, "deleteAccount" | "deletionStatus">;
 
-/**
- * PR #1 exports `DeletionNotRetryableError` (409, carries `jobId`).
- * Until that class exists, a 409 stays a plain `ApiError` and this is null.
- */
-export function isDeletionNotRetryableError(error: unknown): error is Error & { jobId: string } {
-  const ctor = (coreExports as { DeletionNotRetryableError?: DeletionNotRetryableCtor }).DeletionNotRetryableError;
-  if (typeof ctor !== "function" || !(error instanceof ctor)) return false;
-  return typeof error.jobId === "string" && error.jobId.length > 0;
+export interface SignedInDeletionInput {
+  client: DeletionClient;
+  idToken: string;
+  workspaceIds: readonly string[];
+  secrets: SecretStore;
+  onAuthFailure?: (signal: DeletionAuthSignal, error: unknown) => void;
+  /** Clears the Firebase session only. Core keeps the saved job. */
+  clearSession?: () => Promise<void> | void;
+}
+
+export function isDeletionNotRetryableError(error: unknown): error is DeletionNotRetryableError {
+  return error instanceof DeletionNotRetryableError;
 }
 
 /**
- * PR #1 calls `onAuthFailure(signal, error)` and does not throw for these.
- * `signed_out` carries `InvalidTokenError` from a Firebase-token `invalid_token`:
- * clear only the session and leave the progress screen polling.
- * `reauth_required` is the status-token safety net: show re-sign-in and keep the job.
- * Unknown signals are ignored until that hook lands.
+ * `signed_out` clears only the session. Polling continues on the status token.
+ * `reauth_required` shows re-sign-in and leaves the job in place.
  */
 export function applyAuthFailureSignal(
   signal: string,
@@ -43,43 +48,55 @@ export function applyAuthFailureSignal(
   if (signal === "reauth_required") actions.showReauth();
 }
 
-export function clientRetriesDeletion(client: object): client is { retryDeletion: () => Promise<unknown> } {
-  return typeof (client as { retryDeletion?: unknown }).retryDeletion === "function";
+export function signedInDeletionRun(input: SignedInDeletionInput) {
+  return {
+    client: input.client,
+    reauthenticatedAt: "",
+    idToken: input.idToken,
+    workspaceIds: input.workspaceIds,
+    secrets: input.secrets,
+    secureStore: input.secrets,
+    onAuthFailure: input.onAuthFailure,
+    clearSession: input.clearSession,
+  };
 }
 
-export async function deleteSignedInAccount(input: {
-  client: Pick<GenDragoonClient, "deleteAccount" | "deletionStatus">;
-  idToken: string;
-  workspaceIds: readonly string[];
-  secrets: SecretStore;
-  /** Forwarded to core once PR #1 reads `onAuthFailure` during polling. */
-  onAuthFailure?: (signal: string, error: unknown) => void;
-}) {
+export async function deleteSignedInAccount(input: SignedInDeletionInput) {
   const uid = accountUidFromIdToken(input.idToken);
   if (uid) await input.secrets.set(DELETION_UID_KEY, new TextEncoder().encode(uid));
   try {
-    const request: Parameters<typeof deleteAccountAndWipe>[0] = {
-      client: input.client,
-      reauthenticatedAt: "",
-      idToken: input.idToken,
-      workspaceIds: input.workspaceIds,
-      secrets: input.secrets,
-      secureStore: input.secrets,
-    };
-    if (input.onAuthFailure) Object.assign(request, { onAuthFailure: input.onAuthFailure });
-    const status = await deleteAccountAndWipe(request);
+    const status = await deleteAccountAndWipe(signedInDeletionRun(input));
     if (status.status === "done") {
       await input.secrets.delete(DELETION_UID_KEY);
     }
     return status;
   } catch (error) {
+    if (isDeletionNotRetryableError(error) && error.jobId.length > 0) {
+      await input.secrets.set(DELETION_JOB_KEY, new TextEncoder().encode(error.jobId));
+    }
     const job = await input.secrets.get(DELETION_JOB_KEY);
-    // invalid_token clears the session only. The uid stays with any saved job.
     if (deletionSessionAction(error) !== "sign-out" && (!job || job.byteLength === 0)) {
       await input.secrets.delete(DELETION_UID_KEY);
     }
     throw error;
   }
+}
+
+/** Repeat DELETE for a saved job that failed with `retryable: true`. */
+export function retrySignedInDeletion(input: SignedInDeletionInput) {
+  return retryDeletion(signedInDeletionRun(input));
+}
+
+/** Poll the saved status token. Does not send DELETE. */
+export function resumeSignedInDeletion(input: SignedInDeletionInput) {
+  return resumeAccountDeletion({
+    client: input.client,
+    workspaceIds: input.workspaceIds,
+    secrets: input.secrets,
+    secureStore: input.secrets,
+    onAuthFailure: input.onAuthFailure,
+    clearSession: input.clearSession,
+  });
 }
 
 export async function dismissSignedInDeletion(secrets: SecretStore): Promise<void> {
@@ -88,12 +105,20 @@ export async function dismissSignedInDeletion(secrets: SecretStore): Promise<voi
 }
 
 export async function savedDeletionUid(secrets: SecretStore): Promise<string | null> {
-  const bytes = await secrets.get(DELETION_UID_KEY);
-  if (!bytes || bytes.byteLength === 0) return null;
-  const text = new TextDecoder().decode(bytes);
-  return text.length > 0 ? text : null;
+  return readSecret(secrets, DELETION_UID_KEY);
+}
+
+export async function savedDeletionStatusToken(secrets: SecretStore): Promise<string | null> {
+  return readSecret(secrets, DELETION_TOKEN_KEY);
 }
 
 export function deletionSessionAction(error: unknown): "reauth" | "sign-out" | null {
   return deletionAuthFailure(error);
+}
+
+async function readSecret(secrets: SecretStore, name: string): Promise<string | null> {
+  const bytes = await secrets.get(name);
+  if (!bytes || bytes.byteLength === 0) return null;
+  const text = new TextDecoder().decode(bytes);
+  return text.length > 0 ? text : null;
 }

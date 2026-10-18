@@ -28,7 +28,7 @@ function clientFor(fetchImpl: typeof fetch): GenDragoonClient {
 }
 
 describe("delete account uses core and PR #6 error bodies", () => {
-  it("sends {confirm:DELETE} and reads status, not state", async () => {
+  it("sends {confirm:DELETE} and does not treat state as status", async () => {
     const secrets = new MemorySecretStore();
     await secrets.set(workspaceKeyId("ws-1"), new Uint8Array([1, 2, 3]));
     const seen: { method?: string; url: string; body: unknown }[] = [];
@@ -40,23 +40,20 @@ describe("delete account uses core and PR #6 error bodies", () => {
         return json(202, { status: "deleting", jobId: "job-1" });
       }
       polls += 1;
-      if (polls === 1) {
-        expect(await secrets.get(workspaceKeyId("ws-1"))).not.toBeNull();
-        return json(200, { jobId: "job-1", state: "done", retryable: false });
-      }
-      return json(200, { jobId: "job-1", status: "done", retryable: false });
+      expect(await secrets.get(workspaceKeyId("ws-1"))).not.toBeNull();
+      return json(200, { jobId: "job-1", state: "done", retryable: false });
     });
-    const status = await deleteSignedInAccount({
+    await expect(deleteSignedInAccount({
       client,
       idToken: idToken(Math.floor(Date.now() / 1000) - 30),
       workspaceIds: ["ws-1"],
       secrets,
-    });
+    })).rejects.toMatchObject({ status: 409, code: "DELETION_STATUS_UNKNOWN" });
     expect(seen[0]?.body).toEqual({ confirm: "DELETE" });
     expect(seen[1]?.url).toContain("/v2/account/deletions/job-1");
     expect(seen.some((call) => call.url.includes("/account/deletion/"))).toBe(false);
-    expect(status.status).toBe("done");
-    expect(await secrets.get(workspaceKeyId("ws-1"))).toBeNull();
+    expect(polls).toBe(1);
+    expect(await secrets.get(workspaceKeyId("ws-1"))).not.toBeNull();
   });
 
   it("401 {error:reauth_required} does not wipe and asks for sign-in", async () => {

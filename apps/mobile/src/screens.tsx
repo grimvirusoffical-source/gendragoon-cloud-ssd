@@ -3,6 +3,7 @@ import {
   COMING_SOON_BYO_PROVIDERS,
   LAUNCH_BYO_PROVIDERS,
   PASSPHRASE_LOSS_WARNING,
+  SUPPORT_CONTACT,
   SORT_CATEGORIES,
   accountUidFromIdToken,
   actionsForMode,
@@ -23,17 +24,21 @@ import { useState } from "react";
 import { Linking, StyleSheet, Text, TextInput, View } from "react-native";
 import {
   applyAuthFailureSignal,
-  clientRetriesDeletion,
   deletionSessionAction,
   deleteSignedInAccount,
   dismissSignedInDeletion,
   isDeletionNotRetryableError,
+  resumeSignedInDeletion,
+  retrySignedInDeletion,
+  savedDeletionStatusToken,
   savedDeletionUid,
 } from "./account/deleteAccount";
 import { SAME_ACCOUNT_MESSAGE, sessionMaySwap } from "./account/session";
 import { byoServerFlowReady } from "./byoReady";
-import { ENCRYPTED_WORKSPACE_ENABLED } from "./flags";
-import { SUPPORT_CONTACT, supportContactTarget } from "./support";
+import { DELETION_SUPPORT_ENDPOINT_ENABLED, ENCRYPTED_WORKSPACE_ENABLED, WORKSPACE_PRICING_ENABLED } from "./flags";
+import { workspacePriceLabel, type WorkspacePriceInput } from "./pricing";
+import { SUPPORT_REQUEST_ALREADY, SUPPORT_REQUEST_SENT, requestDeletionSupport } from "./supportRequest";
+import { supportContactTarget } from "./supportContact";
 import { Banner, Button, Screen, Title, cardStyle } from "./ui";
 
 export function workspacesWithUnpaid<T extends { id: string }>(
@@ -229,8 +234,27 @@ export interface ServerMergeResult {
   copied: number;
 }
 
+export type ListedWorkspace = WorkspaceRecord & WorkspacePriceInput;
+
+export function NewWorkspaceScreen(props: {
+  /** Server quote for the workspace about to be created. Not a client-side count. */
+  quote: WorkspacePriceInput;
+  onCreate: () => void;
+  /** Overrides `WORKSPACE_PRICING_ENABLED` in tests. */
+  pricingEnabled?: boolean;
+}) {
+  const label = (props.pricingEnabled ?? WORKSPACE_PRICING_ENABLED) ? workspacePriceLabel(props.quote) : null;
+  return (
+    <Screen testID="new-workspace-screen">
+      <Title kicker="Workspaces">New workspace</Title>
+      {label ? <Text testID="new-workspace-price" style={styles.help}>{label}</Text> : null}
+      <Button label="Create workspace" testID="create-workspace" onPress={props.onCreate} />
+    </Screen>
+  );
+}
+
 export function WorkspacesScreen(props: {
-  workspaces: readonly WorkspaceRecord[];
+  workspaces: readonly ListedWorkspace[];
   unpaidIds: readonly string[];
   monthlyCents: number;
   capMessage?: string | null;
@@ -240,7 +264,10 @@ export function WorkspacesScreen(props: {
   mergedFiles?: readonly { id: string; name: string }[] | null;
   onDelete: (id: string) => void;
   onMerge: (sourceId: string, targetId: string) => void;
+  /** Overrides `WORKSPACE_PRICING_ENABLED` in tests. */
+  pricingEnabled?: boolean;
 }) {
+  const showPrice = props.pricingEnabled ?? WORKSPACE_PRICING_ENABLED;
   const rows = workspacesWithUnpaid(props.workspaces, props.unpaidIds);
   const [sourceId, setSourceId] = useState(rows[1]?.id ?? rows[0]?.id ?? "");
   const [targetId, setTargetId] = useState(rows[0]?.id ?? "");
@@ -255,6 +282,9 @@ export function WorkspacesScreen(props: {
       {rows.map((workspace) => (
         <View key={workspace.id} style={cardStyle()}>
           <Text testID={`workspace-name-${workspace.id}`} style={styles.category}>{workspace.name}{workspace.unpaid ? " · unpaid" : ""}</Text>
+          {showPrice && workspacePriceLabel(workspace) ? (
+            <Text testID={`workspace-price-${workspace.id}`} style={styles.help}>{workspacePriceLabel(workspace)}</Text>
+          ) : null}
           <Button label="Delete" tone="danger" testID={`delete-${workspace.id}`} onPress={() => props.onDelete(workspace.id)} />
         </View>
       ))}
@@ -347,7 +377,7 @@ export function ConnectStorageScreen(props: {
       {ready && selected ? <Text testID="byo-selected" style={styles.help}>{selected}</Text> : null}
       <Text style={styles.help}>Coming soon</Text>
       {COMING_SOON_BYO_PROVIDERS.map((provider) => (
-        <Text key={provider.id} testID={`byo-soon-${provider.id}`} style={styles.soon}>{provider.label}</Text>
+        <Text key={provider.id} testID={`byo-soon-${provider.id}`} style={styles.soon}>{`${provider.label} · Coming soon`}</Text>
       ))}
       {props.registration?.byoRegistered ? (
         <Text testID="byo-registered" style={styles.help}>{`${props.registration.providerType} · ${props.registration.endpoint}`}</Text>
@@ -394,7 +424,10 @@ export function PassphraseScreen(props: { onSubmit: (passphrase: string) => void
 
 export type DeletionFrame = "confirm" | "reauth" | "progress" | "retry" | "dismiss" | "not-retryable";
 
+type DeletionNoticeKind = "progress" | "retry" | "dismiss" | "reauth" | "missing" | "offline" | "not-retryable";
+
 interface DeletionNotice {
+  kind: DeletionNoticeKind;
   message: string;
   retry: boolean;
   dismiss: boolean;
@@ -405,18 +438,19 @@ interface DeletionNotice {
   jobId?: string;
 }
 
-function deletionNotice(kind: "progress" | "retry" | "dismiss" | "reauth" | "missing" | "offline" | "not-retryable"): DeletionNotice {
+function deletionNotice(kind: DeletionNoticeKind): DeletionNotice {
   if (kind === "progress") {
-    return { message: "Deletion is running.", retry: false, dismiss: false, reauth: false, progress: true, support: false, hideSignInHelp: false };
+    return { kind, message: "Deletion is running.", retry: false, dismiss: false, reauth: false, progress: true, support: false, hideSignInHelp: false };
   }
   if (kind === "retry") {
-    return { message: "Deletion didn't finish. Retry picks up where it stopped.", retry: true, dismiss: false, reauth: false, progress: false, support: false, hideSignInHelp: false };
+    return { kind, message: "Deletion didn't finish. Retry picks up where it stopped.", retry: true, dismiss: false, reauth: false, progress: false, support: false, hideSignInHelp: false };
   }
   if (kind === "dismiss") {
-    return { message: "Account deletion failed.", retry: false, dismiss: true, reauth: false, progress: false, support: true, hideSignInHelp: false };
+    return { kind, message: "Account deletion failed.", retry: false, dismiss: true, reauth: false, progress: false, support: true, hideSignInHelp: false };
   }
   if (kind === "not-retryable") {
     return {
+      kind,
       message: "We couldn't finish deleting your account. Contact support and we'll complete it for you.",
       retry: false,
       dismiss: true,
@@ -427,12 +461,12 @@ function deletionNotice(kind: "progress" | "retry" | "dismiss" | "reauth" | "mis
     };
   }
   if (kind === "reauth") {
-    return { message: "Sign in again. Your last sign-in is older than 5 minutes.", retry: false, dismiss: false, reauth: true, progress: false, support: false, hideSignInHelp: false };
+    return { kind, message: "Sign in again. Your last sign-in is older than 5 minutes.", retry: false, dismiss: false, reauth: true, progress: false, support: false, hideSignInHelp: false };
   }
   if (kind === "offline") {
-    return { message: "Could not reach the server. Try again.", retry: true, dismiss: true, reauth: false, progress: false, support: false, hideSignInHelp: false };
+    return { kind, message: "Could not reach the server. Try again.", retry: true, dismiss: true, reauth: false, progress: false, support: false, hideSignInHelp: false };
   }
-  return { message: "The deletion status could not be loaded.", retry: true, dismiss: true, reauth: false, progress: false, support: false, hideSignInHelp: false };
+  return { kind, message: "The deletion status could not be loaded.", retry: true, dismiss: true, reauth: false, progress: false, support: false, hideSignInHelp: false };
 }
 
 export function DeleteAccountScreen(props: {
@@ -451,71 +485,132 @@ export function DeleteAccountScreen(props: {
   frame?: DeletionFrame;
   /** Job id used in the support mail subject for a static frame. */
   jobId?: string;
+  /** Overrides the build flag in tests. Production reads `DELETION_SUPPORT_ENDPOINT_ENABLED`. */
+  supportEndpointEnabled?: boolean;
+  apiBase?: string;
+  supportFetch?: typeof fetch;
 }) {
   const [step, setStep] = useState<"review" | "confirm">(props.frame === "confirm" ? "confirm" : "review");
   const [notice, setNotice] = useState<DeletionNotice | null>(
     props.frame && props.frame !== "confirm" ? { ...deletionNotice(props.frame), jobId: props.jobId } : null,
   );
+  const [supportNotice, setSupportNotice] = useState<string | null>(null);
   const blocked = props.activeTransfers > 0;
+  function authHooks() {
+    return {
+      onAuthFailure: (signal: string, error: unknown) => {
+        applyAuthFailureSignal(signal, error, {
+          // Core also calls `clearSession`. Doing it here as well would clear twice.
+          clearSession: () => undefined,
+          showReauth: () => setNotice(deletionNotice("reauth")),
+        });
+      },
+      clearSession: () => props.onClearSession?.(),
+    };
+  }
   function showFailure(error: unknown) {
     if (isDeletionNotRetryableError(error)) {
       setNotice({ ...deletionNotice("not-retryable"), jobId: error.jobId });
       return;
     }
     const action = deletionSessionAction(error);
-    if (action === "reauth") {
+    // `signed_out` already cleared the session. Leave the progress screen up.
+    if (action === "sign-out") return;
+    if (action === "reauth" || (error instanceof ApiError && error.status === 401)) {
       setNotice(deletionNotice("reauth"));
       props.onReauth();
-    } else if (action === "sign-out") props.onSignedOut();
-    else if (error instanceof ApiError && error.status === 404) setNotice(deletionNotice("missing"));
-    else if (error instanceof ApiError && error.status === 0) setNotice(deletionNotice("offline"));
-    else props.onError(error instanceof Error ? error.message : "Account deletion failed");
+      return;
+    }
+    if (error instanceof ApiError && error.status === 404) {
+      setNotice(deletionNotice("missing"));
+      return;
+    }
+    if (error instanceof ApiError && error.status === 0) {
+      setNotice(deletionNotice("offline"));
+      return;
+    }
+    props.onError(error instanceof Error ? error.message : "Account deletion failed");
+  }
+  function applyStatus(status: { status: string; jobId: string; retryable?: boolean }) {
+    if (status.status === "done") {
+      props.onDone();
+      return;
+    }
+    if (status.status === "failed") {
+      const retryable = status.retryable === true;
+      setNotice({ ...deletionNotice(retryable ? "retry" : "dismiss"), jobId: status.jobId });
+      return;
+    }
+    props.onError("Account deletion did not finish. Local keys were kept.");
+  }
+  function deletionInput() {
+    return {
+      client: props.client,
+      idToken: props.idToken,
+      workspaceIds: props.workspaceIds,
+      secrets: props.secrets,
+      ...authHooks(),
+    };
   }
   async function confirm() {
     setNotice(deletionNotice("progress"));
     try {
-      const status = await deleteSignedInAccount({
-        client: props.client,
-        idToken: props.idToken,
-        workspaceIds: props.workspaceIds,
-        secrets: props.secrets,
-        onAuthFailure: (signal, error) => {
-          applyAuthFailureSignal(signal, error, {
-            clearSession: () => props.onClearSession?.(),
-            showReauth: () => setNotice(deletionNotice("reauth")),
-          });
-        },
-      });
-      if (status.status === "done") {
-        props.onDone();
-        return;
-      }
-      if (status.status === "failed") {
-        const retryable = (status as { retryable?: boolean }).retryable === true;
-        setNotice({ ...deletionNotice(retryable ? "retry" : "dismiss"), jobId: status.jobId });
-        return;
-      }
-      props.onError("Account deletion did not finish. Local keys were kept.");
+      applyStatus(await deleteSignedInAccount(deletionInput()));
     } catch (error) {
       showFailure(error);
     }
   }
   async function retry() {
-    const client = props.client;
-    if (clientRetriesDeletion(client)) {
-      setNotice(deletionNotice("progress"));
-      try {
-        await client.retryDeletion();
-      } catch (error) {
-        showFailure(error);
+    const kind = notice?.kind;
+    setNotice(deletionNotice("progress"));
+    try {
+      const status = kind === "retry"
+        ? await retrySignedInDeletion(deletionInput())
+        : await resumeSignedInDeletion(deletionInput());
+      if (!status) {
+        props.onError("Account deletion did not finish. Local keys were kept.");
+        return;
       }
-      return;
+      applyStatus(status);
+    } catch (error) {
+      showFailure(error);
     }
-    await confirm();
   }
   async function dismiss() {
     await dismissSignedInDeletion(props.secrets);
     setNotice(null);
+  }
+  async function contact() {
+    const jobId = notice?.jobId ?? "";
+    const enabled = props.supportEndpointEnabled ?? DELETION_SUPPORT_ENDPOINT_ENABLED;
+    if (enabled) {
+      const statusToken = await savedDeletionStatusToken(props.secrets);
+      if (statusToken) {
+        const result = await requestDeletionSupport({
+          baseUrl: props.apiBase ?? "https://api.example.test",
+          jobId,
+          statusToken,
+          fetchImpl: props.supportFetch,
+        });
+        if (result.kind === "sent") {
+          setSupportNotice(SUPPORT_REQUEST_SENT);
+          return;
+        }
+        if (result.kind === "already") {
+          setSupportNotice(SUPPORT_REQUEST_ALREADY);
+          return;
+        }
+        if (result.kind === "refresh") {
+          try {
+            applyStatus(await props.client.deletionStatus(jobId, statusToken));
+          } catch (error) {
+            showFailure(error);
+          }
+          return;
+        }
+      }
+    }
+    await Linking.openURL(supportContactTarget(SUPPORT_CONTACT.value, jobId));
   }
   return (
     <Screen testID="delete-account-screen">
@@ -527,6 +622,8 @@ export function DeleteAccountScreen(props: {
       {notice ? (
         <Banner testID={notice.progress ? "deletion-progress" : "deletion-error"}>{notice.message}</Banner>
       ) : null}
+      {supportNotice === SUPPORT_REQUEST_SENT ? <Banner testID="support-request-sent">{SUPPORT_REQUEST_SENT}</Banner> : null}
+      {supportNotice === SUPPORT_REQUEST_ALREADY ? <Banner testID="support-request-already">{SUPPORT_REQUEST_ALREADY}</Banner> : null}
       {notice?.support && __DEV__ && SUPPORT_CONTACT.isPlaceholder ? (
         <Text testID="support-placeholder-note" style={styles.devNote}>placeholder contact</Text>
       ) : null}
@@ -537,10 +634,7 @@ export function DeleteAccountScreen(props: {
           label="Contact support"
           testID="contact-support"
           accessibilityLabel="Contact support"
-          onPress={() => {
-            const jobId = notice.jobId ?? "";
-            void Linking.openURL(supportContactTarget(SUPPORT_CONTACT.value, jobId));
-          }}
+          onPress={() => void contact()}
         />
       ) : null}
       {notice?.dismiss ? <Button label="Dismiss" tone="ghost" testID="deletion-dismiss" onPress={() => void dismiss()} /> : null}

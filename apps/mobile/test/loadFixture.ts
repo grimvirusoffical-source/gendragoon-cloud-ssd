@@ -1,17 +1,20 @@
 import { readFileSync } from "node:fs";
 import path from "node:path";
 
-/** gendragoon-cloud-ssd PR #5, presignedUrl-only BYO verify. */
+/** gendragoon-cloud-ssd PR #5 at the BYO, lock, and merge snapshot. */
 export const FIXTURE_SOURCE_SHA = "da3927627fee76103981714f9f8ffa954843b74b";
 
 /** Later fixture areas, keyed by the directory under fixtures/. */
 export const FIXTURE_SOURCE_SHA_BY_AREA: Record<string, string> = {
-  /** cloud-ssd PR #6, including JSON singular-path and deletion retry. */
-  "account-deletion": "9d0f056430450fa97ae513181c9fd48852fd63bf",
-  "errors": "9d0f056430450fa97ae513181c9fd48852fd63bf",
-  "storage-urls": "6af23999cbe6c22a64c7fcab7a9e2f55710aa1c1",
-  /** cloud-ssd PR #9, nested kdf envelope. */
-  "key-envelope": "24fba029b6674ee4410ececec11b0935ba713960",
+  /** cloud-ssd PR #6 tip. Includes status-failed-not-retryable. */
+  "account-deletion": "fff0a84b6d75acb3a79cff7f146450c486efbe56",
+  "errors": "fff0a84b6d75acb3a79cff7f146450c486efbe56",
+  /** cloud-ssd PR #7, manifest ifGeneration as a decimal string. */
+  "storage-urls": "8267784a790bbe8418b3cbe36e8a4b91849b0e81",
+  /** cloud-ssd PR #9 tip. Responses store salt, iv, and wrappedKey as unpadded base64url. */
+  "key-envelope": "ee4f76f07bc798635002ae2c272fb47d83db7698",
+  /** cloud-ssd PR #5 tip. List and create items carry isFree and monthlyPriceCents. */
+  "workspaces": "568f2236ffe2520758fb8f20cf22566aefc14cf3",
 };
 
 export interface FixtureFile<TBody> {

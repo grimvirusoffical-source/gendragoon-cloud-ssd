@@ -1,0 +1,21 @@
+Source-SHA: fff0a84b6d75acb3a79cff7f146450c486efbe56
+Source-Path: fixtures/account-deletion/status-failed-not-retryable.json
+
+{
+  "request": {
+    "body": null,
+    "headers": {
+      "authorization": "<redacted>"
+    },
+    "method": "GET",
+    "path": "/v2/account/deletions/00000000-0000-4000-8000-000000000009"
+  },
+  "response": {
+    "body": {
+      "jobId": "00000000-0000-4000-8000-000000000009",
+      "retryable": false,
+      "status": "failed"
+    },
+    "status": 200
+  }
+}

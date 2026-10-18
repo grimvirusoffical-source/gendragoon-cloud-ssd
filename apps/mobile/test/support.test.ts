@@ -1,4 +1,4 @@
-import { supportContactTarget } from "../src/support";
+import { supportContactTarget } from "../src/supportContact";
 
 describe("support contact target", () => {
   it("mails an email address with the deletion job in the subject", () => {

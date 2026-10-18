@@ -62,7 +62,7 @@ describe("deletion poll rulings", () => {
       secrets,
     }).catch((caught: unknown) => caught);
     expect(deletionSessionAction(again)).toBe("reauth");
-    expect(methods).toEqual(["GET"]);
+    expect(methods).toEqual(["DELETE", "GET"]);
     expect(await savedDeletionUid(secrets)).toBe("user-1");
     expect(await secrets.get("account-deletion:job-id")).not.toBeNull();
     expect(await secrets.get(workspaceKeyId("ws-1"))).toEqual(new Uint8Array([4]));
