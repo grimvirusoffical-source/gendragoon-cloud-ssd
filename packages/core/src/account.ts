@@ -294,14 +294,9 @@ async function pollDeletion(input: {
         await markRecovery(input.secureStore);
         throw new DeletionNotFoundError();
       }
-      const statusRejected = credential === "status" && (isInvalidToken(error) || error instanceof ReauthRequiredError);
-      if (statusRejected) {
-        await markRecovery(input.secureStore);
-        const reauth = error instanceof ReauthRequiredError ? error : new ReauthRequiredError();
-        await input.onAuthFailure?.("reauth_required", reauth);
-        throw reauth;
-      }
-      if (isInvalidToken(error)) {
+      // Only a Firebase-token invalid_token signs out. Polling then continues
+      // with the saved status token. Every other status-GET 401 asks for sign-in.
+      if (isInvalidToken(error) && credential !== "status") {
         await input.onAuthFailure?.("signed_out", error);
         await input.clearSession?.();
         if (input.job.statusToken && !switchedToStatus) {
@@ -310,6 +305,12 @@ async function pollDeletion(input: {
           continue;
         }
         throw error;
+      }
+      if (error instanceof ApiError && error.status === 401) {
+        await markRecovery(input.secureStore);
+        const reauth = credential === "status" && isInvalidToken(error) ? new ReauthRequiredError() : error;
+        await input.onAuthFailure?.("reauth_required", reauth);
+        throw reauth;
       }
       throw error;
     }

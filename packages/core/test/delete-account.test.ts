@@ -151,6 +151,46 @@ describe("DELETE /v2/account contract", () => {
     expect(await secrets.get(workspaceKeyId("w1"))).not.toBeNull();
   });
 
+  it("status GET 401 unauthorized, reauth_required, or no code signals reauth_required and keeps the job", async () => {
+    const bodies: unknown[] = [{ error: "unauthorized" }, { error: "reauth_required" }, {}];
+    for (const body of bodies) {
+      const secrets = new MemorySecretStore();
+      await secrets.set(workspaceKeyId("w1"), new Uint8Array([1]));
+      const secureStore = new MemorySecretStore();
+      const signals: Array<{ signal: string; error: unknown }> = [];
+      let gets = 0;
+      const client = new GenDragoonClient({
+        baseUrl: "https://api.example.test",
+        getToken: () => "firebase-token",
+        fetch: async (_input, init) => {
+          if (init?.method === "DELETE") {
+            return jsonResponse(202, { jobId: "job-1", status: "deleting", statusToken: "status-token" });
+          }
+          gets += 1;
+          return jsonResponse(401, body);
+        },
+      });
+      const error = await deleteAccountAndWipe({
+        client,
+        reauthenticatedAt: new Date().toISOString(),
+        workspaceIds: ["w1"],
+        secrets,
+        secureStore,
+        sleep: async () => {
+          throw new Error("polling continued");
+        },
+        onAuthFailure: (signal, err) => {
+          signals.push({ signal, error: err });
+        },
+      }).catch((caught: unknown) => caught);
+      expect(gets).toBe(1);
+      expect(signals).toEqual([{ signal: "reauth_required", error }]);
+      expect(await secrets.get(workspaceKeyId("w1"))).not.toBeNull();
+      expect(await secureStore.get("account-deletion:job-id")).not.toBeNull();
+      expect(await secureStore.get("account-deletion:status-token")).not.toBeNull();
+    }
+  });
+
   it("polls a 410 account_deleted job and wipes only after done", async () => {
     const secrets = new MemorySecretStore();
     await secrets.set(workspaceKeyId("w1"), new Uint8Array([9]));
