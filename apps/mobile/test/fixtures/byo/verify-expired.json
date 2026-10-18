@@ -1,0 +1,23 @@
+Source-SHA: da3927627fee76103981714f9f8ffa954843b74b
+Source-Path: fixtures/byo/verify-expired.json
+
+{
+  "request": {
+    "body": {
+      "presignedUrl": "https://bucket.s3.us-east-1.amazonaws.com/.gendragoon-challenge/expirednonce"
+    },
+    "headers": {
+      "authorization": "<redacted>",
+      "content-type": "application/json"
+    },
+    "method": "POST",
+    "path": "/v2/workspaces/11111111-1111-4111-8111-000000000002/byo/verify"
+  },
+  "response": {
+    "body": {
+      "error": "BYO_CHALLENGE_EXPIRED",
+      "message": "Bring-your-own challenge was not verified"
+    },
+    "status": 400
+  }
+}

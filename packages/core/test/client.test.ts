@@ -195,4 +195,24 @@ describe("GenDragoonClient", () => {
     expect(status.status).toBe("done");
     expect(seen.at(-1)?.url).toBe("https://api.example.test/v2/account/deletions/job-1");
   });
+
+  it("reads machine codes from error when the body has no code field", async () => {
+    const client = new GenDragoonClient({
+      baseUrl: "https://api.example.test",
+      getToken: () => "fresh-token",
+      fetch: async (_input, init) => {
+        if (init?.method === "DELETE") return jsonResponse(410, { error: "account_deleted", jobId: "job-9" });
+        return jsonResponse(401, { error: "invalid_token" });
+      },
+    });
+    await expect(client.deleteAccount({ reauthenticatedAt: new Date().toISOString() })).rejects.toMatchObject({
+      status: 410,
+      code: "account_deleted",
+      jobId: "job-9",
+    });
+    await expect(client.deletionStatus("job-9")).rejects.toMatchObject({
+      status: 401,
+      code: "invalid_token",
+    });
+  });
 });

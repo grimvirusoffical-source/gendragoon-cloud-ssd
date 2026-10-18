@@ -13,7 +13,7 @@ No secrets, credentials, or user data belong here.
 | `packages/updater` | App-agnostic GitHub release updater. |
 | `apps/desktop` | Windows Electron client and NSIS installer. Mac target is off. |
 | `apps/red-xai-updater` | Mac menu-bar updater. Not bundled into the Windows installer. |
-| `apps/mobile` | Placeholder for the shared iOS/Android app. |
+| `apps/mobile` | Shared Expo app for iOS and Android. |
 | `apps/extension` | Placeholder for Chrome, Edge, Opera, and Firefox. |
 | `services/api` | Notes for Riley's backend changes. |
 | `docs/API.md` | Live routes plus additions. |
