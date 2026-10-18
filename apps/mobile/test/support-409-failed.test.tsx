@@ -64,15 +64,25 @@ describe("409 refresh outcomes on the screen", () => {
     expect(hooks.onError).not.toHaveBeenCalled();
   });
 
-  it.each(["running", "queued"])("refresh %s shows 'still in progress' and sends no mail", async (state) => {
-    const { s, openURL } = await press({ kind: "not_needed", status: { jobId: JOB, status: state } });
-    await waitFor(() => expect(s.getByTestId("support-deletion-running")).toHaveTextContent(SUPPORT_DELETION_STILL_RUNNING));
+  it.each(["running", "queued"])("refresh %s shows 'still in progress' politely, with no mail, no sign-in and no error", async (state) => {
+    const { s, openURL, hooks } = await press({ kind: "not_needed", status: { jobId: JOB, status: state } });
+    await waitFor(() => expect(s.getByTestId("support-deletion-running")).toHaveTextContent("Your deletion is still in progress."));
+    const banner = s.getByTestId("support-deletion-running");
+    expect(banner.props.accessibilityLiveRegion).toBe("polite");
+    expect(banner.props.accessibilityRole).toBeUndefined();
     expect(openURL).not.toHaveBeenCalled();
+    expect(hooks.onReauth).not.toHaveBeenCalled();
+    expect(hooks.onSignedOut).not.toHaveBeenCalled();
+    expect(hooks.onError).not.toHaveBeenCalled();
+    expect(hooks.onDone).not.toHaveBeenCalled();
+    expect(s.queryByTestId("deletion-reauth")).toBeNull();
   });
 
   it("refresh done finishes the deletion and sends no mail", async () => {
-    const { openURL, hooks } = await press({ kind: "not_needed", status: { jobId: JOB, status: "done" } });
-    await waitFor(() => expect(hooks.onDone).toHaveBeenCalled());
+    const { s, openURL, hooks } = await press({ kind: "not_needed", status: { jobId: JOB, status: "done" } });
+    await waitFor(() => expect(hooks.onDone).toHaveBeenCalledTimes(1));
     expect(openURL).not.toHaveBeenCalled();
+    expect(hooks.onError).not.toHaveBeenCalled();
+    expect(s.queryByTestId("support-deletion-running")).toBeNull();
   });
 });
