@@ -66,7 +66,7 @@ export function SignInScreen(props: {
     <Screen testID="sign-in-screen">
       <Title kicker="GenDragoon">Cloud SSD</Title>
       <Text style={styles.help}>Files stay encrypted on this device before they upload.</Text>
-      {props.blockedMessage ? <Banner testID="session-error">{props.blockedMessage}</Banner> : null}
+      {props.blockedMessage ? <Banner alert testID="session-error">{props.blockedMessage}</Banner> : null}
       <Button label="Sign in" testID="sign-in" onPress={props.onSignIn} />
       {props.googleEnabled ? <Text style={styles.help}>Google is configured for this build.</Text> : null}
     </Screen>
@@ -255,7 +255,9 @@ export interface ServerMergeResult {
   copied: number;
 }
 
-export type ListedWorkspace = WorkspaceRecord & { feeWaived?: boolean };
+/** Server `projectStatus: "deleting"` is not on core's union yet (see `isDeletingWorkspace`). */
+export type ListedProjectStatus = NonNullable<WorkspaceRecord["projectStatus"]> | "deleting";
+export type ListedWorkspace = Omit<WorkspaceRecord, "projectStatus"> & { projectStatus?: ListedProjectStatus; feeWaived?: boolean };
 
 export function NewWorkspaceScreen(props: {
   /** Server quote for a hosted workspace. Not a client-side count. */
@@ -407,7 +409,7 @@ export function WorkspacesScreen(props: {
     <Screen testID="workspaces-screen">
       <Title kicker="Workspaces">Your spaces</Title>
       {feeText ? <Banner testID="workspace-fee">{feeText}</Banner> : null}
-      {busyMessage ? <Banner testID="workspace-busy">{busyMessage}</Banner> : null}
+      {busyMessage ? <Banner alert testID="workspace-busy">{busyMessage}</Banner> : null}
       {props.capMessage ? <Banner testID="workspace-cap">{props.capMessage}</Banner> : null}
       {rows.map((workspace) => {
         const deleting = deletingIds.has(workspace.id);
@@ -505,7 +507,7 @@ export function WorkspacesScreen(props: {
           ))}
         </View>
       ) : null}
-      {props.mergeError ? <Banner testID="merge-error">{props.mergeError}</Banner> : null}
+      {props.mergeError ? <Banner alert testID="merge-error">{props.mergeError}</Banner> : null}
       {props.mergeResult?.merged ? (
         <Text testID="merge-result" style={styles.help}>
           {`Merged ${props.mergeResult.copied} into ${props.mergeResult.workspaceId}${props.mergeResult.sourceDeleted ? ". Source deleted." : ""}`}
@@ -670,7 +672,7 @@ export function ConnectStorageScreen(props: {
       {props.verified?.verified ? (
         <Text testID="byo-verified" style={styles.help}>{props.verified.workspaceId}</Text>
       ) : null}
-      {errorText ? <Banner testID="byo-error">{errorText}</Banner> : null}
+      {errorText ? <Banner alert testID="byo-error">{errorText}</Banner> : null}
     </Screen>
   );
 }
@@ -730,7 +732,6 @@ export function PassphraseScreen(props: {
       <Text testID="passphrase-hint" style={styles.help}>
         {longEnough ? "At least 8 characters." : "Use at least 8 characters."}
       </Text>
-      {mismatch ? <Text testID="passphrase-mismatch" style={styles.error}>Passphrases don't match</Text> : null}
       <Pressable
         accessibilityRole="checkbox"
         accessibilityLabel="I understand I can lose my files"
@@ -938,13 +939,19 @@ export function DeleteAccountScreen(props: {
         return;
       }
       if (result?.kind === "not_needed") {
-        if (result.status.status === "done" || result.status.status === "failed") {
-          applyStatus(result.status);
-        } else {
-          // A 409 whose refresh says the job is still queued or running.
+        const state = result.status.status;
+        if (state === "running" || state === "queued") {
+          // A 409 whose refresh says the job is still going.
           setSupportNotice(SUPPORT_DELETION_STILL_RUNNING);
+          return;
         }
-        return;
+        if (state === "done") {
+          applyStatus(result.status);
+          return;
+        }
+        // Avery's ruling: a refresh that comes back failed (or anything else)
+        // means support is needed after all. Core returns `fallback` for this;
+        // an older core's not_needed + failed falls through to the email too.
       }
       if (result?.kind === "fallback") {
         await Linking.openURL(supportContactTarget(result.contact.value, jobId));
@@ -961,7 +968,7 @@ export function DeleteAccountScreen(props: {
       )}
       {blocked ? <Banner>Delete account is disabled during transfers.</Banner> : null}
       {notice?.progress ? <ProgressCard testID="deletion-progress" title={notice.message} /> : null}
-      {notice && !notice.progress ? <Banner testID="deletion-error">{notice.message}</Banner> : null}
+      {notice && !notice.progress ? <Banner alert testID="deletion-error">{notice.message}</Banner> : null}
       {supportNotice === SUPPORT_REQUEST_SENT ? <Banner tone="info" testID="support-request-sent">{SUPPORT_REQUEST_SENT}</Banner> : null}
       {supportNotice === SUPPORT_DELETION_STILL_RUNNING ? <Banner tone="info" testID="support-deletion-running">{SUPPORT_DELETION_STILL_RUNNING}</Banner> : null}
       {supportNotice === SUPPORT_REQUEST_ALREADY ? <Banner tone="info" testID="support-request-already">{SUPPORT_REQUEST_ALREADY}</Banner> : null}
@@ -1015,7 +1022,6 @@ export function SettingsHome(props: {
 const styles = StyleSheet.create({
   help: { color: colors.muted, fontSize: typeScale.helpSize },
   label: { color: colors.text, fontSize: typeScale.bodySize },
-  error: { color: colors.dangerText, fontSize: typeScale.helpSize },
   checkRow: { flexDirection: "row", alignItems: "center", gap: space.sm, minHeight: tapTarget },
   checkbox: { width: 22, height: 22, borderRadius: 6, borderWidth: 1.5, borderColor: colors.controlBorder, alignItems: "center", justifyContent: "center" },
   checkboxOn: { backgroundColor: colors.primary, borderColor: colors.primary },
@@ -1025,13 +1031,4 @@ const styles = StyleSheet.create({
   category: { color: colors.text, fontSize: typeScale.bodySize },
   openRow: { minHeight: tapTarget, justifyContent: "center" },
   soon: { color: colors.muted, fontSize: typeScale.helpSize },
-  input: {
-    minHeight: tapTarget,
-    borderWidth: 1,
-    borderColor: colors.controlBorder,
-    borderRadius: 12,
-    color: colors.text,
-    paddingHorizontal: space.md,
-    backgroundColor: colors.input,
-  },
 });

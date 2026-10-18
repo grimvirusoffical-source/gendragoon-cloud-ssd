@@ -1,13 +1,15 @@
 import { fireEvent, render } from "@testing-library/react-native";
 import { StyleSheet } from "react-native";
-import { WorkspacesScreen } from "../src/screens";
+import { WorkspacesScreen, type ListedWorkspace, type ServerMergeResult } from "../src/screens";
 import { colors, contrastRatio } from "../src/theme";
 
-const A = { id: "11111111-1111-4111-8111-00000000000a", name: "Alpha", kind: "paid" as const, projectStatus: "active" as const };
-const B = { id: "11111111-1111-4111-8111-00000000000b", name: "Beta", kind: "paid" as const, projectStatus: "active" as const };
+const A: ListedWorkspace = { id: "11111111-1111-4111-8111-00000000000a", name: "Alpha", kind: "paid", projectStatus: "active" };
+const B: ListedWorkspace = { id: "11111111-1111-4111-8111-00000000000b", name: "Beta", kind: "paid", projectStatus: "active" };
+/** Typed fixture for a workspace the server is deleting. */
+const B_DELETING: ListedWorkspace = { ...B, projectStatus: "deleting" };
 
-function screenWith(workspaces: (typeof A)[], onMerge = jest.fn()) {
-  return render(<WorkspacesScreen workspaces={workspaces} unpaidIds={[]} onDelete={() => undefined} onMerge={onMerge} />);
+function screenWith(workspaces: ListedWorkspace[], onMerge = jest.fn(), extra: Partial<Parameters<typeof WorkspacesScreen>[0]> = {}) {
+  return render(<WorkspacesScreen workspaces={workspaces} unpaidIds={[]} onDelete={() => undefined} onMerge={onMerge} {...extra} />);
 }
 
 function flatStyle(node: { props: { style?: unknown } }) {
@@ -43,7 +45,7 @@ describe("merge workspaces UI", () => {
   });
 
   it("a disabled Merge button reads as disabled with AA text", async () => {
-    const screen = await screenWith([A, { ...B, projectStatus: "deleting" as never }]);
+    const screen = await screenWith([A, B_DELETING]);
     const merge = screen.getByTestId("merge-workspaces");
     expect(merge.props.accessibilityState.disabled).toBe(true);
     const style = flatStyle(merge);
@@ -52,5 +54,17 @@ describe("merge workspaces UI", () => {
     const label = screen.getByText("Merge");
     expect(StyleSheet.flatten(label.props.style).color).toBe(colors.muted);
     expect(contrastRatio(colors.muted, colors.surfaceRaised)).toBeGreaterThanOrEqual(4.5);
+  });
+
+  it("a merge result still shows when only one workspace is left, with no pickers", async () => {
+    const screen = await screenWith([B], jest.fn(), {
+      mergeResult: { merged: true, copied: 3, sourceId: A.id, workspaceId: B.id, sourceDeleted: true } satisfies ServerMergeResult,
+      mergedFiles: [{ id: "f1", name: "Trip/IMG_0412.HEIC" }],
+    });
+    expect(screen.getByText("Merge workspaces")).toBeTruthy();
+    expect(screen.getByTestId("merge-result")).toHaveTextContent(`Merged 3 into ${B.id}. Source deleted.`);
+    expect(screen.getByTestId("merged-file-f1")).toHaveTextContent("Trip/IMG_0412.HEIC");
+    expect(screen.queryByTestId("merge-source")).toBeNull();
+    expect(screen.queryByTestId("merge-workspaces")).toBeNull();
   });
 });

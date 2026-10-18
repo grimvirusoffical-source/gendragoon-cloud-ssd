@@ -297,13 +297,19 @@ export class GenDragoonClient {
    * this method never throws.
    * This method does not call onAuthFailure or clear a session.
    * 409 support_not_needed refreshes GET status with the same token.
-   * A failed refresh is the same email fallback.
+   * A failed refresh, a refresh body that is not a status for this job, or a
+   * refreshed job that is `failed` (it needs a person) is the same email fallback.
+   * 429 retryAfterSec defaults to 60 and is clamped to 1..86400.
+   * A missing, empty, or whitespace-only status token is the email fallback
+   * with no request, so an empty `Bearer` header is never sent.
    */
   async postDeletionSupport(jobId: string, statusToken: string): Promise<DeletionSupportResult> {
-    const path = `/v2/account/deletions/${encodeURIComponent(jobId)}/support-request`;
+    if (typeof statusToken !== "string" || statusToken.trim() === "") return deletionSupportFallback();
     let status: number;
     let body: unknown;
     try {
+      // Inside the try: encodeURIComponent throws URIError on a lone surrogate.
+      const path = `/v2/account/deletions/${encodeURIComponent(jobId)}/support-request`;
       const response = await this.raw("POST", path, undefined, { Authorization: `Bearer ${statusToken}` });
       const text = await response.text();
       body = text ? safeJson(text) : null;
@@ -319,12 +325,12 @@ export class GenDragoonClient {
       return deletionSupportFallback();
     }
     if (status === 429) {
-      const retryAfterSec = typeof record.retryAfterSec === "number" ? record.retryAfterSec : undefined;
-      return retryAfterSec === undefined ? { kind: "already_sent" } : { kind: "already_sent", retryAfterSec };
+      return { kind: "already_sent", retryAfterSec: supportRetryAfterSec(record.retryAfterSec) };
     }
     if (status === 409 && record.error === "support_not_needed") {
       try {
-        const refreshed = await this.deletionStatus(jobId, statusToken);
+        const refreshed: unknown = await this.deletionStatus(jobId, statusToken);
+        if (!isSupportRefreshStatus(refreshed, jobId) || refreshed.status === "failed") return deletionSupportFallback();
         return { kind: "not_needed", status: refreshed };
       } catch {
         return deletionSupportFallback();
@@ -507,6 +513,24 @@ function machineCode(errorField: string, codeField: string): string {
 
 function deletionSupportFallback(): DeletionSupportResult {
   return { kind: "fallback", contact: SUPPORT_CONTACT };
+}
+
+const SUPPORT_RETRY_AFTER_DEFAULT_SEC = 60;
+const SUPPORT_RETRY_AFTER_MAX_SEC = 86_400;
+
+/** 429 retryAfterSec: missing, non-finite or <= 0 is 60; otherwise clamped to 1..86400. */
+function supportRetryAfterSec(value: unknown): number {
+  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) return SUPPORT_RETRY_AFTER_DEFAULT_SEC;
+  return Math.min(SUPPORT_RETRY_AFTER_MAX_SEC, Math.max(1, value));
+}
+
+const SUPPORT_REFRESH_STATES: ReadonlySet<string> = new Set(["queued", "running", "done", "failed"]);
+
+/** A refresh after 409 must be a deletion status object for this job with a known state. */
+function isSupportRefreshStatus(value: unknown, jobId: string): value is AccountDeletionStatus {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const record = value as Record<string, unknown>;
+  return record.jobId === jobId && typeof record.status === "string" && SUPPORT_REFRESH_STATES.has(record.status);
 }
 
 /**
