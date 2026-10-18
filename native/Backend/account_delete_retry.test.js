@@ -100,7 +100,7 @@ test("account delete: exactly five minutes of auth_time is still fresh",async()=
  assert.equal(res.status,202);
  assert.equal((await untilDone(f.svc,res.jobId)).status,"done");
 });
-test("GET /v2/account/deletions/:jobId reports the polled job without the Firebase user",async()=>{
+test("GET /v2/account/deletions/:jobId reports the polled job for the owning account",async()=>{
  const db=memoryFirestore();
  const stripe={subscriptions:{list:async()=>({has_more:false,data:[]}),cancel:async()=>({})}};
  const bucket={deleteFiles:async()=>{}};
@@ -130,5 +130,64 @@ test("GET /v2/account/deletions/:jobId reports the polled job without the Fireba
   assert.equal((await svc.jobStatus(body.jobId)).status,"done");
   const missing=await fetch(base+"/v2/account/deletions/00000000-0000-4000-8000-000000000000");
   assert.equal(missing.status,404);
+ }finally{server.close();}
+});
+test("deletion 401s are reauth_required or invalid_token, never a bare 401",async()=>{
+ const f=world();
+ await assert.rejects(f.svc.deleteAccount({user:{uid,auth_time:Math.floor(NOW/1000)-6*60}}),{status:401,code:"reauth_required"});
+ await assert.rejects(f.svc.deleteAccount({}),{status:401,code:"invalid_token"});
+ const started=await f.svc.deleteAccount(f.fresh);
+ assert.equal((await untilDone(f.svc,started.jobId)).status,"done");
+ await assert.rejects(f.svc.deleteAccount(f.fresh),{status:401,code:"invalid_token"});
+ assert.equal(f.canceled.length,2);
+});
+test("singular deletion status is not registered; plural enforces ownership",async()=>{
+ const db=memoryFirestore([["gd_accounts/"+owner,{stripeCustomerId:"cus_del"}]]);
+ const stripe={subscriptions:{list:async()=>({has_more:false,data:[]}),cancel:async()=>({})}};
+ const bucket={deleteFiles:async()=>{}};
+ const auth={deleteUser:async()=>{},revokeRefreshTokens:async()=>{}};
+ let current={uid,auth_time:Math.floor(NOW/1000)-30};
+ const app=express();
+ app.use(express.json());
+ registerAccountDeletion({app,firebaseAuth:(req,res,next)=>{
+  if(current===null)return res.status(401).json({error:"Invalid or expired Firebase login"});
+  req.user=current;next();
+ },db,stripe,bucket,auth,byoProviders:{},hash,now:()=>NOW});
+ const server=app.listen(0,"127.0.0.1");
+ await new Promise(r=>server.once("listening",r));
+ const base="http://127.0.0.1:"+server.address().port;
+ try{
+  current={uid,auth_time:Math.floor(NOW/1000)-6*60};
+  const stale=await fetch(base+"/v2/account",{method:"DELETE",headers:{"Content-Type":"application/json"},body:JSON.stringify({confirm:"DELETE"})});
+  assert.equal(stale.status,401);
+  assert.deepEqual(await stale.json(),{error:"reauth_required"});
+  current=null;
+  const rejected=await fetch(base+"/v2/account",{method:"DELETE"});
+  assert.equal(rejected.status,401);
+  assert.deepEqual(await rejected.json(),{error:"invalid_token"});
+  current={uid,auth_time:Math.floor(NOW/1000)-30};
+  const created=await fetch(base+"/v2/account",{method:"DELETE",headers:{"Content-Type":"application/json"},body:JSON.stringify({confirm:"DELETE"})});
+  assert.equal(created.status,202);
+  const {jobId}=await created.json();
+  const deadline=Date.now()+5000;
+  let plural;
+  do{
+   plural=await fetch(base+"/v2/account/deletions/"+jobId);
+   if(plural.status===200&&(await plural.clone().json()).status==="done")break;
+   await new Promise(r=>setTimeout(r,10));
+  }while(Date.now()<deadline);
+  assert.equal(plural.status,200);
+  assert.equal(plural.headers.get("deprecation"),null);
+  const body=await plural.json();
+  assert.equal(body.status,"done");
+  assert.equal(body.jobId,jobId);
+  const singular=await fetch(base+"/v2/account/deletion/"+jobId);
+  assert.equal(singular.status,404);
+  current={uid:"other-account",auth_time:Math.floor(NOW/1000)-30};
+  const foreign=await fetch(base+"/v2/account/deletions/"+jobId);
+  assert.equal(foreign.status,404);
+  assert.deepEqual(await foreign.json(),{error:"not_found"});
+  const foreignSingular=await fetch(base+"/v2/account/deletion/"+jobId);
+  assert.equal(foreignSingular.status,404);
  }finally{server.close();}
 });

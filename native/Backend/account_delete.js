@@ -198,7 +198,7 @@ function createAccountDeletion({db,stripe,bucket,auth,byoProviders,hash,now}){
  async function deleteAccount(req){
   const user=req?.user||req;
   const uid=user?.uid;
-  if(typeof uid!=="string"||!uid)throw refusal(401,"reauth_required");
+  if(typeof uid!=="string"||!uid)throw refusal(401,"invalid_token");
   const authTime=user.auth_time;
   const age=Math.floor(clock()/1000)-(typeof authTime==="number"?authTime:Number.NaN);
   if(!Number.isFinite(authTime)||age>REAUTH_SECONDS)throw refusal(401,"reauth_required");
@@ -209,7 +209,7 @@ function createAccountDeletion({db,stripe,bucket,auth,byoProviders,hash,now}){
   const owner=hash(uid);
   if(typeof owner!=="string"||!/^[a-f0-9]{64}$/.test(owner))throw refusal(400,"invalid_account");
   const existing=await load(owner);
-  if(existing?.status==="done")throw refusal(401,"reauth_required");
+  if(existing?.status==="done")throw refusal(401,"invalid_token");
   if(existing&&(existing.status==="queued"||existing.status==="running"||existing.status==="failed")){
    existing.uid=existing.uid||uid;
    schedule(existing);
@@ -224,34 +224,51 @@ function createAccountDeletion({db,stripe,bucket,auth,byoProviders,hash,now}){
  async function jobStatus(jobId){
   if(typeof jobId!=="string"||!jobId)return null;
   const live=jobs.get(jobId);
-  if(live)return {status:live.status,retryable:live.retryable===true,failure:live.failure||null};
+  if(live)return {status:live.status,accountHash:live.accountHash,retryable:live.retryable===true,failure:live.failure||null};
   const snap=await jobRef(jobId).get();
   if(!snap.exists)return null;
   const data=snap.data();
   if(!JOB_STATUS.has(data?.status))return null;
-  return {status:data.status,retryable:data.retryable===true,failure:data.failure||null};
+  return {status:data.status,accountHash:data.accountHash,retryable:data.retryable===true,failure:data.failure||null};
  }
  return {deleteAccount,jobStatus};
+}
+function deletionAuth(firebaseAuth){
+ return (req,res,next)=>{
+  const send=res.json.bind(res);
+  res.json=body=>{
+   if(res.statusCode===401){
+    const code=body?.error==="reauth_required"||body?.error==="invalid_token"?body.error:"invalid_token";
+    return send({error:code});
+   }
+   return send(body);
+  };
+  return firebaseAuth(req,res,next);
+ };
 }
 function registerAccountDeletion({app,firebaseAuth,...deps}){
  if(!app||typeof firebaseAuth!=="function")throw Error("account deletion requires an app and firebaseAuth");
  const svc=deps.service||createAccountDeletion(deps);
- app.delete("/v2/account",firebaseAuth,async(req,res)=>{
+ const authn=deletionAuth(firebaseAuth);
+ app.delete("/v2/account",authn,async(req,res)=>{
   try{
    const result=await svc.deleteAccount(req);
    res.status(202).json({status:"deleting",jobId:result.jobId});
   }catch(error){
    const status=Number.isInteger(error?.status)?error.status:500;
-   res.status(status).json({error:error?.code||"account_deletion_failed"});
+   const code=error?.code||"account_deletion_failed";
+   res.status(status).json({error:status===401&&code!=="reauth_required"?"invalid_token":code});
   }
  });
- app.get("/v2/account/deletions/:jobId",async(req,res)=>{
+ app.get("/v2/account/deletions/:jobId",authn,async(req,res)=>{
   try{
+   if(typeof req.user?.uid!=="string"||!req.user.uid)return res.status(401).json({error:"invalid_token"});
+   const owner=deps.hash(req.user.uid);
    const job=await svc.jobStatus(req.params.jobId);
-   if(!job)return res.status(404).json({error:"not_found"});
+   if(!job||job.accountHash!==owner)return res.status(404).json({error:"not_found"});
    res.setHeader("Cache-Control","private, no-store");
    res.json({jobId:req.params.jobId,status:job.status,retryable:job.retryable===true});
-  }catch(_){res.status(503).json({error:"deletion_status_unavailable"});}
+  }catch(_){if(!res.headersSent)res.status(503).json({error:"deletion_status_unavailable"});}
  });
  return svc;
 }

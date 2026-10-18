@@ -15,7 +15,14 @@ The token must be fresh. `auth_time` (seconds) is compared with the server clock
 | 5 minutes or less | Deletion may start |
 | Older than 5 minutes, missing, or not a number | `401 {"error":"reauth_required"}` and no job |
 
-A stale token does not create a job and does not cancel billing, delete objects, or touch Firebase.
+Every `401` from these routes is JSON with one of two machine-readable codes. Clients must not treat a bare `401` as proof that the account was deleted.
+
+| `error` | Meaning |
+| --- | --- |
+| `reauth_required` | The token's `auth_time` is stale or missing. Sign in again. Nothing was deleted. |
+| `invalid_token` | The token is missing, rejected, or the Firebase user is already gone. |
+
+A stale token does not create a job and does not cancel billing, delete objects, or touch Firebase. An upstream auth middleware that would have returned a prose `401` is rewritten to `{"error":"invalid_token"}` on these routes.
 
 When the client sends a JSON body, it must be exactly a confirmation object:
 
@@ -50,6 +57,7 @@ The job is keyed by `accountHash` (`sha256("gd-v1:"+uid)` in the running service
 
 ```http
 GET /v2/account/deletions/:jobId
+Authorization: Bearer <Firebase ID token>
 ```
 
 ```json
@@ -58,9 +66,11 @@ GET /v2/account/deletions/:jobId
 
 `status` is one of `queued`, `running`, `done`, `failed`.
 
-`GET` is authorized by the unguessable job id, not by the Firebase user. The user record is removed at the end of a successful job, so the client must be able to observe `done` after the ID token stops working. Treat `jobId` as a secret. Responses are `Cache-Control: private, no-store`. Unknown ids return `404 {"error":"not_found"}`.
+This is the only status route. `GET /v2/account/deletion/:jobId` (singular) is not registered and returns `404`. There is no alias and no `Deprecation` header.
 
-`jobStatus(jobId)` on the service returns `{status}` (plus `retryable` and `failure` when set) or `null`.
+The plural route uses the same Firebase authentication middleware as `DELETE /v2/account`. The five-minute `auth_time` window is enforced on `DELETE` only, so a client can keep polling with the token it already has. The job must belong to the caller's `accountHash`. A missing job and another account's `jobId` both return `404 {"error":"not_found"}` so existence is not revealed. Responses are `Cache-Control: private, no-store`. A rejected token is `401 {"error":"invalid_token"}`.
+
+`jobStatus(jobId)` on the service returns `{status}` (plus `accountHash`, `retryable`, and `failure` when set) or `null`. The HTTP body does not include `accountHash`.
 
 ## What the job does
 
@@ -70,7 +80,7 @@ Steps are idempotent and stored on the job. A failed step stops the job in `fail
 2. **Managed objects.** Delete every object under `customer/{accountHash}/` and `tenants/{accountHash}/` in the configured `CUSTOMER_BUCKET`. Another account's prefix is not listed or deleted.
 3. **Metadata.** Delete workspace, file, and upload documents for `gd_accounts/{accountHash}` and the legacy `tenants/{accountHash}` free project, plus `ad_purchases/{uid}`, API keys for that `accountHash`, and `project_payments` rows for that account. **BYO:** provider clients are never called. The server only drops its record of the customer-owned bucket (provider name and endpoint). It does not send a delete to S3, R2, GCS, SFTP, or any other customer endpoint.
 4. **Receipt retention.** Before those rows are removed, the server writes `billing_receipts/{anonymizedId}` where `anonymizedId` is `sha256("gd-receipt-v1:"+accountHash)`. The receipt keeps the Stripe customer id, subscription ids, and payment ids required for tax and payment records. It does not keep the Firebase uid.
-5. **Firebase last.** `revokeRefreshTokens(uid)`, then `deleteUser(uid)`. A missing user on resume is treated as already deleted. After `done`, another `DELETE` returns `401` (`reauth_required`) and does not cancel subscriptions again or call `deleteUser` again.
+5. **Firebase last.** `revokeRefreshTokens(uid)`, then `deleteUser(uid)`. A missing user on resume is treated as already deleted. After `done`, another `DELETE` with a still-fresh `auth_time` returns `401 {"error":"invalid_token"}` and does not cancel subscriptions again or call `deleteUser` again. A stale `auth_time` on that second call is `401 {"error":"reauth_required"}` instead, so a client is not told the user is gone until it presents a fresh token.
 
 ## Environment
 
@@ -97,4 +107,4 @@ await svc.jobStatus(jobId);   // {status:"queued"|"running"|"done"|"failed"}
 registerAccountDeletion({app, firebaseAuth, db, stripe, bucket, auth, byoProviders, hash, now});
 ```
 
-`registerAccountDeletion` mounts `DELETE /v2/account` and `GET /v2/account/deletions/:jobId`. The running service registers it from `installedBilling` so the same Stripe client used for Checkout performs the cancellations. `auth` is Firebase Admin Auth (`deleteUser`, `revokeRefreshTokens`).
+`registerAccountDeletion` mounts `DELETE /v2/account` and `GET /v2/account/deletions/:jobId` only. The running service registers it from `installedBilling` so the same Stripe client used for Checkout performs the cancellations. `auth` is Firebase Admin Auth (`deleteUser`, `revokeRefreshTokens`).
