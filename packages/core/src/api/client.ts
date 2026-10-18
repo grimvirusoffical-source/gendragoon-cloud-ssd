@@ -1,6 +1,7 @@
 import { assertNoCredentialFields, BYO_PRESIGNED_URL_MESSAGE, BYO_UNSUPPORTED_MESSAGE, BYO_UNVERIFIABLE_MESSAGE } from "../byo.js";
 import { assertKeyEnvelope } from "../envelope.js";
 import { AccountDeletedError, ApiError, DeletionNotFoundError, DeletionNotRetryableError, InvalidTokenError, ReauthRequiredError, SUPPORT_CONTACT, WorkspaceLockedError, deletionAuthFailure, isAccountDeleted, isInvalidToken, isReauthRequired } from "./errors.js";
+import { parseWorkspacePrice } from "../policy.js";
 import { assertStorageUrlResponse, reauthIsRecent, reauthenticatedAtForDelete } from "../storage.js";
 import type {
   BillingStatusResponse,
@@ -88,21 +89,29 @@ export class GenDragoonClient {
     return this.request("GET", "/v1/me");
   }
 
-  listWorkspaces(): Promise<WorkspaceListResponse> {
-    return this.request("GET", "/v2/workspaces");
+  async listWorkspaces(): Promise<WorkspaceListResponse> {
+    const body = await this.request<WorkspaceListResponse>("GET", "/v2/workspaces");
+    assertServerPrices(body);
+    return body;
   }
 
-  listProjects(includeArchived = false): Promise<ProjectListResponse> {
+  async listProjects(includeArchived = false): Promise<ProjectListResponse> {
     const query = includeArchived ? "?includeArchived=true" : "";
-    return this.request("GET", `/v2/projects${query}`);
+    const body = await this.request<ProjectListResponse>("GET", `/v2/projects${query}`);
+    assertServerPrices(body);
+    return body;
   }
 
-  getProject(id: string): Promise<Workspace> {
-    return this.request("GET", `/v2/projects/${encodeURIComponent(id)}`);
+  async getProject(id: string): Promise<Workspace> {
+    const body = await this.request<Workspace>("GET", `/v2/projects/${encodeURIComponent(id)}`);
+    assertServerPrices(body);
+    return body;
   }
 
-  createProject(body: { name: string; intentId: string }): Promise<Record<string, unknown>> {
-    return this.request("POST", "/v2/projects", body);
+  async createProject(body: { name: string; intentId: string }): Promise<Record<string, unknown>> {
+    const created = await this.request<Record<string, unknown>>("POST", "/v2/projects", body);
+    assertServerPrices(created);
+    return created;
   }
 
   checkoutProject(id: string): Promise<CheckoutResponse> {
@@ -268,7 +277,9 @@ export class GenDragoonClient {
       endpoint: body.endpoint,
       ...(bucketFingerprint ? { bucketFingerprint } : {}),
     };
-    return this.request("POST", `/v2/workspaces/${encodeURIComponent(id)}/byo/register`, payload);
+    const registered = await this.request<Record<string, unknown>>("POST", `/v2/workspaces/${encodeURIComponent(id)}/byo/register`, payload);
+    assertServerPrices(registered);
+    return registered;
   }
 
   /** POST /v2/workspaces/:id/byo/challenge. No body. Response is `{ nonce, expiresAtMs, ttlMs }`. */
@@ -440,4 +451,24 @@ function toError(status: number, parsed: unknown): ApiError {
 function machineCode(errorField: string, codeField: string): string {
   if (errorField.length > 0) return errorField;
   return codeField;
+}
+
+/** Rejects a partial server price. Does not invent `isFree` or cents, and does not write `grandfathered`. */
+function assertServerPrices(body: unknown): void {
+  if (!body || typeof body !== "object") return;
+  const record = body as Record<string, unknown>;
+  const items: unknown[] = [];
+  if (Array.isArray(record.workspaces)) items.push(...record.workspaces);
+  if (Array.isArray(record.projects)) items.push(...record.projects);
+  if (record.project && typeof record.project === "object") items.push(record.project);
+  for (const item of items) {
+    if (carriesPrice(item)) parseWorkspacePrice(item);
+  }
+  if (carriesPrice(record)) parseWorkspacePrice(record);
+}
+
+function carriesPrice(value: unknown): boolean {
+  if (!value || typeof value !== "object") return false;
+  const record = value as Record<string, unknown>;
+  return "isFree" in record || "monthlyPriceCents" in record || "grandfathered" in record;
 }

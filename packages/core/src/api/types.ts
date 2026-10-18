@@ -54,6 +54,15 @@ export interface Workspace {
   id: string;
   name: string;
   kind: WorkspaceKind;
+  /** Server flag. The client does not decide this by counting workspaces. */
+  isFree: boolean;
+  /** Server cents. 0 exactly when `isFree` or `grandfathered` is true. */
+  monthlyPriceCents: number;
+  /**
+   * Server flag. Absent means false until a fixture sends it.
+   * The price label is Included only when this is true and `isFree` is false.
+   */
+  grandfathered?: boolean;
   /** Present on paid/BYO server documents. Omitted from today's public payload. */
   accountHash?: string;
   /** Legacy free project only (`tenants/{accountKey}/workspaces/free`). */
@@ -156,11 +165,11 @@ export interface CreateUploadRequest {
   logicalBytes?: number;
 }
 
-/** Proposed. Recurring $5 workspace fee. Not the one-time project activation. */
+/** Proposed. Recurring workspace fee. `monthlyCents` is the server quote. */
 export interface WorkspaceFeeCheckout {
   url?: string;
   workspaceId: string;
-  monthlyCents: 500;
+  monthlyCents: number;
 }
 
 /** POST /v2/workspaces/:sourceId/merge. confirmName is the source workspace name. */
@@ -237,7 +246,8 @@ export interface AccessResponse {
   uploadsBlocked: boolean;
   normalUseBlocked: boolean;
   highTier: boolean;
-  freeWorkspaces: 0 | 1;
+  /** Server count. The client does not cap or recompute it. */
+  freeWorkspaces: number;
   /** Server clock. The client does not derive this from a period end. */
   paidThroughMs?: number;
   renewsAtMs?: number;
