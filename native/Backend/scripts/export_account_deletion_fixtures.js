@@ -183,7 +183,28 @@ async function main(){
   const status=await pollUntil(failed.base,created.response.body.jobId,created.response.body.statusToken,"failed");
   if(status.response.body?.retryable!==true)throw Error("failed retryable "+JSON.stringify(status.response));
   publish("status-failed",status,[created.response.body.statusToken]);
+  const again=await capture(failed.base,"DELETE","/v2/account",{body:{confirm:"DELETE"}});
+  if(again.response.status!==202||again.response.body?.status!=="queued"||again.response.body?.jobId!==created.response.body.jobId)
+   throw Error("retry failed "+JSON.stringify(again.response));
+  if(!again.response.body.statusToken||again.response.body.statusToken===created.response.body.statusToken)
+   throw Error("retry token "+JSON.stringify(again.response.body));
+  publish("retry-after-failed",again,[created.response.body.statusToken,again.response.body.statusToken]);
  }finally{await failed.close();}
+
+ const blockedId="00000000-0000-4000-8000-0000000000aa";
+ const blockedOwner=hash("owner");
+ const blockedRecord={jobId:blockedId,accountHash:blockedOwner,uid:"owner",status:"failed",retryable:false,
+  failure:"blocked",steps:{stripe:true},statusTokens:[],canceledIds:[],subscriptionIds:[],customerId:null};
+ const blocked=await listen({rows:[
+  ["account_deletions/"+blockedOwner,blockedRecord],
+  ["deletion_jobs/"+blockedId,blockedRecord],
+ ]});
+ try{
+  const denied=await capture(blocked.base,"DELETE","/v2/account",{body:{confirm:"DELETE"}});
+  if(denied.response.status!==409||denied.response.body?.error!=="deletion_not_retryable"||denied.response.body?.jobId!==blockedId||denied.response.body?.statusToken)
+   throw Error("not retryable "+JSON.stringify(denied.response));
+  publish("retry-not-retryable",denied);
+ }finally{await blocked.close();}
 
  let clock=NOW;
  const finished=await listen({now:()=>clock});

@@ -58,7 +58,12 @@ Cache-Control: private, no-store
 
 The service method `deleteAccount(req)` returns `{status:202, jobId, statusToken}`. The HTTP body uses `status:"deleting"` plus the same `jobId` and `statusToken`.
 
-The job is keyed by `accountHash` (`sha256("gd-v1:"+uid)` in the running service). Repeating `DELETE` while the job is `queued`, `running`, or `failed` returns the same `jobId` and resumes incomplete steps. It does not start a second cancellation pass.
+The job is keyed by `accountHash` (`sha256("gd-v1:"+uid)` in the running service). Repeating `DELETE` while the job is `queued` or `running` returns the same `jobId` and does not start a second runner while the lease is held.
+
+A repeat `DELETE` with `{"confirm":"DELETE"}` on a `failed` job depends on `retryable`:
+
+- `retryable: true` returns `202 {"status":"queued","jobId":"<same>","statusToken":"<new>"}`. The new token's hash joins `statusTokens`. The set still holds at most five hashes; a sixth drops the oldest. The job goes back to `queued`, takes a new lease, and keeps the per-step completion markers already on the job document. Finished steps are not run again. Two such retries in flight keep that one `jobId` and start one runner: the request that claims the lease schedules it, and the other only appends a token. If that other request reads the job after it is already `queued` or `running`, its `202` body uses `status:"deleting"`, the same as any repeat while the job is in progress.
+- `retryable: false` returns `409 {"error":"deletion_not_retryable","jobId":"<same>"}`. No new `statusToken` is issued and the job document is left as it was.
 
 ## Job status
 
@@ -105,7 +110,7 @@ Clients keep polling and do not have to send `DELETE` again. A status poll resta
 
 ## What the job does
 
-Steps are idempotent and stored on the job. A failed step stops the job in `failed` with `retryable: true`. A later `DELETE` with a still-fresh token resumes at the first unfinished step. A Stripe cancel error does not delete objects or the Firebase user.
+Steps are idempotent and stored on the job. A failed step stops the job in `failed` with `retryable: true`. A later `DELETE` with a still-fresh Firebase ID token returns the job to `queued` and resumes at the first unfinished step. Completed steps stay marked on the job and are skipped. A Stripe cancel error does not delete objects or the Firebase user. A `failed` job with `retryable: false` is `409 {"error":"deletion_not_retryable","jobId"}` and issues no token.
 
 1. **Stripe.** List the account's subscriptions (`customer` = the stored `stripeCustomerId`, status `all`, paged) and cancel every subscription id found there or on the account's workspace records, including storage, performance, BYO workspace-fee, and any other `*SubscriptionId`. Cancellation is immediate: `invoice_now: false`, `prorate: false`. Unused time is not refunded. The customer portal's `at_period_end` setting applies to self-serve cancel, not to account deletion. No invoice and no PaymentIntent is created. Already-canceled or missing subscriptions are skipped.
 2. **Managed objects.** Delete every object under `customer/{accountHash}/` and `tenants/{accountHash}/` in the configured `CUSTOMER_BUCKET`. Another account's prefix is not listed or deleted.
