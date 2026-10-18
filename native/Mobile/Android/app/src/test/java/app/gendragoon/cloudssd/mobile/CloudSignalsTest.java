@@ -13,23 +13,23 @@ import static org.junit.Assert.assertTrue;
 
 public final class CloudSignalsTest {
     @Test public void chunkPut423RoutesToLockScreenWithoutToast(){
-        String body="{\"error\":\"workspace_lock\",\"workspaces\":[{\"id\":\"11111111-1111-1111-1111-111111111111\",\"name\":\"Photos\",\"issue\":\"over_cap\"},{\"id\":\"22222222-2222-2222-2222-222222222222\",\"name\":\"Archive\",\"reason\":\"unpaid\"}]}";
-        CloudSignals.Route route=CloudSignals.route(423,body,"PUT");
+        String body=BackendFixtures.responseBody("workspace-lock","over-cap");
+        CloudSignals.Route route=CloudSignals.route(BackendFixtures.responseStatus("workspace-lock","over-cap"),body,"PUT");
         assertEquals(CloudSignals.Destination.LOCK_SCREEN,route.destination);
         assertEquals("PUT",route.method);
         assertNull(route.toast);
-        assertEquals("Photos",route.lock.workspaces.get(0).name);
-        assertEquals("over_cap",route.lock.workspaces.get(0).issue);
-        assertEquals("Photos · over the plan cap",route.lock.workspaces.get(0).label());
-        assertEquals("unpaid",route.lock.workspaces.get(1).issue);
-        assertEquals("Some workspaces are over the plan cap or unpaid.",route.lock.issueSummary());
+        assertEquals("workspace_lock",JsonFields.string(body,"error"));
+        assertEquals(1,route.lock.overBy);
+        WorkspaceLock named=route.lock.named(BackendFixtures.listedWorkspaces());
+        assertEquals("Fixture Project",named.workspaces.get(0).name);
+        assertEquals("Choose 1 workspaces to remove.",named.chooseMessage());
 
         WorkspaceLocked locked=new WorkspaceLocked(route.lock);
         CloudSignals.FailureNotice notice=CloudSignals.transferFailure(new ExecutionException(locked),false);
         CloudSignals.Presentation shown=CloudSignals.present(notice);
         assertEquals(CloudSignals.ROUTE_LOCK,notice.route);
         assertNull(notice.message);
-        assertTrue(notice.lockJson.contains("Photos"));
+        assertTrue(notice.lockJson.contains("workspace_lock"));
         assertTrue(shown.lockScreen);
         assertNull(shown.toast);
         assertFalse(CloudSignals.shouldToast(locked));

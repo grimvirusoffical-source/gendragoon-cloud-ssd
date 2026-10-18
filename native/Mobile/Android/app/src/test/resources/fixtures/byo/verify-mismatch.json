@@ -1,0 +1,20 @@
+{
+  "request": {
+    "body": {
+      "presignedUrl": "https://bucket.s3.us-east-1.amazonaws.com/.gendragoon-challenge/not-the-nonce"
+    },
+    "headers": {
+      "authorization": "<redacted>",
+      "content-type": "application/json"
+    },
+    "method": "POST",
+    "path": "/v2/workspaces/11111111-1111-4111-8111-000000000001/byo/verify"
+  },
+  "response": {
+    "body": {
+      "error": "BYO_CHALLENGE_MISMATCH",
+      "message": "Challenge object path does not match the nonce"
+    },
+    "status": 400
+  }
+}

@@ -14,12 +14,35 @@ private let panel=Color(red:0.115,green:0.093,blue:0.16)
 struct MobileRoot:View {
     @EnvironmentObject private var session:MobileSession
     var body:some View{
-        ZStack{canvas.ignoresSafeArea();if session.accountDeleted{AccountDeletedScreen()}else{switch session.stage{
+        ZStack{canvas.ignoresSafeArea();if let screen=UIPreview.screen{UIPreviewHost(screen:screen)}else if session.accountDeleted{AccountDeletedScreen()}else if let receipt=session.resumedDeletion{ResumedDeletionScreen(receipt:receipt)}else{switch session.stage{
         case .loading:VStack(spacing:20){Image(systemName:"cloud.fill").font(.system(size:65)).foregroundStyle(violet);ProgressView();Text("Opening your cloud…").font(.subheadline).foregroundStyle(.secondary)}
         case .login:MobileLogin()
         case .terms:MobileTerms()
         case .ready:MobileLibrary().id(session.uid)
-        }}}.task{await session.start()}
+        }}}.task{if UIPreview.screen==nil{await session.start()}}
+    }
+}
+private struct ResumedDeletionScreen:View {
+    @EnvironmentObject private var session:MobileSession
+    let receipt:DeletionReceipt
+    @StateObject private var cloud=MobileCloudModel()
+    var body:some View { DeleteAccountView(resume:receipt).environmentObject(session).environmentObject(cloud) }
+}
+private struct UIPreviewHost:View {
+    let screen:String
+    @StateObject private var session=MobileSession()
+    @StateObject private var cloud=MobileCloudModel()
+    var body:some View {
+        switch screen {
+        case "account":
+            NavigationStack{AccountSettingsForm(confirmReset:.constant(false),close:{},delete:{})}.environmentObject(session).environmentObject(cloud)
+        case "confirm-delete":
+            DeleteAccountView(previewStep:.confirm).environmentObject(session).environmentObject(cloud)
+        case "locked":
+            WorkspaceLockView(lock:UIPreview.lock).environmentObject(session).environmentObject(cloud)
+        default:
+            MobileLogin()
+        }
     }
 }
 private struct MobileLogin:View {
@@ -29,7 +52,7 @@ private struct MobileLogin:View {
             Text("GENDRAGOON  /  CLOUD SSD").font(.system(size:11,weight:.bold,design:.monospaced)).tracking(2).foregroundStyle(violet)
             Spacer(minLength:40)
             Image(systemName:"cloud.fill").font(.system(size:72,weight:.light)).foregroundStyle(violet).padding(30).background(violet.opacity(0.08),in:RoundedRectangle(cornerRadius:30))
-            Text("Your cloud.\nWithin reach.").font(.largeTitle.weight(.bold)).tracking(-1.5).fixedSize(horizontal:false,vertical:true)
+            Text("Your cloud.\nWithin reach.").font(.largeTitle.weight(.bold)).tracking(-1.5).fixedSize(horizontal:false,vertical:true).accessibilityIdentifier("sign-in-title")
             Text("Private files, less clutter. Upload, restore and share across your devices.").font(.body).foregroundStyle(.secondary)
             VStack(alignment:.leading,spacing:17){
                 Label("Start with 2 GB for free",systemImage:"gift")
@@ -132,7 +155,7 @@ private struct MobileLibrary:View {
         .fileImporter(isPresented:$importing,allowedContentTypes:importFolders ? [.folder] : [.item],allowsMultipleSelection:true){result in switch result{case .success(let urls):if cloud.removeOriginals{pendingUpload=urls;confirmOriginalRemoval=true}else{cloud.upload(urls)};case .failure(let error):cloud.status=error.localizedDescription}}
         .confirmationDialog("Upload and remove originals?",isPresented:$confirmOriginalRemoval,titleVisibility:.visible){Button("Verify then remove \(pendingUpload.count) selected items",role:.destructive){cloud.upload(pendingUpload);pendingUpload=[]};Button("Keep originals and upload"){cloud.removeOriginals=false;cloud.upload(pendingUpload);pendingUpload=[]};Button("Cancel",role:.cancel){pendingUpload=[]}}message:{Text("Originals are removed only after a complete cloud read-back and archive restore check. Some providers delete permanently.")}
         .sheet(item:$cloud.export){value in NativeShare(url:value.url).presentationDetents([.medium,.large])}
-        .sheet(isPresented:$settings){NavigationStack{Form{Section("Google account"){Text(session.email).textSelection(.enabled);Button("Reset App",role:.destructive){confirmReset=true}.disabled(cloud.busy);Button("Delete account",role:.destructive){settings=false;DispatchQueue.main.async{deleteAccount=true}}.disabled(cloud.busy);Button("Sign out",role:.destructive){cloud.pause();settings=false;session.signOut()}.disabled(cloud.busy)};Section("Transfers"){Toggle("Data saver",isOn:$cloud.dataSaver);Text("Cellular, constrained networks and Low Power Mode reduce concurrency automatically. Higher paid worker limits do not change your carrier speed.").font(.footnote).foregroundStyle(.secondary)};Section("About"){Text("GenDragoon 1.0");Link("Privacy Notice",destination:URL(string:"https://gendragoon-free-10068843866.us-central1.run.app/mobile/privacy.txt")!);Text("Mobile releases update through the App Store/TestFlight. Desktop self-updating does not apply to this iOS app.").font(.footnote).foregroundStyle(.secondary)}}.alert("Reset App?",isPresented:$confirmReset){Button("Reset",role:.destructive){cloud.resetLocalState();settings=false};Button("Cancel",role:.cancel){}}message:{Text("Clear local transfer cache and selected workspace. Cloud files and exported documents stay in place.")}.navigationTitle("Your account").toolbar{ToolbarItem(placement:.confirmationAction){Button("Done"){settings=false}}}}}
+        .sheet(isPresented:$settings){NavigationStack{AccountSettingsForm(confirmReset:$confirmReset,close:{settings=false},delete:{settings=false;DispatchQueue.main.async{deleteAccount=true}}).alert("Reset App?",isPresented:$confirmReset){Button("Reset",role:.destructive){cloud.resetLocalState();settings=false};Button("Cancel",role:.cancel){}}message:{Text("Clear local transfer cache and selected workspace. Cloud files and exported documents stay in place.")}.toolbar{ToolbarItem(placement:.confirmationAction){Button("Done"){settings=false}}}}}
         .fullScreenCover(isPresented:$deleteAccount){DeleteAccountView().environmentObject(session).environmentObject(cloud)}
         .fullScreenCover(item:$cloud.workspaceLock){lock in WorkspaceLockView(lock:lock).environmentObject(session).environmentObject(cloud)}
         .alert("Delete cloud copy?",isPresented:Binding(get:{removing != nil},set:{if !$0{removing=nil}})){Button("Delete",role:.destructive){if let removing{cloud.delete(removing)};removing=nil};Button("Cancel",role:.cancel){removing=nil}}message:{Text("This removes \(removing?.name ?? "this file") from cloud storage. Local copies are not changed.")}

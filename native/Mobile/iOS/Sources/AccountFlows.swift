@@ -17,23 +17,39 @@ struct AccountDeletedScreen:View {
     func confirm(_ phrase:String)->Bool { flow.confirmPhrase(phrase) }
     func acceptFreshSignIn(authTime:Date,now:Date)->Bool { flow.acceptFreshSignIn(authTime:authTime,now:now) }
     func noteDeleteSent(){flow.noteDeleteSent()}
-    func onDeleteHttp(_ http:AccountHttp){flow.onDeleteHttp(status:http.status,jobId:http.jobId,errorCode:http.error)}
-    func onPollHttp(_ http:AccountHttp){flow.onPollHttp(status:http.status,state:http.state,errorCode:http.error)}
+    func onDeleteHttp(_ http:AccountHttp){flow.onDeleteHttp(status:http.status,jobId:http.jobId,errorCode:http.error,statusToken:http.statusToken);syncReceipt()}
+    func onPollHttp(_ http:AccountHttp){flow.onPollHttp(status:http.status,jobStatus:http.jobStatus,errorCode:http.error,retryable:http.retryable);syncReceipt()}
     func exhausted()->Bool { flow.exhausted() }
     func nextPollDelayMillis()->Int { flow.nextPollDelayMillis() }
     func fail(_ text:String){flow.fail(text)}
-    func retry(){flow.retry()}
+    func retry(){flow.retry();syncReceipt()}
     func noteWiped(){flow.noteWiped()}
     func noteWipeFailed(_ text:String){flow.noteWipeFailed(text)}
+    func resume(_ receipt:DeletionReceipt){flow=AccountDeletion.resume(receipt);syncReceipt()}
+    func preview(_ step:AccountDeletion.Step){var next=AccountDeletion();next.step=step;flow=next}
+    func askForSignIn(_ text:String){flow.askForSignIn(text)}
+    func syncReceipt(){
+        if flow.dropReceipt && !flow.requestsWipe() {DeletionReceiptVault.clear();return}
+        if flow.step == .polling,let receipt=flow.receipt() {DeletionReceiptVault.save(jobId:receipt.jobId,token:receipt.statusToken)}
+    }
 }
 
 @MainActor struct DeleteAccountView:View {
     @Environment(\.dismiss) private var dismiss
     @EnvironmentObject private var session:MobileSession
     @EnvironmentObject private var cloud:MobileCloudModel
-    @StateObject private var model=AccountDeletionModel()
+    @StateObject private var model:AccountDeletionModel
     @State private var phrase=""
     @State private var working=false
+    init(resume:DeletionReceipt?=nil,previewStep:AccountDeletion.Step?=nil){
+        let model=AccountDeletionModel()
+        if let previewStep {model.preview(previewStep)}
+        else if let resume {model.resume(resume)}
+        else if let saved=DeletionReceiptVault.load() {model.resume(saved)}
+        _model=StateObject(wrappedValue:model)
+        _phrase=State(initialValue:"")
+        _working=State(initialValue:false)
+    }
     var body:some View {
         NavigationStack {
             ScrollView {
@@ -44,7 +60,7 @@ struct AccountDeletedScreen:View {
                         Text("This deletes your account, all hosted workspaces and their files. Subscriptions are cancelled. Bring-your-own storage is not changed.")
                         Button("Continue"){model.continueFromExplain()}.buttonStyle(.borderedProminent)
                     case .confirm:
-                        Text("Type DELETE to confirm. You will sign in with Google again immediately before the account is deleted.")
+                        Text("Type DELETE to confirm. You will sign in with Google again immediately before the account is deleted.").accessibilityIdentifier("delete-confirm")
                         TextField("Type DELETE",text:$phrase).textInputAutocapitalization(.characters).autocorrectionDisabled().textFieldStyle(.roundedBorder)
                         Button("Delete account",role:.destructive){if model.confirm(phrase){Task{await authenticateAndDelete()}}}.buttonStyle(.borderedProminent).disabled(phrase != AccountDeletion.confirmPhrase || working)
                     case .reauth:
@@ -82,11 +98,17 @@ struct AccountDeletedScreen:View {
             let token=try await session.reauthenticate()
             let auth=CloudSignals.authTime(token) ?? .distantPast
             guard model.acceptFreshSignIn(authTime:auth,now:Date()) else {return}
-            if model.flow.step == .polling {return}
+            if model.flow.step == .polling || !model.flow.allowsDelete() {return}
             model.noteDeleteSent()
             let http=try await cloud.deleteAccount(freshToken:token)
             if http.status==423 && http.error==CloudSignals.lockCode { cloud.workspaceLock=WorkspaceLock.decode(http.raw);dismiss();return }
             model.onDeleteHttp(http)
+            if http.status==423 && http.error==CloudSignals.lockCode {
+                cloud.noteLock(WorkspaceLock.decode(http.raw))
+                if model.flow.step != .polling {dismiss()}
+            }
+        }catch let error as GDTransferError where error.status==401 {
+            model.askForSignIn(error.message)
         }catch{model.fail(error.localizedDescription)}
     }
     private func poll() async {
@@ -96,8 +118,12 @@ struct AccountDeletedScreen:View {
             try? await Task.sleep(nanoseconds:UInt64(delay)*1_000_000)
             if Task.isCancelled || model.flow.step != .polling {return}
             do {
-                let http=try await cloud.pollDeletion(model.flow.statusPath ?? "")
-                if http.status==423 && http.error==CloudSignals.lockCode { cloud.workspaceLock=WorkspaceLock.decode(http.raw);dismiss();return }
+                let http=try await cloud.pollDeletion(model.flow.statusPath ?? "",statusToken:model.flow.statusToken ?? "")
+                if http.status==423 && http.error==CloudSignals.lockCode {
+                    cloud.noteLock(WorkspaceLock.decode(http.raw))
+                    model.onPollHttp(http)
+                    continue
+                }
                 model.onPollHttp(http)
             }catch{model.fail(error.localizedDescription);return}
         }
@@ -106,7 +132,8 @@ struct AccountDeletedScreen:View {
         guard !working,model.flow.requestsWipe() else {return}
         working=true;defer{working=false}
         cloud.pause()
-        do { try session.eraseLocalData();model.noteWiped() }
+        cloud.workspaceLock=nil
+        do { DeletionReceiptVault.clear();try session.eraseLocalData();model.noteWiped() }
         catch { model.noteWipeFailed(error.localizedDescription) }
     }
 }
@@ -122,12 +149,13 @@ struct AccountDeletedScreen:View {
         NavigationStack {
             ScrollView {
                 VStack(alignment:.leading,spacing:16){
-                    Text("Workspaces locked").font(.largeTitle.bold())
+                    Text("Workspaces locked").font(.largeTitle.bold()).accessibilityIdentifier("workspaces-locked")
                     Text("Your files are still readable and downloadable. Uploads are paused until you delete or merge workspaces down to your plan limit.")
-                    if !lock.issueSummary.isEmpty { Text(lock.issueSummary).font(.headline) }
+                    if !resolved.chooseMessage.isEmpty { Text(resolved.chooseMessage).font(.headline) }
+                    if !resolved.issueSummary.isEmpty { Text(resolved.issueSummary).font(.headline) }
                     Text("Duplicates are kept as name (from <source>).").font(.footnote).foregroundStyle(.secondary)
-                    if lock.workspaces.isEmpty { Text("The server did not include a workspace list.").foregroundStyle(.secondary) }
-                    ForEach(lock.workspaces){item in
+                    if resolved.workspaces.isEmpty { Text("The server did not include a workspace list.").foregroundStyle(.secondary) }
+                    ForEach(resolved.workspaces){item in
                         VStack(alignment:.leading,spacing:10){
                             Text(item.label).font(.headline)
                             HStack{
@@ -147,18 +175,28 @@ struct AccountDeletedScreen:View {
             }.background(Color(red:0.064,green:0.055,blue:0.10))
         }
         .interactiveDismissDisabled(true)
+        .task{if lock.workspaces.contains(where:{$0.name==nil || $0.name?.isEmpty==true}){await cloud.refreshLockNames()}}
         .sheet(item:$cloud.export){value in NativeShare(url:value.url)}
         .confirmationDialog("Delete workspace?",isPresented:Binding(get:{pendingDelete != nil},set:{if !$0 {pendingDelete=nil}}),titleVisibility:.visible){
             Button("Delete workspace",role:.destructive){if let pendingDelete {Task{await remove(pendingDelete)}};pendingDelete=nil}
             Button("Cancel",role:.cancel){pendingDelete=nil}
         } message:{ Text("This permanently deletes the hosted workspace and its files. Bring-your-own storage is not changed.") }
     }
+    private var resolved:WorkspaceLock { lock.named(cloud.knownWorkspaces()) }
     private func mergeControl(_ item:WorkspaceLock.Item)->some View {
-        let others=lock.workspaces.filter{$0.workspaceID != nil && $0.workspaceID != item.workspaceID}
+        let others=resolved.workspaces.filter{$0.workspaceID != nil && $0.workspaceID != item.workspaceID}
         return Menu("Merge"){
-            if others.isEmpty {Button("No other workspace"){notice=AccountDeletion.mergeUnavailable(item.name ?? "workspace")}}
-            else {ForEach(others){target in Button("Into "+target.label){notice=GDTransferClient.mergeWorkspaces(into:target.workspaceID ?? "",sourceID:item.workspaceID ?? "",sourceName:item.name ?? item.workspaceID ?? "workspace")}}}
+            if others.isEmpty {Button("No other workspace"){notice=AccountDeletion.mergeNote(item.name ?? "workspace")}}
+            else {ForEach(others){target in Button("Into "+target.label){Task{await merge(item,into:target)}}}}
         }.disabled(cloud.busy)
+    }
+    private func merge(_ item:WorkspaceLock.Item,into target:WorkspaceLock.Item) async {
+        notice=AccountDeletion.mergeNote(item.name ?? "workspace")
+        do {
+            try await cloud.mergeWorkspace(source:item.workspaceID ?? "",target:target.workspaceID ?? "",confirmName:item.name ?? "")
+            notice=AccountDeletion.mergeNote(item.name ?? "workspace")
+        } catch let locked as WorkspaceLocked { cloud.workspaceLock=locked.lock }
+        catch { notice=error.localizedDescription }
     }
     private func list(_ item:WorkspaceLock.Item) async {
         guard let id=item.workspaceID else {return}

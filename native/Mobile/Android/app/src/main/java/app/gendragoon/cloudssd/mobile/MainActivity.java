@@ -48,6 +48,8 @@ public final class MainActivity extends AppCompatActivity {
     private List<JSONObject> files=new ArrayList<>();private final Set<UUID> handled=new HashSet<>();
     private boolean holdAuthNavigation=false;private WorkspaceLock activeLock;private AccountDeletion deletion;
     private boolean deletionSignInStarted=false,deletionAuthBusy=false,wiping=false;private int deletionEpoch=0;
+    private String deletionOwnerUid="",deletionOwnerEmail="";
+    private final List<WorkspaceLock.Item> knownSpaces=new ArrayList<>();private boolean lockNamesRequested=false;
     private final List<JSONObject> lockFiles=new ArrayList<>();private String lockFilesFor="";
     private ActivityResultLauncher<String[]> picker;private ActivityResultLauncher<Uri> folderPicker;private ActivityResultLauncher<String> notifications;
     private CloudApi api(){return new CloudApi(uid);}
@@ -57,7 +59,10 @@ public final class MainActivity extends AppCompatActivity {
         folderPicker=registerForActivityResult(new ActivityResultContracts.OpenDocumentTree(),uri->{if(uri!=null)chooseUpload(List.of(uri),true);});
         notifications=registerForActivityResult(new ActivityResultContracts.RequestPermission(),allowed->{if(!allowed)say("Transfer started. Notifications are off; progress remains available in the app.");});
         listener=firebase->{FirebaseUser user=firebase.getCurrentUser();if(holdAuthNavigation){uid=user==null?"":user.getUid();return;}loadSerial++;uid=user==null?"":user.getUid();workspace=user==null?"free":getSharedPreferences("gd-settings",MODE_PRIVATE).getString("workspace:"+uid,"free");files.clear();query="";handled.clear();if(user==null)showLogin();else checkConsent();};
+        DeletionReceipt savedDeletion=DeletionReceiptVault.read(this);
+        if(savedDeletion!=null){holdAuthNavigation=true;deletion=AccountDeletion.resume(savedDeletion);}
         auth.addAuthStateListener(listener);
+        if(deletion!=null){showDeleteAccount();advanceDeletion();}
         WorkManager.getInstance(this).getWorkInfosForUniqueWorkLiveData("GenDragoonTransfer").observe(this,items->{
             boolean previous=workBusy;workBusy=false;
             for(WorkInfo item:items){if(item.getState()==WorkInfo.State.RUNNING||item.getState()==WorkInfo.State.ENQUEUED||item.getState()==WorkInfo.State.BLOCKED){workBusy=true;Data p=item.getProgress();long total=p.getLong("total",0),done=p.getLong("done",0);
@@ -122,7 +127,7 @@ public final class MainActivity extends AppCompatActivity {
             CloudApi api=new CloudApi(owner);JSONArray all=api.get("/v2/workspaces").getJSONArray("workspaces");List<JSONObject> spaces=new ArrayList<>();for(int n=0;n<all.length();n++){JSONObject s=all.getJSONObject(n);if("paid".equals(s.optString("kind"))&&s.optBoolean("storageActive")&&s.optBoolean("provisioned"))spaces.add(s);}
             String effective=chosen;boolean found=chosen.equals("free");for(JSONObject entry:spaces)if(chosen.equals(entry.optString("id")))found=true;if(!found)effective="free";
             JSONObject config=null;List<JSONObject> list=new ArrayList<>();try{config=api.get(CloudApi.workspace(effective)+"/config");list=api.files(effective);}catch(CloudApi.Failure e){if(e.status!=404||!effective.equals("free"))throw e;}
-            JSONObject cfg=config;List<JSONObject> loaded=list;String verifiedWorkspace=effective;runOnUiThread(()->{if(serial!=loadSerial||!owner.equals(uid))return;loading=false;activeLock=null;lockFiles.clear();lockFilesFor="";deletion=null;workspace=verifiedWorkspace;getSharedPreferences("gd-settings",MODE_PRIVATE).edit().putString("workspace:"+uid,workspace).apply();files=loaded;showLibrary(spaces,cfg);});
+            JSONObject cfg=config;List<JSONObject> loaded=list;String verifiedWorkspace=effective;runOnUiThread(()->{if(serial!=loadSerial||!owner.equals(uid))return;loading=false;activeLock=null;lockFiles.clear();lockFilesFor="";if(deletion==null||deletion.step!=AccountDeletion.Step.POLLING)deletion=null;workspace=verifiedWorkspace;rememberSpaces(spaces);getSharedPreferences("gd-settings",MODE_PRIVATE).edit().putString("workspace:"+uid,workspace).apply();files=loaded;if(deletion!=null&&deletion.step==AccountDeletion.Step.POLLING)return;showLibrary(spaces,cfg);});
         }catch(Exception e){runOnUiThread(()->{if(serial!=loadSerial||!owner.equals(uid))return;loading=false;if(e instanceof WorkspaceLocked locked){showLock(locked.lock);return;}updateButtons();say(e.getMessage());});}});
     }
     private void showLibrary(List<JSONObject> spaces,JSONObject cfg){
@@ -205,17 +210,26 @@ public final class MainActivity extends AppCompatActivity {
         box.addView(button("About GenDragoon",()->new MaterialAlertDialogBuilder(this).setTitle("GenDragoon").setMessage("Cloud files, folders and application packages. Your workspace quotas and transfer limits are verified by the server. Mobile updates are distributed through the app store. Android manages installed apps independently of the GenDragoon cache.").setPositiveButton("Done",null).show()));
         box.addView(button("Reset App",this::resetApp));
         box.addView(button("Privacy Notice",()->startActivity(new Intent(Intent.ACTION_VIEW,Uri.parse(CloudApi.ORIGIN+"/mobile/privacy.txt")))));
+        box.addView(button("Bring-your-own storage",this::showByo));
         androidx.appcompat.app.AlertDialog[] shown=new androidx.appcompat.app.AlertDialog[1];
-        MaterialButton delete=button("Delete account",()->{if(shown[0]!=null)shown[0].dismiss();deletionEpoch++;deletion=new AccountDeletion();deletionSignInStarted=false;wiping=false;holdAuthNavigation=true;showDeleteAccount();});
-        delete.setBackgroundTintList(ColorStateList.valueOf(Color.rgb(120,32,48)));delete.setTextColor(Color.WHITE);box.addView(delete);
+        MaterialButton delete=button("Delete account",()->{if(workBusy||shown[0]==null)return;shown[0].dismiss();deletionEpoch++;deletionOwnerUid=user.getUid();deletionOwnerEmail=user.getEmail()==null?"":user.getEmail();deletionSignInStarted=false;wiping=false;holdAuthNavigation=true;DeletionReceipt saved=DeletionReceiptVault.read(this);if(saved!=null){deletion=AccountDeletion.resume(saved);advanceDeletion();return;}deletion=new AccountDeletion();showDeleteAccount();});
+        delete.setEnabled(!workBusy);delete.setBackgroundTintList(ColorStateList.valueOf(Color.rgb(120,32,48)));delete.setTextColor(Color.WHITE);box.addView(delete);
         box.addView(button("Sign out",()->{WorkManager.getInstance(this).cancelUniqueWork("GenDragoonTransfer");auth.signOut();}));
         shown[0]=new MaterialAlertDialogBuilder(this).setTitle(user.getEmail()==null?"Account":user.getEmail()).setView(box).setNegativeButton("Done",null).create();shown[0].show();
     }
+    private void rememberSpaces(List<JSONObject> spaces){
+        knownSpaces.clear();knownSpaces.add(new WorkspaceLock.Item("free","Free",null));
+        for(JSONObject space:spaces)knownSpaces.add(new WorkspaceLock.Item(space.optString("id"),space.optString("name"),null));
+    }
     private void showLock(WorkspaceLock lock){
-        activeLock=lock==null?new WorkspaceLock(List.of(),""):lock;loadSerial++;deletion=null;shell();
+        WorkspaceLock resolved=(lock==null?new WorkspaceLock(List.of(),""):lock).named(knownSpaces);
+        if(deletion!=null&&deletion.step==AccountDeletion.Step.POLLING){activeLock=resolved;return;}
+        activeLock=resolved;loadSerial++;deletion=null;shell();
         content.addView(text("Workspaces locked",30,true));space(content,12);
         TextView body=text("Your files are still readable and downloadable. Uploads are paused until you delete or merge workspaces down to your plan limit.",15,false);body.setTextColor(muted);content.addView(body);
+        String choose=activeLock.chooseMessage();if(!choose.isEmpty()){space(content,10);content.addView(text(choose,16,true));}
         String issues=activeLock.issueSummary();if(!issues.isEmpty()){space(content,10);content.addView(text(issues,14,true));}
+        if(knownSpaces.isEmpty()&&(activeLock.overBy>0||!activeLock.unpaidIds.isEmpty()))fetchLockNames();
         space(content,8);TextView note=text("Duplicates are kept as name (from <source>).",12,false);note.setTextColor(muted);content.addView(note);space(content,8);
         if(activeLock.workspaces.isEmpty())content.addView(text("The server did not include a workspace list.",14,false));
         for(WorkspaceLock.Item item:activeLock.workspaces){
@@ -245,7 +259,8 @@ public final class MainActivity extends AppCompatActivity {
         new MaterialAlertDialogBuilder(this).setTitle("Merge into").setItems(labels.toArray(new String[0]),(d,which)->{
             WorkspaceLock.Item target=targets.get(which);
             String sourceName=source.name==null||source.name.isEmpty()?source.id:source.name;
-            new MaterialAlertDialogBuilder(this).setTitle("Merge workspaces").setMessage(CloudApi.mergeWorkspaces(target.id,source.id,sourceName)).setPositiveButton("OK",null).show();
+            String owner=uid;
+            new MaterialAlertDialogBuilder(this).setTitle("Merge workspaces").setMessage(AccountActions.mergeUnavailable(sourceName)).setNegativeButton("Cancel",null).setPositiveButton("Merge",(dialog,index)->io.execute(()->{try{new CloudApi(owner).mergeWorkspace(source.id,target.id,sourceName);runOnUiThread(()->{if(owner.equals(uid))load();});}catch(Exception error){report(error);}})).show();
         }).setNegativeButton("Cancel",null).show();
     }
     private void listWorkspaceFiles(WorkspaceLock.Item item){
@@ -285,7 +300,7 @@ public final class MainActivity extends AppCompatActivity {
             }
             case FAILED -> {
                 content.addView(text(deletion.message==null?"Account deletion did not finish. You can retry.":deletion.message,15,false));
-                space(content,12);content.addView(button("Retry",()->{deletion.retry();showDeleteAccount();}));
+                space(content,12);content.addView(button("Retry",()->{deletion.retry();if(deletion.step==AccountDeletion.Step.POLLING){advanceDeletion();return;}deletionSignInStarted=false;showDeleteAccount();}));
                 space(content,8);content.addView(button("Cancel",this::cancelDeletion));
             }
             case SIGNED_OUT -> {
@@ -313,12 +328,14 @@ public final class MainActivity extends AppCompatActivity {
                     auth.signInWithCredential(GoogleAuthProvider.getCredential(google.getIdToken(),null)).addOnCompleteListener(task->{
                         if(epoch!=deletionEpoch||deletion==null){deletionAuthBusy=false;return;}
                         if(!task.isSuccessful()||auth.getCurrentUser()==null){deletionAuthBusy=false;deletion.message=task.getException()==null?"Sign-in failed.":task.getException().getMessage();showDeleteAccount();return;}
-                        auth.getCurrentUser().getIdToken(false).addOnCompleteListener(tokenTask->{
+                        FirebaseUser signed=auth.getCurrentUser();
+                        if(!AccountMatch.same(deletionOwnerUid,deletionOwnerEmail,signed.getUid(),signed.getEmail())){deletionAuthBusy=false;deletion.fail("Sign in with the same Google account. Nothing was deleted.");showDeleteAccount();return;}
+                        signed.getIdToken(false).addOnCompleteListener(tokenTask->{
                             deletionAuthBusy=false;if(epoch!=deletionEpoch||deletion==null)return;
                             if(!tokenTask.isSuccessful()||tokenTask.getResult()==null||tokenTask.getResult().getToken()==null){deletion.message="Sign in again. The server only accepts a sign-in from the last 5 minutes.";showDeleteAccount();return;}
                             String jwt=tokenTask.getResult().getToken();Long authTime=CloudSignals.authTimeMillis(jwt);
                             if(!deletion.acceptFreshSignIn(authTime==null?0L:authTime,System.currentTimeMillis())){showDeleteAccount();return;}
-                            if(deletion.step==AccountDeletion.Step.POLLING){advanceDeletion();return;}
+                            if(deletion.step==AccountDeletion.Step.POLLING||!deletion.allowsDelete()){advanceDeletion();return;}
                             sendDelete(jwt,epoch);
                         });
                     });
@@ -328,16 +345,48 @@ public final class MainActivity extends AppCompatActivity {
         });
     }
     private void sendDelete(String jwt,int epoch){
-        if(deletion==null)return;deletion.noteDeleteSent();String owner=uid;
+        if(deletion==null||!deletion.allowsDelete())return;deletion.noteDeleteSent();String owner=uid;
         io.execute(()->{try{AccountActions.HttpBody body=new CloudApi(owner).deleteAccountCall(jwt);runOnUiThread(()->applyDelete(body,epoch));}catch(Exception error){runOnUiThread(()->{if(epoch!=deletionEpoch||deletion==null)return;deletion.fail(error.getMessage());showDeleteAccount();});}});
     }
     private void applyDelete(AccountActions.HttpBody body,int epoch){
         if(epoch!=deletionEpoch||deletion==null)return;
-        if(body.status==423&&CloudSignals.CODE_LOCK.equals(body.error)){showLock(WorkspaceLock.decode(body.raw));return;}
-        deletion.onDeleteHttp(body.status,body.jobId,body.error);advanceDeletion();
+        if(body.status==423&&CloudSignals.CODE_LOCK.equals(body.error)){noteLockDuringDeletion(WorkspaceLock.decode(body.raw));return;}
+        deletion.onDeleteHttp(body.status,body.jobId,body.error,body.statusToken);persistReceipt();advanceDeletion();
+    }
+    private void persistReceipt(){
+        if(deletion==null)return;
+        DeletionReceipt receipt=deletion.receipt();
+        if(receipt!=null&&deletion.step==AccountDeletion.Step.POLLING)DeletionReceiptVault.save(this,receipt);
+    }
+    private void noteLockDuringDeletion(WorkspaceLock lock){
+        activeLock=(lock==null?new WorkspaceLock(List.of(),""):lock).named(knownSpaces);
+        if(deletion!=null&&deletion.step==AccountDeletion.Step.POLLING)return;
+        showLock(lock);
+    }
+    private void fetchLockNames(){
+        if(lockNamesRequested||uid.isEmpty())return;lockNamesRequested=true;String owner=uid;
+        io.execute(()->{try{
+            JSONArray all=new CloudApi(owner).get("/v2/workspaces").getJSONArray("workspaces");
+            List<JSONObject> spaces=new ArrayList<>();for(int n=0;n<all.length();n++)spaces.add(all.getJSONObject(n));
+            runOnUiThread(()->{if(!owner.equals(uid)||activeLock==null)return;rememberSpaces(spaces);showLock(activeLock);});
+        }catch(Exception error){report(error);}});
+    }
+    private void showByo(){
+        LinearLayout box=vertical();box.setPadding(dp(8),dp(4),dp(8),dp(4));
+        box.addView(text("S3-compatible storage. Keys stay on this device.",14,false));
+        EditText endpoint=new EditText(this);endpoint.setHint("Endpoint");endpoint.setSingleLine(true);box.addView(endpoint);
+        EditText bucket=new EditText(this);bucket.setHint("Bucket");bucket.setSingleLine(true);box.addView(bucket);
+        EditText access=new EditText(this);access.setHint("Access key");access.setSingleLine(true);box.addView(access);
+        EditText secret=new EditText(this);secret.setHint("Secret key");secret.setSingleLine(true);box.addView(secret);
+        for(String provider:List.of("SFTP","Azure","WebDAV")){TextView row=text(provider+" · "+ByoMessages.COMING_SOON,14,false);row.setEnabled(false);row.setTextColor(muted);box.addView(row);}
+        new MaterialAlertDialogBuilder(this).setTitle("Bring-your-own storage").setView(box).setNegativeButton("Cancel",null).setPositiveButton("Save on this device",(d,w)->{
+            try{ByoSecretStore.save(this,endpoint.getText().toString(),bucket.getText().toString(),access.getText().toString(),secret.getText().toString());say("S3-compatible keys are stored on this device.");}
+            catch(Exception error){say(error.getMessage()==null?"Keys could not be saved on this device.":error.getMessage());}
+        }).show();
     }
     private void advanceDeletion(){
         if(deletion==null)return;
+        if(deletion.dropReceipt&&!deletion.requestsWipe())DeletionReceiptVault.clear(this);
         if(deletion.step==AccountDeletion.Step.SIGNED_OUT){leaveDeletionSignedOut();return;}
         if(deletion.step==AccountDeletion.Step.POLLING){
             if(deletion.exhausted()){deletion.fail("Account deletion is still running. You can retry.");showDeleteAccount();return;}
@@ -348,11 +397,11 @@ public final class MainActivity extends AppCompatActivity {
     }
     private void pollOnce(int epoch){
         if(epoch!=deletionEpoch||deletion==null||deletion.step!=AccountDeletion.Step.POLLING)return;
-        String path=deletion.statusPath,owner=uid;
-        try{AccountActions.HttpBody body=new CloudApi(owner).pollDeletion(path);runOnUiThread(()->{
+        String path=deletion.statusPath,token=deletion.statusToken,owner=uid;
+        try{AccountActions.HttpBody body=new CloudApi(owner).pollDeletion(path,token);runOnUiThread(()->{
             if(epoch!=deletionEpoch||deletion==null||deletion.step!=AccountDeletion.Step.POLLING)return;
-            if(body.status==423&&CloudSignals.CODE_LOCK.equals(body.error)){showLock(WorkspaceLock.decode(body.raw));return;}
-            deletion.onPollHttp(body.status,body.state,body.error);advanceDeletion();
+            if(body.status==423&&CloudSignals.CODE_LOCK.equals(body.error)){activeLock=WorkspaceLock.decode(body.raw).named(knownSpaces);deletion.onPollHttp(body.status,body.jobStatus,body.error,body.retryable);advanceDeletion();return;}
+            deletion.onPollHttp(body.status,body.jobStatus,body.error,body.retryable);advanceDeletion();
         });}catch(Exception error){runOnUiThread(()->{if(epoch!=deletionEpoch||deletion==null)return;deletion.fail(error.getMessage());showDeleteAccount();});}
     }
     private void leaveDeletionSignedOut(){holdAuthNavigation=false;deletionEpoch++;deletionAuthBusy=false;wiping=false;deletion=null;activeLock=null;auth.signOut();}
@@ -362,6 +411,7 @@ public final class MainActivity extends AppCompatActivity {
         io.execute(()->{try{eraseAccountData();runOnUiThread(()->{wiping=false;if(deletion!=null)deletion.noteWiped();showDeleteAccount();});}catch(Exception error){runOnUiThread(()->{wiping=false;if(deletion!=null)deletion.message=error.getMessage()==null?"Local data could not be removed.":error.getMessage();showDeleteAccount();});}});
     }
     private void eraseAccountData()throws Exception{
+        DeletionReceiptVault.clear(this);
         WorkManager.getInstance(this).cancelUniqueWork("GenDragoonTransfer");
         for(String name:LocalDataWipe.PREFERENCES)getSharedPreferences(name,MODE_PRIVATE).edit().clear().commit();
         getPreferences(MODE_PRIVATE).edit().clear().commit();

@@ -123,8 +123,36 @@ jobs:
 
   ios:
     runs-on: macos-latest
-    timeout-minutes: 25
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-      - name: Build iOS Simulator client
-        run: xcodebuild -project native/Mobile/iOS/GenDragoonMobile.xcodeproj -scheme GenDragoonMobile -sdk iphonesimulator -destination 'generic/platform=iOS Simulator' -derivedDataPath "$RUNNER_TEMP/GenDragoon-iOS" CODE_SIGNING_ALLOWED=NO build
+      - name: Choose an available iPhone simulator
+        id: simulator
+        run: |
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import json, subprocess, sys
+          data=json.loads(subprocess.check_output(["xcrun","simctl","list","devices","available","-j"]))
+          for runtime, devices in data.get("devices", {}).items():
+              if "iOS" not in runtime:
+                  continue
+              for device in devices:
+                  if device.get("isAvailable") and "iPhone" in device.get("name",""):
+                      print(f"udid={device['udid']}")
+                      print(f"name={device['name']}")
+                      sys.exit(0)
+          sys.exit("no available iPhone simulator")
+          PY
+      - name: Test iOS Simulator client
+        run: xcodebuild test -project native/Mobile/iOS/GenDragoonMobile.xcodeproj -scheme GenDragoonMobile -destination "platform=iOS Simulator,id=${{ steps.simulator.outputs.udid }}" -derivedDataPath "$RUNNER_TEMP/GenDragoon-iOS" CODE_SIGNING_ALLOWED=NO
+      - name: Collect simulator screenshots
+        if: always()
+        run: |
+          mkdir -p ios-screenshots
+          if [ -d /tmp/ios-screenshots ]; then cp -R /tmp/ios-screenshots/. ios-screenshots/; fi
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        if: always()
+        with:
+          name: ios-simulator-screenshots
+          path: ios-screenshots
+          if-no-files-found: warn
+          retention-days: 7

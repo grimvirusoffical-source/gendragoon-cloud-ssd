@@ -13,7 +13,10 @@ enum LocalWipePlan {
 
     static func wipedDefaults(_ keys:[String])->[String] { keys.filter{$0.hasPrefix(defaultsPrefix)} }
     /// Keychain services removed for this deletion outcome. A 401 passes `wipe: false` and removes none.
-    static func keychainServicesRemoved(wipe:Bool)->[String] { wipe ? [authService,byoService] : [] }
+    /// The deletion receipt service is included only when the account wipe runs.
+    static func keychainServicesRemoved(wipe:Bool)->[String] {
+        wipe ? [authService,byoService,DeletionReceiptVault.service] : []
+    }
     static func lockPauseDeletes()->[String] { [] }
     static func accountWipeIncludesCheckpoints()->Bool { true }
 }

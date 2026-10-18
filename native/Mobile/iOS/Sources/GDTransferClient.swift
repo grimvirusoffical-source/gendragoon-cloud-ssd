@@ -311,18 +311,20 @@ actor GDTransferClient {
         try? FileManager.default.removeItem(at:state)
         return target
     }
-    /// One-shot `DELETE /v2/account`. Contract, adjustable when the route is merged: `202 {"jobId"}`.
-    /// Poll `GET /v2/account/deletions/{jobId}` for `queued | running | done | failed`.
-    /// A 401 does not wipe local keys. Uses `freshToken` as given. Does not refresh the session or retry.
+    /// One-shot `DELETE /v2/account` with `{"confirm":"DELETE"}`.
+    /// Returns `202` or `410` including `jobId` and `statusToken`.
+    /// Poll with the status token, not the Firebase token. A 401 does not wipe. Does not refresh or retry.
     func deleteAccount(freshToken:String) async throws -> AccountHttp {
-        let(data,http)=try await once(path:"v2/account",method:"DELETE",token:freshToken)
+        let(data,http)=try await once(path:"v2/account",method:"DELETE",token:freshToken,body:AccountDeletion.confirmBody)
         return AccountHttp.parse(status:http.statusCode,data:data)
     }
-    /// One-shot poll of `AccountDeletion.deletionStatusPath`. A 401 is returned and does not wipe.
-    func accountDeletionStatus(path:String) async throws -> AccountHttp {
-        guard AccountDeletion.safeAccountPath(path) else {throw GDTransferError(message:"Invalid deletion status route.",status:400)}
-        let transport=path.hasPrefix("/") ? String(path.dropFirst()) : path
-        let(data,http)=try await once(path:transport,method:"GET",token:try await tokens(false))
+    /// One-shot poll of `AccountDeletion.deletionStatusPath`.
+    /// `Authorization` is `Bearer statusToken`, which still works after the Firebase user is gone.
+    /// A 401 is returned and does not wipe. The token is not logged.
+    func accountDeletionStatus(path:String,statusToken:String) async throws -> AccountHttp {
+        guard let call=AccountDeletion.pollCall(path:path,statusToken:statusToken) else {throw GDTransferError(message:"Invalid deletion status route.",status:400)}
+        let transport=call.path.hasPrefix("/") ? String(call.path.dropFirst()) : call.path
+        let(data,http)=try await once(path:transport,method:"GET",token:statusToken)
         return AccountHttp.parse(status:http.statusCode,data:data)
     }
     /// `DELETE /v2/workspaces/{id}`. Uses `send`, so HTTP 423 `workspace_lock` still opens the lock screen.
@@ -331,12 +333,14 @@ actor GDTransferClient {
         guard id=="free" || UUID(uuidString:id) != nil else {throw GDTransferError(message:"Invalid workspace.",status:400)}
         _=try await send("v2/workspaces/"+id.lowercased(),method:"DELETE")
     }
-    /// Merge is not final and this method performs no request.
-    /// Expected later call: `POST /v2/workspaces/{targetId}/merge` with `{"sourceId": sourceId}`.
-    /// Duplicate files are kept as `name (from <source>)`.
-    static func mergeWorkspaces(into targetID:String,sourceID:String,sourceName:String)->String {
-        if targetID.isEmpty || sourceID.isEmpty {return AccountDeletion.mergeUnavailable(sourceName)}
-        return AccountDeletion.mergeUnavailable(sourceName)
+    /// `POST /v2/workspaces/{sourceId}/merge` with `{"targetId","confirmName"}`.
+    /// Duplicate files are kept as `name (from <source>)`. Uses `send`, so HTTP 423 still locks.
+    func mergeWorkspaces(sourceID:String,targetID:String,sourceName:String) async throws {
+        guard let path=AccountDeletion.mergePath(sourceID:sourceID),
+              let body=AccountDeletion.mergeBody(targetID:targetID,confirmName:sourceName) else {
+            throw GDTransferError(message:"Invalid merge.",status:400)
+        }
+        _=try await send(path,method:"POST",data:body)
     }
     private func once(path:String,method:String,token:String,body:Data?=nil) async throws -> (Data,HTTPURLResponse) {
         guard !path.isEmpty,!path.hasPrefix("/"),!path.contains(".."),!path.contains("\\"),!path.contains("//") else {

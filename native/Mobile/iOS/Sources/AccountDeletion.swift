@@ -1,24 +1,36 @@
 import Foundation
+import Security
 
 /// Account-deletion state machine. Freshness is the Firebase ID token `auth_time` claim.
-/// `DELETE /v2/account` returns `202 {"jobId"}`. Status is only `deletionStatusPath`.
-/// States are `queued | running | done | failed`. A 401 never wipes local keys. Only `done` does.
+/// `DELETE /v2/account` sends `{"confirm":"DELETE"}` and returns `202` with `jobId` and `statusToken`.
+/// A repeat delete returns `410 {"error":"account_deleted","jobId","statusToken"}`.
+/// Status is only `deletionStatusPath`, authorized with the status token.
+/// The JSON field is `status` (`queued | running | done | failed`) plus `retryable`.
+/// Local keys are wiped only after `done`.
 struct AccountDeletion:Equatable {
     enum Step:Equatable,Hashable { case explain, confirm, reauth, deleting, polling, done, failed, wiped, signedOut }
     static let confirmPhrase="DELETE"
     static let freshSeconds:TimeInterval=300
     static let pollLimit=90
+    static let confirmJSON="{\"confirm\":\"DELETE\"}"
+    static let confirmContentType="application/json"
+    static let confirmBody=Data("{\"confirm\":\"DELETE\"}".utf8)
     /// The only deletion status route. It is plural: `GET /v2/account/deletions/:jobId`.
     static let deletionStatusPath="/v2/account/deletions/"
 
     var step:Step = .explain
     var message:String?
     var jobId:String?
+    var statusToken:String?
     var statusPath:String?
     var deleteAttempts=0
     var polls=0
     var wipe=false
     var wiped=false
+    /// Clear the saved job and token without erasing the rest of the device.
+    var dropReceipt=false
+    /// A 404 means this token does not match the job. Do not send DELETE again.
+    var refuseDelete=false
 
     mutating func continueFromExplain(){if step == .explain {step = .confirm}}
     mutating func confirmPhrase(_ phrase:String)->Bool {
@@ -33,32 +45,83 @@ struct AccountDeletion:Equatable {
             message="Sign in again. The server only accepts a sign-in from the last 5 minutes."
             return false
         }
-        step = self.jobId==nil ? .deleting : .polling;message=nil;return true
-    }
-    mutating func noteDeleteSent(){deleteAttempts+=1}
-    /// True only after the deletion job reports `done`. A 401 never sets this.
-    func requestsWipe()->Bool { wipe && step == .done }
-    mutating func onDeleteHttp(status:Int,jobId:String?,errorCode:String?){
-        guard step == .deleting else {return}
-        if status==401 {onUnauthorized(errorCode);return}
-        if status==202,let jobId,Self.validJob(jobId){
-            self.jobId=jobId;statusPath=Self.statusPath(jobId:jobId);step = .polling;wipe=false;message=nil;return
+        if beginPolling(jobId:jobId,statusToken:statusToken) {return true}
+        if refuseDelete || jobId != nil || statusToken != nil {
+            fail("A saved deletion is already in progress. DELETE was not sent again.")
+            return false
         }
+        step = .deleting;message=nil;return true
+    }
+    /// DELETE is sent only when nothing is saved. Up to 5 status tokens stay valid, so a saved token is kept and polled.
+    func allowsDelete()->Bool { step == .deleting && !refuseDelete && jobId==nil && statusToken==nil }
+    mutating func noteDeleteSent(){deleteAttempts+=1}
+    func requestsWipe()->Bool { wipe && step == .done }
+    func receipt()->DeletionReceipt? { DeletionReceipt.of(jobId:jobId,statusToken:statusToken) }
+    static func resume(_ receipt:DeletionReceipt?)->AccountDeletion {
+        var flow=AccountDeletion()
+        if receipt==nil || !flow.beginPolling(jobId:receipt?.jobId,statusToken:receipt?.statusToken) {
+            flow.dropReceipt=true
+            flow.fail("Saved deletion could not be resumed. Nothing on this device was erased.")
+        }
+        return flow
+    }
+    mutating func askForSignIn(_ text:String){
+        wipe=false
+        step = .reauth
+        message=text
+    }
+    mutating func onDeleteHttp(status:Int,jobId:String?,errorCode:String?,statusToken:String?){
+        guard step == .deleting else {return}
+        if status==423 && errorCode==CloudSignals.lockCode {wipe=false;return}
+        if status==401 {onUnauthorized(errorCode);return}
+        if status==410 {
+            // A repeat DELETE after done is 410 account_deleted, never 401.
+            // Up to 5 status tokens for the job stay valid, so this token is polled and not discarded.
+            wipe=false
+            if errorCode=="account_deleted" && beginPolling(jobId:jobId,statusToken:statusToken) {return}
+            fail("Account deletion did not include a usable job. Nothing on this device was erased.")
+            return
+        }
+        if status==202 && beginPolling(jobId:jobId,statusToken:statusToken) {return}
         fail("Account deletion did not start. You can retry.")
     }
-    mutating func onPollHttp(status:Int,state:String?,errorCode:String?){
+    mutating func onPollHttp(status:Int,jobStatus:String?,errorCode:String?,retryable:Bool?){
         guard step == .polling else {return}
+        if status==423 && errorCode==CloudSignals.lockCode {wipe=false;return}
         if status==401 {onUnauthorized(errorCode);return}
-        if (200..<300).contains(status){
-            if state=="queued" || state=="running" {step = .polling;wipe=false;return}
-            if state=="done" {step = .done;wipe=true;message=nil;return}
-            if state=="failed" {fail("Account deletion failed. You can retry.");return}
+        if status==404 {
+            wipe=false;refuseDelete=true;dropReceipt=true;self.jobId=nil;self.statusToken=nil;self.statusPath=nil
+            fail("This deletion could not be confirmed. Nothing on this device was erased.")
+            return
         }
+        if (200..<300).contains(status) {
+            if jobStatus=="queued" || jobStatus=="running" {step = .polling;wipe=false;return}
+            if jobStatus=="done" {step = .done;wipe=true;message=nil;return}
+            if jobStatus=="failed" {
+                if retryable==false {
+                    dropReceipt=true;self.jobId=nil;self.statusToken=nil;self.statusPath=nil
+                    fail("Account deletion failed and cannot be resumed. Nothing on this device was erased.")
+                } else {fail("Account deletion failed. You can retry.")}
+                return
+            }
+            // Anything else, including "completed", stops now. Do not poll until the timeout.
+            fail("Account deletion reported an unknown status. Nothing on this device was erased.")
+            return
+        }
+        wipe=false
         fail("Could not read deletion status. You can retry.")
+    }
+    private mutating func beginPolling(jobId:String?,statusToken:String?)->Bool {
+        guard let jobId,let statusToken,let path=Self.statusPath(jobId:jobId),Self.validToken(statusToken),Self.safeAccountPath(path) else {return false}
+        self.jobId=jobId;self.statusToken=statusToken;self.statusPath=path
+        step = .polling;wipe=false;dropReceipt=false;message=nil
+        return true
     }
     private mutating func onUnauthorized(_ errorCode:String?){
         wipe=false
-        if errorCode=="invalid_token" {step = .signedOut;message="Sign in again to continue.";return}
+        if errorCode==nil || errorCode?.isEmpty==true || errorCode=="invalid_token" {
+            step = .signedOut;message="Sign in again to continue.";return
+        }
         step = .reauth
         message="Sign in again. The server only accepts a sign-in from the last 5 minutes."
     }
@@ -66,24 +129,57 @@ struct AccountDeletion:Equatable {
     mutating func nextPollDelayMillis()->Int { let delay=1000<<min(polls,3);polls+=1;return delay }
     mutating func fail(_ text:String){step = .failed;wipe=false;message=text}
     mutating func retry(){
-        guard step == .failed else {return}
-        step = .explain;message=nil;jobId=nil;statusPath=nil;deleteAttempts=0;polls=0;wipe=false;wiped=false
+        guard step == .failed, !refuseDelete else {return}
+        wipe=false;message=nil;polls=0
+        if let jobId,let statusToken,Self.validJob(jobId),Self.validToken(statusToken),let path=Self.statusPath(jobId:jobId) {
+            statusPath=path;step = .polling;dropReceipt=false;return
+        }
+        jobId=nil;statusToken=nil;statusPath=nil;step = .reauth
     }
     mutating func noteWiped(){if step == .done && wipe {wiped=true;step = .wiped}}
     mutating func noteWipeFailed(_ text:String){if step == .done {message=text}}
 
-    static func validJob(_ jobId:String)->Bool { jobId.range(of:"^[A-Za-z0-9_-]{1,80}$",options:.regularExpression) != nil }
-    static func statusPath(jobId:String)->String { deletionStatusPath+jobId }
-    static func safeAccountPath(_ path:String)->Bool {
-        guard path.hasPrefix(deletionStatusPath) else {return false}
-        return validJob(String(path.dropFirst(deletionStatusPath.count)))
+    static func validJob(_ jobId:String)->Bool {
+        jobId.range(of:"^[A-Za-z0-9_-]{1,80}$",options:.regularExpression) != nil && !jobId.contains("..") && !jobId.contains("/") && !jobId.contains("\\")
     }
-    /// Merge is not final and performs no request.
-    /// Expected later call: POST v2/workspaces/{targetId}/merge {"sourceId": sourceId}.
-    /// Duplicate files are kept as name (from <source>).
-    static func mergeUnavailable(_ sourceName:String)->String {
+    static func validToken(_ token:String)->Bool {
+        guard token.count>=8 && token.count<=512 else {return false}
+        return token.unicodeScalars.allSatisfy { $0.value>32 && $0.value<127 && $0 != "\"" && $0 != "\\" }
+    }
+    static func statusPath(jobId:String)->String? {
+        guard validJob(jobId) else {return nil}
+        let allowed=CharacterSet(charactersIn:"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-")
+        guard let encoded=jobId.addingPercentEncoding(withAllowedCharacters:allowed) else {return nil}
+        return deletionStatusPath+encoded
+    }
+    static func safeAccountPath(_ path:String)->Bool {
+        guard path.hasPrefix(deletionStatusPath), !path.contains("/v2/account/deletion/") else {return false}
+        let rest=String(path.dropFirst(deletionStatusPath.count))
+        if rest.contains("/") || rest.contains("\\") || rest.contains("..") || rest.contains("%") {return false}
+        return validJob(rest)
+    }
+    static func pollCall(path:String,statusToken:String)->(method:String,path:String,authorization:String)? {
+        guard safeAccountPath(path),validToken(statusToken) else {return nil}
+        return ("GET",path,"Bearer "+statusToken)
+    }
+    /// Safe to log. The status token is never included.
+    static func describePoll(path:String)->String { "GET "+path+" Authorization: Bearer [redacted]" }
+    /// A saved pair is resumed before any sign-out. An unusable pair is not.
+    static func resumesBeforeSignOut(_ receipt:DeletionReceipt?)->Bool {
+        guard let receipt else {return false}
+        return validJob(receipt.jobId) && validToken(receipt.statusToken)
+    }
+    static func mergePath(sourceID:String)->String? {
+        guard sourceID=="free" || UUID(uuidString:sourceID) != nil else {return nil}
+        return "v2/workspaces/"+sourceID.lowercased()+"/merge"
+    }
+    static func mergeBody(targetID:String,confirmName:String)->Data? {
+        guard !confirmName.isEmpty,targetID=="free" || UUID(uuidString:targetID) != nil else {return nil}
+        return try? JSONSerialization.data(withJSONObject:["targetId":targetID,"confirmName":confirmName])
+    }
+    static func mergeNote(_ sourceName:String)->String {
         let source=sourceName.isEmpty ? "workspace" : sourceName
-        return "Merge isn't available yet. Duplicates are kept as name (from "+source+")."
+        return "Duplicates are kept as name (from "+source+")."
     }
 }
 
@@ -92,10 +188,95 @@ struct AccountHttp:Equatable,Sendable {
     var raw:String
     var error:String?
     var jobId:String?
-    var state:String?
+    var jobStatus:String?
+    var retryable:Bool?
+    var statusToken:String?
     static func parse(status:Int,data:Data)->AccountHttp {
         let raw=String(data:data,encoding:.utf8) ?? ""
-        let json=(try? JSONSerialization.jsonObject(with:data)) as? [String:Any]
-        return AccountHttp(status:status,raw:raw,error:json?["error"] as? String,jobId:json?["jobId"] as? String,state:json?["state"] as? String)
+        guard let json=(try? JSONSerialization.jsonObject(with:data)) as? [String:Any] else {
+            return AccountHttp(status:status,raw:raw,error:nil,jobId:nil,jobStatus:nil,retryable:nil,statusToken:nil)
+        }
+        let retryable:Bool?
+        if let value=json["retryable"] as? Bool {retryable=value}
+        else if let number=json["retryable"] as? NSNumber, CFGetTypeID(number) != CFStringGetTypeID() {retryable=number.boolValue}
+        else {retryable=nil}
+        return AccountHttp(status:status,raw:raw,error:errorCode(in:json),jobId:json["jobId"] as? String,jobStatus:json["status"] as? String,retryable:retryable,statusToken:json["statusToken"] as? String)
+    }
+    /// PR #6 sends the machine code in `error`. `code` is only a fallback.
+    static func errorCode(in json:[String:Any])->String? {
+        if let error=json["error"] as? String, !error.isEmpty {return error}
+        if let code=json["code"] as? String, !code.isEmpty {return code}
+        return nil
+    }
+}
+
+struct DeletionReceipt:Equatable {
+    let jobId:String
+    let statusToken:String
+    static func of(jobId:String?,statusToken:String?)->DeletionReceipt? {
+        guard let jobId,let statusToken,AccountDeletion.validJob(jobId),AccountDeletion.validToken(statusToken) else {return nil}
+        return DeletionReceipt(jobId:jobId,statusToken:statusToken)
+    }
+    var description:String { "DeletionReceipt("+jobId+")" }
+}
+
+struct DeletionReceiptMemory {
+    private var values:[String:String]=[:]
+    mutating func save(_ receipt:DeletionReceipt?){
+        guard let receipt else {return}
+        values["jobId"]=receipt.jobId
+        values["statusToken"]=receipt.statusToken
+    }
+    func read()->DeletionReceipt? { DeletionReceipt.of(jobId:values["jobId"],statusToken:values["statusToken"]) }
+    mutating func clear(){values.removeAll()}
+    func containsToken(_ token:String)->Bool { values["statusToken"]==token }
+}
+
+enum DeletionReceiptVault {
+    static let service="app.gendragoon.cloudssd.mobile.deletion"
+    static let account="status-receipt"
+    static let backedByKeychain=true
+    static let usesUserDefaults=false
+    static func save(jobId:String,token:String){
+        guard let receipt=DeletionReceipt.of(jobId:jobId,statusToken:token),
+              let data=try? JSONSerialization.data(withJSONObject:["jobId":receipt.jobId,"statusToken":receipt.statusToken]) else {return}
+        let query:[String:Any]=[kSecClass as String:kSecClassGenericPassword,kSecAttrService as String:service,kSecAttrAccount as String:account]
+        SecItemDelete(query as CFDictionary)
+        var add=query
+        add[kSecValueData as String]=data
+        add[kSecAttrAccessible as String]=kSecAttrAccessibleWhenUnlockedThisDeviceOnly
+        SecItemAdd(add as CFDictionary,nil)
+    }
+    static func load()->DeletionReceipt? {
+        var query:[String:Any]=[kSecClass as String:kSecClassGenericPassword,kSecAttrService as String:service,kSecAttrAccount as String:account,kSecReturnData as String:true,kSecMatchLimit as String:kSecMatchLimitOne]
+        var result:CFTypeRef?
+        guard SecItemCopyMatching(query as CFDictionary,&result)==errSecSuccess,let data=result as? Data,
+              let json=try? JSONSerialization.jsonObject(with:data) as? [String:String] else {return nil}
+        return DeletionReceipt.of(jobId:json["jobId"],statusToken:json["statusToken"])
+    }
+    static func clear(){
+        let query:[String:Any]=[kSecClass as String:kSecClassGenericPassword,kSecAttrService as String:service,kSecAttrAccount as String:account]
+        SecItemDelete(query as CFDictionary)
+    }
+}
+
+enum AccountMatch {
+    static func same(expectedUid:String,expectedEmail:String,actualUid:String,actualEmail:String?)->Bool {
+        guard !expectedUid.isEmpty,expectedUid==actualUid else {return false}
+        if expectedEmail.isEmpty {return true}
+        return expectedEmail.compare(actualEmail ?? "",options:.caseInsensitive) == .orderedSame
+    }
+}
+
+enum ByoMessages {
+    static let comingSoon="Coming soon"
+    static let unsupported="That storage provider isn't available yet. S3-compatible storage is supported."
+    static func friendly(status:Int,error:String?)->String? {
+        if status==422 && error=="byo_provider_unsupported" {return unsupported}
+        return nil
+    }
+    static func comingSoonProvider(_ provider:String)->Bool {
+        let name=provider.lowercased()
+        return name=="sftp" || name=="azure" || name=="webdav"
     }
 }

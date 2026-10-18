@@ -10,7 +10,9 @@ import java.util.List;
  * are cleared anyway so a later credential store cannot survive account deletion.
  */
 final class LocalDataWipe {
-    static final List<String> PREFERENCES=List.of("gd-settings","gd-transfer-checkpoints","gd-byo-credentials");
+    static final String DELETION_RECEIPT="gd-deletion-receipt";
+    static final String DELETION_KEY_ALIAS="gd-deletion-receipt-key";
+    static final List<String> PREFERENCES=List.of("gd-settings","gd-transfer-checkpoints","gd-byo-credentials",DELETION_RECEIPT);
     static final List<String> CACHE_DIRS=List.of("gd-inputs","gd-downloads","gd-folder-inputs");
     static final String FILES_DIR="exports";
     static final String KEYSTORE_PREFIX="gd-byo-";
@@ -20,7 +22,7 @@ final class LocalDataWipe {
 
     static boolean accountWipeClears(String name){
         if(name==null)return false;
-        return PREFERENCES.contains(name)||CACHE_DIRS.contains(name)||FILES_DIR.equals(name)||ACTIVITY_KEY_DATA_SAVER.equals(name)||name.startsWith(KEYSTORE_PREFIX);
+        return PREFERENCES.contains(name)||CACHE_DIRS.contains(name)||FILES_DIR.equals(name)||ACTIVITY_KEY_DATA_SAVER.equals(name)||DELETION_KEY_ALIAS.equals(name)||name.startsWith(KEYSTORE_PREFIX);
     }
 
     static boolean lockPauseClears(String name){return false;}
@@ -30,7 +32,7 @@ final class LocalDataWipe {
     static List<String> keystoreAliasesToDelete(Iterable<String> aliases){
         List<String> matched=new ArrayList<>();
         if(aliases==null)return matched;
-        for(String alias:aliases)if(alias!=null&&alias.startsWith(KEYSTORE_PREFIX))matched.add(alias);
+        for(String alias:aliases)if(alias!=null&&(alias.startsWith(KEYSTORE_PREFIX)||DELETION_KEY_ALIAS.equals(alias)))matched.add(alias);
         return matched;
     }
 

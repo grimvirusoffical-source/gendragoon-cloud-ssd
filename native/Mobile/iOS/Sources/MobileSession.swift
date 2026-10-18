@@ -10,6 +10,21 @@ private enum ByoVault {
         let query:[String:Any]=[kSecClass as String:kSecClassGenericPassword,kSecAttrService as String:LocalWipePlan.byoService]
         SecItemDelete(query as CFDictionary)
     }
+    /// S3-compatible keys stay in the keychain. They are never sent to the server.
+    static func save(endpoint:String,bucket:String,access:String,secret:String) throws {
+        guard !endpoint.isEmpty,!bucket.isEmpty,!access.isEmpty,!secret.isEmpty else {
+            throw GDTransferError(message:"Endpoint, bucket, and keys are required.",status:0)
+        }
+        let data=try JSONSerialization.data(withJSONObject:["endpoint":endpoint,"bucket":bucket,"accessKey":access,"secret":secret])
+        let query:[String:Any]=[kSecClass as String:kSecClassGenericPassword,kSecAttrService as String:LocalWipePlan.byoService,kSecAttrAccount as String:"s3"]
+        SecItemDelete(query as CFDictionary)
+        var add=query
+        add[kSecValueData as String]=data
+        add[kSecAttrAccessible as String]=kSecAttrAccessibleWhenUnlockedThisDeviceOnly
+        guard SecItemAdd(add as CFDictionary,nil)==errSecSuccess else {
+            throw GDTransferError(message:"Secure storage is unavailable.",status:0)
+        }
+    }
 }
 private enum SessionVault {
     static let service="app.gendragoon.cloudssd.mobile.auth"
@@ -39,6 +54,8 @@ private enum SessionVault {
     @Published var status="Opening your private cloud…"
     @Published var busy=false
     @Published var accountDeleted=false
+    /// Set before any sign-out when a deletion receipt is already in the keychain.
+    @Published var resumedDeletion:DeletionReceipt?
     private var bearer="",refresh=""
     private var expires=Date.distantPast
     private var renewal:Task<String,Error>?
@@ -52,6 +69,12 @@ private enum SessionVault {
     private var apiKey:String {configuration["API_KEY"] as? String ?? ""}
     func start() async {
         guard stage == .loading else{return}
+        if let receipt=DeletionReceiptVault.load(),AccountDeletion.resumesBeforeSignOut(receipt) {
+            resumedDeletion=receipt
+            stage = .ready
+            status="Finishing account deletion…"
+            return
+        }
         guard configuration["PROJECT_ID"] as? String=="gendragoonssd",
               configuration["BUNDLE_ID"] as? String==Bundle.main.bundleIdentifier else {
             stage = .login;status="Mobile sign-in configuration is missing or mismatched.";return
@@ -93,8 +116,12 @@ private enum SessionVault {
         guard result["providerId"] as? String=="google.com",result["needConfirmation"] as? Bool != true,
               let id=result["localId"] as? String,!id.isEmpty,let access=result["idToken"] as? String,
               let refresh=result["refreshToken"] as? String else {throw GDTransferError(message:"Google account could not be verified.",status:401)}
-        if !uid.isEmpty && id != uid {throw GDTransferError(message:"Use the same Google account.",status:401)}
-        generation=UUID();uid=id;email=result["email"] as? String ?? "Google account"
+        let nextEmail=result["email"] as? String
+        let expectedEmail=email.contains("@") ? email : ""
+        if !uid.isEmpty && !AccountMatch.same(expectedUid:uid,expectedEmail:expectedEmail,actualUid:id,actualEmail:nextEmail) {
+            throw GDTransferError(message:"Sign in with the same Google account. Nothing was deleted.",status:401)
+        }
+        generation=UUID();uid=id;email=nextEmail ?? "Google account"
         self.bearer=access;self.refresh=refresh;expires=Date().addingTimeInterval(3300)
         try SessionVault.save(StoredSession(uid:uid,email:email,refreshToken:refresh))
         return access
@@ -161,12 +188,15 @@ private enum SessionVault {
             try await checkTerms()
         }catch{status=error.localizedDescription}}
     }
-    func signOut(){renewal?.cancel();renewal=nil;generation=UUID();bearer="";refresh="";uid="";email="";expires = .distantPast;SessionVault.clear();GIDSignIn.sharedInstance.signOut();stage = .login;status="Signed out."}
+    func signOut(){renewal?.cancel();renewal=nil;generation=UUID();bearer="";refresh="";uid="";email="";expires = .distantPast;resumedDeletion=nil;SessionVault.clear();GIDSignIn.sharedInstance.signOut();stage = .login;status="Signed out."}
+    func saveByo(endpoint:String,bucket:String,access:String,secret:String) throws {
+        try ByoVault.save(endpoint:endpoint,bucket:bucket,access:access,secret:secret)
+    }
     /// Clears the session, saved workspace selection, transfer checkpoints, exports and future bring-your-own secrets.
     /// The done screen stays up until `returnToSignIn`. Upload code recreates its cache directory on the next sign-in.
     func eraseLocalData() throws {
         renewal?.cancel();renewal=nil;generation=UUID();bearer="";refresh="";expires = .distantPast
-        SessionVault.clear();ByoVault.clear();GIDSignIn.sharedInstance.signOut()
+        SessionVault.clear();ByoVault.clear();DeletionReceiptVault.clear();GIDSignIn.sharedInstance.signOut();resumedDeletion=nil
         let defaults=UserDefaults.standard
         for key in defaults.dictionaryRepresentation().keys where key.hasPrefix(LocalWipePlan.defaultsPrefix){defaults.removeObject(forKey:key)}
         let caches=FileManager.default.urls(for:.cachesDirectory,in:.userDomainMask)[0].appendingPathComponent(LocalWipePlan.cacheDirectory,isDirectory:true)

@@ -34,13 +34,15 @@ final class CloudSignals {
         if(lock!=null)return new Route(Destination.LOCK_SCREEN,null,lock,body==null?"":body,status,verb);
         if(status>=200&&status<300)return new Route(Destination.CONTINUE,null,null,body,status,verb);
         String message=JsonFields.string(body,"error");
-        if(message==null||message.isEmpty()||CODE_LOCK.equals(message))message="Cloud request failed (HTTP "+status+").";
+        String friendly=ByoMessages.friendly(status,message);
+        if(friendly!=null)message=friendly;
+        else if(message==null||message.isEmpty()||CODE_LOCK.equals(message))message="Cloud request failed (HTTP "+status+").";
         return new Route(Destination.GENERIC_ERROR,message,null,body,status,verb);
     }
 
     static WorkspaceLock workspaceLock(int status,String body){
         if(status!=423||!CODE_LOCK.equals(JsonFields.string(body,"error")))return null;
-        return new WorkspaceLock(JsonFields.workspaces(body),body==null?"":body);
+        return WorkspaceLock.fromLockBody(body==null?"":body);
     }
 
     static boolean shouldToast(Exception error){return !(error instanceof WorkspaceLocked)&&error.getMessage()!=null;}
@@ -136,11 +138,51 @@ final class WorkspaceLocked extends Exception {
 final class WorkspaceLock {
     final List<Item> workspaces;
     final String raw;
-    WorkspaceLock(List<Item> workspaces,String raw){this.workspaces=workspaces;this.raw=raw==null?"":raw;}
+    final int overBy;
+    final List<String> unpaidIds;
+    WorkspaceLock(List<Item> workspaces,String raw){this(workspaces,raw,0,List.of());}
+    WorkspaceLock(List<Item> workspaces,String raw,int overBy,List<String> unpaidIds){
+        this.workspaces=workspaces==null?List.of():workspaces;this.raw=raw==null?"":raw;this.overBy=Math.max(0,overBy);this.unpaidIds=unpaidIds==null?List.of():unpaidIds;
+    }
     static WorkspaceLock decode(String raw){
         if(raw==null||raw.isEmpty())return new WorkspaceLock(List.of(),"");
-        return new WorkspaceLock(JsonFields.workspaces(raw),raw);
+        return fromLockBody(raw);
     }
+    /** PR #5 lock body. Names come from the workspace list, not from this JSON. */
+    static WorkspaceLock fromLockBody(String body){
+        if(body!=null&&body.contains("\"unpaidWorkspaceIds\"")){
+            String count=JsonFields.number(body,"overBy");
+            int overBy=0;
+            if(count!=null)try{overBy=Integer.parseInt(count);}catch(NumberFormatException ignored){overBy=0;}
+            List<String> ids=JsonFields.stringList(body,"unpaidWorkspaceIds");
+            List<Item> items=new ArrayList<>();
+            for(String id:ids)items.add(new Item(id,null,"unpaid"));
+            return new WorkspaceLock(items,body,overBy,ids);
+        }
+        return new WorkspaceLock(JsonFields.workspaces(body),body,0,List.of());
+    }
+    /** Replace id-only rows with names from the cached workspace list. overBy makes every cached workspace actionable. */
+    WorkspaceLock named(List<Item> known){
+        if(known==null)known=List.of();
+        if(overBy<=0&&unpaidIds.isEmpty())return this;
+        List<Item> items=new ArrayList<>();
+        java.util.Set<String> seen=new java.util.HashSet<>();
+        if(overBy>0){
+            for(Item item:known){
+                if(item==null||item.id==null)continue;
+                seen.add(item.id);
+                items.add(new Item(item.id,item.name,unpaidIds.contains(item.id)?"unpaid":null));
+            }
+        }
+        for(String id:unpaidIds){
+            if(id==null||!seen.add(id))continue;
+            String name=null;
+            for(Item item:known)if(item!=null&&id.equals(item.id))name=item.name;
+            items.add(new Item(id,name,"unpaid"));
+        }
+        return new WorkspaceLock(items,raw,overBy,unpaidIds);
+    }
+    String chooseMessage(){return overBy>0?"Choose "+overBy+" workspaces to remove.":"";}
     String summary(){return "Workspaces locked";}
     String issueSummary(){
         boolean cap=false,unpaid=false;
@@ -185,6 +227,43 @@ final class JsonFields {
             return readString(json,i);
         }
         return null;
+    }
+    static Boolean bool(String json,String key){
+        if(json==null||key==null)return null;
+        String needle="\""+key+"\"";
+        int from=0;
+        while(from<json.length()){
+            int at=json.indexOf(needle,from);
+            if(at<0)return null;
+            int colon=json.indexOf(':',at+needle.length());
+            if(colon<0)return null;
+            int i=colon+1;
+            while(i<json.length()&&Character.isWhitespace(json.charAt(i)))i++;
+            if(json.startsWith("true",i))return Boolean.TRUE;
+            if(json.startsWith("false",i))return Boolean.FALSE;
+            from=at+needle.length();
+        }
+        return null;
+    }
+    static List<String> stringList(String json,String key){
+        List<String> values=new ArrayList<>();
+        if(json==null||key==null)return values;
+        int keyAt=json.indexOf("\""+key+"\"");
+        if(keyAt<0)return values;
+        int start=json.indexOf('[',keyAt);
+        int end=start<0?-1:json.indexOf(']',start);
+        if(start<0||end<0)return values;
+        String array=json.substring(start,end+1);
+        int cursor=0;
+        while(cursor<array.length()){
+            int quote=array.indexOf('"',cursor);
+            if(quote<0)break;
+            String value=readString(array,quote);
+            if(value==null)break;
+            values.add(value);
+            cursor=quote+value.length()+2;
+        }
+        return values;
     }
     static String number(String json,String key){
         if(json==null)return null;
@@ -233,5 +312,31 @@ final class JsonFields {
             out.append(c);
         }
         return null;
+    }
+}
+
+/** Friendly copy for bring-your-own storage. The raw provider code is never shown. */
+final class ByoMessages {
+    static final String COMING_SOON="Coming soon";
+    static final String UNSUPPORTED="That storage provider isn't available yet. S3-compatible storage is supported.";
+    private ByoMessages(){}
+    static String friendly(int status,String error){
+        if(status==422&&"byo_provider_unsupported".equals(error))return UNSUPPORTED;
+        return null;
+    }
+    static boolean comingSoon(String provider){
+        if(provider==null)return false;
+        String name=provider.toLowerCase(java.util.Locale.ROOT);
+        return "sftp".equals(name)||"azure".equals(name)||"webdav".equals(name);
+    }
+}
+
+/** Re-sign-in must be the same Google account that started deletion. */
+final class AccountMatch {
+    private AccountMatch(){}
+    static boolean same(String expectedUid,String expectedEmail,String actualUid,String actualEmail){
+        if(expectedUid==null||actualUid==null||expectedUid.isEmpty()||!expectedUid.equals(actualUid))return false;
+        if(expectedEmail==null||expectedEmail.isEmpty())return true;
+        return actualEmail!=null&&expectedEmail.equalsIgnoreCase(actualEmail);
     }
 }

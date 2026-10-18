@@ -28,12 +28,13 @@ enum CloudSignals {
         if let lock=workspaceLock(status:status,body:text){return Route(destination:.lockScreen,toast:nil,lock:lock,method:method)}
         if (200..<300).contains(status){return Route(destination:.cont,toast:nil,lock:nil,method:method)}
         var message=jsonString(text,"error")
-        if message==nil || message?.isEmpty==true || message==lockCode {message="Cloud request failed (HTTP \(status))."}
+        if let friendly=ByoMessages.friendly(status:status,error:message) {message=friendly}
+        else if message==nil || message?.isEmpty==true || message==lockCode {message="Cloud request failed (HTTP \(status))."}
         return Route(destination:.genericError,toast:message,lock:nil,method:method)
     }
     static func workspaceLock(status:Int,body:String)->WorkspaceLock? {
         guard status==423,jsonString(body,"error")==lockCode else {return nil}
-        return WorkspaceLock(workspaces:workspaces(body),raw:body)
+        return WorkspaceLock.fromLockBody(body)
     }
     static func present(route:String?,message:String?)->Presentation {
         if route==routeLock {return Presentation(lockScreen:true,toast:nil)}
@@ -96,7 +97,10 @@ struct WorkspaceLock:Identifiable,Equatable,Sendable {
     }
     var workspaces:[Item]
     var raw:String
+    var overBy:Int=0
+    var unpaidIds:[String]=[]
     var id:String { raw.isEmpty ? "workspace-lock" : raw }
+    var chooseMessage:String { overBy>0 ? "Choose \(overBy) workspaces to remove." : "" }
     var issueSummary:String {
         let cap=workspaces.contains{$0.issue=="over_cap"}
         let unpaid=workspaces.contains{$0.issue=="unpaid"}
@@ -105,5 +109,37 @@ struct WorkspaceLock:Identifiable,Equatable,Sendable {
         if unpaid {return "Some workspaces are unpaid."}
         return ""
     }
-    static func decode(_ raw:String)->WorkspaceLock { WorkspaceLock(workspaces:CloudSignals.workspaces(raw),raw:raw) }
+    static func decode(_ raw:String)->WorkspaceLock { fromLockBody(raw) }
+    /// The 423 body has `unpaidWorkspaceIds` and `overBy`. Names come from the workspace list.
+    /// A legacy `workspaces` array is still read when the new field is absent.
+    static func fromLockBody(_ raw:String)->WorkspaceLock {
+        guard let data=raw.data(using:.utf8),let json=try? JSONSerialization.jsonObject(with:data) as? [String:Any] else {
+            return WorkspaceLock(workspaces:[],raw:raw)
+        }
+        if json["unpaidWorkspaceIds"] != nil {
+            let parsedOverBy=(json["overBy"] as? Int) ?? (json["overBy"] as? NSNumber)?.intValue ?? 0
+            let overBy=max(0,parsedOverBy)
+            let ids=(json["unpaidWorkspaceIds"] as? [String]) ?? []
+            let items=ids.map{Item(workspaceID:$0,name:nil,issue:"unpaid")}
+            return WorkspaceLock(workspaces:items,raw:raw,overBy:overBy,unpaidIds:ids)
+        }
+        return WorkspaceLock(workspaces:CloudSignals.workspaces(raw),raw:raw)
+    }
+    func named(_ known:[Item])->WorkspaceLock {
+        if overBy<=0 && unpaidIds.isEmpty {return self}
+        var items:[Item]=[]
+        var seen=Set<String>()
+        if overBy>0 {
+            for item in known {
+                guard let id=item.workspaceID else {continue}
+                seen.insert(id)
+                items.append(Item(workspaceID:id,name:item.name,issue:unpaidIds.contains(id) ? "unpaid" : nil))
+            }
+        }
+        for id in unpaidIds where seen.insert(id).inserted {
+            let name=known.first{$0.workspaceID==id}?.name
+            items.append(Item(workspaceID:id,name:name,issue:"unpaid"))
+        }
+        return WorkspaceLock(workspaces:items,raw:raw,overBy:overBy,unpaidIds:unpaidIds)
+    }
 }

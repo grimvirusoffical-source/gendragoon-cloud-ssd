@@ -61,10 +61,10 @@ final class CloudApi {
         if(!target.getProtocol().equals("https")||!Set.of("gendragoon-free-10068843866.us-central1.run.app","firestore.googleapis.com").contains(target.getHost()))throw new Failure(400,"Untrusted endpoint.");
         HttpsURLConnection c=(HttpsURLConnection)target.openConnection();
         try{
-            c.setInstanceFollowRedirects(false);c.setConnectTimeout(30000);c.setReadTimeout(120000);c.setRequestMethod(method);c.setUseCaches(false);
+            c.setInstanceFollowRedirects(false);c.setConnectTimeout(30000);c.setReadTimeout(120000);            c.setRequestMethod(method);c.setUseCaches(false);
             c.setRequestProperty("Authorization","Bearer "+bearer);c.setRequestProperty("Accept","application/json");c.setRequestProperty("Accept-Encoding","identity");
             for(Map.Entry<String,String> e:headers.entrySet())c.setRequestProperty(e.getKey(),e.getValue());
-            if(body!=null){c.setDoOutput(true);c.setFixedLengthStreamingMode(body.length);try(OutputStream out=c.getOutputStream()){out.write(body);}}
+            if(body!=null){c.setDoOutput(true);c.setRequestMethod(method);c.setFixedLengthStreamingMode(body.length);try(OutputStream out=c.getOutputStream()){out.write(body);}}
             int status=c.getResponseCode();byte[] bytes=new byte[0];
             if(!method.equals("HEAD")||status==423){
                 InputStream raw=status<400?c.getInputStream():c.getErrorStream();
@@ -77,24 +77,29 @@ final class CloudApi {
         }finally{c.disconnect();}
     }
     /**
-     * One-shot {@code DELETE /v2/account}. Returns {@code 202 {"jobId"}}. Poll
-     * {@link AccountActions#DELETION_STATUS_PATH} for {@code queued | running | done | failed}.
-     * {@code 401 reauth_required} asks for a new sign-in. {@code 401 invalid_token} returns to
-     * sign-in. Neither wipes local keys. Uses {@code freshToken} as given: no session refresh and no retry.
+     * One-shot {@code DELETE /v2/account} with {@code {"confirm":"DELETE"}}.
+     * Returns {@code 202} or {@code 410} including {@code jobId} and {@code statusToken}.
+     * Poll {@link AccountActions#DELETION_STATUS_PATH} with the status token, not the Firebase token.
+     * Uses {@code freshToken} as given: no session refresh and no retry.
      */
     AccountActions.HttpBody deleteAccountCall(String freshToken)throws Exception{
         if(freshToken==null||freshToken.isEmpty())throw new Failure(401,"Sign in again to continue.");
-        Response response=exchangeAuthorized(ORIGIN+"/v2/account","DELETE",null,Map.of(),freshToken);
+        Response response=exchangeAuthorized(ORIGIN+"/v2/account","DELETE",AccountActions.CONFIRM_BODY,Map.of("Content-Type",AccountActions.CONFIRM_TYPE),freshToken);
         return AccountActions.parse(response.status,new String(response.body,StandardCharsets.UTF_8));
     }
-    /** One-shot poll of {@link AccountActions#DELETION_STATUS_PATH}. A 401 is returned and does not wipe. */
-    AccountActions.HttpBody pollDeletion(String path)throws Exception{
-        if(!AccountActions.safeAccountPath(path))throw new Failure(400,"Invalid deletion status route.");
+    /**
+     * One-shot poll of {@link AccountActions#DELETION_STATUS_PATH}.
+     * {@code Authorization} is {@code Bearer statusToken}. A 401 is returned and does not wipe.
+     * The token is not logged.
+     */
+    AccountActions.HttpBody pollDeletion(String path,String statusToken)throws Exception{
+        AccountActions.PollCall call=AccountActions.pollCall(path,statusToken);
+        if(call==null)throw new Failure(400,"Invalid deletion status route.");
         try{
-            Response response=exchangeAuthorized(ORIGIN+path,"GET",null,Map.of(),token(false));
+            Response response=exchangeAuthorized(ORIGIN+call.path,"GET",null,Map.of(),statusToken);
             return AccountActions.parse(response.status,new String(response.body,StandardCharsets.UTF_8));
         }catch(Failure error){
-            if(error.status==401)return new AccountActions.HttpBody(401,"",error.getMessage()==null?null:"reauth_required",null,null);
+            if(error.status==401)return new AccountActions.HttpBody(401,"",error.getMessage()==null?null:"reauth_required",null,null,null,null);
             throw error;
         }
     }
@@ -107,13 +112,14 @@ final class CloudApi {
         request("/v2/workspaces/"+id,"DELETE",(JSONObject)null);
     }
     /**
-     * Merge is not final and this method performs no request.
-     * Expected later call: {@code POST /v2/workspaces/{targetId}/merge} with {@code {"sourceId"}}.
-     * Duplicate files are kept as {@code name (from <source>)}.
+     * {@code POST /v2/workspaces/{sourceId}/merge} with {@code {"targetId","confirmName"}}.
+     * Duplicate files are kept as {@code name (from <source>)}. Uses {@link #request}, so HTTP 423 still locks.
      */
-    static String mergeWorkspaces(String targetId,String sourceId,String sourceName){
-        if(targetId==null||sourceId==null)return AccountActions.mergeUnavailable(sourceName);
-        return AccountActions.mergeUnavailable(sourceName);
+    void mergeWorkspace(String sourceId,String targetId,String confirmName)throws Exception{
+        String path=AccountActions.mergePath(sourceId);
+        String body=AccountActions.mergeBody(targetId,confirmName);
+        if(path==null||body==null)throw new Failure(400,"Invalid merge.");
+        request(path,"POST",new JSONObject(body));
     }
     JSONObject get(String path)throws Exception{return request(path,"GET",(JSONObject)null).json();}
     List<JSONObject> files(String workspace)throws Exception{

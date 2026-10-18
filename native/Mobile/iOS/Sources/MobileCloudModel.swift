@@ -134,14 +134,49 @@ struct MobileExport:Identifiable {let id=UUID();let url:URL}
     func reloadLibrary() async throws {
         try await load();workspaceLock=nil
     }
+    func knownWorkspaces()->[WorkspaceLock.Item] {
+        var items=[WorkspaceLock.Item(workspaceID:"free",name:"Free",issue:nil)]
+        items+=choices.map{WorkspaceLock.Item(workspaceID:$0.id,name:$0.name,issue:nil)}
+        return items
+    }
+    func refreshLockNames() async {
+        let transport:GDTransferClient
+        if let client {transport=client}
+        else {
+            guard let made=try? GDTransferClient(endpoint:URL(string:"https://gendragoon-free-10068843866.us-central1.run.app")!,accountID:"lock"){_ in
+                throw GDTransferError(message:"Sign in again to continue.",status:401)
+            } else {return}
+            transport=made
+        }
+        do {
+            struct Response:Decodable{let workspaces:[MobileWorkspace]}
+            let response=try JSONDecoder().decode(Response.self,from:await transport.json("v2/workspaces"))
+            choices=response.workspaces.filter{$0.kind=="paid"&&$0.storageActive&&$0.provisioned}
+        } catch let locked as WorkspaceLocked { workspaceLock=locked.lock }
+        catch {}
+    }
+    func noteLock(_ lock:WorkspaceLock){workspaceLock=lock.named(knownWorkspaces())}
     func deleteAccount(freshToken:String) async throws -> AccountHttp {
         guard let client else{throw GDTransferError(message:"Sign in again to continue.",status:401)}
         return try await client.deleteAccount(freshToken:freshToken)
     }
-    func pollDeletion(_ path:String) async throws -> AccountHttp {
+    /// Polls with the status token. A missing Firebase user still polls; a local token failure is `reauth_required`.
+    func pollDeletion(_ path:String,statusToken:String) async throws -> AccountHttp {
+        let transport:GDTransferClient
+        if let client {transport=client}
+        else {
+            transport=try GDTransferClient(endpoint:URL(string:"https://gendragoon-free-10068843866.us-central1.run.app")!,accountID:"deletion"){_ in
+                throw GDTransferError(message:"Sign in again to continue.",status:401)
+            }
+        }
+        do { return try await transport.accountDeletionStatus(path:path,statusToken:statusToken) }
+        catch let error as GDTransferError where error.status==401 {
+            return AccountHttp(status:401,raw:"",error:"reauth_required",jobId:nil,jobStatus:nil,retryable:nil,statusToken:nil)
+        }
+    }
+    func mergeWorkspace(source:String,target:String,confirmName:String) async throws {
         guard let client else{throw GDTransferError(message:"Sign in again to continue.",status:401)}
-        do { return try await client.accountDeletionStatus(path:path) }
-        catch let error as GDTransferError where error.status==401 { return AccountHttp(status:401,raw:"",error:"reauth_required",jobId:nil,state:nil) }
+        try await client.mergeWorkspaces(sourceID:source,targetID:target,sourceName:confirmName)
     }
     func pause(){task?.cancel()}
 }
