@@ -103,6 +103,12 @@ const DELETION_TIMEOUT_MS = 120_000;
 const DELETION_JOB_KEY = "account-deletion:job-id";
 const DELETION_TOKEN_KEY = "account-deletion:status-token";
 const DELETION_RECOVERY_KEY = "account-deletion:needs-token-recovery";
+/**
+ * SecureStore key for the account uid saved with a deletion job (Firebase `sub`,
+ * see `accountUidFromIdToken`). Core owns this key; the mobile app uses the same name.
+ * The uid only ties the local job to the right account. It is never an auth decision.
+ */
+export const DELETION_UID_KEY = "account-deletion:uid";
 
 /** Shell hook while a deletion poll is still running. */
 export type DeletionAuthSignal = "signed_out" | "reauth_required";
@@ -431,6 +437,12 @@ export async function dismissAccountDeletion(store: SecureStore): Promise<void> 
  * Does not call `onAuthFailure` or `clearSession`, and does not clear the job.
  * A saved job id that does not match `jobId`, or a SecureStore read that
  * rejects, returns the email fallback and sends nothing.
+ *
+ * `currentUid` is the signed-in account's uid, if any. When it is given and a
+ * uid is saved with the job that differs from it, the job is not this
+ * account's: return the fallback, send nothing, and leave the store alone.
+ * With no `currentUid` (omitted or null) the saved uid is not read, so
+ * today's behavior is unchanged. A job with no saved uid also proceeds. This is not an auth decision; the server checks the status token.
  */
 export async function requestDeletionSupport(
   jobId: string,
@@ -439,20 +451,26 @@ export async function requestDeletionSupport(
     secureStore: SecureStore;
     onAuthFailure?: (signal: DeletionAuthSignal, error: unknown) => void;
     clearSession?: () => void;
+    /** Signed-in account uid, e.g. `accountUidFromIdToken(idToken)`. Omit or null when signed out or unknown. */
+    currentUid?: string | null;
   },
 ): Promise<DeletionSupportResult> {
   void deps.onAuthFailure;
   void deps.clearSession;
   let savedJobId: string | null;
   let statusToken: string | null;
+  let savedUid: string | null = null;
   try {
     savedJobId = decodeSecret(await deps.secureStore.get(DELETION_JOB_KEY));
     statusToken = decodeSecret(await deps.secureStore.get(DELETION_TOKEN_KEY));
+    if (deps.currentUid != null) savedUid = decodeSecret(await deps.secureStore.get(DELETION_UID_KEY));
   } catch {
     // A SecureStore read that rejects (e.g. a locked keychain) sends nothing.
     return { kind: "fallback", contact: SUPPORT_CONTACT };
   }
   if (!statusToken || savedJobId !== jobId) return { kind: "fallback", contact: SUPPORT_CONTACT };
+  // A job saved by another account is not this one's: no request, no store change.
+  if (savedUid !== null && savedUid !== deps.currentUid) return { kind: "fallback", contact: SUPPORT_CONTACT };
   return deps.client.postDeletionSupport(jobId, statusToken);
 }
 

@@ -10,12 +10,13 @@
  *   - currentUid omitted -> today's behaviour (control, passes now)
  *   - the uid read sits inside the existing keychain try/catch: rejecting read -> fallback, 0 requests
  *   - never throws, never signs out (onAuthFailure/clearSession never called, Firebase token never read)
- * Each it.fails checks its setup first, so it fails at the requestDeletionSupport call/result.
+ * Each case checks its setup first. The it.fails markers were removed in the uid-check PR,
+ * which implements the rule; these are required passes now.
  *
  * Also: passing probes pinning Avery's 409 refresh rule on ccde5bf (client.ts:327-334).
  */
 import { describe, expect, it } from "vitest";
-import { GenDragoonClient, MemorySecretStore, SUPPORT_CONTACT, requestDeletionSupport } from "../src/index.js";
+import { DELETION_UID_KEY, GenDragoonClient, MemorySecretStore, SUPPORT_CONTACT, requestDeletionSupport } from "../src/index.js";
 
 const BASE = "https://api.example.test";
 const JOB = "00000000-0000-4000-8000-0000000000u1";
@@ -86,7 +87,7 @@ const noSignOut = (seen: ReturnType<typeof harness>["seen"]) => {
 };
 
 describe("requestDeletionSupport uid check (ahead of the uid-check PR, cut from ccde5bf)", () => {
-  it.fails("saved uid differs from currentUid -> fallback, 0 requests, store byte-identical", async () => {
+  it("saved uid differs from currentUid -> fallback, 0 requests, store byte-identical", async () => {
     const store = await savedStore("user-1");
     const before = await snapshot(store);
     expect(before[UID_KEY]).toBe(`b:${Buffer.from("user-1").toString("hex")}`);
@@ -98,7 +99,7 @@ describe("requestDeletionSupport uid check (ahead of the uid-check PR, cut from 
     noSignOut(h.seen);
   });
 
-  it.fails("rejecting uid read (inside the keychain try/catch) -> fallback, 0 requests, no throw", async () => {
+  it("rejecting uid read (inside the keychain try/catch) -> fallback, 0 requests, no throw", async () => {
     const store = await savedStore("user-1");
     const realGet = store.get.bind(store);
     let uidReads = 0;
@@ -129,6 +130,42 @@ describe("requestDeletionSupport uid check (ahead of the uid-check PR, cut from 
 
   it("control: currentUid equal to the saved uid -> request goes out as today", async () => {
     const store = await savedStore("user-1");
+    const h = harness([json(202, { status: "received", requestId: "req-1" })]);
+    expect(await callWithUid(store, h, "user-1")).toEqual({ kind: "received", requestId: "req-1" });
+    expect(h.seen.requests).toBe(1);
+    noSignOut(h.seen);
+  });
+});
+
+describe("requestDeletionSupport uid check: edges (uid-check PR)", () => {
+  it("core exports the uid key under the name the mobile app already uses", () => {
+    expect(DELETION_UID_KEY).toBe(UID_KEY);
+  });
+
+  it("currentUid null -> today's behaviour, and the uid key is never read", async () => {
+    const store = await savedStore("user-1");
+    const realGet = store.get.bind(store);
+    const reads: string[] = [];
+    store.get = (async (key: string) => { reads.push(key); return realGet(key); }) as typeof store.get;
+    const h = harness([json(202, { status: "received", requestId: "req-1" })]);
+    expect(await callWithUid(store, h, null)).toEqual({ kind: "received", requestId: "req-1" });
+    expect(h.seen.requests).toBe(1);
+    expect(reads).not.toContain(UID_KEY);
+    noSignOut(h.seen);
+  });
+
+  it("no currentUid -> the uid key is never read", async () => {
+    const store = await savedStore("user-1");
+    const realGet = store.get.bind(store);
+    const reads: string[] = [];
+    store.get = (async (key: string) => { reads.push(key); return realGet(key); }) as typeof store.get;
+    const h = harness([json(202, { status: "received", requestId: "req-1" })]);
+    expect(await callWithUid(store, h)).toEqual({ kind: "received", requestId: "req-1" });
+    expect(reads).not.toContain(UID_KEY);
+  });
+
+  it("no saved uid (job saved before uids) with a currentUid -> request goes out as today", async () => {
+    const store = await savedStore(null);
     const h = harness([json(202, { status: "received", requestId: "req-1" })]);
     expect(await callWithUid(store, h, "user-1")).toEqual({ kind: "received", requestId: "req-1" });
     expect(h.seen.requests).toBe(1);
