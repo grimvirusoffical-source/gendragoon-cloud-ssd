@@ -1,6 +1,5 @@
 import {
   GenDragoonClient,
-  accountFromAssessment,
   treeNode,
   type LockAssessment,
   type SecretStore,
@@ -125,8 +124,6 @@ export function MobileRoot(props: {
     }
     return new GenDragoonClient({ baseUrl: apiBase, getToken: () => idToken });
   }, [apiBase, idToken]);
-  const account = accountFromAssessment(access);
-
   useEffect(() => {
     if (__DEV__) return;
     void import("expo-updates").then(async (Updates) => {
