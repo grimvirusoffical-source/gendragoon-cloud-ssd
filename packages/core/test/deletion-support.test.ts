@@ -350,3 +350,79 @@ describe("requestDeletionSupport gaps on bcc1c39", () => {
     await expectNoSignInAndJobKept(t, deps.secureStore, savedJobId);
   });
 });
+
+/**
+ * Unexpected statuses and unreadable bodies on the support request. The
+ * contract is that requestDeletionSupport never throws: each of these gives
+ * the email fallback after exactly one request, with no sign-in signal and the
+ * saved job and status token left alone. All DERIVED: no fixture for them.
+ */
+describe("requestDeletionSupport never throws on an unexpected status or body error", () => {
+  const settle = (fn: CoreSupport, jobId: string, deps: Parameters<CoreSupport>[1]) =>
+    fn(jobId, deps).then(
+      (r): SupportResult | { threw: string } => r,
+      (e: unknown) => ({ threw: `${(e as Error)?.name}: ${(e as Error)?.message}` }),
+    );
+
+  /** Records the call through the scripted server, then answers with `respond()` instead. */
+  async function withRawResponse(jobId: string, respond: () => Response) {
+    const t = setup(jobId, { support: [{ status: 500 }] });
+    let firebaseCalls = 0;
+    const client = new GenDragoonClient({
+      baseUrl: BASE,
+      getToken: () => { firebaseCalls += 1; throw new Error("signed out"); },
+      fetch: async (input, init) => {
+        await t.srv.fetchImpl(input, init);
+        return respond();
+      },
+    });
+    const deps = { ...(await t.deps()), client };
+    return { t, deps, firebaseCalls: () => firebaseCalls };
+  }
+
+  const unexpected: Array<[string, Reply]> = [
+    ["200 with a received-shaped body", { status: 200, body: { status: "received", requestId: "req-200" } }],
+    ["204 with no body", { status: 204 }],
+    ["302 redirect", { status: 302, body: { error: "moved" } }],
+  ];
+  for (const [label, r] of unexpected) {
+    it(`support request ${label} -> fallback SUPPORT_CONTACT, no throw, one request`, async () => {
+      const jobId = jobOf("support-received");
+      const t = setup(jobId, { support: [r] });
+      const deps = await t.deps();
+      expect(await read(deps.secureStore, TOKEN_KEY)).toBe(STATUS_TOKEN);
+      const result = await settle(requestDeletionSupport(), jobId, deps);
+      expect(result).toEqual({ kind: "fallback", contact: SUPPORT_CONTACT });
+      expect(t.srv.calls).toHaveLength(1);
+      expect(t.srv.calls[0]!.method).toBe("POST");
+      await expectNoSignInAndJobKept(t, deps.secureStore, jobId);
+    });
+  }
+
+  it("202 with a malformed JSON body -> fallback SUPPORT_CONTACT, no throw, one request", async () => {
+    const jobId = jobOf("support-received");
+    const { t, deps, firebaseCalls } = await withRawResponse(
+      jobId,
+      () => new Response("{\"status\":\"received\",\"requestId\":", { status: 202, headers: { "content-type": "application/json" } }),
+    );
+    const result = await settle(requestDeletionSupport(), jobId, deps);
+    expect(result).toEqual({ kind: "fallback", contact: SUPPORT_CONTACT });
+    expect(t.srv.calls).toHaveLength(1);
+    expect(firebaseCalls()).toBe(0);
+    await expectNoSignInAndJobKept(t, deps.secureStore, jobId);
+  });
+
+  it("a 202 whose body read rejects -> fallback SUPPORT_CONTACT, no throw, one request", async () => {
+    const jobId = jobOf("support-received");
+    const { t, deps, firebaseCalls } = await withRawResponse(jobId, () => {
+      const response = new Response(null, { status: 202 });
+      Object.defineProperty(response, "text", { value: () => Promise.reject(new TypeError("body stream already read")) });
+      return response;
+    });
+    const result = await settle(requestDeletionSupport(), jobId, deps);
+    expect(result).toEqual({ kind: "fallback", contact: SUPPORT_CONTACT });
+    expect(t.srv.calls).toHaveLength(1);
+    expect(firebaseCalls()).toBe(0);
+    await expectNoSignInAndJobKept(t, deps.secureStore, jobId);
+  });
+});
