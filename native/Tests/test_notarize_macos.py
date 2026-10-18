@@ -383,6 +383,31 @@ class PackagingFailClosedTests(unittest.TestCase):
         self.assertTrue(any("-R" in args for args in commands))
         self.assertTrue(any("stapler" in args for args in commands))
 
+    def test_production_package_rejects_the_placeholder_support_contact(self):
+        package_spec = importlib.util.spec_from_file_location("gd_package_contact",
+                Path(__file__).resolve().parents[1] / "package_macos.py")
+        package = importlib.util.module_from_spec(package_spec)
+        package_spec.loader.exec_module(package)
+        source = (Path(__file__).resolve().parents[1] / "Sources/GDSupportContact.swift").read_text()
+        if "isPlaceholder: true" not in source:
+            self.skipTest("the support contact is no longer a placeholder")
+        commands = []
+        def command(argv, **kwargs):
+            commands.append(argv)
+            return SimpleNamespace(returncode=0)
+        with tempfile.TemporaryDirectory(prefix="gd-package-fixture-") as folder, \
+             patch.object(package.sys, "platform", "darwin"), \
+             patch.object(package.subprocess, "run", side_effect=command):
+            app = Path(folder) / "GenDragoon Cloud SSD.app"
+            resources = app / "Contents/Resources"
+            resources.mkdir(parents=True)
+            for name in package.REQUIRED_RESOURCES:
+                (resources / name).write_bytes(b"bundled runtime fixture\n")
+            with self.assertRaisesRegex(RuntimeError, "real support contact"):
+                package.package(app, Path(folder) / "unused-release", candidate=False)
+            self.assertFalse((Path(folder) / "unused-release").exists())
+        self.assertFalse(any("/usr/bin/ditto" in args for args in commands), "no distributable is written")
+
 
 if __name__ == "__main__":
     unittest.main()
