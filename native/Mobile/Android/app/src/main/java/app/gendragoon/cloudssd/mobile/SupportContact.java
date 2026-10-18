@@ -27,10 +27,11 @@ public final class SupportContact {
 }
 
 /**
- * Contact support for a deletion that cannot be retried. Off until the endpoint is turned on.
- * The only path is {@code POST} {@link #PATH}. There is no request body: no {@code jobId} field,
- * no uid, and no user data. {@code Authorization} is {@code Bearer statusToken}, so this still
- * works while signed out. Riley's {@code d9888be} fixtures describe the responses.
+ * Contact support for a deletion that cannot be retried. Off until the Discord webhook is
+ * configured in production. The only path is {@code POST} {@link #PATH}. There is no request
+ * body: no {@code jobId} field, no uid, and no user data. {@code Authorization} is
+ * {@code Bearer statusToken}, so this still works while signed out. Riley's {@code d33970c}
+ * fixtures in {@code fixtures/account-deletion/} describe the responses.
  */
 final class DeletionSupport {
     static final boolean ENABLED=false;

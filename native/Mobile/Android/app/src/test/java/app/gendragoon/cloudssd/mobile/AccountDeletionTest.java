@@ -888,7 +888,7 @@ public final class AccountDeletionTest {
     }
 
     @Test public void supportRequestUsesRileyFixturesAndSendsNoBody(){
-        assertEquals("d9888be",BackendFixtures.SUPPORT_FIXTURE_SHA);
+        assertEquals("d33970c",BackendFixtures.SUPPORT_FIXTURE_SHA);
         assertFalse(DeletionSupport.ENABLED);
         String job="00000000-0000-4000-8000-00000000000a";
         DeletionSupport.Call off=DeletionSupport.call(job,TOKEN);
@@ -899,10 +899,18 @@ public final class AccountDeletionTest {
         assertEquals("/v2/account/deletions/"+job+"/support-request",call.path);
         assertEquals("Bearer "+TOKEN,call.authorization());
         assertNull(call.body);
-        assertEquals(202,BackendFixtures.responseStatus("support","request-received"));
-        assertEquals(202,BackendFixtures.responseStatus("support","request-repeat"));
-        String received=BackendFixtures.responseBody("support","request-received");
-        String repeat=BackendFixtures.responseBody("support","request-repeat");
+        assertEquals(call.path,BackendFixtures.requestPath("account-deletion","support-received"));
+        assertEquals("",BackendFixtures.requestBody("account-deletion","support-received"));
+        assertEquals(call.path,BackendFixtures.requestPath("account-deletion","support-repeat"));
+        assertEquals("",BackendFixtures.requestBody("account-deletion","support-repeat"));
+        assertEquals(call.path,BackendFixtures.requestPath("account-deletion","support-bad-token"));
+        assertEquals(call.path,BackendFixtures.requestPath("account-deletion","support-rate-limited"));
+        assertEquals("/v2/account/deletions/00000000-0000-4000-8000-00000000000b/support-request",BackendFixtures.requestPath("account-deletion","support-not-needed"));
+        assertEquals("",BackendFixtures.requestBody("account-deletion","support-not-needed"));
+        assertEquals(202,BackendFixtures.responseStatus("account-deletion","support-received"));
+        assertEquals(202,BackendFixtures.responseStatus("account-deletion","support-repeat"));
+        String received=BackendFixtures.responseBody("account-deletion","support-received");
+        String repeat=BackendFixtures.responseBody("account-deletion","support-repeat");
         DeletionSupport.Result first=DeletionSupport.interpret(202,received,false);
         DeletionSupport.Result again=DeletionSupport.interpret(202,repeat,false);
         assertEquals(DeletionSupport.Kind.SENT,first.kind);
@@ -910,17 +918,17 @@ public final class AccountDeletionTest {
         assertEquals("Request sent.",first.message);
         assertEquals(first.requestId,again.requestId);
         assertFalse(first.requestId.isEmpty());
-        assertEquals(409,BackendFixtures.responseStatus("support","request-not-failed"));
-        assertEquals("support_not_needed",JsonFields.string(BackendFixtures.responseBody("support","request-not-failed"),"error"));
-        DeletionSupport.Result refresh=DeletionSupport.interpret(409,BackendFixtures.responseBody("support","request-not-failed"),false);
+        assertEquals(409,BackendFixtures.responseStatus("account-deletion","support-not-needed"));
+        assertEquals("support_not_needed",JsonFields.string(BackendFixtures.responseBody("account-deletion","support-not-needed"),"error"));
+        DeletionSupport.Result refresh=DeletionSupport.interpret(409,BackendFixtures.responseBody("account-deletion","support-not-needed"),false);
         assertEquals(DeletionSupport.Kind.REFRESH,refresh.kind);
         assertFalse(refresh.opensMailto());
         AccountDeletion flow=AccountDeletion.resume(DeletionReceipt.of(job,TOKEN));
         assertTrue(flow.refreshAfterSupport());
         assertEquals(AccountDeletion.Step.POLLING,flow.step);
         assertFalse(flow.requestsWipe());
-        assertEquals(429,BackendFixtures.responseStatus("support","request-rate-limited"));
-        DeletionSupport.Result limited=DeletionSupport.interpret(429,BackendFixtures.responseBody("support","request-rate-limited"),false);
+        assertEquals(429,BackendFixtures.responseStatus("account-deletion","support-rate-limited"));
+        DeletionSupport.Result limited=DeletionSupport.interpret(429,BackendFixtures.responseBody("account-deletion","support-rate-limited"),false);
         assertEquals(DeletionSupport.Kind.ALREADY,limited.kind);
         assertEquals("Request already sent.",limited.message);
         assertFalse(limited.opensMailto());
@@ -930,8 +938,8 @@ public final class AccountDeletionTest {
     }
 
     @Test public void support404ShowsMailtoAndNeverSignIn(){
-        assertEquals(404,BackendFixtures.responseStatus("support","request-bad-token"));
-        String body=BackendFixtures.responseBody("support","request-bad-token");
+        assertEquals(404,BackendFixtures.responseStatus("account-deletion","support-bad-token"));
+        String body=BackendFixtures.responseBody("account-deletion","support-bad-token");
         assertEquals("not_found",JsonFields.string(body,"error"));
         DeletionSupport.Result missing=DeletionSupport.interpret(404,body,false);
         DeletionSupport.Result unavailable=DeletionSupport.interpret(503,"<html>unavailable</html>",false);
@@ -1046,6 +1054,25 @@ public final class AccountDeletionTest {
         assertFalse(WorkspacePolicy.paymentDue(through,through,true));
         assertFalse(WorkspacePolicy.paymentDue(null,through,false));
         assertEquals("Payment due",WorkspacePolicy.PAYMENT_DUE);
+    }
+
+    /**
+     * Provisional until PR #5 lands its billing fix. {@code feeWaived} and {@code grandfatheringEnded}
+     * are not in the 4c3dd13 fixtures, so these bodies are synthetic.
+     */
+    @Test public void provisionalFeeWaivedAndGrandfatheringEnded(){
+        assertEquals("Included",WorkspacePrice.priceLabel(false,false,true,0));
+        assertEquals("Included",WorkspacePrice.priceLabel(false,true,false,0));
+        assertEquals("Free",WorkspacePrice.priceLabel(true,true,true,0));
+        assertNull(WorkspacePrice.formatCents(0));
+        String waived="{\"name\":\"Waived\",\"isFree\":false,\"grandfathered\":false,\"feeWaived\":true,\"monthlyPriceCents\":0}";
+        assertEquals("Waived",WorkspacePrice.pickerText(waived));
+        assertEquals("Waived · Included",WorkspacePrice.pickerText(waived,true));
+        String ended="{\"grandfatheringEnded\":true,\"grandfathered\":false,\"feeWaived\":false,\"isFree\":false,\"monthlyPriceCents\":500}";
+        assertEquals(Boolean.TRUE,JsonFields.bool(ended,"grandfatheringEnded"));
+        assertEquals("$5/mo",WorkspacePrice.priceLabel(false,false,false,500));
+        assertEquals("Workspace · $5/mo",WorkspacePrice.pickerText(ended,true));
+        assertFalse(WorkspacePrice.pickerText(ended,true).contains("Included"));
     }
 
     private static FileReplacement.Manifest manifest(){

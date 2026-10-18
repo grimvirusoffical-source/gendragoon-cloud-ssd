@@ -885,17 +885,25 @@ final class AccountLogicTests: XCTestCase {
     }
 
     func testSupportRequestUsesRileyFixturesAndSendsNoBody() {
-        XCTAssertEqual(BackendFixtures.supportFixtureSHA,"d9888be")
+        XCTAssertEqual(BackendFixtures.supportFixtureSHA,"d33970c")
         XCTAssertFalse(DeletionSupport.enabled)
         let job="00000000-0000-4000-8000-00000000000a"
         XCTAssertFalse(DeletionSupport.call(jobId:job,statusToken:token).send)
         let call=DeletionSupport.call(jobId:job,statusToken:token,enabled:true)
         XCTAssertEqual(call.path,"/v2/account/deletions/"+job+"/support-request")
         XCTAssertEqual(call.authorization,"Bearer "+token)
-        XCTAssertEqual(BackendFixtures.responseStatus(area:"support",name:"request-received"),202)
-        XCTAssertEqual(BackendFixtures.responseStatus(area:"support",name:"request-repeat"),202)
-        let received=BackendFixtures.responseBodyString(area:"support",name:"request-received")
-        let repeated=BackendFixtures.responseBodyString(area:"support",name:"request-repeat")
+        XCTAssertEqual(call.path,BackendFixtures.requestPath(area:"account-deletion",name:"support-received"))
+        XCTAssertEqual(BackendFixtures.requestBodyString(area:"account-deletion",name:"support-received"),"")
+        XCTAssertEqual(call.path,BackendFixtures.requestPath(area:"account-deletion",name:"support-repeat"))
+        XCTAssertEqual(BackendFixtures.requestBodyString(area:"account-deletion",name:"support-repeat"),"")
+        XCTAssertEqual(call.path,BackendFixtures.requestPath(area:"account-deletion",name:"support-bad-token"))
+        XCTAssertEqual(call.path,BackendFixtures.requestPath(area:"account-deletion",name:"support-rate-limited"))
+        XCTAssertEqual(BackendFixtures.requestPath(area:"account-deletion",name:"support-not-needed"),"/v2/account/deletions/00000000-0000-4000-8000-00000000000b/support-request")
+        XCTAssertEqual(BackendFixtures.requestBodyString(area:"account-deletion",name:"support-not-needed"),"")
+        XCTAssertEqual(BackendFixtures.responseStatus(area:"account-deletion",name:"support-received"),202)
+        XCTAssertEqual(BackendFixtures.responseStatus(area:"account-deletion",name:"support-repeat"),202)
+        let received=BackendFixtures.responseBodyString(area:"account-deletion",name:"support-received")
+        let repeated=BackendFixtures.responseBodyString(area:"account-deletion",name:"support-repeat")
         let first=DeletionSupport.interpret(status:202,body:received,transportFailed:false)
         let again=DeletionSupport.interpret(status:202,body:repeated,transportFailed:false)
         XCTAssertEqual(first.kind,.sent)
@@ -903,16 +911,16 @@ final class AccountLogicTests: XCTestCase {
         XCTAssertEqual(first.message,"Request sent.")
         XCTAssertEqual(first.requestId,again.requestId)
         XCTAssertFalse(first.requestId?.isEmpty ?? true)
-        XCTAssertEqual(BackendFixtures.responseStatus(area:"support",name:"request-not-failed"),409)
-        let refresh=DeletionSupport.interpret(status:409,body:BackendFixtures.responseBodyString(area:"support",name:"request-not-failed"),transportFailed:false)
+        XCTAssertEqual(BackendFixtures.responseStatus(area:"account-deletion",name:"support-not-needed"),409)
+        let refresh=DeletionSupport.interpret(status:409,body:BackendFixtures.responseBodyString(area:"account-deletion",name:"support-not-needed"),transportFailed:false)
         XCTAssertEqual(refresh.kind,.refresh)
         XCTAssertFalse(refresh.opensMailto)
         var flow=AccountDeletion.resume(DeletionReceipt.of(jobId:job,statusToken:token))
         XCTAssertTrue(flow.refreshAfterSupport())
         XCTAssertEqual(flow.step,.polling)
         XCTAssertFalse(flow.requestsWipe())
-        XCTAssertEqual(BackendFixtures.responseStatus(area:"support",name:"request-rate-limited"),429)
-        let limited=DeletionSupport.interpret(status:429,body:BackendFixtures.responseBodyString(area:"support",name:"request-rate-limited"),transportFailed:false)
+        XCTAssertEqual(BackendFixtures.responseStatus(area:"account-deletion",name:"support-rate-limited"),429)
+        let limited=DeletionSupport.interpret(status:429,body:BackendFixtures.responseBodyString(area:"account-deletion",name:"support-rate-limited"),transportFailed:false)
         XCTAssertEqual(limited.kind,.already)
         XCTAssertEqual(limited.message,"Request already sent.")
         XCTAssertFalse(limited.opensMailto)
@@ -922,8 +930,8 @@ final class AccountLogicTests: XCTestCase {
     }
 
     func testSupport404ShowsMailtoAndNeverSignIn() async {
-        XCTAssertEqual(BackendFixtures.responseStatus(area:"support",name:"request-bad-token"),404)
-        let body=BackendFixtures.responseBodyString(area:"support",name:"request-bad-token")
+        XCTAssertEqual(BackendFixtures.responseStatus(area:"account-deletion",name:"support-bad-token"),404)
+        let body=BackendFixtures.responseBodyString(area:"account-deletion",name:"support-bad-token")
         XCTAssertEqual(CloudSignals.jsonString(body,"error"),"not_found")
         let missing=DeletionSupport.interpret(status:404,body:body,transportFailed:false)
         let unavailable=DeletionSupport.interpret(status:503,body:"<html>unavailable</html>",transportFailed:false)
@@ -1040,8 +1048,23 @@ final class AccountLogicTests: XCTestCase {
         XCTAssertEqual(WorkspacePolicy.paymentDue,"Payment due")
     }
 
+    /// Provisional until PR #5 lands its billing fix. `feeWaived` and `grandfatheringEnded`
+    /// are not in the 4c3dd13 fixtures, so these bodies are synthetic.
+    func testProvisionalFeeWaivedAndGrandfatheringEnded() {
+        XCTAssertEqual(WorkspacePrice.priceLabel(isFree:false,grandfathered:false,feeWaived:true,cents:0),"Included")
+        XCTAssertEqual(WorkspacePrice.priceLabel(isFree:false,grandfathered:true,feeWaived:false,cents:0),"Included")
+        XCTAssertEqual(WorkspacePrice.priceLabel(isFree:true,grandfathered:true,feeWaived:true,cents:0),"Free")
+        XCTAssertNil(WorkspacePrice.formatCents(0))
+        XCTAssertEqual(WorkspacePrice.pickerText(name:"Waived",isFree:false,grandfathered:false,feeWaived:true,cents:0,enabled:false),"Waived")
+        XCTAssertEqual(WorkspacePrice.pickerText(name:"Waived",isFree:false,grandfathered:false,feeWaived:true,cents:0,enabled:true),"Waived · Included")
+        let ended=WorkspacePrice.pickerText(name:"Workspace",isFree:false,grandfathered:false,feeWaived:false,cents:500,enabled:true)
+        XCTAssertEqual(ended,"Workspace · $5/mo")
+        XCTAssertFalse(ended.contains("Included"))
+        XCTAssertEqual(WorkspacePrice.priceLabel(isFree:false,grandfathered:false,feeWaived:false,cents:500),"$5/mo")
+    }
+
     private func pricedLabel(_ row:[String:Any],enabled:Bool=true)->String {
-        WorkspacePrice.pickerText(name:row["name"] as? String ?? "Workspace",isFree:row["isFree"] as? Bool,grandfathered:(row["grandfathered"] as? Bool)==true,cents:(row["monthlyPriceCents"] as? NSNumber)?.intValue,enabled:enabled)
+        WorkspacePrice.pickerText(name:row["name"] as? String ?? "Workspace",isFree:row["isFree"] as? Bool,grandfathered:(row["grandfathered"] as? Bool)==true,feeWaived:(row["feeWaived"] as? Bool)==true,cents:(row["monthlyPriceCents"] as? NSNumber)?.intValue,enabled:enabled)
     }
 
     private func fixture(_ name:String)->AccountHttp {
@@ -1250,13 +1273,14 @@ final class InvalidTokenDeletionTests: XCTestCase {
 
 /// The repo-root `fixtures/` directory wins when this branch has it.
 /// `singular-path.json` is JSON. A non-JSON body in a test is synthetic.
-/// Support responses are Riley's d9888be files. The client path is pinned and sends no body.
+/// Support responses are Riley's d33970c `support-*` files in `fixtures/account-deletion`.
+/// Each request is `POST /v2/account/deletions/:jobId/support-request` with no body.
 /// Workspace price fixtures are the `workspaces/` files from PR #5 at 4c3dd13,
 /// including `grandfathered-plus-new`. `list.json`, `create.json`, and
 /// `cap-reached.json` stay on the shared fixtures at da39276.
 private enum BackendFixtures {
     static let accountDeletionSHA="fff0a84"
-    static let supportFixtureSHA="d9888be"
+    static let supportFixtureSHA="d33970c"
     static let workspacePriceSHA="4c3dd13"
     static let keyEnvelopeSHA="ee4f76f"
     static let sharedFixtureSHA="da39276"

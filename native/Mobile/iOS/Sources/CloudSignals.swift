@@ -83,9 +83,11 @@ enum CloudSignals {
 struct WorkspaceLocked:Error,Sendable { let lock:WorkspaceLock }
 
 /// Workspace price copy. Off until pricing labels ship. `isFree:true` shows "Free".
-/// `grandfathered:true` shows "Included" (those rows are `isFree:false` and `monthlyPriceCents:0`).
+/// `grandfathered:true` or `feeWaived:true` shows "Included". The server sends
+/// `monthlyPriceCents:0` when `isFree`, `grandfathered`, or `feeWaived` is set.
 /// Every other row shows `monthlyPriceCents`. Zero is not a price, so the label is never `$0.00/mo`.
-/// The client does not count workspaces.
+/// A BYO register with `grandfatheringEnded:true` keeps `grandfathered:false` and a non-zero
+/// cent amount, so it shows that price. The client does not count workspaces.
 enum WorkspacePrice {
     static let enabled=false
     static let free="Free"
@@ -97,15 +99,15 @@ enum WorkspacePrice {
         if remainder==0 {return "$\(dollars)/mo"}
         return String(format:"$%d.%02d/mo",dollars,remainder)
     }
-    static func priceLabel(isFree:Bool?,grandfathered:Bool,cents:Int?)->String? {
+    static func priceLabel(isFree:Bool?,grandfathered:Bool,feeWaived:Bool=false,cents:Int?)->String? {
         if isFree==true {return free}
-        if grandfathered {return included}
+        if grandfathered || feeWaived {return included}
         return formatCents(cents)
     }
-    static func pickerText(name:String,isFree:Bool?,grandfathered:Bool,cents:Int?,enabled:Bool=WorkspacePrice.enabled)->String {
+    static func pickerText(name:String,isFree:Bool?,grandfathered:Bool,feeWaived:Bool=false,cents:Int?,enabled:Bool=WorkspacePrice.enabled)->String {
         let title=name.isEmpty ? "Workspace" : name
         guard enabled else {return title}
-        guard let price=priceLabel(isFree:isFree,grandfathered:grandfathered,cents:cents) else {return title}
+        guard let price=priceLabel(isFree:isFree,grandfathered:grandfathered,feeWaived:feeWaived,cents:cents) else {return title}
         return title+" · "+price
     }
 }

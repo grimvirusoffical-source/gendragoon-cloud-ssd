@@ -8,8 +8,8 @@ import java.util.List;
 
 /**
  * Account-deletion fixtures are {@code fixtures/account-deletion} at fff0a84.
- * Support-request responses are {@code fixtures/support} at d9888be. The client path is pinned
- * and sends no body; those files still record {@code POST /v2/support/deletion-request}.
+ * Support-request responses are the {@code support-*} files in that folder at d33970c.
+ * Each request is {@code POST /v2/account/deletions/:jobId/support-request} with no body.
  * Workspace price fixtures are the {@code workspaces/} files from PR #5 at 4c3dd13,
  * including {@code grandfathered-plus-new}. {@code list.json}, {@code create.json}, and
  * {@code cap-reached.json} stay on the shared fixtures at da39276.
@@ -20,7 +20,7 @@ import java.util.List;
  */
 final class BackendFixtures {
     static final String ACCOUNT_DELETION_SHA="fff0a84";
-    static final String SUPPORT_FIXTURE_SHA="d9888be";
+    static final String SUPPORT_FIXTURE_SHA="d33970c";
     static final String WORKSPACE_PRICE_SHA="4c3dd13";
     static final String KEY_ENVELOPE_SHA="ee4f76f";
     static final String SHARED_FIXTURE_SHA="da39276";

@@ -131,9 +131,12 @@ final class CloudSignals {
 
 /**
  * Workspace price copy. Off until pricing labels ship. {@code isFree:true} shows "Free".
- * {@code grandfathered:true} shows "Included" (those rows are {@code isFree:false} and
- * {@code monthlyPriceCents:0}). Every other row shows {@code monthlyPriceCents}. Zero is not a
- * price, so the label is never {@code $0.00/mo}. The client does not count workspaces.
+ * {@code grandfathered:true} or {@code feeWaived:true} shows "Included". The server sends
+ * {@code monthlyPriceCents:0} when {@code isFree}, {@code grandfathered}, or {@code feeWaived}
+ * is set. Every other row shows {@code monthlyPriceCents}. Zero is not a price, so the label
+ * is never {@code $0.00/mo}. A BYO register with {@code grandfatheringEnded:true} keeps
+ * {@code grandfathered:false} and a non-zero cent amount, so it shows that price.
+ * The client does not count workspaces.
  */
 final class WorkspacePrice {
     static final boolean ENABLED=false;
@@ -148,8 +151,11 @@ final class WorkspacePrice {
         return String.format(java.util.Locale.ROOT,"$%d.%02d/mo",dollars,remainder);
     }
     static String priceLabel(Boolean isFree,boolean grandfathered,Integer monthlyPriceCents){
+        return priceLabel(isFree,grandfathered,false,monthlyPriceCents);
+    }
+    static String priceLabel(Boolean isFree,boolean grandfathered,boolean feeWaived,Integer monthlyPriceCents){
         if(Boolean.TRUE.equals(isFree))return FREE;
-        if(grandfathered)return INCLUDED;
+        if(grandfathered||feeWaived)return INCLUDED;
         return formatCents(monthlyPriceCents);
     }
     static String pickerText(String workspaceJson){return pickerText(workspaceJson,ENABLED);}
@@ -158,12 +164,16 @@ final class WorkspacePrice {
         String raw=JsonFields.number(workspaceJson,"monthlyPriceCents");
         if(raw!=null){try{cents=Integer.parseInt(raw);}catch(NumberFormatException ignored){cents=null;}}
         boolean grandfathered=Boolean.TRUE.equals(JsonFields.bool(workspaceJson,"grandfathered"));
-        return pickerText(JsonFields.string(workspaceJson,"name"),JsonFields.bool(workspaceJson,"isFree"),grandfathered,cents,enabled);
+        boolean feeWaived=Boolean.TRUE.equals(JsonFields.bool(workspaceJson,"feeWaived"));
+        return pickerText(JsonFields.string(workspaceJson,"name"),JsonFields.bool(workspaceJson,"isFree"),grandfathered,feeWaived,cents,enabled);
     }
     static String pickerText(String name,Boolean isFree,boolean grandfathered,Integer monthlyPriceCents,boolean enabled){
+        return pickerText(name,isFree,grandfathered,false,monthlyPriceCents,enabled);
+    }
+    static String pickerText(String name,Boolean isFree,boolean grandfathered,boolean feeWaived,Integer monthlyPriceCents,boolean enabled){
         String title=name==null||name.isEmpty()?"Workspace":name;
         if(!enabled)return title;
-        String price=priceLabel(isFree,grandfathered,monthlyPriceCents);
+        String price=priceLabel(isFree,grandfathered,feeWaived,monthlyPriceCents);
         return price==null?title:title+" · "+price;
     }
 }
