@@ -22,7 +22,7 @@ async function fixture(t){
  const app=express();app.use("/v2",express.json());
  const firebaseAuth=(req,res,next)=>{const uid=req.headers.authorization?.replace("Bearer ","");if(!["test-a","test-b"].includes(uid))return res.status(401).json({error:"Sign in"});req.user={uid};next();};
  const runtime=installedBilling({app,db,bucket:{file:name=>({save:async()=>markers.push(name)})},stripeOverride:stripe,
-   admin:{firestore:{FieldValue:{serverTimestamp:()=>123}}},firebaseAuth,accountKey:hash,
+   admin:{firestore:{FieldValue:{serverTimestamp:()=>Date.parse("2026-10-18T00:00:00Z")}}},firebaseAuth,accountKey:hash,
    env:{STRIPE_SECRET_KEY:"sk_test_dummyABC123",STRIPE_WEBHOOK_SECRET:hookSecret,STRIPE_CHECKOUT_ENABLED:"true",
      STRIPE_PROJECT_CHECKOUT_READY:"true",STRIPE_ENVIRONMENT:"test",PUBLIC_URL:"https://billing.example",STRIPE_PRICE_CATALOG_JSON:JSON.stringify(configured)}});
  const server=app.listen(0,"127.0.0.1");await new Promise(resolve=>server.once("listening",resolve));
@@ -71,7 +71,7 @@ test("the bundled mobile draft request cannot create projects or collect an acti
  const before=structuredClone(f.db.rows),body={name:"Requested storage",tier:"2TB",mode:"standard",interval:"month"};
  for(const payload of [body,body,{...body,intentId:idFor(1)},{...body,intentId:idFor(2)}]){
    const result=await f.request("/v2/workspaces/draft",payload);assert.equal(result.status,426);
-   assert.equal(result.body.code,"CLIENT_UPDATE_REQUIRED");assert.equal(result.body.url,undefined);assert.equal(result.body.workspaceId,undefined);
+   assert.equal(result.body.error,"CLIENT_UPDATE_REQUIRED");assert.equal(result.body.url,undefined);assert.equal(result.body.workspaceId,undefined);
  }
  assert.deepEqual(f.db.rows,before);assert.equal(f.calls.length,0);assert.equal(f.sessions.size,0);
 });
@@ -81,7 +81,7 @@ test("a legacy storage or BYO request cannot switch an inactive project's checko
  const before=structuredClone(f.db.rows),sessionCount=f.sessions.size;
  for(const kind of ["storage","byo"]){
    const result=await f.request("/v2/workspaces/"+idFor(2)+"/checkout/"+kind,{});
-   assert.equal(result.status,409);assert.equal(result.body.code,"PROJECT_ACTIVATION_REQUIRED");assert.equal(result.body.url,undefined);
+   assert.equal(result.status,409);assert.equal(result.body.error,"PROJECT_ACTIVATION_REQUIRED");assert.equal(result.body.url,undefined);
  }
  assert.deepEqual(f.db.rows,before);assert.equal(f.sessions.size,sessionCount);assert.equal(f.calls.length,1);
  const explicit=await f.request("/v2/projects/"+idFor(2)+"/checkout",{});assert.equal(explicit.status,200);assert.equal(explicit.body.resumed,true);

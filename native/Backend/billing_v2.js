@@ -1,8 +1,10 @@
 "use strict";
 const crypto=require("node:crypto");
-const {STORAGE,PERFORMANCE,validateWorkspaceName}=require("./catalog");
+const {STORAGE,PERFORMANCE,WORKSPACE_FEE_CENTS,WORKSPACE_FEE_LABEL,validateWorkspaceName}=require("./catalog");
+const {gcsObjectStore}=require("./object_store");
 const {GPU,GPU_READY,gpuQuote,tripleBundleQuote}=require("./gpu_catalog");
-const {createProjectService,ProjectError,projectStatus,activatedBasicProject,effectiveStorageQuota,safeProjectId,hasContinuingBilling}=require("./projects");
+const {createProjectService,ProjectError,projectStatus,activatedBasicProject,effectiveStorageQuota,safeProjectId,hasContinuingBilling,isGrandfathered,evaluateLapse,workspacePrice,byoLapsed}=require("./projects");
+const {rejectProviderSecrets}=require("./workspace_policy");
 const FREE_GB=2,FREE_WORKERS=1,REMOVE_ADS_CENTS=499;
 const VALID_INTERVALS=new Set(["month","year"]);
 const ACTIVE_STATUSES=new Set(["active","trialing"]);
@@ -11,14 +13,14 @@ function storageQuote(tier,interval,mode="standard",billingVersion=1){
  if(typeof tier!=="string"||!Object.hasOwn(STORAGE,tier)||!VALID_INTERVALS.has(interval))throw Error("Invalid storage plan");
  if(!["standard","bundle"].includes(mode))throw Error("Invalid storage mode");
  const monthly=STORAGE[tier][mode];
- const recurringFee=billingVersion>=2?0:500;
+ const recurringFee=billingVersion>=2?0:WORKSPACE_FEE_CENTS;
  return {tier,interval,mode,storageGB:STORAGE[tier].gb,storageCents:monthly*yearFactor(interval),
   workspaceFeeCents:recurringFee*yearFactor(interval),totalCents:(monthly+recurringFee)*yearFactor(interval),
   ...(billingVersion>=2?{billingVersion:2}:{})};
 }
 function byoQuote(interval){
  if(!VALID_INTERVALS.has(interval))throw Error("Invalid BYO interval");
- return {interval,kind:"byo",totalCents:1000*yearFactor(interval),storageGB:0,workers:1};
+ return {interval,kind:"byo",totalCents:WORKSPACE_FEE_CENTS*yearFactor(interval),storageGB:0,workers:1};
 }
 function performanceQuote(tier,interval){
  if(typeof tier!=="string"||!Object.hasOwn(PERFORMANCE,tier)||!VALID_INTERVALS.has(interval))throw Error("Invalid performance plan");
@@ -43,7 +45,7 @@ function bundleWorkers(tier){
 function effectiveWorkers(workspace){
  if(!workspace||["archived","pending_payment","payment_revoked","payment_confirmed_pending_capacity"].includes(projectStatus(workspace)))return 0;
  if(workspace.kind==="byo"){
-   if(!workspace.byoActive||!workspace.manualProviderConfigured)return 0;
+   if(!workspace.byoActive||!workspace.manualProviderConfigured||workspace.byoChallengeVerified!==true)return 0;
    return workspace.performanceActive===true && PERFORMANCE[workspace.performanceTier] ?
      PERFORMANCE[workspace.performanceTier].workers:FREE_WORKERS;
  }
@@ -52,20 +54,59 @@ function effectiveWorkers(workspace){
  return workspace.performanceActive===true && PERFORMANCE[workspace.performanceTier] ?
   Math.max(base,PERFORMANCE[workspace.performanceTier].workers):base;
 }
-function registerBillingV2({app,db,stripe,admin,auth,agreed,hash,prices,env=process.env}){
+const BILLING_SWEEP_INTERVAL_MS=5*60*1000;
+let registeredBillingSweep=null;
+// Cloud Run sets K_SERVICE. There a missing object store is a deployment error, not a test.
+function productionRuntime(env){return typeof env?.K_SERVICE==="string"&&env.K_SERVICE.length>0;}
+// The pre-activation router built by billing_bootstrap has an empty secret key. Stripe calls
+// from it would fail as 401 and mark queued cancels permanently failed, so they wait instead.
+function stripeCallsEnabled(env){return !(Object.hasOwn(env||{},"STRIPE_SECRET_KEY")&&!env.STRIPE_SECRET_KEY);}
+function sweepTokenMatches(env,authorization){
+ const expected=typeof env?.BILLING_SWEEP_TOKEN==="string"?env.BILLING_SWEEP_TOKEN:"";
+ const match=/^Bearer ([A-Za-z0-9._~+\/=-]+)$/.exec(typeof authorization==="string"?authorization:"");
+ const presented=match?match[1]:"";
+ return expected.length>=16&&presented.length===expected.length&&
+  crypto.timingSafeEqual(crypto.createHash("sha256").update(expected).digest(),crypto.createHash("sha256").update(presented).digest());
+}
+function sweepRegisteredBillingJobs(){
+ return registeredBillingSweep?registeredBillingSweep():Promise.resolve({swept:0,failed:0,queryFailed:false,registered:false});
+}
+ function registerBillingV2({app,db,stripe,admin,auth,agreed,hash,prices,env=process.env,byoFetch=null,bucket=null,objectStore=null}){
  const stamp=()=>admin.firestore.FieldValue.serverTimestamp();
  const accounts=db.collection("gd_accounts");
  const accRef=req=>accounts.doc(hash(req.user.uid));
  const coll=req=>accRef(req).collection("workspaces");
  const safeWorkspaceId=safeProjectId;
- const projects=createProjectService({db,stamp,hash,stripe,env,prices,ensureCustomer});
- function projectError(res,error){return res.status(error instanceof ProjectError?error.status:503).json({
-   error:error instanceof ProjectError?error.message:"Project service temporarily unavailable",code:error instanceof ProjectError?error.code:"PROJECT_UNAVAILABLE"});}
+ // Production purges and merges use the real customer bucket. Tests inject a fake store.
+ const store=objectStore||(bucket?gcsObjectStore(bucket):null);
+ const storeRequired=productionRuntime(env),callsEnabled=stripeCallsEnabled(env);
+ const projects=createProjectService({db,stamp,hash,stripe,env,prices,ensureCustomer,byoFetch,objectStore:store,objectStoreRequired:storeRequired,stripeCallsEnabled:callsEnabled});
+ // Cloud Scheduler calls this with Authorization: Bearer $BILLING_SWEEP_TOKEN (at least 16 characters).
+ app.post("/internal/billing-jobs/sweep",async(req,res)=>{
+  res.setHeader("Cache-Control","private, no-store");
+  if(!sweepTokenMatches(env,req.headers?.authorization))return res.status(401).json({error:"unauthorized"});
+  try{
+   const result=await projects.sweepBillingJobs();
+   if(result.queryFailed)return res.status(503).json({error:"unavailable"});
+   res.json({ok:true,swept:result.swept,failed:result.failed});
+  }catch(_){res.status(503).json({error:"unavailable"});}
+ });
+ registeredBillingSweep=()=>projects.sweepBillingJobs();
+ function projectError(res,error){
+   if(!(error instanceof ProjectError))return res.status(503).json({error:"PROJECT_UNAVAILABLE"});
+   const body={error:error.code};
+   if(error.message&&error.message!==error.code)body.message=error.message;
+   if(error.provider)body.provider=error.provider;
+   if(error.reason)body.reason=error.reason;
+   return res.status(error.status).json(body);
+ }
  async function getWorkspace(req,res){
    try{return await projects.get(req,req.params.id);}catch(error){projectError(res,error);return null;}
  }
- function publicWorkspace(w){
+ function publicWorkspace(w,freeId=null){
+   const price=workspacePrice({...w.data,id:w.id},freeId);
    return {id:w.id,name:w.data.name,kind:w.data.kind,storageMode:w.data.storageMode||null,
+   isFree:price.isFree,monthlyPriceCents:price.monthlyPriceCents,feeWaived:price.feeWaived,
    byoActive:!!w.data.byoActive,manualProviderConfigured:!!w.data.manualProviderConfigured,
    storageTier:w.data.storageTier||null,
    storageInterval:w.data.storageInterval||null,storageBillingVersion:w.data.storageBillingVersion||1,
@@ -76,6 +117,9 @@ function registerBillingV2({app,db,stripe,admin,auth,agreed,hash,prices,env=proc
    provisioned:w.data.provisioned===true||(w.data.kind==="free"&&w.data.provisioned!==false),
    projectStatus:projectStatus(w.data),projectBillingVersion:w.data.projectBillingVersion||1,
    projectFeeStatus:w.data.projectFeeStatus||"legacy",projectFeeCents:w.data.projectFeeCents||0,
+   grandfathered:isGrandfathered(w.data),lapsed:evaluateLapse(w.data).lapsed||byoLapsed(w.data),
+   workspaceFeeModel:w.data.workspaceFeeModel||(isGrandfathered(w.data)?"one_time":null),
+   byoChallengeVerified:w.data.byoChallengeVerified===true,
    intendedSelection:w.data.intendedSelection||{},dataRetained:w.data.dataRetained===true,
    hasContinuingBilling:hasContinuingBilling(w.data),transferEligible:effectiveStorageQuota(w.data)>0};
  }
@@ -112,12 +156,12 @@ function registerBillingV2({app,db,stripe,admin,auth,agreed,hash,prices,env=proc
  app.get("/v2/pricing",(_req,res)=>res.json({
    currency:"usd",catalogVersion:2,
    free:{storageGB:FREE_GB,workers:FREE_WORKERS,monthlyCents:0},
-   workspaceFeeMonthlyCents:0,legacyWorkspaceFeeMonthlyCents:500,
-   projects:{firstFree:true,additionalOneTimeCents:500,defaultLimit:10,qualifiedLimit:20,
+   workspaceFeeMonthlyCents:0,legacyWorkspaceFeeMonthlyCents:WORKSPACE_FEE_CENTS,
+   projects:{firstFree:true,additionalOneTimeCents:WORKSPACE_FEE_CENTS,workspaceMonthlyCents:WORKSPACE_FEE_CENTS,feeIsOneTime:false,freeWorkspaces:1,defaultLimit:10,qualifiedLimit:20,
      qualifyingStorageTier:"2TB",qualifyingPerformanceTier:"turbo",qualifyingWorkers:8,
      qualificationLabel:"2 TB storage AND Turbo (8 workers) or higher on the same active project; equivalent bundles qualify",
      paymentAvailable:projects.paymentAvailable(),archiveRetainsData:true},
-   byo:{monthlyCents:1000,yearlyCents:10000,providerFeesExtra:true,manualSetupRequired:true},
+   byo:{monthlyCents:WORKSPACE_FEE_CENTS,yearlyCents:WORKSPACE_FEE_CENTS*10,providerFeesExtra:true,manualSetupRequired:true},
    purchasesEnabled:env.STRIPE_CHECKOUT_ENABLED==="true",
    storage:Object.fromEntries(Object.keys(STORAGE).map(t=>[t,{
      gb:STORAGE[t].gb,monthlyCents:STORAGE[t].standard,
@@ -141,12 +185,12 @@ function registerBillingV2({app,db,stripe,admin,auth,agreed,hash,prices,env=proc
  app.get("/v2/workspaces",auth,agreed,async(req,res)=>{
    try{
      const result=await projects.inventory(req);
-     res.json({ownerBenefits:req.ownerBenefits===true,workspaces:result.records.filter(w=>projectStatus(w.data)!=="archived").map(publicWorkspace),policy:result.policy});
+     res.json({ownerBenefits:req.ownerBenefits===true,workspaces:result.records.filter(w=>projectStatus(w.data)!=="archived").map(w=>publicWorkspace(w,result.policy.freeWorkspaceId)),policy:result.policy});
    }catch(_){res.status(503).json({error:"Workspaces unavailable"})}
  });
  app.get("/v2/projects",auth,agreed,async(req,res)=>{
    try{const result=await projects.inventory(req);res.json({ownerBenefits:req.ownerBenefits===true,policy:result.policy,
-     projects:result.records.filter(w=>req.query.includeArchived==="true"||projectStatus(w.data)!=="archived").map(publicWorkspace)});}
+     projects:result.records.filter(w=>req.query.includeArchived==="true"||projectStatus(w.data)!=="archived").map(w=>publicWorkspace(w,result.policy.freeWorkspaceId))});}
    catch(error){projectError(res,error);}
  });
  app.post("/v2/projects",auth,agreed,async(req,res)=>{
@@ -154,12 +198,18 @@ function registerBillingV2({app,db,stripe,admin,auth,agreed,hash,prices,env=proc
      const result=await projects.create(req,{name:req.body?.name,intentId:req.body?.intentId});
      let payment={};
      if(result.project.data.projectFeeStatus==="pending")payment=await projects.checkout(req,result.project.id);
-     res.status(result.resumed?200:201).json({project:publicWorkspace(result.project),workspaceId:result.project.id,
-       policy:result.policy,resumed:result.resumed,oneTimeCents:result.project.data.projectFeeStatus==="pending"?500:0,...payment});
+     const project=publicWorkspace(result.project,result.policy.freeWorkspaceId);
+     const monthly=result.project.data.workspaceFeeModel==="monthly";
+     res.status(result.resumed?200:201).json({project,workspaceId:result.project.id,isFree:project.isFree,monthlyPriceCents:project.monthlyPriceCents,feeWaived:project.feeWaived,
+       policy:result.policy,resumed:result.resumed,oneTimeCents:result.project.data.projectFeeStatus==="pending"&&!monthly?WORKSPACE_FEE_CENTS:0,...payment});
    }catch(error){projectError(res,error);}
  });
  app.get("/v2/projects/:id",auth,agreed,async(req,res)=>{
-   try{res.json(publicWorkspace(await projects.get(req,req.params.id)));}catch(error){projectError(res,error);}
+   try{
+     const result=await projects.inventory(req),w=result.records.find(item=>item.id===req.params.id);
+     if(!w)return res.status(404).json({error:"PROJECT_NOT_FOUND",message:"Project not found"});
+     res.json(publicWorkspace(w,result.policy.freeWorkspaceId));
+   }catch(error){projectError(res,error);}
  });
  app.post("/v2/projects/:id/checkout",auth,agreed,async(req,res)=>{
    try{res.json(await projects.checkout(req,req.params.id));}catch(error){projectError(res,error);}
@@ -167,11 +217,34 @@ function registerBillingV2({app,db,stripe,admin,auth,agreed,hash,prices,env=proc
  app.put("/v2/projects/:id/selection",auth,agreed,async(req,res)=>{
    try{res.json({workspaceId:req.params.id,intendedSelection:await projects.setSelection(req,req.params.id,req.body)});}catch(error){projectError(res,error);}
  });
+ app.post("/v2/projects/:id/make-hosted",auth,agreed,async(req,res)=>{
+   try{res.json(await projects.makeHosted(req,req.params.id));}catch(error){projectError(res,error);}
+ });
+ app.delete("/v2/projects/:id",auth,agreed,async(req,res)=>{
+   try{res.json(await projects.remove(req,req.params.id));}catch(error){projectError(res,error);}
+ });
  app.post("/v2/projects/:id/archive",auth,agreed,async(req,res)=>{
    try{res.json(await projects.archive(req,req.params.id,req.body));}catch(error){projectError(res,error);}
  });
  app.post("/v2/projects/:id/restore",auth,agreed,async(req,res)=>{
    try{res.json(await projects.restore(req,req.params.id));}catch(error){projectError(res,error);}
+ });
+ app.post("/v2/workspaces/:id/merge/preview",auth,agreed,async(req,res)=>{
+   try{res.json(await projects.mergePreview(req,req.params.id,{targetId:req.body?.targetId,confirmName:req.body?.confirmName}));}
+   catch(error){projectError(res,error);}
+ });
+ app.post("/v2/workspaces/:id/merge",auth,agreed,async(req,res)=>{
+   try{res.json(await projects.merge(req,req.params.id,{targetId:req.body?.targetId,confirmName:req.body?.confirmName}));}
+   catch(error){projectError(res,error);}
+ });
+ app.post("/v2/workspaces/:id/byo/register",auth,agreed,async(req,res)=>{
+   try{res.json(await projects.registerByo(req,req.params.id,req.body||{}));}catch(error){projectError(res,error);}
+ });
+ app.post("/v2/workspaces/:id/byo/challenge",auth,agreed,async(req,res)=>{
+   try{res.json(await projects.issueByoChallenge(req,req.params.id));}catch(error){projectError(res,error);}
+ });
+ app.post("/v2/workspaces/:id/byo/verify",auth,agreed,async(req,res)=>{
+   try{res.json(await projects.verifyByo(req,req.params.id,req.body||{}));}catch(error){projectError(res,error);}
  });
  app.post("/v2/workspaces/free",auth,agreed,async(req,res)=>{
    try{
@@ -190,8 +263,8 @@ function registerBillingV2({app,db,stripe,admin,auth,agreed,hash,prices,env=proc
      const intent=req.body?.intentId;
      if(intent!==undefined&&(typeof intent!=="string"||!(/^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i).test(intent)))
        return res.status(400).json({error:"Invalid checkout intent"});
-     const updateRequired=()=>res.status(426).json({code:"CLIENT_UPDATE_REQUIRED",projectFlow:"/v2/projects",
-       error:"Update GenDragoon to create a project in Cloud, then choose it for storage or performance. Each new project after your first costs $5 once."});
+     const updateRequired=()=>res.status(426).json({error:"CLIENT_UPDATE_REQUIRED",projectFlow:"/v2/projects",
+       message:"Update GenDragoon to create a project in Cloud, then choose it for storage or performance. Each new workspace after your first costs "+WORKSPACE_FEE_LABEL+" a month."});
      // Older clients cannot complete the separate project-activation flow. This
      // compatibility endpoint may resume an existing legacy intent, but never
      // creates a new project or switches a storage purchase into a project fee.
@@ -203,15 +276,20 @@ function registerBillingV2({app,db,stripe,admin,auth,agreed,hash,prices,env=proc
      const expected={name,kind,accountHash:hash(req.user.uid),storageTier:plan.tier||null,
        storageMode:plan.mode||null,storageInterval:interval};
      if(Object.keys(expected).some(key=>w.data[key]!==expected[key]))
-       return res.status(409).json({code:"INTENT_CONFLICT",error:"This checkout intent belongs to a different selection. Choose the plan again."});
-     if(projectStatus(w.data)==="archived")return res.status(409).json({code:"PROJECT_ARCHIVED",error:"Restore this project in Cloud before continuing its purchase."});
+       return res.status(409).json({error:"INTENT_CONFLICT",message:"This checkout intent belongs to a different selection. Choose the plan again."});
+     if(projectStatus(w.data)==="archived")return res.status(409).json({error:"PROJECT_ARCHIVED",message:"Restore this project in Cloud before continuing its purchase."});
      const quote=kind==="byo"?plan:storageQuote(plan.tier,interval,mode,w.data.storageBillingVersion||1);
      res.json({workspaceId:w.id,quote,provisioned:w.data.provisioned===true,
        projectStatus:projectStatus(w.data),projectActivationRequired:false,oneTimeProjectCents:0,resumed:true});
    }catch(error){if(error instanceof ProjectError)return projectError(res,error);res.status(400).json({error:"Invalid workspace or storage plan"})}
  });
  app.get("/v2/workspaces/:id",auth,agreed,async(req,res)=>{
-   try{const w=await getWorkspace(req,res);if(w)res.json(publicWorkspace(w))}
+   try{
+     const w=await getWorkspace(req,res);
+     if(!w)return;
+     const result=await projects.inventory(req);
+     res.json(publicWorkspace(w,result.policy.freeWorkspaceId));
+   }
    catch(_){res.status(503).json({error:"Workspace unavailable"})}
  });
  async function existingCheckout(w,kind,res,selection){
@@ -236,8 +314,8 @@ function registerBillingV2({app,db,stripe,admin,auth,agreed,hash,prices,env=proc
    try{
      const w=await getWorkspace(req,res);if(!w)return;
      if(!["paid","free"].includes(w.data.kind))return res.status(409).json({error:"Managed storage project required"});
-     if(w.data.projectBillingVersion===2&&!activatedBasicProject(w.data))return res.status(409).json({code:"PROJECT_ACTIVATION_REQUIRED",
-       error:"Activate or restore this project in Cloud before choosing a storage plan.",workspaceId:w.id});
+     if(w.data.projectBillingVersion===2&&!activatedBasicProject(w.data))return res.status(409).json({error:"PROJECT_ACTIVATION_REQUIRED",
+       message:"Activate or restore this project in Cloud before choosing a storage plan.",workspaceId:w.id});
      await projects.withLease(req,w.id,async fresh=>{
        const intent=fresh.data.intendedSelection||{};
        const plan=storageQuote(req.body?.tier||intent.storageTier||fresh.data.storageTier,
@@ -262,6 +340,7 @@ function registerBillingV2({app,db,stripe,admin,auth,agreed,hash,prices,env=proc
    try{
      const w=await getWorkspace(req,res);if(!w)return;
      if(!["byo","paid","free"].includes(w.data.kind)||projectStatus(w.data)==="archived")return res.status(409).json({error:"An available project is required"});
+     try{rejectProviderSecrets(req.body||{});}catch(error){return res.status(400).json({error:error.code||"BYO_SECRET_REJECTED",message:error.message});}
      const provider=String(req.body?.provider||"").trim().toLowerCase();
      const label=String(req.body?.label||"").trim();
      if(!["s3","gcs","r2","b2","sftp","webdav","google-drive","onedrive","other"].includes(provider)||
@@ -278,11 +357,13 @@ function registerBillingV2({app,db,stripe,admin,auth,agreed,hash,prices,env=proc
      const w=await getWorkspace(req,res);if(!w)return;
      if(!w.data.manualProviderConfigured)
        return res.status(409).json({error:"Complete and test a manual cloud configuration first"});
-     if(w.data.projectBillingVersion===2&&!activatedBasicProject(w.data))return res.status(409).json({code:"PROJECT_ACTIVATION_REQUIRED",
-       error:"Activate or restore this project in Cloud before choosing a cloud connection plan.",workspaceId:w.id});
+     if(w.data.projectBillingVersion===2&&!activatedBasicProject(w.data))return res.status(409).json({error:"PROJECT_ACTIVATION_REQUIRED",
+       message:"Activate or restore this project in Cloud before choosing a cloud connection plan.",workspaceId:w.id});
      await projects.withLease(req,w.id,async fresh=>{
        const plan=byoQuote(req.body?.interval||fresh.data.intendedSelection?.byoInterval||fresh.data.byoInterval||fresh.data.storageInterval||"month");
        if(req.ownerBenefits===true){
+         if(fresh.data.byoChallengeVerified!==true)
+           return res.status(409).json({error:"BYO_CHALLENGE_REQUIRED",message:"Verify the bring-your-own challenge before activating storage"});
          await fresh.ref.update({byoActive:true,byoInterval:plan.interval,entitlementSource:"owner",updatedAt:stamp()});
          return res.json({complimentary:true,workspaceId:fresh.id,message:"Owner BYO access activated. Your provider's own charges still apply."});
        }
@@ -364,7 +445,7 @@ function registerBillingV2({app,db,stripe,admin,auth,agreed,hash,prices,env=proc
      expected=priceKeysBYO(byoQuote(interval)).map(verifiedPrice);
      const matches=matchesStripePrices(sub,expected);
      patch={byoSubscriptionId:sub.id,byoStatus:sub.status,
-       byoActive:active&&matches,byoInterval:matches?interval:(data.byoInterval||null)};
+       byoActive:active&&matches&&data.byoChallengeVerified===true,byoInterval:matches?interval:(data.byoInterval||null)};
    } else if(kind==="storage"){
      if(!["paid","free"].includes(data.kind) || (data.storageSubscriptionId && data.storageSubscriptionId!==sub.id))return false;
      const tier=data.pendingStorageTier||data.storageTier,interval=data.pendingStorageInterval||data.storageInterval,
@@ -420,6 +501,6 @@ function registerBillingV2({app,db,stripe,admin,auth,agreed,hash,prices,env=proc
  }
  return {reconcileSubscription,reconcileAds,effectiveWorkers,projects};
 }
-module.exports={registerBillingV2,storageQuote,performanceQuote,effectiveWorkers,
+module.exports={registerBillingV2,sweepRegisteredBillingJobs,sweepTokenMatches,BILLING_SWEEP_INTERVAL_MS,storageQuote,performanceQuote,effectiveWorkers,
  FREE_GB,FREE_WORKERS,REMOVE_ADS_CENTS,matchesStripePrices,priceKeysStorage,priceKeysPerformance,
  byoQuote,priceKeysBYO,effectiveStorageQuota};

@@ -19,7 +19,7 @@ function fixture({configured=true,ownerBenefits=false}={}){
    listLineItems:async id=>({has_more:false,data:sessions.get(id).line_items.map(line=>({price:{id:line.price},quantity:line.quantity}))})
  }},paymentIntents:{retrieve:async id=>structuredClone(intents.get(id))},charges:{retrieve:async()=>{throw Error("unexpected charge lookup");}}};
  const env={STRIPE_CHECKOUT_ENABLED:"true",STRIPE_PROJECT_CHECKOUT_READY:"true",STRIPE_ENVIRONMENT:"test",PUBLIC_URL:"https://billing.example",...(configured?{STRIPE_PROJECT_CREATION_PRICE_ID:"price_project"}:{})};
- const service=createProjectService({db,stamp:()=>123,hash:uid=>uid==="other"?other:owner,stripe,env,ensureCustomer:async()=>"cus_own"});
+ const service=createProjectService({db,stamp:()=>Date.parse("2026-10-18T00:00:00Z"),hash:uid=>uid==="other"?other:owner,stripe,env,ensureCustomer:async()=>"cus_own"});
  const req={user:{uid:"owner"},ownerBenefits};
  const path=id=>id==="free"?"tenants/"+owner+"/workspaces/free":"gd_accounts/"+owner+"/workspaces/"+id;
  const create=(n,name="Project "+n)=>service.create(req,{name,intentId:idFor(n)});
@@ -67,12 +67,14 @@ test("archiving cannot reset the free allowance, including the legacy/v1 creatio
  const restored=await f.service.restore(f.req,idFor(1));assert.equal(restored.newProjectFeeCharged,false);
  assert.equal(f.record(idFor(1)).projectFeeStatus,"free");assert.equal(effectiveStorageQuota(f.record(idFor(1))),2e9);
 });
-test("a migrated legacy free project consumes the lifetime allowance and can qualify when upgraded",async()=>{
+test("a migrated legacy free project stays grandfathered and does not take the free slot",async()=>{
  const f=fixture();f.put("free",{kind:"free",accountKey:owner,projectBillingVersion:undefined,projectStatus:undefined,
    storageActive:true,storageTier:"2TB",performanceActive:true,performanceTier:"turbo"});
- const list=await f.service.inventory(f.req);assert.equal(list.policy.freeProjectAvailable,false);assert.equal(list.policy.projectLimit,20);
+ const list=await f.service.inventory(f.req);assert.equal(list.policy.freeProjectAvailable,true);assert.equal(list.policy.projectLimit,20);
+ assert.equal(list.policy.freeWorkspaceId,null);
  assert.equal(effectiveStorageQuota(f.record("free")),2e12);assert.equal(effectiveWorkers(f.record("free")),8);
- assert.equal((await f.create(2)).project.data.projectFeeStatus,"pending");
+ assert.equal((await f.create(2)).project.data.projectFeeStatus,"free");
+ assert.equal((await f.service.inventory(f.req)).policy.freeWorkspaceId,idFor(2));
 });
 test("new storage subscriptions omit recurring workspace fees while legacy quotes remain exact",()=>{
  for(const interval of ["month","year"]){

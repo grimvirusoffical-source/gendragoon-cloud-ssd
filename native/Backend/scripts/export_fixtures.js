@@ -1,0 +1,402 @@
+"use strict";
+// Starts the workspace HTTP handlers with Firestore and Stripe test doubles,
+// sends real requests, and writes fixtures/<area>/<case>.json.
+const crypto=require("node:crypto");
+const NOW=1_700_000_000_000;
+Date.now=()=>NOW;
+let byte=1;
+crypto.randomBytes=size=>{
+ const buf=Buffer.alloc(size);
+ for(let i=0;i<size;i++)buf[i]=(byte+i)&255;
+ byte+=1;
+ return buf;
+};
+let uuid=0;
+crypto.randomUUID=()=>{
+ uuid+=1;
+ return "00000000-0000-4000-8000-"+uuid.toString(16).padStart(12,"0");
+};
+
+const fs=require("node:fs");
+const path=require("node:path");
+const express=require("express");
+const {memoryFirestore}=require("../test_firestore");
+const {registerBillingV2}=require("../billing_v2");
+const {registerPaidStorage}=require("../paid_storage");
+const {LAPSE_GRACE_MS}=require("../workspace_policy");
+
+const hash=uid=>crypto.createHash("sha256").update("fixture:"+uid).digest("hex");
+const owner=hash("owner");
+const other=hash("other");
+const wid=n=>"11111111-1111-4111-8111-"+String(n).padStart(12,"0");
+const outDir=path.resolve(process.argv[2]||path.join(__dirname,"../../../fixtures"));
+const env={STRIPE_CHECKOUT_ENABLED:"false",STRIPE_ENVIRONMENT:"test",PUBLIC_URL:"https://billing.example"};
+const stripe={customers:{create:async()=>({id:"cus_fixture"})},checkout:{sessions:{}},prices:{retrieve:async()=>{throw Error("stripe double");}}};
+const monthlyEnv={...env,STRIPE_CHECKOUT_ENABLED:"true",STRIPE_WORKSPACE_MONTHLY_READY:"true",STRIPE_WORKSPACE_MONTHLY_PRICE_ID:"price_fixturemonthly"};
+function monthlyStripe(){
+ return {customers:{create:async()=>({id:"cus_fixture"})},
+  prices:{retrieve:async id=>({id,active:true,type:"recurring",recurring:{interval:"month"},currency:"usd",unit_amount:500,billing_scheme:"per_unit",livemode:false,product:{active:true}})},
+  checkout:{sessions:{retrieve:async()=>{throw Error("missing session");},create:async()=>({id:"cs_fixture_monthly",url:"https://checkout.stripe.com/c/pay/cs_fixture_monthly",status:"open"})}}};
+}
+const byoBody={provider:"s3",endpoint:"https://bucket.s3.us-east-1.amazonaws.com",bucketFingerprint:"ab".repeat(8)};
+const SECRET_HEADERS=new Set(["authorization","cookie","set-cookie","x-api-key","stripe-signature"]);
+
+function sortValue(value){
+ if(Array.isArray(value))return value.map(sortValue);
+ if(value&&typeof value==="object")return Object.fromEntries(Object.keys(value).sort().map(key=>[key,sortValue(value[key])]));
+ return value;
+}
+function clearJson(dir){
+ if(!fs.existsSync(dir))return;
+ for(const entry of fs.readdirSync(dir,{withFileTypes:true})){
+  const child=path.join(dir,entry.name);
+  if(entry.isDirectory())clearJson(child);
+  else if(entry.name.endsWith(".json"))fs.unlinkSync(child);
+ }
+}
+function writeCase(area,name,record){
+ const dir=path.join(outDir,area);
+ fs.mkdirSync(dir,{recursive:true});
+ fs.writeFileSync(path.join(dir,name+".json"),JSON.stringify(sortValue(record),null,2)+"\n");
+}
+function requestHeaders(method,token,extra){
+ const headers={authorization:"Bearer "+token,...extra};
+ if(method!=="GET"&&method!=="HEAD")headers["content-type"]="application/json";
+ return headers;
+}
+function redact(headers){
+ return Object.fromEntries(Object.entries(headers).map(([key,value])=>{
+  const lower=key.toLowerCase();
+  return [lower,SECRET_HEADERS.has(lower)?"<redacted>":value];
+ }));
+}
+async function capture(base,method,requestPath,{token="owner",body,headers}={}){
+ const sent=requestHeaders(method,token,headers);
+ const response=await fetch(base+requestPath,{method,headers:sent,body:body===undefined?undefined:JSON.stringify(body)});
+ const text=await response.text();
+ let parsed=null;
+ if(text){try{parsed=JSON.parse(text);}catch(_){parsed=text;}}
+ return {request:{method,path:requestPath,headers:redact(sent),body:body===undefined?null:body},response:{status:response.status,body:parsed}};
+}
+function paid(name,extra={}){
+ return {kind:"paid",accountHash:owner,name,projectBillingVersion:2,projectStatus:"active",projectFeeStatus:"paid",
+  provisioned:true,storageActive:false,performanceActive:false,usedBytes:0,reservedBytes:0,createdAt:NOW,...extra};
+}
+function put(db,id,data,account=owner){db.rows.set("gd_accounts/"+account+"/workspaces/"+id,data);}
+async function start(db,{byoFetch=null,env:useEnv=env,stripe:useStripe=stripe,stamp=NOW}={}){
+ const app=express();
+ app.use(express.json({limit:"16kb"}));
+ const auth=(req,res,next)=>{
+  const token=(req.headers.authorization||"").replace(/^Bearer /,"");
+  if(token==="owner"||token==="other"){req.user={uid:token};return next();}
+  if(token==="owner-benefits"){req.user={uid:"owner"};req.ownerBenefits=true;return next();}
+  res.status(401).json({error:"Sign in required"});
+ };
+ registerBillingV2({app,db,stripe:useStripe,admin:{firestore:{FieldValue:{serverTimestamp:()=>stamp}}},
+  auth,agreed:(_req,_res,next)=>next(),hash,prices:{},env:useEnv,byoFetch});
+ registerPaidStorage({app,db,bucket:{file:()=>({})},accountKey:hash,
+  FieldValue:{increment:n=>({increment:n}),serverTimestamp:()=>stamp},
+  apiKeys:{verify:async()=>null},getAuth:()=>({}),firebaseAuth:auth});
+ const server=app.listen(0,"127.0.0.1");
+ await new Promise(resolve=>server.once("listening",resolve));
+ return {base:"http://127.0.0.1:"+server.address().port,close:()=>new Promise(resolve=>server.close(resolve))};
+}
+function unlistable(db){
+ const col=c=>({...c,limit:undefined,doc:id=>doc(c.doc(id))});
+ const doc=d=>({...d,collection:name=>col(d.collection(name))});
+ return {...db,collection:name=>col(db.collection(name)),doc:p=>doc(db.doc(p))};
+}
+function assertLock(record,reason){
+ if(record.response.status!==423||record.response.body?.error!=="workspace_lock"||record.response.body.reason!==reason||
+    typeof record.response.body.overBy!=="number"||!Array.isArray(record.response.body.unpaidWorkspaceIds))
+  throw Error("expected 423 workspace_lock "+reason+" but got "+record.response.status+" "+JSON.stringify(record.response.body));
+}
+
+async function workspaceCases(){
+ const db=memoryFirestore();
+ const app=await start(db,{stamp:FREE_STAMP});
+ try{
+  const created=await capture(app.base,"POST","/v2/projects",{body:{name:"Fixture Project",intentId:wid(1)}});
+  if(created.response.status!==201)throw Error("create failed "+JSON.stringify(created.response));
+  writeCase("workspaces","create",created);
+  const listed=await capture(app.base,"GET","/v2/workspaces");
+  if(listed.response.status!==200||!Array.isArray(listed.response.body?.workspaces))throw Error("list failed "+JSON.stringify(listed.response));
+  writeCase("workspaces","list",listed);
+  for(let n=2;n<=10;n++)put(db,wid(n),paid("Workspace "+n));
+  const capped=await capture(app.base,"POST","/v2/projects",{body:{name:"Eleventh Workspace",intentId:wid(11)}});
+  if(capped.response.status!==409||capped.response.body?.error!=="PROJECT_LIMIT_REACHED")throw Error("cap failed "+JSON.stringify(capped.response));
+  writeCase("workspaces","cap-reached",capped);
+  put(db,wid(40),{...paid("Foreign workspace"),accountHash:other});
+  const foreign=await capture(app.base,"GET","/v2/projects/"+wid(40));
+  if(foreign.response.status!==404||foreign.response.body?.error!=="PROJECT_NOT_FOUND")throw Error("foreign get failed "+JSON.stringify(foreign.response));
+  writeCase("ownership","foreign-workspace",foreign);
+ }finally{await app.close();}
+}
+async function lockCase(name,reason,seed){
+ const db=memoryFirestore();
+ seed(db);
+ const app=await start(name==="scope-unavailable"?unlistable(db):db);
+ try{
+  const record=await capture(app.base,"POST","/v2/workspaces/"+wid(1)+"/cloud/uploads",{body:{name:"blocked.txt",sizeBytes:4}});
+  assertLock(record,reason);
+  writeCase("workspace-lock",name,record);
+ }finally{await app.close();}
+}
+async function mergeCases(){
+ const db=memoryFirestore();
+ const source=wid(1),target=wid(2);
+ put(db,source,paid("Alpha"));
+ put(db,target,paid("Beta"));
+ const digest="ab".repeat(32);
+ db.rows.set("gd_accounts/"+owner+"/workspaces/"+source+"/files/a",{name:"notes.txt",sizeBytes:11,sha256:digest,createdAt:NOW});
+ db.rows.set("gd_accounts/"+owner+"/workspaces/"+target+"/files/b",{name:"notes.txt",sizeBytes:11,sha256:digest,createdAt:NOW});
+ const app=await start(db);
+ try{
+  const rejected=await capture(app.base,"POST","/v2/workspaces/"+source+"/merge",{body:{targetId:target,confirmName:"Nope"}});
+  if(rejected.response.status!==400||rejected.response.body?.error!=="CONFIRM_NAME_REQUIRED")throw Error("confirmName failed "+JSON.stringify(rejected.response));
+  writeCase("merge","confirm-name",rejected);
+  const preview=await capture(app.base,"POST","/v2/workspaces/"+source+"/merge/preview",{body:{targetId:target,confirmName:"Alpha"}});
+  if(preview.response.status!==200||preview.response.body?.files?.[0]?.renamedTo!=="notes.txt (from Alpha)")
+   throw Error("preview failed "+JSON.stringify(preview.response));
+  writeCase("merge","preview",preview);
+  const merged=await capture(app.base,"POST","/v2/workspaces/"+source+"/merge",{body:{targetId:target,confirmName:"Alpha"}});
+  if(merged.response.status!==200||merged.response.body?.sourceDeleted!==true)throw Error("merge failed "+JSON.stringify(merged.response));
+  writeCase("merge","completed",merged);
+  const files=await capture(app.base,"GET","/v2/workspaces/"+target+"/cloud/files");
+  if(files.response.status!==200||!files.response.body?.files?.some(file=>file.name==="notes.txt (from Alpha)"))
+   throw Error("renamed file missing "+JSON.stringify(files.response));
+  writeCase("merge","renamed-file",files);
+ }finally{await app.close();}
+}
+async function byoCases(){
+ const fetched=[];
+ const byoFetch=async url=>{
+  fetched.push(url);
+  const nonce=new URL(url).pathname.split("/").pop();
+  return {status:200,body:Buffer.from(nonce),headers:{etag:'"'+"cd".repeat(16)+'"'}};
+ };
+ const db=memoryFirestore();
+ const id=wid(1),expired=wid(2),endpoint="https://bucket.s3.us-east-1.amazonaws.com";
+ put(db,id,{kind:"byo",accountHash:owner,name:"BYO workspace",provisioned:true,projectBillingVersion:2});
+ put(db,expired,{kind:"byo",accountHash:owner,name:"Expired BYO",provisioned:true,projectBillingVersion:2,providerType:"s3",
+  endpoint,bucketFingerprint:"ab".repeat(8),byoChallenge:{nonce:"expirednonce",expiresAtMs:NOW-1,used:false}});
+ const app=await start(db,{byoFetch});
+ try{
+  const unsupported=await capture(app.base,"POST","/v2/workspaces/"+id+"/byo/register",{body:{provider:"sftp",endpoint:"sftp.example.com:22",bucketFingerprint:"ab".repeat(16)}});
+  if(unsupported.response.status!==422||unsupported.response.body?.error!=="byo_provider_unsupported")throw Error("sftp "+JSON.stringify(unsupported.response));
+  writeCase("byo","provider-unsupported",unsupported);
+  const registered=await capture(app.base,"POST","/v2/workspaces/"+id+"/byo/register",{body:{provider:"s3",endpoint,bucketFingerprint:"ab".repeat(8)}});
+  if(registered.response.status!==200)throw Error("register "+JSON.stringify(registered.response));
+  writeCase("byo","register",registered);
+  const challenge=await capture(app.base,"POST","/v2/workspaces/"+id+"/byo/challenge");
+  const nonce=challenge.response.body?.nonce;
+  if(challenge.response.status!==200||typeof nonce!=="string"||typeof challenge.response.body.expiresAtMs!=="number"||typeof challenge.response.body.ttlMs!=="number")
+   throw Error("challenge "+JSON.stringify(challenge.response));
+  writeCase("byo","challenge",challenge);
+  const missing=await capture(app.base,"POST","/v2/workspaces/"+id+"/byo/verify",{body:{}});
+  if(missing.response.status!==400||JSON.stringify(missing.response.body)!==JSON.stringify({error:"presigned_url_required"}))
+   throw Error("missing url "+JSON.stringify(missing.response));
+  writeCase("byo","verify-missing-url",missing);
+  const host=await capture(app.base,"POST","/v2/workspaces/"+id+"/byo/verify",{body:{presignedUrl:"https://attacker.example/.gendragoon-challenge/"+nonce}});
+  if(host.response.body?.error!=="BYO_ENDPOINT_HOST_MISMATCH")throw Error("host "+JSON.stringify(host.response));
+  writeCase("byo","verify-host-mismatch",host);
+  const mismatch=await capture(app.base,"POST","/v2/workspaces/"+id+"/byo/verify",{body:{presignedUrl:endpoint+"/.gendragoon-challenge/not-the-nonce"}});
+  if(mismatch.response.body?.error!=="BYO_CHALLENGE_MISMATCH")throw Error("mismatch "+JSON.stringify(mismatch.response));
+  writeCase("byo","verify-mismatch",mismatch);
+  const expiredVerify=await capture(app.base,"POST","/v2/workspaces/"+expired+"/byo/verify",{body:{presignedUrl:endpoint+"/.gendragoon-challenge/expirednonce"}});
+  if(expiredVerify.response.body?.error!=="BYO_CHALLENGE_EXPIRED")throw Error("expired "+JSON.stringify(expiredVerify.response));
+  writeCase("byo","verify-expired",expiredVerify);
+  const ok=await capture(app.base,"POST","/v2/workspaces/"+id+"/byo/verify",{body:{presignedUrl:endpoint+"/.gendragoon-challenge/"+nonce+"?X-Amz-Signature=fixture"}});
+  if(ok.response.status!==200||ok.response.body?.verified!==true)throw Error("verify "+JSON.stringify(ok.response));
+  writeCase("byo","verify-success",ok);
+  const used=await capture(app.base,"POST","/v2/workspaces/"+id+"/byo/verify",{body:{presignedUrl:endpoint+"/.gendragoon-challenge/"+nonce}});
+  if(used.response.body?.error!=="BYO_CHALLENGE_USED")throw Error("used "+JSON.stringify(used.response));
+  writeCase("byo","verify-used",used);
+  if(fetched.some(url=>url.includes("attacker.example")))throw Error("host mismatch was fetched");
+ }finally{await app.close();}
+}
+
+function assertPrice(record,isFree,cents,label){
+ const body=record.response.body||{};
+ if(record.response.status!==200&&record.response.status!==201)throw Error(label+" status "+JSON.stringify(record.response));
+ if(body.isFree!==isFree||body.monthlyPriceCents!==cents||body.feeWaived!==false)throw Error(label+" price "+JSON.stringify(body));
+}
+const FREE_STAMP=Date.parse("2026-10-18T00:00:00Z");
+async function freeSlotCases(){
+ const hosted=await start(memoryFirestore(),{env:monthlyEnv,stripe:monthlyStripe(),stamp:FREE_STAMP});
+ try{
+  const first=await capture(hosted.base,"POST","/v2/projects",{body:{name:"Free Hosted",intentId:wid(1)}});
+  assertPrice(first,true,0,"free-first");
+  writeCase("workspaces","free-first",first);
+  const second=await capture(hosted.base,"POST","/v2/projects",{body:{name:"Second Workspace",intentId:wid(2)}});
+  assertPrice(second,false,500,"second-paid");
+  writeCase("workspaces","second-paid",second);
+  const moved=await capture(hosted.base,"POST","/v2/workspaces/"+wid(1)+"/byo/register",{body:byoBody});
+  assertPrice(moved,false,500,"free-to-byo");
+  if(moved.response.body?.freeWorkspaceId!==wid(2))throw Error("free slot did not move "+JSON.stringify(moved.response.body));
+  writeCase("workspaces","free-to-byo-billable",moved);
+  const both=await capture(hosted.base,"GET","/v2/workspaces");
+  const items=both.response.body?.workspaces||[];
+  const kept=items.find(item=>item.id===wid(2)),converted=items.find(item=>item.id===wid(1));
+  if(kept?.isFree!==true||kept?.monthlyPriceCents!==0||kept?.feeWaived!==false||converted?.isFree!==false||converted?.monthlyPriceCents!==500||converted?.feeWaived!==false)
+   throw Error("hosted plus byo "+JSON.stringify(items));
+  if(both.response.body?.policy?.locked===true||both.response.body?.policy?.reason==="lapsed"||(both.response.body?.policy?.unpaidWorkspaceIds||[]).includes(wid(1)))
+   throw Error("hosted plus byo should still be in grace "+JSON.stringify(both.response.body?.policy));
+  writeCase("workspaces","list-hosted-plus-byo",both);
+ }finally{await hosted.close();}
+ const only=await start(memoryFirestore(),{env:monthlyEnv,stripe:monthlyStripe(),stamp:FREE_STAMP});
+ try{
+  const created=await capture(only.base,"POST","/v2/projects",{body:{name:"Only BYO",intentId:wid(3)}});
+  if(created.response.status!==201)throw Error("only byo create "+JSON.stringify(created.response));
+  const registered=await capture(only.base,"POST","/v2/workspaces/"+wid(3)+"/byo/register",{body:byoBody});
+  assertPrice(registered,false,500,"byo-first");
+  if(registered.response.body?.freeWorkspaceId!==null)throw Error("byo held the free slot "+JSON.stringify(registered.response.body));
+  writeCase("workspaces","byo-first-paid",registered);
+  const listed=await capture(only.base,"GET","/v2/workspaces");
+  const item=listed.response.body?.workspaces?.[0];
+  if(listed.response.body?.workspaces?.length!==1||item?.isFree!==false||item?.monthlyPriceCents!==500||item?.feeWaived!==false)
+   throw Error("list byo only "+JSON.stringify(listed.response.body));
+  const policy=listed.response.body?.policy;
+  if(policy?.locked===true||policy?.reason==="lapsed"||(policy?.unpaidWorkspaceIds||[]).includes(wid(3)))
+   throw Error("list byo should still be in grace "+JSON.stringify(policy));
+  writeCase("workspaces","list-byo-only",listed);
+ }finally{await only.close();}
+ const replaced=await start(memoryFirestore(),{env:monthlyEnv,stripe:monthlyStripe(),stamp:FREE_STAMP});
+ try{
+  const original=await capture(replaced.base,"POST","/v2/projects",{body:{name:"Disposable Free",intentId:wid(4)}});
+  if(original.response.body?.isFree!==true)throw Error("disposable was not free");
+  const gone=await capture(replaced.base,"DELETE","/v2/projects/"+wid(4));
+  if(gone.response.status!==200||gone.response.body?.deleted!==true||gone.response.body?.freeWorkspaceId!==null)
+   throw Error("delete "+JSON.stringify(gone.response));
+  const again=await capture(replaced.base,"POST","/v2/projects",{body:{name:"Replacement Free",intentId:wid(5)}});
+  assertPrice(again,true,0,"delete-free-then-create");
+  if(again.response.body?.policy?.usedProjectSlots!==1)throw Error("more than one workspace survived delete "+JSON.stringify(again.response.body?.policy));
+  writeCase("workspaces","delete-free-then-create",again);
+ }finally{await replaced.close();}
+ const concurrent=await start(memoryFirestore(),{env:monthlyEnv,stripe:monthlyStripe(),stamp:FREE_STAMP});
+ try{
+  const created=await Promise.all([
+   capture(concurrent.base,"POST","/v2/projects",{body:{name:"Concurrent A",intentId:wid(6)}}),
+   capture(concurrent.base,"POST","/v2/projects",{body:{name:"Concurrent B",intentId:wid(7)}})
+  ]);
+  if(created.some(item=>item.response.status!==201))throw Error("concurrent create "+created.map(item=>item.response.status).join(","));
+  const listed=await capture(concurrent.base,"GET","/v2/workspaces");
+  const items=listed.response.body?.workspaces||[];
+  if(items.length!==2||items.filter(item=>item.isFree===true).length!==1||items.filter(item=>item.monthlyPriceCents===500).length!==1)
+   throw Error("concurrent list "+JSON.stringify(items.map(item=>({id:item.id,isFree:item.isFree,monthlyPriceCents:item.monthlyPriceCents}))));
+  writeCase("workspaces","concurrent-create-one-free",listed);
+ }finally{await concurrent.close();}
+ const mixed=memoryFirestore();
+ const grandfatheredId=wid(8),newId=wid(9);
+ put(mixed,grandfatheredId,paid("One-time paid",{feeIsOneTime:true,projectFeeStatus:"paid",createdAt:NOW}));
+ const mixedApp=await start(mixed,{env:monthlyEnv,stripe:monthlyStripe(),stamp:FREE_STAMP});
+ try{
+  const created=await capture(mixedApp.base,"POST","/v2/projects",{body:{name:"New Hosted",intentId:newId}});
+  if(created.response.status!==201||created.response.body?.isFree!==true||created.response.body?.project?.grandfathered!==false)
+   throw Error("new hosted beside grandfathered "+JSON.stringify(created.response));
+  const listed=await capture(mixedApp.base,"GET","/v2/workspaces");
+  const items=listed.response.body?.workspaces||[];
+  const old=items.find(item=>item.id===grandfatheredId),neu=items.find(item=>item.id===newId);
+  if(old?.isFree!==false||old?.monthlyPriceCents!==0||old?.grandfathered!==true)
+   throw Error("grandfathered row "+JSON.stringify(old));
+  if(neu?.isFree!==true||neu?.monthlyPriceCents!==0||neu?.grandfathered!==false)
+   throw Error("new free row "+JSON.stringify(neu));
+  if(listed.response.body?.policy?.freeWorkspaceId!==newId)
+   throw Error("grandfathered held the slot "+JSON.stringify(listed.response.body?.policy));
+  for(const item of items){
+   if(typeof item.feeWaived!=="boolean")throw Error("feeWaived missing "+JSON.stringify(item));
+   if(item.feeWaived!==true&&item.feeWaived!==false)throw Error("feeWaived "+JSON.stringify(item));
+   if((item.monthlyPriceCents===0)!==(item.isFree===true||item.grandfathered===true||item.feeWaived===true))
+    throw Error("price invariant "+JSON.stringify(item));
+  }
+  writeCase("workspaces","grandfathered-plus-new",listed);
+ }finally{await mixedApp.close();}
+}
+async function pricingCorrectionCases(){
+ const grandfatheredDb=memoryFirestore();
+ const grandfatheredId=wid(20);
+ put(grandfatheredDb,grandfatheredId,paid("Grandfathered workspace",{feeIsOneTime:true,projectFeeStatus:"paid",createdAt:NOW}));
+ const grandfatheredApp=await start(grandfatheredDb,{env:monthlyEnv,stripe:monthlyStripe(),stamp:FREE_STAMP});
+ try{
+  const registered=await capture(grandfatheredApp.base,"POST","/v2/workspaces/"+grandfatheredId+"/byo/register",{body:byoBody});
+  const body=registered.response.body||{};
+  if(registered.response.status!==200||body.grandfathered!==false||body.grandfatheringEnded!==true||body.monthlyPriceCents!==500||body.feeWaived!==false)
+   throw Error("byo ends grandfathering "+JSON.stringify(registered.response));
+  writeCase("workspaces","byo-register-ends-grandfathered",registered);
+ }finally{await grandfatheredApp.close();}
+ function byoRow(name,extra){
+  return paid(name,{byoRegistered:true,providerType:"s3",endpoint:"https://bucket.s3.us-east-1.amazonaws.com",bucketFingerprint:"ab".repeat(8),
+   workspaceFeeModel:"monthly",feeIsOneTime:false,workspaceFeeStatus:"unpaid",workspaceFeePaid:false,workspaceFeeCents:500,
+   projectFeeStatus:"pending",projectStatus:"active",provisioned:true,...extra});
+ }
+ const graceDb=memoryFirestore();
+ put(graceDb,wid(21),byoRow("BYO in grace",{paidThroughMs:NOW}));
+ const graceApp=await start(graceDb);
+ try{
+  const uploaded=await capture(graceApp.base,"POST","/v2/workspaces/"+wid(21)+"/cloud/uploads",{body:{name:"open.txt",sizeBytes:4}});
+  if(uploaded.response.status!==201)throw Error("byo in grace "+JSON.stringify(uploaded.response));
+  writeCase("workspaces","byo-in-grace",uploaded);
+ }finally{await graceApp.close();}
+ const lapsedDb=memoryFirestore();
+ put(lapsedDb,wid(22),byoRow("BYO lapsed",{paidThroughMs:NOW-LAPSE_GRACE_MS-1}));
+ const lapsedApp=await start(lapsedDb);
+ try{
+  const blocked=await capture(lapsedApp.base,"POST","/v2/workspaces/"+wid(22)+"/cloud/uploads",{body:{name:"blocked.txt",sizeBytes:4}});
+  if(blocked.response.status!==423||blocked.response.body?.error!=="workspace_lock"||blocked.response.body?.reason!=="lapsed"||
+     JSON.stringify(blocked.response.body?.unpaidWorkspaceIds)!==JSON.stringify([wid(22)]))
+   throw Error("byo lapsed "+JSON.stringify(blocked.response));
+  writeCase("workspace-lock","byo-lapsed",blocked);
+ }finally{await lapsedApp.close();}
+ const openDb=memoryFirestore();
+ put(openDb,wid(23),byoRow("BYO lapsed sibling",{paidThroughMs:NOW-LAPSE_GRACE_MS-1}));
+ put(openDb,wid(24),paid("Still open",{projectFeeStatus:"free",projectStatus:"active",createdAt:FREE_STAMP,provisioned:true}));
+ const openApp=await start(openDb,{stamp:FREE_STAMP});
+ try{
+  const uploaded=await capture(openApp.base,"POST","/v2/workspaces/"+wid(24)+"/cloud/uploads",{body:{name:"sibling.txt",sizeBytes:4}});
+  if(uploaded.response.status!==201)throw Error("other workspace should stay open "+JSON.stringify(uploaded.response));
+  writeCase("workspaces","byo-lapsed-others-open",uploaded);
+ }finally{await openApp.close();}
+ const hosted=await start(memoryFirestore(),{env:monthlyEnv,stripe:monthlyStripe(),stamp:FREE_STAMP});
+ try{
+  const oldest=await capture(hosted.base,"POST","/v2/projects",{body:{name:"Oldest",intentId:wid(30)}});
+  const second=await capture(hosted.base,"POST","/v2/projects",{body:{name:"Second",intentId:wid(31)}});
+  if(oldest.response.status!==201||second.response.status!==201)throw Error("make-hosted setup "+oldest.response.status+" "+second.response.status);
+  const moved=await capture(hosted.base,"POST","/v2/workspaces/"+wid(30)+"/byo/register",{body:byoBody});
+  if(moved.response.status!==200)throw Error("make-hosted byo "+JSON.stringify(moved.response));
+  const back=await capture(hosted.base,"POST","/v2/projects/"+wid(30)+"/make-hosted");
+  const demoted=back.response.body?.demoted;
+  if(back.response.status!==200||back.response.body?.freeWorkspaceId!==wid(30)||demoted?.workspaceId!==wid(31)||demoted?.requiresCheckout!==true||
+     typeof demoted?.paidThroughMs!=="number"||demoted.graceEndsAt!==demoted.paidThroughMs+LAPSE_GRACE_MS||typeof demoted.checkoutUrl!=="string")
+   throw Error("make-hosted "+JSON.stringify(back.response));
+  writeCase("workspaces","make-hosted",back);
+ }finally{await hosted.close();}
+ const ownerApp=await start(memoryFirestore(),{env:monthlyEnv,stripe:monthlyStripe(),stamp:FREE_STAMP});
+ try{
+  const first=await capture(ownerApp.base,"POST","/v2/projects",{body:{name:"Free Hosted",intentId:wid(50)}});
+  if(first.response.body?.isFree!==true||first.response.body?.feeWaived!==false)throw Error("owner setup "+JSON.stringify(first.response.body));
+  const owner=await capture(ownerApp.base,"POST","/v2/projects",{token:"owner-benefits",body:{name:"Owner Benefit",intentId:wid(51)}});
+  const project=owner.response.body?.project;
+  if(owner.response.status!==201||owner.response.body?.feeWaived!==true||owner.response.body?.isFree!==false||owner.response.body?.monthlyPriceCents!==0||
+     project?.feeWaived!==true||project?.isFree!==false||project?.grandfathered!==false||project?.monthlyPriceCents!==0||project?.projectFeeStatus!=="owner")
+   throw Error("owner fee waived "+JSON.stringify(owner.response));
+  writeCase("workspaces","owner-fee-waived",owner);
+ }finally{await ownerApp.close();}
+}
+async function main(){
+ fs.mkdirSync(outDir,{recursive:true});
+ clearJson(outDir);
+ await workspaceCases();
+ await lockCase("over-cap","over_cap",db=>{for(let n=1;n<=11;n++)put(db,wid(n),paid("Workspace "+n));});
+ await lockCase("lapsed","lapsed",db=>put(db,wid(1),paid("Lapsed",{workspaceFeeModel:"monthly",workspaceFeeStatus:"past_due",workspaceFeePaid:false,paidThroughMs:NOW-LAPSE_GRACE_MS})));
+ await lockCase("over-cap-and-lapsed","over_cap_and_lapsed",db=>{
+  for(let n=1;n<=10;n++)put(db,wid(n),paid("Workspace "+n));
+  put(db,wid(11),paid("Lapsed",{workspaceFeeModel:"monthly",workspaceFeeStatus:"past_due",workspaceFeePaid:false,paidThroughMs:NOW-LAPSE_GRACE_MS}));
+ });
+ await lockCase("scope-unavailable","scope_unavailable",db=>put(db,wid(1),paid("Unlisted")));
+ await lockCase("merge-in-progress","merge_in_progress",db=>put(db,wid(1),paid("Merging",{mergeLock:{token:"fixture-lock",sourceId:wid(1),targetId:wid(2),expiresAtMs:NOW+120000}})));
+ await mergeCases();
+ await byoCases();
+ await freeSlotCases();
+ await pricingCorrectionCases();
+}
+main().catch(error=>{console.error(error);process.exit(1);});

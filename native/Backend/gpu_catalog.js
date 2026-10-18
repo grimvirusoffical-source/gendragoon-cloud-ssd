@@ -16,12 +16,12 @@ function gpuQuote(tier,interval="month"){
     priceCents:x.monthlyCents*factor,available:GPU_READY,hardware:"not assigned",billingCap:true});
 }
 function tripleBundleQuote({storageTier,storageMode="standard",performanceTier,gpuTier,interval="month"}){
-  const {STORAGE,PERFORMANCE}=require("./catalog");
+  const {STORAGE,PERFORMANCE,WORKSPACE_FEE_CENTS}=require("./catalog");
   if(!STORAGE[storageTier]||!PERFORMANCE[performanceTier]||!GPU[gpuTier] ||
      !["month","year"].includes(interval)||!["standard","bundle"].includes(storageMode))
      throw Error("Invalid triple bundle");
   if(storageMode!=="standard")throw Error("Do not stack the existing performance bundle with a separate performance tier");
-  const m=STORAGE[storageTier].standard+500+PERFORMANCE[performanceTier].cents+GPU[gpuTier].monthlyCents;
+  const m=STORAGE[storageTier].standard+WORKSPACE_FEE_CENTS+PERFORMANCE[performanceTier].cents+GPU[gpuTier].monthlyCents;
   const monthly=Math.ceil(m*(100-GPU_BUNDLE_DISCOUNT_PERCENT)/100);
   return Object.freeze({storageTier,performanceTier,gpuTier,interval,discountPercent:10,
     monthlyCents:monthly,totalCents:monthly*(interval==="year"?10:1),
