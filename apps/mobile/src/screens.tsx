@@ -369,7 +369,11 @@ export function WorkspacesScreen(props: {
   const feeText = additionalWorkspaceFeeText(props.additionalMonthlyCents);
   const rows = workspacesWithUnpaid(props.workspaces, props.unpaidIds);
   const [sourceId, setSourceId] = useState(rows[0]?.id ?? "");
-  const [targetId, setTargetId] = useState(rows[1]?.id ?? rows[0]?.id ?? "");
+  const [targetId, setTargetId] = useState(rows[1]?.id ?? "");
+  /** Merging needs two distinct workspaces. */
+  const mergeable = rows.length >= 2;
+  /** Server preview, error, or result stay visible, e.g. after a merge leaves one workspace. */
+  const mergeOutcome = Boolean(props.serverPreview || props.mergeError || props.mergeResult?.merged || props.mergedFiles?.length);
   const [pendingDeleteId, setPendingDeleteId] = useState<string | null>(null);
   const [busyMessage, setBusyMessage] = useState<string | null>(null);
   const deletingIds = new Set(rows.filter((workspace) => isDeletingWorkspace(workspace)).map((workspace) => workspace.id));
@@ -475,17 +479,19 @@ export function WorkspacesScreen(props: {
           </View>
         );
       })}
+      {mergeable || mergeOutcome ? (<>
       <SectionLabel>Merge workspaces</SectionLabel>
       <Text style={styles.help}>Copies every file from the source into the target. Name clashes are renamed, never overwritten.</Text>
+      {mergeable && !props.serverPreview ? (
+        <Text style={styles.help}>{localPreview[0] ? `${localPreview[0].sourcePath} → ${localPreview[0].targetPath}` : "Choose two workspaces to preview a merge."}</Text>
+      ) : null}
       {props.serverPreview ? (
         <View testID="merge-preview" style={cardStyle()}>
           {props.serverPreview.files.map((file) => (
             <Text key={file.name} style={styles.help}>{`${file.name} → ${file.renamedTo}`}</Text>
           ))}
         </View>
-      ) : (
-        <Text style={styles.help}>{localPreview[0] ? `${localPreview[0].sourcePath} → ${localPreview[0].targetPath}` : "Choose two workspaces to preview a merge."}</Text>
-      )}
+      ) : null}
       {props.mergeError ? <Banner testID="merge-error">{props.mergeError}</Banner> : null}
       {props.mergeResult?.merged ? (
         <Text testID="merge-result" style={styles.help}>
@@ -495,6 +501,8 @@ export function WorkspacesScreen(props: {
       {props.mergedFiles?.map((file) => (
         <Text key={file.id} testID={`merged-file-${file.id}`} style={styles.help}>{file.name}</Text>
       ))}
+      </>) : null}
+      {mergeable ? (<>
       <Text style={styles.label}>From (source)</Text>
       <View testID="merge-source" accessibilityRole="radiogroup" accessibilityLabel="Merge source" style={styles.choices}>
         {rows.map((workspace) => (
@@ -506,7 +514,10 @@ export function WorkspacesScreen(props: {
             testID={`merge-source-${workspace.id}`}
             accessibilityLabel={`Merge source ${workspace.name}`}
             disabled={deletingIds.has(workspace.id)}
-            onPress={() => setSourceId(workspace.id)}
+            onPress={() => {
+              setSourceId(workspace.id);
+              if (targetId === workspace.id) setTargetId(rows.find((row) => row.id !== workspace.id)?.id ?? "");
+            }}
           />
         ))}
       </View>
@@ -520,7 +531,8 @@ export function WorkspacesScreen(props: {
             selected={targetId === workspace.id}
             testID={`merge-target-${workspace.id}`}
             accessibilityLabel={`Merge target ${workspace.name}`}
-            disabled={deletingIds.has(workspace.id)}
+            accessibilityHint={workspace.id === sourceId ? "Already selected as the source" : undefined}
+            disabled={deletingIds.has(workspace.id) || workspace.id === sourceId}
             onPress={() => setTargetId(workspace.id)}
           />
         ))}
@@ -532,6 +544,7 @@ export function WorkspacesScreen(props: {
         disabled={!sourceId || !targetId || sourceId === targetId || deletingIds.has(sourceId) || deletingIds.has(targetId)}
         onPress={() => props.onMerge(sourceId, targetId)}
       />
+      </>) : null}
     </Screen>
   );
 }

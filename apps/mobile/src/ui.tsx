@@ -62,7 +62,9 @@ export function Button(props: {
 } & Pick<PressableProps, "accessibilityHint">) {
   const tone = props.tone ?? "primary";
   const isChoice = typeof props.selected === "boolean";
-  const textStyle = props.destructive || tone === "danger"
+  const textStyle = props.disabled
+    ? styles.disabledText
+    : props.destructive || tone === "danger"
     ? styles.dangerText
     : tone === "primary"
       ? styles.primaryText
@@ -205,7 +207,9 @@ const styles = StyleSheet.create({
   secondary: { backgroundColor: colors.secondaryBg, borderColor: colors.secondaryBorder },
   danger: { backgroundColor: colors.dangerBg, borderColor: colors.dangerBorder },
   ghost: { backgroundColor: "transparent", borderColor: colors.border },
-  disabled: { opacity: 0.4 },
+  /** Muted surface + muted text instead of opacity, so the label keeps AA contrast. */
+  disabled: { backgroundColor: colors.surfaceRaised, borderColor: colors.border },
+  disabledText: { color: colors.muted, fontSize: typeScale.bodySize, fontWeight: typeScale.buttonWeight },
   pressed: { opacity: 0.8 },
   primaryText: { color: colors.primaryText, fontSize: typeScale.bodySize, fontWeight: typeScale.buttonWeight },
   secondaryText: { color: colors.secondaryText, fontSize: typeScale.bodySize, fontWeight: typeScale.buttonWeight },
