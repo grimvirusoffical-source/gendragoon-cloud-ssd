@@ -3,13 +3,13 @@
 // and a version. It does not accept a passphrase, a plaintext key, or a filename.
 const UUID=/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const B64=/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
+const B64URL=/^[A-Za-z0-9_-]+={0,2}$/;
 const MAX_ENVELOPE_BYTES=4*1024;
-const MIB=1024*1024;
-const GIB=1024*MIB;
-const ARGON_MEMORY_MIN=19*MIB;
-const ARGON_MEMORY_MAX=GIB;
+const ARGON_MEMORY_MIN=19456;
+const ARGON_MEMORY_MAX=1048576;
 const SCRYPT_N_MIN=2**14;
 const SCRYPT_N_MAX=2**20;
+const ENVELOPE_KEYS=["version","kdf","salt","iv","wrappedKey"];
 const FORBIDDEN=/^(name|filename|fileName|originalName|plaintext|plaintextName|key|keys|encryptionKey|dek|kek|password|passphrase|secret|secretAccessKey|accessKey|accessKeyId|privateKey|content|data|unwrappedKey|rawKey|masterKey|workspaceKey|keyMaterial|plainKey)$/i;
 
 function refusal(status,error){
@@ -36,36 +36,45 @@ function validWrappedKey(value){
  return buf.length>=32&&buf.toString("base64")===value;
 }
 function integer(value){return Number.isSafeInteger(value);}
-function kdfRecord(body){
- const name=body?.kdf;
- const params=body?.kdfParams;
- if((name!=="argon2id"&&name!=="scrypt")||!params||typeof params!=="object"||Array.isArray(params))
-  throw refusal(422,"kdf_params_invalid");
- if(name==="argon2id"){
-  const keys=Object.keys(params);
-  if(keys.length!==3||!["iterations","memory","parallelism"].every(key=>keys.includes(key)))throw refusal(422,"kdf_params_invalid");
-  const {memory,iterations,parallelism}=params;
-  // Compare the integer. A 64 GiB memory value is rejected here and never allocated.
-  if(!integer(memory)||memory<ARGON_MEMORY_MIN||memory>ARGON_MEMORY_MAX)throw refusal(422,"kdf_params_invalid");
+function base64UrlBytes(value){
+ if(typeof value!=="string"||!B64URL.test(value))return -1;
+ const buf=Buffer.from(value,"base64url");
+ if(buf.toString("base64url")!==value.replace(/=+$/,""))return -1;
+ return buf.length;
+}
+function kdfRecord(kdf){
+ if(!kdf||typeof kdf!=="object"||Array.isArray(kdf))throw refusal(422,"kdf_params_invalid");
+ if(kdf.alg==="argon2id"){
+  const keys=Object.keys(kdf);
+  if(keys.length!==4||!["alg","memoryKiB","iterations","parallelism"].every(key=>keys.includes(key)))throw refusal(422,"kdf_params_invalid");
+  const {memoryKiB,iterations,parallelism}=kdf;
+  // Compare the integer. 64 GiB is 67108864 KiB and is rejected here, never allocated.
+  if(!integer(memoryKiB)||memoryKiB<ARGON_MEMORY_MIN||memoryKiB>ARGON_MEMORY_MAX)throw refusal(422,"kdf_params_invalid");
   if(!integer(iterations)||iterations<1||iterations>10)throw refusal(422,"kdf_params_invalid");
   if(!integer(parallelism)||parallelism<1||parallelism>4)throw refusal(422,"kdf_params_invalid");
-  return {kdf:"argon2id",kdfParams:{memory,iterations,parallelism}};
+  return {alg:"argon2id",memoryKiB,iterations,parallelism};
  }
- const keys=Object.keys(params);
- if(keys.length!==3||!["N","r","p"].every(key=>keys.includes(key)))throw refusal(422,"kdf_params_invalid");
- const {N,r,p}=params;
+ if(kdf.alg!=="scrypt")throw refusal(422,"kdf_params_invalid");
+ const keys=Object.keys(kdf);
+ if(keys.length!==4||!["alg","N","r","p"].every(key=>keys.includes(key)))throw refusal(422,"kdf_params_invalid");
+ const {N,r,p}=kdf;
  if(!integer(N)||N<SCRYPT_N_MIN||N>SCRYPT_N_MAX||r!==8||!integer(p)||p<1||p>4)throw refusal(422,"kdf_params_invalid");
- return {kdf:"scrypt",kdfParams:{N,r,p}};
+ return {alg:"scrypt",N,r,p};
 }
 function parseEnvelope(body){
  if(!body||typeof body!=="object"||Array.isArray(body))throw refusal(400,"invalid_envelope");
  rejectForbidden(body);
- const extra=Object.keys(body).filter(key=>key!=="version"&&key!=="wrappedKey"&&key!=="kdf"&&key!=="kdfParams");
+ if(Object.hasOwn(body,"opsLimit")||Object.hasOwn(body,"memLimit")||Object.hasOwn(body,"kdfParams"))
+  throw refusal(422,"envelope_invalid");
+ const extra=Object.keys(body).filter(key=>!ENVELOPE_KEYS.includes(key));
  if(extra.length)throw refusal(400,"invalid_envelope");
  if(!Number.isSafeInteger(body.version)||body.version<1||body.version>1_000_000_000)throw refusal(400,"invalid_envelope");
  if(!validWrappedKey(body.wrappedKey))throw refusal(400,"invalid_envelope");
- const kdf=kdfRecord(body);
- const envelope={version:body.version,wrappedKey:body.wrappedKey,...kdf};
+ const saltBytes=base64UrlBytes(body.salt);
+ const ivBytes=base64UrlBytes(body.iv);
+ if(saltBytes<16||saltBytes>64||ivBytes<12||ivBytes>32)throw refusal(422,"envelope_invalid");
+ const kdf=kdfRecord(body.kdf);
+ const envelope={version:body.version,kdf,salt:body.salt,iv:body.iv,wrappedKey:body.wrappedKey};
  if(Buffer.byteLength(JSON.stringify(envelope),"utf8")>MAX_ENVELOPE_BYTES)throw refusal(413,"payload_too_large");
  return envelope;
 }

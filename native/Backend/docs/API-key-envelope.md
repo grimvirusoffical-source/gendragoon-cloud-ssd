@@ -9,23 +9,27 @@ No wrapped key, passphrase, or customer payload belongs in logs or in this repos
 ## Record
 
 ```json
-{"version":1,"wrappedKey":"<standard base64>","kdf":"argon2id","kdfParams":{"memory":19922944,"iterations":2,"parallelism":1}}
+{"version":1,"kdf":{"alg":"argon2id","memoryKiB":19456,"iterations":2,"parallelism":1},"salt":"<base64url>","iv":"<base64url>","wrappedKey":"<standard base64>"}
 ```
 
-`version` is an integer greater than or equal to 1. It is stored on the envelope and returned in `ETag`. `wrappedKey` is standard base64 of at least 32 bytes. `kdf` and `kdfParams` are stored with them. The JSON document must be 4 KB or smaller (`413 {"error":"payload_too_large"}`).
+`version` is an integer greater than or equal to 1. It is stored on the envelope and returned in `ETag`. `wrappedKey` is standard base64 of at least 32 bytes. `kdf`, `salt`, and `iv` are stored with them. The JSON document must be 4 KB or smaller (`413 {"error":"payload_too_large"}`).
 
-`kdf` is `argon2id` or `scrypt`. Anything else, or params outside these bounds, is `422 {"error":"kdf_params_invalid"}` and nothing is written. The server compares the numbers; it does not allocate them.
+`kdf` is an object. `alg` is `argon2id` or `scrypt`. Anything else, or params outside these bounds, is `422 {"error":"kdf_params_invalid"}` and nothing is written. The server compares the numbers; it does not allocate them.
 
 | KDF | Param | Allowed |
 | --- | --- | --- |
-| `argon2id` | `memory` | 19 MiB through 1 GiB, in bytes (19922944 through 1073741824) |
+| `argon2id` | `memoryKiB` | 19 MiB through 1 GiB, in KiB (19456 through 1048576) |
 | `argon2id` | `iterations` | 1 through 10 |
 | `argon2id` | `parallelism` | 1 through 4 |
 | `scrypt` | `N` | 2^14 through 2^20 (16384 through 1048576) |
 | `scrypt` | `r` | 8 |
 | `scrypt` | `p` | 1 through 4 |
 
-A memory value of 64 GiB (68719476736) is outside the argon2id range and is refused with `422`.
+A `memoryKiB` value of 64 GiB (67108864) is outside the argon2id range and is refused with `422 {"error":"kdf_params_invalid"}`.
+
+`salt` is base64url of 16 to 64 bytes. `iv` is base64url of 12 to 32 bytes. Both are required. A missing value, a value that is not base64url, or a decoded length outside that range is `422 {"error":"envelope_invalid"}`.
+
+A top-level `opsLimit`, `memLimit`, or `kdfParams` field is `422 {"error":"envelope_invalid"}`. Those limits belong inside `kdf`.
 
 A field named like a passphrase, plaintext, or key (`passphrase`, `password`, `plaintext`, `key`, `secret`, `privateKey`, and the same kind of name) is `400 {"error":"plaintext_rejected"}`. Nothing is written.
 
@@ -38,7 +42,7 @@ Error bodies use `error` only. They do not include a `code` field.
 ## `GET /v2/workspaces/:id/key-envelope`
 
 ```json
-{"version":1,"wrappedKey":"<standard base64>","kdf":"argon2id","kdfParams":{"memory":19922944,"iterations":2,"parallelism":1}}
+{"version":1,"kdf":{"alg":"argon2id","memoryKiB":19456,"iterations":2,"parallelism":1},"salt":"<base64url>","iv":"<base64url>","wrappedKey":"<standard base64>"}
 ```
 
 The response includes `ETag: "<version>"` and `Cache-Control: private, no-store`. The ETag is the stored `version`.

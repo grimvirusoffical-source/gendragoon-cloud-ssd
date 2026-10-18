@@ -1,12 +1,14 @@
 {
   "request": {
     "body": {
-      "kdf": "argon2id",
-      "kdfParams": {
+      "iv": "AwMDAwMDAwMDAwMD",
+      "kdf": {
+        "alg": "argon2id",
         "iterations": 2,
-        "memory": 19922944,
+        "memoryKiB": 19456,
         "parallelism": 1
       },
+      "salt": "AgICAgICAgICAgICAgICAg",
       "version": 2,
       "wrappedKey": "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcH"
     },
