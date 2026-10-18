@@ -303,5 +303,7 @@ async function main(){
  await freeSlotCases();
  const deletion=spawnSync(process.execPath,[path.join(__dirname,"export_account_deletion_fixtures.js"),outDir],{encoding:"utf8"});
  if(deletion.status!==0)throw Error((deletion.stderr||"")+(deletion.stdout||"")||"account deletion fixtures failed");
+ const envelope=spawnSync(process.execPath,[path.join(__dirname,"export_key_envelope_fixtures.js"),outDir],{encoding:"utf8"});
+ if(envelope.status!==0)throw Error((envelope.stderr||"")+(envelope.stdout||"")||"key-envelope fixtures failed");
 }
 main().catch(error=>{console.error(error);process.exit(1);});

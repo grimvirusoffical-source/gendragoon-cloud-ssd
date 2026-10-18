@@ -6,6 +6,7 @@
 // Customer-owned (BYO) buckets are never called; only our record of them is
 // dropped. Firebase refresh tokens are revoked and the user is deleted last.
 const crypto=require("node:crypto");
+const {deleteAccountKeyEnvelopes}=require("./key_envelope");
 const REAUTH_SECONDS=5*60;
 const STATUS_TOKEN_TTL_MS=7*24*60*60*1000;
 const LEASE_MS=60*1000;
@@ -669,6 +670,7 @@ function createAccountDeletion({db,stripe,bucket,auth,byoProviders,hash,now,noti
  }
  async function deleteMetadata(job){
   const owner=job.accountHash;
+  await deleteAccountKeyEnvelopes(db,owner);
   const anonymizedId=crypto.createHash("sha256").update("gd-receipt-v1:"+owner).digest("hex");
   const receipt=db.collection("billing_receipts").doc(anonymizedId);
   await receipt.set({anonymizedId,stripeCustomerId:job.customerId||null,

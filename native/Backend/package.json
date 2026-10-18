@@ -5,7 +5,7 @@
   "type": "commonjs",
   "scripts": {
     "start": "node free_server.js",
-    "check": "node --check free_server.js && node --check projects.js && node --check workspace_policy.js && node --check locked_write.js && node --check billing_v2.js && node --check billing_gateway.js && node --check billing_bootstrap.js && node --check transfer_v3.js && node --check paid_storage.js && node --check account_delete.js && node --check login_gate.js && node --check v2_errors.js",
+    "check": "node --check free_server.js && node --check projects.js && node --check workspace_policy.js && node --check locked_write.js && node --check billing_v2.js && node --check billing_gateway.js && node --check billing_bootstrap.js && node --check transfer_v3.js && node --check paid_storage.js && node --check account_delete.js && node --check login_gate.js && node --check v2_errors.js && node --check key_envelope.js",
     "test": "node --test --test-concurrency=2 *.test.js",
     "fixtures": "node scripts/export_fixtures.js",
     "predeploy:check": "node scripts/predeploy_check.js",
