@@ -26,6 +26,7 @@ export const SHOTS = [
   "delete-progress",
   "delete-retry",
   "delete-dismiss",
+  "delete-not-retryable",
   "byo-hidden",
 ] as const;
 
@@ -76,6 +77,7 @@ function deleteFrame(shot: ShotId): DeletionFrame | null {
   if (shot === "delete-progress") return "progress";
   if (shot === "delete-retry") return "retry";
   if (shot === "delete-dismiss") return "dismiss";
+  if (shot === "delete-not-retryable") return "not-retryable";
   return null;
 }
 

@@ -10,7 +10,7 @@ import {
 } from "@gendragoon/core";
 import { fireEvent, render } from "@testing-library/react-native";
 import { byoServerFlowReady, connectBucket } from "../src/byoReady";
-import { ConnectStorageScreen, LockScreen, SettingsHome, WorkspacesScreen } from "../src/screens";
+import { ConnectStorageScreen, LockScreen, SettingsHome, WorkspacesScreen, lockReasonMessage } from "../src/screens";
 import { FIXTURE_SOURCE_SHA, loadFixture } from "./loadFixture";
 
 const LOCKS = [
@@ -153,12 +153,19 @@ describe("vendored cloud-ssd fixtures", () => {
     const fixture = loadFixture<LockBody>(`workspace-lock/${name}.json`);
     expect(fixture.response.status).toBe(423);
     expect(fixture.response.body.error).toBe("workspace_lock");
-    const message = `${LOCK_LEAD[name]} Over by ${fixture.response.body.overBy}.`;
+    const message = lockReasonMessage(fixture.response.body.reason, fixture.response.body.overBy);
     const others = LOCKS.filter((item) => item !== name).map((item) => LOCK_LEAD[item]);
     expect(others).not.toContain(message);
+    expect(message).not.toMatch(/Over by 0/);
+    if (name === "over-cap" || name === "over-cap-and-lapsed") {
+      expect(message).toContain("You're 1 workspace over your plan.");
+    } else {
+      expect(message).not.toMatch(/over your plan/);
+    }
     const onReview = jest.fn();
+    const onPay = jest.fn();
     const screen = await render(
-      <LockScreen workspaces={listedWorkspaces()} lock={fixture.response.body} onReview={onReview} />,
+      <LockScreen workspaces={listedWorkspaces()} lock={fixture.response.body} onReview={onReview} onPay={onPay} />,
     );
     const reason = screen.getByTestId("lock-reason");
     expect(textOf(reason)).toBe(message);
@@ -173,6 +180,25 @@ describe("vendored cloud-ssd fixtures", () => {
     }
     fireEvent.press(screen.getByTestId("review-workspaces"));
     expect(onReview).toHaveBeenCalledTimes(1);
+    const pays = name === "lapsed" || name === "over-cap-and-lapsed";
+    if (pays) expect(screen.getByTestId("pay-to-restore")).toBeTruthy();
+    else expect(screen.queryByTestId("pay-to-restore")).toBeNull();
+  });
+
+  it("pay to restore is the action for a lapsed lock", async () => {
+    const fixture = loadFixture<LockBody>("workspace-lock/lapsed.json");
+    const onPay = jest.fn();
+    const screen = await render(
+      <LockScreen workspaces={listedWorkspaces()} lock={fixture.response.body} onReview={() => undefined} onPay={onPay} />,
+    );
+    fireEvent.press(screen.getByTestId("pay-to-restore"));
+    expect(onPay).toHaveBeenCalledTimes(1);
+  });
+
+  it("omits an over-plan count unless the lock is over cap and overBy is positive", () => {
+    expect(lockReasonMessage("lapsed", 0)).toBe("A workspace payment has lapsed. Pay to restore this workspace.");
+    expect(lockReasonMessage("over_cap", 0)).toBe("This account is over the workspace cap.");
+    expect(lockReasonMessage("over_cap", 2)).toBe("This account is over the workspace cap. You're 2 workspaces over your plan.");
   });
 
   it("workspaces screen lists the server project and the monthly fee", async () => {

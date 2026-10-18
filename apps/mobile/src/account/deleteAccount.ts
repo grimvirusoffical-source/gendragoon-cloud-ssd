@@ -6,32 +6,57 @@ import {
   type GenDragoonClient,
   type SecretStore,
 } from "@gendragoon/core";
+import * as coreExports from "@gendragoon/core";
 
 /** Same SecureStore as core's deletion job. The uid is the account that started it. */
 const DELETION_UID_KEY = "account-deletion:uid";
 const DELETION_JOB_KEY = "account-deletion:job-id";
 
+type DeletionNotRetryableCtor = new (...args: never[]) => Error & { jobId: string };
+
 /**
- * Account deletion is core's deleteAccountAndWipe. The Expo SecretStore is
- * both the workspace-key store and the deletion job store.
+ * PR #1 exports `DeletionNotRetryableError` (409, carries `jobId`).
+ * Until that class exists, a 409 stays a plain `ApiError` and this is null.
  */
+export function isDeletionNotRetryableError(error: unknown): error is Error & { jobId: string } {
+  const ctor = (coreExports as { DeletionNotRetryableError?: DeletionNotRetryableCtor }).DeletionNotRetryableError;
+  if (typeof ctor !== "function" || !(error instanceof ctor)) return false;
+  return typeof error.jobId === "string" && error.jobId.length > 0;
+}
+
+/**
+ * PR #1's polling hook is `onAuthFailure(signal, error)`.
+ * Sign-out clears only the session. Polling and the progress screen stay up.
+ */
+export function clearSessionOnPollAuthFailure(signal: string, _error: unknown, clearSession: () => void): void {
+  if (signal === "sign-out") clearSession();
+}
+
+export function clientRetriesDeletion(client: object): client is { retryDeletion: () => Promise<unknown> } {
+  return typeof (client as { retryDeletion?: unknown }).retryDeletion === "function";
+}
+
 export async function deleteSignedInAccount(input: {
   client: Pick<GenDragoonClient, "deleteAccount" | "deletionStatus">;
   idToken: string;
   workspaceIds: readonly string[];
   secrets: SecretStore;
+  /** Forwarded to core once PR #1 reads `onAuthFailure` during polling. */
+  onAuthFailure?: (signal: string, error: unknown) => void;
 }) {
   const uid = accountUidFromIdToken(input.idToken);
   if (uid) await input.secrets.set(DELETION_UID_KEY, new TextEncoder().encode(uid));
   try {
-    const status = await deleteAccountAndWipe({
+    const request: Parameters<typeof deleteAccountAndWipe>[0] = {
       client: input.client,
       reauthenticatedAt: "",
       idToken: input.idToken,
       workspaceIds: input.workspaceIds,
       secrets: input.secrets,
       secureStore: input.secrets,
-    });
+    };
+    if (input.onAuthFailure) Object.assign(request, { onAuthFailure: input.onAuthFailure });
+    const status = await deleteAccountAndWipe(request);
     if (status.status === "done") {
       await input.secrets.delete(DELETION_UID_KEY);
     }

@@ -14,6 +14,7 @@ import { NavigationContainer, createNavigationContainerRef } from "@react-naviga
 import { createBottomTabNavigator } from "@react-navigation/bottom-tabs";
 import { createNativeStackNavigator } from "@react-navigation/native-stack";
 import { useEffect, useMemo, useState } from "react";
+import { Linking } from "react-native";
 import { StatusBar } from "expo-status-bar";
 import { SafeAreaProvider } from "react-native-safe-area-context";
 import {
@@ -28,6 +29,7 @@ import {
   WorkspacesScreen,
 } from "./src/screens";
 import { sessionTokenAfterAuthFailure } from "./src/account/session";
+import { payToRestore } from "./src/billing";
 import { byoServerFlowReady } from "./src/byoReady";
 import { ENCRYPTED_WORKSPACE_ENABLED } from "./src/flags";
 import { createExpoSecureStore } from "./src/platform/secureStore";
@@ -197,6 +199,9 @@ export function MobileRoot(props: {
             setIdToken((token) => sessionTokenAfterAuthFailure("sign-out", token));
             if (navigationRef.isReady()) navigationRef.navigate("SignIn");
           }}
+          onClearSession={() => {
+            setIdToken((token) => sessionTokenAfterAuthFailure("sign-out", token));
+          }}
           onDone={() => {
             if (navigationRef.isReady()) navigationRef.navigate("SignIn");
           }}
@@ -279,6 +284,16 @@ export function MobileRoot(props: {
             onReview={() => {
               setTab("Workspaces");
               navigationRef.navigate("Main");
+            }}
+            onPay={() => {
+              const checkout = "checkoutWorkspaceFee" in client
+                ? (id: string) => client.checkoutWorkspaceFee(id)
+                : undefined;
+              void payToRestore({
+                unpaidWorkspaceIds: access.unpaidIds,
+                checkoutWorkspaceFee: checkout,
+                openUrl: (url) => Linking.openURL(url),
+              }).catch(() => undefined);
             }}
           />
         )}
