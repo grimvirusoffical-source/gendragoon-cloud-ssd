@@ -2,7 +2,8 @@
 const crypto=require("node:crypto");
 const {STORAGE,PERFORMANCE,validateWorkspaceName}=require("./catalog");
 const {GPU,GPU_READY,gpuQuote,tripleBundleQuote}=require("./gpu_catalog");
-const {createProjectService,ProjectError,projectStatus,activatedBasicProject,effectiveStorageQuota,safeProjectId,hasContinuingBilling}=require("./projects");
+const {createProjectService,ProjectError,projectStatus,activatedBasicProject,effectiveStorageQuota,safeProjectId,hasContinuingBilling,isGrandfathered,evaluateLapse}=require("./projects");
+const {rejectProviderSecrets}=require("./workspace_policy");
 const FREE_GB=2,FREE_WORKERS=1,REMOVE_ADS_CENTS=499;
 const VALID_INTERVALS=new Set(["month","year"]);
 const ACTIVE_STATUSES=new Set(["active","trialing"]);
@@ -76,6 +77,9 @@ function registerBillingV2({app,db,stripe,admin,auth,agreed,hash,prices,env=proc
    provisioned:w.data.provisioned===true||(w.data.kind==="free"&&w.data.provisioned!==false),
    projectStatus:projectStatus(w.data),projectBillingVersion:w.data.projectBillingVersion||1,
    projectFeeStatus:w.data.projectFeeStatus||"legacy",projectFeeCents:w.data.projectFeeCents||0,
+   grandfathered:isGrandfathered(w.data),lapsed:evaluateLapse(w.data).lapsed,
+   workspaceFeeModel:w.data.workspaceFeeModel||(isGrandfathered(w.data)?"one_time":null),
+   byoChallengeVerified:w.data.byoChallengeVerified===true,
    intendedSelection:w.data.intendedSelection||{},dataRetained:w.data.dataRetained===true,
    hasContinuingBilling:hasContinuingBilling(w.data),transferEligible:effectiveStorageQuota(w.data)>0};
  }
@@ -113,7 +117,7 @@ function registerBillingV2({app,db,stripe,admin,auth,agreed,hash,prices,env=proc
    currency:"usd",catalogVersion:2,
    free:{storageGB:FREE_GB,workers:FREE_WORKERS,monthlyCents:0},
    workspaceFeeMonthlyCents:0,legacyWorkspaceFeeMonthlyCents:500,
-   projects:{firstFree:true,additionalOneTimeCents:500,defaultLimit:10,qualifiedLimit:20,
+   projects:{firstFree:true,additionalOneTimeCents:500,workspaceMonthlyCents:500,feeIsOneTime:false,freeWorkspaces:1,defaultLimit:10,qualifiedLimit:20,
      qualifyingStorageTier:"2TB",qualifyingPerformanceTier:"turbo",qualifyingWorkers:8,
      qualificationLabel:"2 TB storage AND Turbo (8 workers) or higher on the same active project; equivalent bundles qualify",
      paymentAvailable:projects.paymentAvailable(),archiveRetainsData:true},
@@ -172,6 +176,19 @@ function registerBillingV2({app,db,stripe,admin,auth,agreed,hash,prices,env=proc
  });
  app.post("/v2/projects/:id/restore",auth,agreed,async(req,res)=>{
    try{res.json(await projects.restore(req,req.params.id));}catch(error){projectError(res,error);}
+ });
+ app.post("/v2/workspaces/:id/merge",auth,agreed,async(req,res)=>{
+   try{res.json(await projects.merge(req,req.params.id,{targetId:req.body?.targetId,confirmName:req.body?.confirmName}));}
+   catch(error){projectError(res,error);}
+ });
+ app.post("/v2/workspaces/:id/byo/register",auth,agreed,async(req,res)=>{
+   try{res.json(await projects.registerByo(req,req.params.id,req.body||{}));}catch(error){projectError(res,error);}
+ });
+ app.post("/v2/workspaces/:id/byo/challenge",auth,agreed,async(req,res)=>{
+   try{res.json(await projects.issueByoChallenge(req,req.params.id));}catch(error){projectError(res,error);}
+ });
+ app.post("/v2/workspaces/:id/byo/verify",auth,agreed,async(req,res)=>{
+   try{res.json(await projects.verifyByo(req,req.params.id,req.body||{}));}catch(error){projectError(res,error);}
  });
  app.post("/v2/workspaces/free",auth,agreed,async(req,res)=>{
    try{
@@ -262,6 +279,7 @@ function registerBillingV2({app,db,stripe,admin,auth,agreed,hash,prices,env=proc
    try{
      const w=await getWorkspace(req,res);if(!w)return;
      if(!["byo","paid","free"].includes(w.data.kind)||projectStatus(w.data)==="archived")return res.status(409).json({error:"An available project is required"});
+     try{rejectProviderSecrets(req.body||{});}catch(error){return res.status(400).json({error:error.message,code:error.code||"BYO_SECRET_REJECTED"});}
      const provider=String(req.body?.provider||"").trim().toLowerCase();
      const label=String(req.body?.label||"").trim();
      if(!["s3","gcs","r2","b2","sftp","webdav","google-drive","onedrive","other"].includes(provider)||

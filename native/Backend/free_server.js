@@ -11,7 +11,7 @@ const {Firestore,FieldValue}=require("@google-cloud/firestore");
 const {Storage}=require("@google-cloud/storage");
 const {TransferGovernor}=require("./free_performance");
 const {installedBilling}=require("./billing_gateway");
-const {createProjectService,ProjectError}=require("./projects");
+const {createProjectService,ProjectError,listAccountProjects,summarizeProjects,lockBody}=require("./projects");
 const {effectiveStorageQuota,effectiveWorkers}=require("./billing_v2");
 const apiKeys=require("./api_keys");
 const required=["CUSTOMER_BUCKET","STORAGE_PROJECT_ID"];
@@ -95,9 +95,20 @@ async function currentWorkspace(req,res){
  const doc=await req.workspaceRef.get();
  if(!doc.exists){res.status(404).json({error:"Create free workspace first"});return null}
  const w=doc.data();
- if(w.accountKey!==accountKey(req.user.uid)||w.kind!=="free"){res.status(403).json({error:"Workspace access denied"});return null}
+ if(w.accountKey!==accountKey(req.user.uid)){res.status(404).json({error:"Workspace not found"});return null}
+ if(w.kind!=="free"){res.status(403).json({error:"Workspace access denied"});return null}
  if(effectiveStorageQuota(w)<=0){res.status(403).json({error:"This project is not active. Restore or activate it in Projects."});return null}
  return w;
+}
+async function lockedWrite(req,res){
+ try{
+  const listed=await listAccountProjects(db,accountKey(req.user.uid));
+  if(!listed)return false;
+  const summary=summarizeProjects(listed);
+  if(!summary.locked)return false;
+  res.status(423).json(lockBody(summary));
+  return true;
+ }catch(_){res.status(503).json({error:"Workspace policy unavailable"});return true;}
 }
 async function runFreeTransfer(req,workspace,action){
  return governor.run(accountKey(req.user.uid),workspace,async()=>{
@@ -173,6 +184,7 @@ app.get("/v1/files",auth,requireRead,async(req,res)=>{
 });
 app.post("/v1/uploads",auth,requireWrite,express.json({limit:"4kb"}),async(req,res)=>{
  try{
+   if(await lockedWrite(req,res))return;
    const name=safeName(req.body?.name),size=req.body?.sizeBytes;
    if(!Number.isSafeInteger(size)||size<1||size>QUOTA)return res.status(400).json({error:"Invalid size"});
    await cleanupExpired(req);
@@ -205,6 +217,7 @@ app.put("/v1/uploads/:id/chunks/:index",auth,requireWrite,async(req,res)=>{
    return res.status(400).json({error:"Invalid chunk"});
  const ref=req.workspaceRef.collection("uploads").doc(id);
  try{
+   if(await lockedWrite(req,res))return;
    const workspace=await currentWorkspace(req,res);if(!workspace)return;
    const snap=await ref.get();
    if(!snap.exists||snap.data().status!=="active")return res.status(404).json({error:"Unknown upload"});
@@ -245,6 +258,7 @@ app.post("/v1/uploads/:id/finalize",auth,requireWrite,async(req,res)=>{
  const id=req.params.id;if(!validID(id))return res.status(400).end();
  const ref=req.workspaceRef.collection("uploads").doc(id);
  try{
+   if(await lockedWrite(req,res))return;
    const workspace=await currentWorkspace(req,res);if(!workspace)return;
    const snap=await ref.get();
    if(!snap.exists)return res.status(404).end();

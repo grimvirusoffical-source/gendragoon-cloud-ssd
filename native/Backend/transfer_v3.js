@@ -4,6 +4,7 @@
 const express=require("express"),crypto=require("node:crypto");
 const {effectiveWorkers,effectiveStorageQuota}=require("./billing_v2");
 const {scopeFromWorkspace,safeName}=require("./paid_storage");
+const {listAccountProjects,summarizeProjects,lockBody}=require("./projects");
 const {sendObject}=require("./range_download");
 const {nativeProfile}=require("./performance");
 const CHUNK=8*1024*1024,FREE_QUOTA=2_000_000_000,MAX_FILE=5*1024**4;
@@ -74,13 +75,21 @@ function registerTransferV3({app,db,bucket,firebaseAuth,accountKey,FieldValue,ap
    db.collection("gd_accounts").doc(hash).collection("workspaces").doc(id);
   const snap=await ref.get();if(!snap.exists)throw problem(404,"Workspace not found");
   const w=snap.data();let quota,prefix,governor,key;
+  let listed=null;
+  try{listed=await listAccountProjects(db,hash);}catch(_){throw problem(503,"Workspace policy unavailable");}
+  const summary=Array.isArray(listed)?summarizeProjects(listed):null;
+  if(summary&&summary.locked&&!["GET","HEAD","DELETE"].includes(req.method)){
+   const error=problem(423,"workspace_lock");error.lock=lockBody(summary);throw error;
+  }
   if(id==="free"){
-   if(w.kind!=="free"||w.accountKey!==hash||w.provisioned!==true)throw problem(403,"Free workspace unavailable");
+   if(w.accountKey!==hash)throw problem(404,"Workspace not found");
+   if(w.kind!=="free"||w.provisioned!==true)throw problem(403,"Free workspace unavailable");
    quota=effectiveStorageQuota(w);
    if(quota<=0)throw problem(403,"Project is archived or unavailable");
    prefix="customer/"+hash+"/free";governor=freeGovernor;key=hash;
   }else{
-   const scope=scopeFromWorkspace(w,hash,id);if(!scope)throw problem(403,"Active provisioned storage required");
+   if(w.accountHash!==hash)throw problem(404,"Workspace not found");
+   const scope=scopeFromWorkspace(w,hash,id,listed||undefined);if(!scope)throw problem(403,"Active provisioned storage required");
    quota=scope.limit;prefix=scope.prefix;governor=paidGovernor;key=hash+"-"+id;
   }
   return {id,hash,ref,workspace:w,quota,prefix,governor,key};
@@ -96,6 +105,7 @@ function registerTransferV3({app,db,bucket,firebaseAuth,accountKey,FieldValue,ap
  function route(method,path,fn){router[method](path,async(req,res)=>{
   try{await fn(req,res);}catch(error){
    if(res.headersSent)return res.destroy();
+   if(error.status===423&&error.lock)return res.status(423).json(error.lock);
    const status=error.status||(/Too many/.test(error.message)?429:503);
    if(status===429||status===503)res.set("Retry-After","2");
    res.status(status).json({error:error.status?error.message:"Transfer unavailable; retry safely"});

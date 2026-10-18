@@ -7,7 +7,8 @@
 const crypto=require("node:crypto");
 const express=require("express");
 const {pipeline}=require("node:stream/promises");
-const {effectiveStorageQuota}=require("./projects");
+const {effectiveStorageQuota,listAccountProjects}=require("./projects");
+const {summarizeProjects,lockBody,projectsInSameIndex}=require("./workspace_policy");
 const {TransferGovernor}=require("./performance");
 const CHUNK=8*1024*1024,MAX_SINGLE_FILE=2_000_000_000,MAX_CHUNKS=Math.ceil(MAX_SINGLE_FILE/CHUNK);
 const UUID=/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
@@ -17,13 +18,18 @@ function safeName(name){
  if(!n||n.length>150||n==="."||n===".."||/[\\/\x00-\x1f]/.test(n))throw Error("Invalid file name");
  return n;
 }
-function scopeFromWorkspace(workspace,accountHash,id){
+function scopeFromWorkspace(workspace,accountHash,id,accountProjects){
  if(!UUID.test(id)||workspace?.kind!=="paid"||workspace.accountHash!==accountHash||
     effectiveStorageQuota(workspace)<=0)return null;
+ const projects=Array.isArray(accountProjects)?accountProjects:projectsInSameIndex(workspace,accountHash);
+ const summary=projects&&projects.length?summarizeProjects(projects):null;
+ const blocked=!!(summary&&summary.uploadsBlocked);
  return {
   prefix:"customer/"+accountHash+"/managed/"+id,
   limit:effectiveStorageQuota(workspace),
-  workers:workspace.performanceActive?workspace.performanceTier:null
+  workers:workspace.performanceActive?workspace.performanceTier:null,
+  uploadsBlocked:blocked,
+  ...(blocked?{lock:lockBody(summary)}:{})
  };
 }
 function registerPaidStorage({app,db,bucket,firebaseAuth,accountKey,FieldValue,apiKeys,getAuth}){
@@ -55,9 +61,14 @@ function registerPaidStorage({app,db,bucket,firebaseAuth,accountKey,FieldValue,a
    const ref=db.collection("gd_accounts").doc(userHash).collection("workspaces").doc(id);
    const snap=await ref.get();
    if(!snap.exists)return res.status(404).json({error:"Workspace not found"});
-   const info=scopeFromWorkspace(snap.data(),userHash,id);
+   if(snap.data().accountHash!==userHash)return res.status(404).json({error:"Workspace not found"});
+   let listed=null;
+   try{listed=await listAccountProjects(db,userHash);}catch(_){return res.status(503).json({error:"Workspace policy unavailable"});}
+   const info=scopeFromWorkspace(snap.data(),userHash,id,listed||undefined);
    if(!info)return res.status(403).json({error:"An active, provisioned project is required"});
-   req.paid={ref,workspace:snap.data(),...info};
+   if(info.uploadsBlocked&&req.method!=="GET"&&req.method!=="HEAD"&&req.method!=="DELETE")
+     return res.status(423).json(info.lock);
+   req.paid={ref,workspace:snap.data(),...info,accountProjects:listed};
    next();
   }catch(_){res.status(503).json({error:"Paid workspace unavailable"})}
  },router);
@@ -117,15 +128,19 @@ function registerPaidStorage({app,db,bucket,firebaseAuth,accountKey,FieldValue,a
    await db.runTransaction(async tx=>{
     const snap=await tx.get(w(req));
     if(!snap.exists)return Promise.reject(Error("MISSING"));
-    const cur=scopeFromWorkspace(snap.data(),accountKey(req.user.uid),req.params.workspaceId);
+    const cur=scopeFromWorkspace(snap.data(),accountKey(req.user.uid),req.params.workspaceId,req.paid.accountProjects||undefined);
     if(!cur)throw Error("NOT_ACTIVE");
+    if(cur.uploadsBlocked)throw Object.assign(Error("WORKSPACE_LOCK"),{status:423,lock:cur.lock});
     if((snap.data().usedBytes||0)+(snap.data().reservedBytes||0)+size>cur.limit)throw Error("QUOTA");
     tx.update(w(req),{reservedBytes:FieldValue.increment(size)});
     tx.create(ref,{name,sizeBytes:size,status:"active",nextIndex:0,uploadedBytes:0,
       createdAt:FieldValue.serverTimestamp()});
    });
    res.status(201).json({uploadId:id,chunkBytes:CHUNK,totalChunks:Math.ceil(size/CHUNK)});
-  }catch(error){res.status(error.message==="QUOTA"?413:409).json({error:"Storage unavailable or quota exceeded"})}
+  }catch(error){
+   if(error.status===423)return res.status(423).json(error.lock||{error:"workspace_lock",reason:"over_cap",overBy:0,unpaidWorkspaceIds:[]});
+   res.status(error.message==="QUOTA"?413:409).json({error:"Storage unavailable or quota exceeded"});
+  }
  });
  router.get("/uploads/:uploadId",async(req,res)=>{
   if(!UUID.test(req.params.uploadId))return res.status(400).end();

@@ -3,24 +3,19 @@
 // a Google Cloud project, a bucket, a file record, or an object.
 const crypto=require("node:crypto");
 const {STORAGE,PERFORMANCE,validateWorkspaceName}=require("./catalog");
-const PROJECT_FEE_CENTS=500,DEFAULT_PROJECT_LIMIT=10,QUALIFIED_PROJECT_LIMIT=20;
-const QUALIFYING_STORAGE_GB=2000,QUALIFYING_WORKERS=8,BASIC_QUOTA_BYTES=2_000_000_000;
+const policy=require("./workspace_policy");
+const {FREE_WORKSPACES,WORKSPACE_FEE_CENTS,BASE_CAP,RAISED_CAP,QUALIFYING_STORAGE_GB,QUALIFYING_WORKERS,
+ monthlyPriceId,registerWorkspaceIndex,isGrandfathered,evaluateLapse,projectStatus,activatedBasicProject,
+ qualifiesForRaisedCap:qualifiesForHigherLimit,summarizeProjects,lockBody,publicByoRegistration,rejectProviderSecrets,
+ issueChallenge,verifyChallenge,collisionName,fileDigest,listAccountProjects}=policy;
+const PROJECT_FEE_CENTS=WORKSPACE_FEE_CENTS,DEFAULT_PROJECT_LIMIT=BASE_CAP,QUALIFIED_PROJECT_LIMIT=RAISED_CAP;
+const BASIC_QUOTA_BYTES=2_000_000_000;
 const UUID=/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
 const INTENT=/^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i;
 class ProjectError extends Error {
  constructor(status,message,code="PROJECT_UNAVAILABLE"){super(message);this.status=status;this.code=code;}
 }
 function safeProjectId(id){return id==="free"||(typeof id==="string"&&UUID.test(id));}
-function projectStatus(w){
- if(w.projectStatus)return w.projectStatus;
- if(w.kind==="free"&&w.provisioned!==false)return "active";
- if(w.storageActive&&w.provisioned||w.kind==="byo"&&w.byoActive&&w.manualProviderConfigured)return "active";
- return "pending_activation";
-}
-function activatedBasicProject(w){
- return w.projectBillingVersion===2&&w.projectStatus==="active"&&
-   ["free","paid","owner"].includes(w.projectFeeStatus)&&w.provisioned===true;
-}
 function effectiveStorageQuota(w){
  if(!w||["archived","pending_payment","payment_revoked","payment_confirmed_pending_capacity"].includes(projectStatus(w)))return 0;
  if(w.kind==="free"&&w.provisioned!==false){
@@ -31,28 +26,23 @@ function effectiveStorageQuota(w){
  if(w.storageActive===true&&Object.hasOwn(STORAGE,w.storageTier||""))return STORAGE[w.storageTier].gb*1e9;
  return activatedBasicProject(w)?BASIC_QUOTA_BYTES:0;
 }
-function qualifiesForHigherLimit(w){
- if(projectStatus(w)!=="active"||w.storageActive!==true||w.provisioned!==true||
-    !Object.hasOwn(STORAGE,w.storageTier||"")||STORAGE[w.storageTier].gb<QUALIFYING_STORAGE_GB)return false;
- if(w.projectBillingVersion===2&&!activatedBasicProject(w))return false;
- const extra=w.performanceActive===true&&Object.hasOwn(PERFORMANCE,w.performanceTier||"")?PERFORMANCE[w.performanceTier].workers:0;
- const bundled=w.storageMode==="bundle"?Math.min(24,Math.max(2,Math.floor(STORAGE[w.storageTier].gb/250))):0;
- return Math.max(extra,bundled)>=QUALIFYING_WORKERS;
-}
 function policyFor(account,projects,{ownerBenefits=false,paymentAvailable=false}={}){
- const current=projects.filter(w=>projectStatus(w)!=="archived");
- const qualified=current.some(qualifiesForHigherLimit);
+ const summary=summarizeProjects(projects);
  const freeClaimed=account.freeProjectClaimed===true||projects.length>0;
  return {firstProjectFree:true,freeProjectClaimed:freeClaimed,freeProjectAvailable:!freeClaimed,
-   newProjectOneTimeCents:PROJECT_FEE_CENTS,currency:"usd",feeIsOneTime:true,
+   newProjectOneTimeCents:PROJECT_FEE_CENTS,workspaceMonthlyCents:WORKSPACE_FEE_CENTS,freeWorkspaces:FREE_WORKSPACES,
+   currency:"usd",feeIsOneTime:false,
    defaultLimit:DEFAULT_PROJECT_LIMIT,qualifiedLimit:QUALIFIED_PROJECT_LIMIT,
    qualifyingStorageTier:"2TB",qualifyingStorageGB:QUALIFYING_STORAGE_GB,
    qualifyingPerformanceTier:"turbo",qualifyingWorkers:QUALIFYING_WORKERS,
    qualificationLabel:"2 TB or more storage AND Turbo (8 workers) or higher on the same active project; equivalent bundles qualify",
-   qualifiesForHigherLimit:qualified,projectLimit:qualified?QUALIFIED_PROJECT_LIMIT:DEFAULT_PROJECT_LIMIT,
-   usedProjectSlots:current.length,activeProjects:current.filter(w=>projectStatus(w)==="active").length,
-   pendingProjects:current.filter(w=>projectStatus(w)!=="active").length,
-   archivedProjects:projects.length-current.length,ownerFeeWaived:ownerBenefits,paymentAvailable};
+   qualifiesForHigherLimit:summary.qualified,projectLimit:summary.projectLimit,
+   usedProjectSlots:summary.used,activeProjects:summary.active,
+   pendingProjects:summary.pending,
+   archivedProjects:summary.archived,grandfatheredProjects:summary.grandfatheredProjects,
+   ownerFeeWaived:ownerBenefits,paymentAvailable,
+   locked:summary.locked,uploadsBlocked:summary.uploadsBlocked,overBy:summary.overBy,
+   unpaidWorkspaceIds:summary.unpaidWorkspaceIds,reason:summary.reason};
 }
 function validateSelection(raw){
  if(!raw||Array.isArray(raw)||typeof raw!=="object")throw new ProjectError(400,"Choose a valid plan selection","INVALID_SELECTION");
@@ -72,7 +62,8 @@ function validateSelection(raw){
 }
 function hasContinuingBilling(w){return ["storage","performance","byo"].some(k=>w[k+"SubscriptionId"]&&!["canceled","incomplete_expired"].includes(w[k+"Status"]));}
 
-function createProjectService({db,stamp,hash,stripe,env={},prices={},ensureCustomer}){
+function createProjectService({db,stamp,hash,stripe,env={},prices={},ensureCustomer,objectStore=null}){
+ registerWorkspaceIndex(db);
  const accounts=db.collection("gd_accounts");
  const accountRef=owner=>accounts.doc(owner);
  const collection=owner=>accountRef(owner).collection("workspaces");
@@ -83,7 +74,12 @@ function createProjectService({db,stamp,hash,stripe,env={},prices={},ensureCusto
  }
  function owned(data,owner,id){return !!data&&(id==="free"?data.accountKey===owner:data.accountHash===owner);}
  function configuredPrice(){return env.STRIPE_PROJECT_CREATION_PRICE_ID||prices["one_time|project_creation"]||null;}
- function paymentAvailable(){return env.STRIPE_CHECKOUT_ENABLED==="true"&&env.STRIPE_PROJECT_CHECKOUT_READY==="true"&&/^price_[A-Za-z0-9]+$/.test(configuredPrice()||"");}
+ function configuredMonthlyPrice(){return monthlyPriceId(env,prices);}
+ function monthlyReady(){return env.STRIPE_CHECKOUT_ENABLED==="true"&&env.STRIPE_WORKSPACE_MONTHLY_READY==="true"&&!!configuredMonthlyPrice();}
+ function legacyPaymentAvailable(){return env.STRIPE_CHECKOUT_ENABLED==="true"&&env.STRIPE_PROJECT_CHECKOUT_READY==="true"&&/^price_[A-Za-z0-9]+$/.test(configuredPrice()||"");}
+ // A configured recurring price replaces the legacy one-time fee for new workspaces.
+ // When that price is absent, the existing one-time readiness path stays available.
+ function paymentAvailable(){return configuredMonthlyPrice()?monthlyReady():legacyPaymentAvailable();}
  async function snapshot(owner,tx=null){
    const read=ref=>tx?tx.get(ref):ref.get();
    const [account,docs,legacy]=await Promise.all([read(accountRef(owner)),read(collection(owner).limit(201)),read(legacyRef(owner))]);
@@ -92,7 +88,7 @@ function createProjectService({db,stamp,hash,stripe,env={},prices={},ensureCusto
    if(legacy.exists&&owned(legacy.data(),owner,"free"))records.push({id:"free",ref:legacy.ref||legacyRef(owner),data:legacy.data()});
    return {account:account.data()||{},records};
  }
- function policy(state,req){return policyFor(state.account,state.records.map(w=>w.data),{ownerBenefits:req.ownerBenefits===true,paymentAvailable:paymentAvailable()});}
+ function policy(state,req){return policyFor(state.account,state.records.map(w=>({...w.data,id:w.id})),{ownerBenefits:req.ownerBenefits===true,paymentAvailable:paymentAvailable()});}
  function touch(tx,owner,state,extra={}){
    tx.set(accountRef(owner),{freeProjectClaimed:state.account.freeProjectClaimed===true||state.records.length>0,
      projectPolicyVersion:2,projectRevision:(state.account.projectRevision||0)+1,projectUpdatedAt:stamp(),...extra},{merge:true});
@@ -100,8 +96,8 @@ function createProjectService({db,stamp,hash,stripe,env={},prices={},ensureCusto
  async function inventory(req){const state=await snapshot(hash(req.user.uid));return {...state,policy:policy(state,req)};}
  async function get(req,id){
    const owner=hash(req.user.uid),ref=refFor(owner,id),snap=await ref.get();
-   if(!snap.exists)throw new ProjectError(404,"Project not found","PROJECT_NOT_FOUND");
-   if(!owned(snap.data(),owner,id))throw new ProjectError(403,"Project access denied","PROJECT_FORBIDDEN");
+   // A foreign accountHash is not distinguishable from a missing workspace.
+   if(!snap.exists||!owned(snap.data(),owner,id))throw new ProjectError(404,"Project not found","PROJECT_NOT_FOUND");
    return {id,ref,data:snap.data()};
  }
  async function create(req,{name,intentId,legacyFree=false,selection=null}={}){
@@ -120,9 +116,13 @@ function createProjectService({db,stamp,hash,stripe,env={},prices={},ensureCusto
      if(p.usedProjectSlots>=p.projectLimit)throw new ProjectError(409,"Project limit reached ("+p.projectLimit+"). Archive a project or qualify with 2 TB storage and Turbo performance.","PROJECT_LIMIT_REACHED");
      if(legacyFree&&!p.freeProjectAvailable)throw new ProjectError(409,"The lifetime free project has already been claimed. Create an additional project for $5 once.","FREE_PROJECT_ALREADY_CLAIMED");
      const feeStatus=req.ownerBenefits===true?"owner":p.freeProjectAvailable?"free":"pending";
-     if(feeStatus==="pending"&&!p.paymentAvailable)throw new ProjectError(503,"The $5 one-time project activation price is not configured. Your existing projects remain available.","PROJECT_PAYMENT_UNAVAILABLE");
+     if(feeStatus==="pending"&&!p.paymentAvailable)throw new ProjectError(503,configuredMonthlyPrice()
+       ?"The $5 monthly workspace price is not configured. Your existing workspaces remain available."
+       :"The $5 one-time project activation price is not configured. Your existing projects remain available.","PROJECT_PAYMENT_UNAVAILABLE");
+     const recurring=feeStatus==="pending"&&monthlyReady();
      const data={name,kind:legacyFree?"free":"paid",accountHash:owner,...(legacyFree?{accountKey:owner}:{}),
        projectBillingVersion:2,projectStatus:feeStatus==="pending"?"pending_payment":"active",projectFeeStatus:feeStatus,
+       ...(recurring?{workspaceFeeModel:"monthly",feeIsOneTime:false,workspaceFeeStatus:"pending",workspaceFeeCents:WORKSPACE_FEE_CENTS}:{}),
        projectFeeCents:feeStatus==="pending"?PROJECT_FEE_CENTS:0,storageBillingVersion:2,
        storageTier:null,storageMode:"standard",storageInterval:"month",storageActive:false,
        performanceTier:null,performanceActive:false,byoActive:false,manualProviderConfigured:false,
@@ -171,8 +171,41 @@ function createProjectService({db,stamp,hash,stripe,env={},prices={},ensureCusto
      throw new ProjectError(503,"Project activation requires an active one-time USD $5 Price in the configured Stripe environment","PROJECT_PRICE_MISMATCH");
    return id;
  }
+ async function verifiedMonthlyPrice(){
+   if(!monthlyReady())throw new ProjectError(503,"The $5 monthly workspace price is not configured","PROJECT_PAYMENT_UNAVAILABLE");
+   const id=configuredMonthlyPrice(),price=await stripe.prices.retrieve(id,{expand:["product"]});
+   if(price.id!==id||price.active!==true||price.type!=="recurring"||price.recurring?.interval!=="month"||price.currency!=="usd"||
+     price.unit_amount!==WORKSPACE_FEE_CENTS||price.billing_scheme!=="per_unit"||price.product?.deleted||price.product?.active!==true||
+     (env.STRIPE_ENVIRONMENT&&price.livemode!==(env.STRIPE_ENVIRONMENT==="live")))
+     throw new ProjectError(503,"Workspace fee requires an active recurring USD $5 monthly Price in the configured Stripe environment","PROJECT_PRICE_MISMATCH");
+   return id;
+ }
+ async function checkoutMonthly(req,w){
+   const id=w.id;
+   if(["active","paid","trialing"].includes(w.data.workspaceFeeStatus)&&w.data.workspaceFeePaid!==false)
+     return {workspaceId:id,alreadyActivated:true,message:"The monthly workspace fee is already current."};
+   const state=await inventory(req);
+   if(state.policy.usedProjectSlots>state.policy.projectLimit)throw new ProjectError(409,"Archive projects before paying: the current account limit is "+state.policy.projectLimit,"PROJECT_LIMIT_REACHED");
+   const price=await verifiedMonthlyPrice(),customer=await ensureCustomer(req),origin=new URL(env.PUBLIC_URL);
+   if(origin.protocol!=="https:")throw new ProjectError(503,"HTTPS Checkout return address required");
+   const priorId=w.data.workspaceFeeCheckoutSessionId;
+   if(priorId){
+     const prior=await stripe.checkout.sessions.retrieve(priorId);
+     if(prior.status==="open"&&prior.url)return {url:prior.url,workspaceId:id,workspaceMonthlyCents:WORKSPACE_FEE_CENTS,resumed:true};
+     if(prior.status!=="expired")throw new ProjectError(409,"Your workspace payment is being verified. Refresh before retrying.","PAYMENT_PENDING");
+   }
+   const metadata={kind:"workspace_fee",accountHash:hash(req.user.uid),workspaceId:id};
+   const session=await stripe.checkout.sessions.create({mode:"subscription",customer,client_reference_id:id,
+     line_items:[{price,quantity:1}],metadata,subscription_data:{metadata},
+     success_url:origin.origin+"/billing/success?session_id={CHECKOUT_SESSION_ID}",cancel_url:origin.origin+"/billing/cancel"
+   },{idempotencyKey:"gd-workspace-fee-"+hash(req.user.uid)+"-"+id+"-"+(priorId||"first")});
+   await w.ref.update({workspaceFeeCheckoutSessionId:session.id,workspaceFeePriceId:price,workspaceFeeModel:"monthly",
+     feeIsOneTime:false,workspaceFeeStatus:"pending",projectStatus:"pending_payment",projectFeeStatus:"pending",updatedAt:stamp()});
+   return {url:session.url,workspaceId:id,workspaceMonthlyCents:WORKSPACE_FEE_CENTS};
+ }
  async function checkout(req,id){
    return withLease(req,id,async w=>{
+     if(w.data.workspaceFeeModel==="monthly")return checkoutMonthly(req,w);
      if(w.data.projectBillingVersion!==2)throw new ProjectError(409,"This existing project uses legacy billing","LEGACY_PROJECT");
      if(["free","paid","owner"].includes(w.data.projectFeeStatus))return {workspaceId:id,alreadyActivated:true,message:"The project activation fee is already covered."};
      const state=await inventory(req);
@@ -321,9 +354,181 @@ function createProjectService({db,stamp,hash,stripe,env={},prices={},ensureCusto
      return true;
    });
  }
+ async function listFiles(ref){
+   const snap=await ref.collection("files").get();
+   return snap.docs.map(d=>({id:d.id,ref:d.ref,data:d.data()}));
+ }
+ async function registerByo(req,id,body){
+   let registration;
+   try{registration=publicByoRegistration(body);}catch(error){
+     if(error.status)throw new ProjectError(error.status,error.message,error.code);throw error;
+   }
+   const owner=hash(req.user.uid),ref=refFor(owner,id);
+   return db.runTransaction(async tx=>{
+     const snap=await tx.get(ref);
+     if(!snap.exists||!owned(snap.data(),owner,id))throw new ProjectError(404,"Project not found","PROJECT_NOT_FOUND");
+     const patch={providerType:registration.providerType,endpoint:registration.endpoint,
+       bucketFingerprint:registration.bucketFingerprint,byoRegistered:true,updatedAt:stamp()};
+     tx.update(ref,patch);return patch;
+   });
+ }
+ async function issueByoChallenge(req,id){
+   const owner=hash(req.user.uid),ref=refFor(owner,id),challenge=issueChallenge(Date.now());
+   await db.runTransaction(async tx=>{
+     const snap=await tx.get(ref);
+     if(!snap.exists||!owned(snap.data(),owner,id))throw new ProjectError(404,"Project not found","PROJECT_NOT_FOUND");
+     if(!snap.data().providerType)throw new ProjectError(409,"Register the provider before requesting a challenge","BYO_NOT_REGISTERED");
+     tx.update(ref,{byoChallenge:challenge,byoChallengeVerified:false,updatedAt:stamp()});
+   });
+   return {nonce:challenge.nonce,expiresAtMs:challenge.expiresAtMs,ttlMs:policy.BYO_CHALLENGE_TTL_MS};
+ }
+ async function verifyByo(req,id,body){
+   try{rejectProviderSecrets(body||{});}catch(error){throw new ProjectError(error.status||400,error.message,error.code||"BYO_SECRET_REJECTED");}
+   const readBack=typeof body?.readBack==="string"?body.readBack:typeof body?.nonce==="string"?body.nonce:"";
+   const owner=hash(req.user.uid),ref=refFor(owner,id);
+   return db.runTransaction(async tx=>{
+     const snap=await tx.get(ref);
+     if(!snap.exists||!owned(snap.data(),owner,id))throw new ProjectError(404,"Project not found","PROJECT_NOT_FOUND");
+     const result=verifyChallenge(snap.data().byoChallenge,readBack,Date.now());
+     if(!result.ok)throw new ProjectError(400,"Bring-your-own challenge was not verified",result.code);
+     tx.update(ref,{byoChallenge:{...snap.data().byoChallenge,used:true,nonce:null},byoChallengeVerified:true,
+       manualProviderConfigured:true,byoActive:true,updatedAt:stamp()});
+     return {verified:true,workspaceId:id};
+   });
+ }
+ async function reconcileWorkspaceFee(sub,{eventType=""}={}){
+   const meta=sub?.metadata||{};
+   if(meta.kind!=="workspace_fee")return false;
+   const owner=meta.accountHash,id=meta.workspaceId;
+   if(!/^[a-f0-9]{64}$/.test(owner||"")||!safeProjectId(id))return false;
+   const ref=refFor(owner,id),[account,workspace]=await Promise.all([accountRef(owner).get(),ref.get()]);
+   if(!account.exists||!workspace.exists||!owned(workspace.data(),owner,id))return false;
+   const customer=typeof sub.customer==="string"?sub.customer:sub.customer?.id;
+   if(account.data().stripeCustomerId!==customer)return false;
+   // Grandfathered one-time and legacy free workspaces are never lapsed or rewritten.
+   if(isGrandfathered(workspace.data()))return true;
+   const periodSeconds=sub.current_period_end||sub.items?.data?.[0]?.current_period_end;
+   const periodEndMs=typeof periodSeconds==="number"?(periodSeconds<1e12?Math.round(periodSeconds*1000):periodSeconds):(workspace.data().workspaceFeePeriodEndMs??null);
+   let workspaceFeeStatus=workspace.data().workspaceFeeStatus||"past_due",workspaceFeePaid=false;
+   if(eventType==="invoice.payment_failed"){workspaceFeeStatus="past_due";workspaceFeePaid=false;}
+   else if(eventType==="invoice.paid"){workspaceFeeStatus="active";workspaceFeePaid=true;}
+   else if(eventType==="customer.subscription.deleted"||sub.status==="canceled"||sub.status==="incomplete_expired"){workspaceFeeStatus="canceled";workspaceFeePaid=false;}
+   else if(sub.status==="active"||sub.status==="trialing"){workspaceFeeStatus="active";workspaceFeePaid=true;}
+   else if(sub.status==="past_due"||sub.status==="unpaid"){workspaceFeeStatus="past_due";workspaceFeePaid=false;}
+   const patch={workspaceFeeModel:"monthly",workspaceFeeStatus,workspaceFeePaid,workspaceFeeSubscriptionId:sub.id,
+     workspaceFeePeriodEndMs:periodEndMs,feeIsOneTime:false,updatedAt:stamp()};
+   if(workspaceFeePaid&&workspace.data().projectStatus==="lapsed")patch.projectStatus="active";
+   await ref.update(patch);return true;
+ }
+ async function merge(req,sourceId,{targetId,confirmName}={}){
+   if(!safeProjectId(sourceId)||!safeProjectId(targetId)||sourceId===targetId)throw new ProjectError(400,"Choose two different workspaces","INVALID_MERGE");
+   const owner=hash(req.user.uid),sourceRef=refFor(owner,sourceId),targetRef=refFor(owner,targetId);
+   const tombRef=accountRef(owner).collection("workspace_merges").doc(sourceId);
+   const tomb=await tombRef.get();
+   if(tomb.exists){
+     if(confirmName!==tomb.data().name)throw new ProjectError(400,"Enter the exact source workspace name","CONFIRM_NAME_REQUIRED");
+     if(tomb.data().targetId!==targetId)throw new ProjectError(409,"This workspace was already merged elsewhere","MERGE_CONFLICT");
+     for(const key of tomb.data().sourceObjectKeys||[])if(objectStore)await objectStore.delete(key);
+     return {merged:true,idempotent:true,sourceDeleted:true,sourceId,workspaceId:targetId,copied:tomb.data().copied||0};
+   }
+   const token=crypto.randomUUID();
+   let held=false;
+   try{
+     const locked=await db.runTransaction(async tx=>{
+       const [source,target]=await Promise.all([tx.get(sourceRef),tx.get(targetRef)]);
+       if(!source.exists||!owned(source.data(),owner,sourceId))throw new ProjectError(404,"Project not found","PROJECT_NOT_FOUND");
+       if(!target.exists||!owned(target.data(),owner,targetId))throw new ProjectError(404,"Project not found","PROJECT_NOT_FOUND");
+       if(confirmName!==source.data().name)throw new ProjectError(400,"Enter the exact source workspace name","CONFIRM_NAME_REQUIRED");
+       const now=Date.now(),sourceLock=source.data().mergeLock,targetLock=target.data().mergeLock;
+       const same=lock=>lock&&lock.sourceId===sourceId&&lock.targetId===targetId;
+       if(sourceLock&&sourceLock.expiresAtMs>now&&!same(sourceLock))throw new ProjectError(409,"A merge is already running","MERGE_IN_PROGRESS");
+       if(targetLock&&targetLock.expiresAtMs>now&&!same(targetLock))throw new ProjectError(409,"Target workspace is in another merge","MERGE_IN_PROGRESS");
+       if(same(sourceLock)&&sourceLock.expiresAtMs>now)throw new ProjectError(409,"A merge is already running","MERGE_IN_PROGRESS");
+       const lock={token,sourceId,targetId,expiresAtMs:now+120000,phase:"copying"};
+       tx.update(sourceRef,{mergeLock:lock,updatedAt:stamp()});
+       tx.update(targetRef,{mergeLock:lock,updatedAt:stamp()});
+       return {source:source.data(),target:target.data()};
+     });
+     held=true;
+     const sourceName=locked.source.name;
+     const copied=new Map((locked.source.mergeCopied||[]).map(entry=>[entry.fileId,entry]));
+     const taken=new Set((await listFiles(targetRef)).map(file=>file.data.name));
+     for(const entry of copied.values())if(entry.name)taken.add(entry.name);
+     const sourceFiles=await listFiles(sourceRef);
+     for(const file of sourceFiles){
+       const digest=fileDigest(file.data),size=file.data.sizeBytes||0;
+       const previous=copied.get(file.id);
+       if(previous){
+         const dest=await targetRef.collection("files").doc(previous.destId).get();
+         const stat=objectStore&&previous.objectKey?await objectStore.stat(previous.objectKey):null;
+         if(dest.exists&&dest.data().sizeBytes===size&&fileDigest(dest.data())===digest&&(!stat||stat.size===size&&stat.sha256===digest))continue;
+       }
+       const name=previous?.name||collisionName(file.data.name,sourceName,taken);
+       taken.add(name);
+       const destId=previous?.destId||crypto.randomUUID();
+       const objectKey=file.data.objectKey?("customer/"+owner+"/managed/"+targetId+"/files/"+file.id+"-from-"+sourceId):null;
+       if(file.data.objectKey){
+         if(!objectStore)throw new ProjectError(503,"Workspace file storage is not available for merge","MERGE_STORAGE_UNAVAILABLE");
+         const copiedObject=await objectStore.copy(file.data.objectKey,objectKey);
+         if(!copiedObject||copiedObject.size!==size||copiedObject.sha256!==digest)throw new ProjectError(409,"Copied object failed verification","MERGE_VERIFY_FAILED");
+       }
+       const record={name,sizeBytes:size,sha256:digest,copiedFrom:{workspaceId:sourceId,fileId:file.id,sha256:digest,sizeBytes:size},createdAt:stamp()};
+       if(objectKey)record.objectKey=objectKey;
+       const destRef=targetRef.collection("files").doc(destId);
+       const existing=await destRef.get();
+       if(existing.exists)await destRef.set(record);else await destRef.create(record);
+       if(objectStore&&objectKey){
+         const stat=await objectStore.stat(objectKey);
+         if(!stat||stat.size!==size||stat.sha256!==digest)throw new ProjectError(409,"Copied object failed verification","MERGE_VERIFY_FAILED");
+       }
+       const saved=await destRef.get();
+       if(!saved.exists||saved.data().sizeBytes!==size||fileDigest(saved.data())!==digest)throw new ProjectError(409,"Copied file record failed verification","MERGE_VERIFY_FAILED");
+       copied.set(file.id,{fileId:file.id,destId,name,sha256:digest,sizeBytes:size,objectKey,sourceObjectKey:file.data.objectKey||null});
+       await sourceRef.update({mergeCopied:[...copied.values()],updatedAt:stamp()});
+     }
+     const sourceObjectKeys=[...copied.values()].map(entry=>entry.sourceObjectKey).filter(Boolean);
+     for(const entry of copied.values()){
+       const dest=await targetRef.collection("files").doc(entry.destId).get();
+       if(!dest.exists||dest.data().sizeBytes!==entry.sizeBytes||fileDigest(dest.data())!==entry.sha256)
+         throw new ProjectError(409,"Copied file record failed verification","MERGE_VERIFY_FAILED");
+       if(objectStore&&entry.objectKey){
+         const stat=await objectStore.stat(entry.objectKey);
+         if(!stat||stat.size!==entry.sizeBytes||stat.sha256!==entry.sha256)throw new ProjectError(409,"Copied object failed verification","MERGE_VERIFY_FAILED");
+       }
+     }
+     const finalFiles=await listFiles(sourceRef);
+     if(finalFiles.some(file=>!copied.has(file.id)))throw new ProjectError(409,"Source changed during merge. Retry to resume.","MERGE_SOURCE_CHANGED");
+     await db.runTransaction(async tx=>{
+       const [source,target]=await Promise.all([tx.get(sourceRef),tx.get(targetRef)]);
+       if(!source.exists||source.data().mergeLock?.token!==token)throw new ProjectError(409,"Merge lock lost","MERGE_LOCK_LOST");
+       if(!target.exists||!owned(target.data(),owner,targetId))throw new ProjectError(404,"Project not found","PROJECT_NOT_FOUND");
+       const files=await listFiles(targetRef);
+       const uploads=await sourceRef.collection("uploads").get();
+       for(const file of await listFiles(sourceRef))tx.delete(file.ref);
+       for(const upload of uploads.docs)tx.delete(upload.ref);
+       tx.set(tombRef,{name:sourceName,targetId,copied:copied.size,sourceObjectKeys,mergedAt:stamp()});
+       tx.delete(sourceRef);
+       tx.update(targetRef,{mergeLock:null,usedBytes:files.reduce((sum,file)=>sum+(file.data.sizeBytes||0),0),updatedAt:stamp()});
+     });
+     held=false;
+     if(objectStore)for(const key of sourceObjectKeys)await objectStore.delete(key);
+     return {merged:true,idempotent:false,sourceDeleted:true,sourceId,workspaceId:targetId,copied:copied.size};
+   }finally{
+     if(held){
+       await db.runTransaction(async tx=>{
+         const source=await tx.get(sourceRef);
+         if(!source.exists||source.data().mergeLock?.token!==token)return;
+         tx.update(sourceRef,{mergeLock:{...source.data().mergeLock,expiresAtMs:0,phase:"interrupted"},updatedAt:stamp()});
+         tx.update(targetRef,{mergeLock:{token,sourceId,targetId,expiresAtMs:0,phase:"interrupted"},updatedAt:stamp()});
+       }).catch(()=>{});
+     }
+   }
+ }
  return {inventory,get,create,setSelection,checkout,archive,restore,withLease,reconcilePayment,revokePayment,
-   paymentAvailable,refFor,legacyRef,policy,hasContinuingBilling};
+   registerByo,issueByoChallenge,verifyByo,reconcileWorkspaceFee,merge,
+   paymentAvailable,monthlyReady,refFor,legacyRef,policy,hasContinuingBilling};
 }
 module.exports={createProjectService,ProjectError,projectStatus,activatedBasicProject,effectiveStorageQuota,
- qualifiesForHigherLimit,policyFor,validateSelection,safeProjectId,hasContinuingBilling,
- PROJECT_FEE_CENTS,DEFAULT_PROJECT_LIMIT,QUALIFIED_PROJECT_LIMIT,BASIC_QUOTA_BYTES};
+ qualifiesForHigherLimit,policyFor,validateSelection,safeProjectId,hasContinuingBilling,listAccountProjects,
+ PROJECT_FEE_CENTS,DEFAULT_PROJECT_LIMIT,QUALIFIED_PROJECT_LIMIT,BASIC_QUOTA_BYTES,FREE_WORKSPACES,
+ evaluateLapse,isGrandfathered,lockBody,summarizeProjects};
