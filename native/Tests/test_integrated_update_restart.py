@@ -76,6 +76,7 @@ class RestartWorkerTests(unittest.TestCase):
     def test_private_snapshot_contains_only_fixed_bundled_sources_and_rejects_tampering(self):
         directory, receipt = self.snapshot()
         self.assertEqual(set(receipt["sources"]), set(worker.DEPENDENCIES))
+        self.assertIn("redxai_updater.py", receipt["sources"], "install_worker applies updates through Red-XAI")
         self.assertEqual(worker.verify_snapshot(directory), receipt)
         self.assertEqual(directory.stat().st_mode & 0o077, 0)
         (directory / "gendragoon_library.py").write_text("changed")

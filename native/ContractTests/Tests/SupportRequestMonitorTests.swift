@@ -154,36 +154,45 @@ final class SupportRequestMonitorTests: XCTestCase {
         XCTAssertEqual(transport.sent, [post])
     }
 
-    func testNotNeededConflictIsNotNeededWithoutARefresh() async throws {
+    func testNotNeededConflictThenRefreshInProgressOrDoneIsNotNeeded() async throws {
         let fixture = try GDFixtureFile.load("account-deletion", "support-not-needed")
-        let transport = await check([(fixture.status, fixture.body)], saved: savedJob, expect: .notNeeded)
-        XCTAssertEqual(transport.sent, [post])
-        let short = await check([(409, ["error": "not_needed"])], saved: savedJob, expect: .notNeeded)
-        XCTAssertEqual(short.sent, [post])
-    }
-
-    func testOtherConflictThenFailedRefreshShowsTheFallback() async throws {
-        let failures: [(status: Int, json: [String: Any])?] = [
-            nil,
-            (401, ["error": "invalid_token"]),
-            (404, ["error": "not_found"]),
-            (500, ["error": "internal"]),
-            (200, ["jobId": jobId, "status": "failed", "retryable": false]),
-            (200, ["jobId": "00000000-0000-4000-8000-000000000009", "status": "done"]),
-            (200, [:]),
-        ]
-        for refreshReply in failures {
-            let transport = await check([(409, ["error": "deletion_not_retryable", "jobId": jobId]), refreshReply],
-                                        saved: savedJob)
+        XCTAssertEqual(fixture.status, 409)
+        for state in ["queued", "running", "done"] {
+            let transport = await check([(fixture.status, fixture.body), (200, ["jobId": jobId, "status": state, "retryable": true])],
+                                        saved: savedJob, expect: .notNeeded)
             XCTAssertEqual(transport.sent, [post, refresh], "exactly one refresh")
         }
     }
 
-    func testOtherConflictThenRefreshShowingNoSupportNeededIsNotNeeded() async throws {
-        for state in ["queued", "running", "done"] {
-            let transport = await check([(409, ["error": "conflict"]), (200, ["jobId": jobId, "status": state, "retryable": true])],
-                                        saved: savedJob, expect: .notNeeded)
-            XCTAssertEqual(transport.sent, [post, refresh])
+    func testNotNeededConflictThenFailedOrInvalidRefreshShowsTheFallback() async throws {
+        let refreshes: [(status: Int, json: [String: Any])?] = [
+            (200, ["jobId": jobId, "status": "failed", "retryable": false]),
+            (200, ["jobId": "00000000-0000-4000-8000-000000000009", "status": "done"]),
+            (200, ["jobId": jobId, "status": "completed"]),
+            (200, ["jobId": jobId]),
+            (200, [:]),
+            (401, ["error": "invalid_token"]),
+            (404, ["error": "not_found"]),
+            (500, ["error": "internal"]),
+            nil,
+        ]
+        for refreshReply in refreshes {
+            let transport = await check([(409, ["error": "support_not_needed"]), refreshReply], saved: savedJob)
+            XCTAssertEqual(transport.sent, [post, refresh], "exactly one refresh")
+        }
+    }
+
+    func testOtherConflictsShowTheFallbackWithoutARefresh() async throws {
+        let conflicts: [[String: Any]] = [
+            ["error": "deletion_not_retryable", "jobId": jobId],
+            ["error": "conflict"],
+            ["error": "not_needed"],
+            ["code": "support_not_needed"],
+            [:],
+        ]
+        for body in conflicts {
+            let transport = await check([(409, body), (200, ["jobId": jobId, "status": "done"])], saved: savedJob)
+            XCTAssertEqual(transport.sent, [post], "no refresh")
         }
     }
 

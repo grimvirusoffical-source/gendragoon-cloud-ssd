@@ -73,24 +73,34 @@ def install_path(entry):
     return Path(os.path.expanduser(entry["installPath"]))
 
 
-def apply_ready_update(entry, staged, *, quit_app, replace_app, relaunch_app, log=None):
+def apply_ready_update(entry, staged, *, quit_app, replace_app, relaunch_app, log=None,
+                       relaunch_previous=None, previous_path=None, keep_previous=False,
+                       discard_failed=None, verify_previous=None):
     """Quit, replace, and relaunch one app whose update is already on disk.
 
     The installed bundle is moved aside first. If the replacement or the new
     version's relaunch fails, the previous bundle is put back and relaunched,
     so the app is never left quit. ``relaunch_app(entry, path)`` gets the path
     of the bundle that is actually installed at that moment.
+
+    The GenDragoon install worker passes its own hooks: ``previous_path`` and
+    ``keep_previous`` keep its named backup, ``discard_failed(app)`` stops a
+    failed launch and retains the failed copy, ``verify_previous(app)`` checks
+    the restored bundle, and ``relaunch_previous(entry, path)`` reopens it.
     """
     if not isinstance(entry, dict) or "bundleId" not in entry or "installPath" not in entry:
         raise ValueError("Choose a manifest app before applying an update")
     staged = Path(staged)
-    if not staged.is_file():
+    if staged.is_symlink() or not (staged.is_file() or staged.is_dir()):
         raise ValueError("A downloaded update package is required")
     app = install_path(entry)
     if app.is_symlink() or not app.is_dir():
         raise ValueError("The installed app was not found; nothing was changed")
+    import shutil
     import uuid
-    previous = app.with_name(app.name + ".redxai-previous-" + uuid.uuid4().hex)
+    previous = Path(previous_path) if previous_path else app.with_name(app.name + ".redxai-previous-" + uuid.uuid4().hex)
+    relaunch_previous = relaunch_app if relaunch_previous is None else relaunch_previous
+    discard_failed = (lambda path: _discard(path, log)) if discard_failed is None else discard_failed
     quit_app(entry)
     failure = None
     moved = False
@@ -110,19 +120,21 @@ def apply_ready_update(entry, staged, *, quit_app, replace_app, relaunch_app, lo
             failure = error
             _log(log, "redxai_relaunch_new_failed", app=app, error=error)
         else:
-            import shutil
-            try:
-                shutil.rmtree(previous)
-            except OSError as error:
-                _log(log, "redxai_cleanup_failed", path=previous, error=error)
+            if not keep_previous:
+                try:
+                    shutil.rmtree(previous)
+                except OSError as error:
+                    _log(log, "redxai_cleanup_failed", path=previous, error=error)
             return result
-    # Roll back: discard whatever was installed, restore the previous bundle, relaunch it.
+    # Roll back: set aside whatever was installed, restore the previous bundle, relaunch it.
     try:
         if moved:
-            _discard(app, log)
+            discard_failed(app)
             os.replace(previous, app)
             _log(log, "redxai_restored_previous", app=app)
-        relaunch_app(entry, app)
+        if verify_previous is not None:
+            verify_previous(app)
+        relaunch_previous(entry, app)
     except Exception as error:
         _log(log, "redxai_relaunch_previous_failed", app=app, error=error)
         raise RedXAIRelaunchFailed("The update failed and the previous version could not be relaunched. "
@@ -130,12 +142,13 @@ def apply_ready_update(entry, staged, *, quit_app, replace_app, relaunch_app, lo
     raise RedXAIUpdateFailed("The update failed. The previous version was restored and relaunched.") from failure
 
 
-def apply_and_report(entry, staged, *, quit_app, replace_app, relaunch_app, log=None):
+def apply_and_report(entry, staged, *, quit_app, replace_app, relaunch_app, log=None, **hooks):
     """Exit status for the Red-XAI process: 0 updated and relaunched, 1 update failed but
-    the previous version was restored and relaunched, 2 nothing could be relaunched."""
+    the previous version was restored and relaunched, 2 nothing could be relaunched.
+    ``hooks`` are passed to apply_ready_update unchanged."""
     try:
         apply_ready_update(entry, staged, quit_app=quit_app, replace_app=replace_app,
-                           relaunch_app=relaunch_app, log=log)
+                           relaunch_app=relaunch_app, log=log, **hooks)
     except RedXAIRelaunchFailed as error:
         _log(log, "redxai_attention", message=error)
         return 2

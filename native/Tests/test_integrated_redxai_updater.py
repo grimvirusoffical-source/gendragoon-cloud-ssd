@@ -58,10 +58,12 @@ class RedXAITests(unittest.TestCase):
     def leftovers(self, app):
         return sorted(p.name for p in app.parent.iterdir() if p.name != app.name)
 
-    def test_missing_or_non_file_package_is_rejected_before_quitting(self):
+    def test_missing_or_linked_package_is_rejected_before_quitting(self):
         with tempfile.TemporaryDirectory() as folder:
             app, staged, entry, calls, logs, callbacks = self.fixture(folder)
-            for package in (Path(folder) / "missing.zip", Path(folder)):
+            linked = Path(folder) / "linked.zip"
+            linked.symlink_to(staged)
+            for package in (Path(folder) / "missing.zip", linked):
                 with self.assertRaises(ValueError):
                     redxai.apply_ready_update(entry, package, **callbacks)
             self.assertEqual(calls, [])

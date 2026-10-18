@@ -233,9 +233,9 @@ struct GDSavedDeletionJob: Equatable {
 
     /// POST .../support-request. A 401 `unauthorized` (missing Authorization) matches a 404:
     /// show the support email and never open sign-in. A missing or blank status token, a blank
-    /// job id, or a job id that is not the saved job sends nothing. A 409 other than
-    /// `support_not_needed` gets one status refresh. This never signs in, signs out, throws,
-    /// or clears the saved job.
+    /// job id, or a job id that is not the saved job sends nothing. A 409 `support_not_needed`
+    /// gets one status refresh; every other 409 is the fallback. This never signs in, signs out,
+    /// throws, or clears the saved job.
     @discardableResult
     func requestSupport(jobId: String) async -> GDSupportRequestResult {
         let result = await supportRequestResult(jobId: jobId)
