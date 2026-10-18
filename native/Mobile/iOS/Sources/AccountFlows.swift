@@ -17,8 +17,8 @@ struct AccountDeletedScreen:View {
     func confirm(_ phrase:String)->Bool { flow.confirmPhrase(phrase) }
     func acceptFreshSignIn(authTime:Date,now:Date)->Bool { flow.acceptFreshSignIn(authTime:authTime,now:now) }
     func noteDeleteSent(){flow.noteDeleteSent()}
-    func onDeleteHttp(_ http:AccountHttp){flow.onDeleteHttp(status:http.status,jobId:http.jobId,statusUrl:http.statusUrl,errorCode:http.error)}
-    func onPollHttp(_ http:AccountHttp){flow.onPollHttp(status:http.status,state:http.state)}
+    func onDeleteHttp(_ http:AccountHttp){flow.onDeleteHttp(status:http.status,jobId:http.jobId,errorCode:http.error)}
+    func onPollHttp(_ http:AccountHttp){flow.onPollHttp(status:http.status,state:http.state,errorCode:http.error)}
     func exhausted()->Bool { flow.exhausted() }
     func nextPollDelayMillis()->Int { flow.nextPollDelayMillis() }
     func fail(_ text:String){flow.fail(text)}
@@ -59,6 +59,9 @@ struct AccountDeletedScreen:View {
                     case .failed:
                         Text(model.flow.message ?? "Account deletion did not finish. You can retry.")
                         Button("Retry"){model.retry()}
+                    case .signedOut:
+                        Text(model.flow.message ?? "Sign in again to continue.")
+                        Button("Return to sign-in"){session.signOut();dismiss()}.buttonStyle(.borderedProminent)
                     case .wiped:
                         Text("Your account has been deleted.")
                     }
@@ -69,7 +72,8 @@ struct AccountDeletedScreen:View {
     }
     private func onStep() async {
         if model.flow.step == .polling { await poll() }
-        else if model.flow.step == .done { await wipe() }
+        else if model.flow.step == .done && model.flow.requestsWipe() { await wipe() }
+        else if model.flow.step == .signedOut { session.signOut();dismiss() }
     }
     private func authenticateAndDelete() async {
         guard !working else {return}
@@ -78,6 +82,7 @@ struct AccountDeletedScreen:View {
             let token=try await session.reauthenticate()
             let auth=CloudSignals.authTime(token) ?? .distantPast
             guard model.acceptFreshSignIn(authTime:auth,now:Date()) else {return}
+            if model.flow.step == .polling {return}
             model.noteDeleteSent()
             let http=try await cloud.deleteAccount(freshToken:token)
             if http.status==423 && http.error==CloudSignals.lockCode { cloud.workspaceLock=WorkspaceLock.decode(http.raw);dismiss();return }
@@ -98,7 +103,7 @@ struct AccountDeletedScreen:View {
         }
     }
     private func wipe() async {
-        guard !working,model.flow.step == .done else {return}
+        guard !working,model.flow.requestsWipe() else {return}
         working=true;defer{working=false}
         cloud.pause()
         do { try session.eraseLocalData();model.noteWiped() }

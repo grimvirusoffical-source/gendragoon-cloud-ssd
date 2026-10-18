@@ -313,15 +313,16 @@ actor GDTransferClient {
     }
     /// One-shot `DELETE /v2/account`. Contract, adjustable when the route is merged: `202 {"jobId"}`.
     /// Poll `GET /v2/account/deletions/{jobId}` for `queued | running | done | failed`.
-    /// Uses `freshToken` as given. Does not refresh the session or retry.
+    /// A 401 does not wipe local keys. Uses `freshToken` as given. Does not refresh the session or retry.
     func deleteAccount(freshToken:String) async throws -> AccountHttp {
         let(data,http)=try await once(path:"v2/account",method:"DELETE",token:freshToken)
         return AccountHttp.parse(status:http.statusCode,data:data)
     }
-    /// One-shot job poll. A 401 is returned so an already-removed account can be treated as success.
+    /// One-shot poll of `AccountDeletion.deletionStatusPath`. A 401 is returned and does not wipe.
     func accountDeletionStatus(path:String) async throws -> AccountHttp {
         guard AccountDeletion.safeAccountPath(path) else {throw GDTransferError(message:"Invalid deletion status route.",status:400)}
-        let(data,http)=try await once(path:path,method:"GET",token:try await tokens(false))
+        let transport=path.hasPrefix("/") ? String(path.dropFirst()) : path
+        let(data,http)=try await once(path:transport,method:"GET",token:try await tokens(false))
         return AccountHttp.parse(status:http.statusCode,data:data)
     }
     /// `DELETE /v2/workspaces/{id}`. Uses `send`, so HTTP 423 `workspace_lock` still opens the lock screen.

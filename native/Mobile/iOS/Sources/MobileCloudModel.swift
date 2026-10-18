@@ -141,7 +141,7 @@ struct MobileExport:Identifiable {let id=UUID();let url:URL}
     func pollDeletion(_ path:String) async throws -> AccountHttp {
         guard let client else{throw GDTransferError(message:"Sign in again to continue.",status:401)}
         do { return try await client.accountDeletionStatus(path:path) }
-        catch let error as GDTransferError where error.status==401 { return AccountHttp(status:401,raw:"",error:nil,jobId:nil,statusUrl:nil,state:nil) }
+        catch let error as GDTransferError where error.status==401 { return AccountHttp(status:401,raw:"",error:"reauth_required",jobId:nil,state:nil) }
     }
     func pause(){task?.cancel()}
 }

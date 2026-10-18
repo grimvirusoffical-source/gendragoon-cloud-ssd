@@ -1,12 +1,13 @@
 package app.gendragoon.cloudssd.mobile;
 
 /**
- * Account-deletion state machine. The server contract is not merged yet and is documented on
- * {@link AccountActions}: a fresh sign-in from the last five minutes, {@code DELETE /v2/account}
- * returning {@code 202 {"jobId"}}, then {@code queued | running | done | failed}.
+ * Account-deletion state machine. Freshness is the Firebase ID token {@code auth_time} claim.
+ * {@code DELETE /v2/account} returns {@code 202 {"jobId"}}. Status is only
+ * {@link AccountActions#DELETION_STATUS_PATH}. States are {@code queued | running | done | failed}.
+ * A 401 never wipes local keys. Only {@code done} does.
  */
 final class AccountDeletion {
-    enum Step { EXPLAIN, CONFIRM, REAUTH, DELETING, POLLING, DONE, FAILED, WIPED }
+    enum Step { EXPLAIN, CONFIRM, REAUTH, DELETING, POLLING, DONE, FAILED, WIPED, SIGNED_OUT }
 
     static final String CONFIRM_PHRASE="DELETE";
     static final long FRESH_SIGN_IN_MS=CloudSignals.FRESH_SIGN_IN_MS;
@@ -17,7 +18,6 @@ final class AccountDeletion {
     String jobId;
     String statusPath;
     int deleteAttempts;
-    int staleRetries;
     int polls;
     boolean wipe;
     boolean wiped;
@@ -39,45 +39,50 @@ final class AccountDeletion {
             message="Sign in again. The server only accepts a sign-in from the last 5 minutes.";
             return false;
         }
-        step=Step.DELETING;
+        step=this.jobId==null?Step.DELETING:Step.POLLING;
         message=null;
         return true;
     }
 
     void noteDeleteSent(){deleteAttempts++;}
 
-    void onDeleteHttp(int status,String jobId,String statusUrl,String errorCode){
+    /** True only after the deletion job reports {@code done}. A 401 never sets this. */
+    boolean requestsWipe(){return wipe&&step==Step.DONE;}
+
+    void onDeleteHttp(int status,String jobId,String errorCode){
         if(step!=Step.DELETING)return;
+        if(status==401){onUnauthorized(errorCode);return;}
         if(status==202&&AccountActions.validJob(jobId)){
             this.jobId=jobId;
-            this.statusPath=AccountActions.statusPath(jobId,statusUrl);
+            this.statusPath=AccountActions.statusPath(jobId);
             step=Step.POLLING;
+            wipe=false;
             message=null;
-            return;
-        }
-        if(status==404||status==410){succeed();return;}
-        if(status==401){
-            if(AccountActions.staleSession(errorCode)&&deleteAttempts<=1&&staleRetries==0){
-                staleRetries=1;
-                step=Step.REAUTH;
-                message="Sign in again. The server only accepts a sign-in from the last 5 minutes.";
-                return;
-            }
-            succeed();
             return;
         }
         fail("Account deletion did not start. You can retry.");
     }
 
-    void onPollHttp(int status,String state){
+    void onPollHttp(int status,String state,String errorCode){
         if(step!=Step.POLLING)return;
-        if(status==401){succeed();return;}
+        if(status==401){onUnauthorized(errorCode);return;}
         if(status>=200&&status<300){
-            if("queued".equals(state)||"running".equals(state)){step=Step.POLLING;return;}
-            if("done".equals(state)){succeed();return;}
+            if("queued".equals(state)||"running".equals(state)){step=Step.POLLING;wipe=false;return;}
+            if("done".equals(state)){step=Step.DONE;wipe=true;message=null;return;}
             if("failed".equals(state)){fail("Account deletion failed. You can retry.");return;}
         }
         fail("Could not read deletion status. You can retry.");
+    }
+
+    private void onUnauthorized(String errorCode){
+        wipe=false;
+        if("invalid_token".equals(errorCode)){
+            step=Step.SIGNED_OUT;
+            message="Sign in again to continue.";
+            return;
+        }
+        step=Step.REAUTH;
+        message="Sign in again. The server only accepts a sign-in from the last 5 minutes.";
     }
 
     boolean exhausted(){return polls>=POLL_LIMIT;}
@@ -97,60 +102,43 @@ final class AccountDeletion {
         jobId=null;
         statusPath=null;
         deleteAttempts=0;
-        staleRetries=0;
         polls=0;
         wipe=false;
         wiped=false;
     }
 
-    void noteWiped(){if(step==Step.DONE){wiped=true;step=Step.WIPED;}}
-
-    private void succeed(){step=Step.DONE;wipe=true;message=null;}
+    void noteWiped(){if(step==Step.DONE&&wipe){wiped=true;step=Step.WIPED;}}
 }
 
 /** Documented client helpers that do not open a connection. */
 final class AccountActions {
-    static final String ORIGIN="https://gendragoon-free-10068843866.us-central1.run.app";
-
     static final class HttpBody {
         final int status;
         final String raw;
         final String error;
         final String jobId;
-        final String statusUrl;
         final String state;
-        HttpBody(int status,String raw,String error,String jobId,String statusUrl,String state){
-            this.status=status;this.raw=raw==null?"":raw;this.error=error;this.jobId=jobId;this.statusUrl=statusUrl;this.state=state;
+        HttpBody(int status,String raw,String error,String jobId,String state){
+            this.status=status;this.raw=raw==null?"":raw;this.error=error;this.jobId=jobId;this.state=state;
         }
     }
 
     private AccountActions(){}
 
+    /** The only deletion status route. It is plural: {@code GET /v2/account/deletions/:jobId}. */
+    static final String DELETION_STATUS_PATH="/v2/account/deletions/";
+
     static HttpBody parse(int status,String raw){
-        return new HttpBody(status,raw,JsonFields.string(raw,"error"),JsonFields.string(raw,"jobId"),JsonFields.string(raw,"statusUrl"),JsonFields.string(raw,"state"));
+        return new HttpBody(status,raw,JsonFields.string(raw,"error"),JsonFields.string(raw,"jobId"),JsonFields.string(raw,"state"));
     }
 
     static boolean validJob(String jobId){return jobId!=null&&jobId.matches("[A-Za-z0-9_-]{1,80}");}
 
-    static boolean staleSession(String errorCode){
-        return "session_stale".equals(errorCode)||"auth_too_old".equals(errorCode)||"signin_too_old".equals(errorCode);
-    }
-
-    /**
-     * Poll path when {@code DELETE /v2/account} returns only {@code jobId}. A statusUrl is followed
-     * only when it is already a {@code /v2/account/} path or an https URL on the cloud origin.
-     */
-    static String statusPath(String jobId,String statusUrl){
-        String fallback="/v2/account/deletions/"+jobId;
-        if(statusUrl==null||statusUrl.isEmpty())return fallback;
-        String path=statusUrl;
-        if(path.startsWith(ORIGIN+"/"))path=path.substring(ORIGIN.length());
-        if(safeAccountPath(path))return path;
-        return fallback;
-    }
+    static String statusPath(String jobId){return DELETION_STATUS_PATH+jobId;}
 
     static boolean safeAccountPath(String path){
-        return path!=null&&path.startsWith("/v2/account/")&&!path.contains("..")&&!path.contains("\\")&&!path.contains(" ")&&!path.contains("@")&&!path.contains("?");
+        if(path==null||!path.startsWith(DELETION_STATUS_PATH))return false;
+        return validJob(path.substring(DELETION_STATUS_PATH.length()));
     }
 
     /**

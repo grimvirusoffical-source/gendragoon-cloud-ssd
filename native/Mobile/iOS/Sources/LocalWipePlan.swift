@@ -12,6 +12,8 @@ enum LocalWipePlan {
     static let authAccount="firebase-refresh"
 
     static func wipedDefaults(_ keys:[String])->[String] { keys.filter{$0.hasPrefix(defaultsPrefix)} }
+    /// Keychain services removed for this deletion outcome. A 401 passes `wipe: false` and removes none.
+    static func keychainServicesRemoved(wipe:Bool)->[String] { wipe ? [authService,byoService] : [] }
     static func lockPauseDeletes()->[String] { [] }
     static func accountWipeIncludesCheckpoints()->Bool { true }
 }

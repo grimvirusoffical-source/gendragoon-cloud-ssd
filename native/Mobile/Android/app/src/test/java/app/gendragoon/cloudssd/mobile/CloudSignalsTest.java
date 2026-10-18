@@ -60,5 +60,8 @@ public final class CloudSignalsTest {
         assertTrue(CloudSignals.freshSignIn(jwt,auth+CloudSignals.FRESH_SIGN_IN_MS));
         assertFalse(CloudSignals.freshSignIn(jwt,auth+CloudSignals.FRESH_SIGN_IN_MS+1));
         assertFalse(CloudSignals.freshSignIn("not-a-jwt",auth));
+        String refreshed="{\"iat\":1700003600,\"auth_time\":1700000000}";
+        String refreshedToken="eyJhbGciOiJub25lIn0."+Base64.getUrlEncoder().withoutPadding().encodeToString(refreshed.getBytes(StandardCharsets.UTF_8))+".";
+        assertFalse(CloudSignals.freshSignIn(refreshedToken,1700003600L*1000L));
     }
 }

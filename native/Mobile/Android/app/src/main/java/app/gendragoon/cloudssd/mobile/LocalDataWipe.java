@@ -33,4 +33,10 @@ final class LocalDataWipe {
         for(String alias:aliases)if(alias!=null&&alias.startsWith(KEYSTORE_PREFIX))matched.add(alias);
         return matched;
     }
+
+    /** Keystore aliases removed for this deletion outcome. A 401 passes {@code wipe=false} and removes none. */
+    static List<String> secretsRemoved(boolean wipe,Iterable<String> aliases){
+        if(!wipe)return List.of();
+        return keystoreAliasesToDelete(aliases);
+    }
 }

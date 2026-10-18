@@ -2,6 +2,8 @@ package app.gendragoon.cloudssd.mobile;
 
 import org.junit.Test;
 
+import java.util.List;
+
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
@@ -24,50 +26,67 @@ public final class AccountDeletionTest {
 
     @Test public void queuedAndRunningStayInProgressUntilDone(){
         AccountDeletion flow=ready();
-        flow.onDeleteHttp(202,"job_1",null,null);
+        flow.onDeleteHttp(202,"job_1",null);
         assertEquals(AccountDeletion.Step.POLLING,flow.step);
-        assertEquals("/v2/account/deletions/job_1",flow.statusPath);
-        flow.onPollHttp(200,"queued");
+        assertEquals(AccountActions.DELETION_STATUS_PATH+"job_1",flow.statusPath);
+        flow.onPollHttp(200,"queued",null);
         assertEquals(AccountDeletion.Step.POLLING,flow.step);
-        assertFalse(flow.wipe);
-        flow.onPollHttp(200,"running");
+        assertFalse(flow.requestsWipe());
+        flow.onPollHttp(200,"running",null);
         assertEquals(AccountDeletion.Step.POLLING,flow.step);
-        flow.onPollHttp(200,"done");
+        flow.onPollHttp(200,"done",null);
         assertEquals(AccountDeletion.Step.DONE,flow.step);
-        assertTrue(flow.wipe);
+        assertTrue(flow.requestsWipe());
         flow.noteWiped();
         assertEquals(AccountDeletion.Step.WIPED,flow.step);
     }
 
     @Test public void failedPollCanBeRetried(){
         AccountDeletion flow=ready();
-        flow.onDeleteHttp(202,"job_2",null,null);
-        flow.onPollHttp(200,"failed");
+        flow.onDeleteHttp(202,"job_2",null);
+        flow.onPollHttp(200,"failed",null);
         assertEquals(AccountDeletion.Step.FAILED,flow.step);
-        assertFalse(flow.wipe);
+        assertFalse(flow.requestsWipe());
+        assertTrue(LocalDataWipe.secretsRemoved(flow.requestsWipe(),List.of("gd-byo-gcs")).isEmpty());
         flow.retry();
         assertEquals(AccountDeletion.Step.EXPLAIN,flow.step);
     }
 
-    @Test public void staleSessionRetriesOnceAndSecond401Wipes(){
-        AccountDeletion flow=ready();
-        flow.onDeleteHttp(401,null,null,"session_stale");
-        assertEquals(AccountDeletion.Step.REAUTH,flow.step);
-        assertFalse(flow.wipe);
-        assertTrue(flow.acceptFreshSignIn(5_000L,5_000L));
-        flow.noteDeleteSent();
-        flow.onDeleteHttp(401,null,null,null);
-        assertTrue(flow.wipe);
-        assertEquals(AccountDeletion.Step.DONE,flow.step);
-    }
+    @Test public void unauthorizedDeletionDoesNotWipeKeystore(){
+        List<String> aliases=List.of("gd-byo-gcs","unrelated-alias");
+        AccountDeletion reauth=ready();
+        reauth.onDeleteHttp(401,null,"reauth_required");
+        assertEquals(AccountDeletion.Step.REAUTH,reauth.step);
+        assertFalse(reauth.requestsWipe());
+        assertTrue(LocalDataWipe.secretsRemoved(reauth.requestsWipe(),aliases).isEmpty());
+        assertTrue(reauth.acceptFreshSignIn(5_000L,5_000L));
+        reauth.noteDeleteSent();
+        reauth.onDeleteHttp(401,null,"reauth_required");
+        assertEquals(AccountDeletion.Step.REAUTH,reauth.step);
+        assertFalse(reauth.requestsWipe());
+        assertTrue(LocalDataWipe.secretsRemoved(reauth.requestsWipe(),aliases).isEmpty());
 
-    @Test public void missingAccountWipes(){
-        AccountDeletion gone=ready();
-        gone.onDeleteHttp(404,null,null,null);
-        assertTrue(gone.wipe);
-        AccountDeletion finished=ready();
-        finished.onDeleteHttp(410,null,null,null);
-        assertTrue(finished.wipe);
+        AccountDeletion invalid=ready();
+        invalid.onDeleteHttp(401,null,"invalid_token");
+        assertEquals(AccountDeletion.Step.SIGNED_OUT,invalid.step);
+        assertFalse(invalid.requestsWipe());
+        assertTrue(LocalDataWipe.secretsRemoved(invalid.requestsWipe(),aliases).isEmpty());
+
+        AccountDeletion polling=ready();
+        polling.onDeleteHttp(202,"job_3",null);
+        polling.onPollHttp(401,null,"reauth_required");
+        assertEquals(AccountDeletion.Step.REAUTH,polling.step);
+        assertFalse(polling.requestsWipe());
+        assertTrue(polling.acceptFreshSignIn(6_000L,6_000L));
+        assertEquals(AccountDeletion.Step.POLLING,polling.step);
+        polling.onPollHttp(401,null,"invalid_token");
+        assertEquals(AccountDeletion.Step.SIGNED_OUT,polling.step);
+        assertTrue(LocalDataWipe.secretsRemoved(polling.requestsWipe(),aliases).isEmpty());
+
+        AccountDeletion done=ready();
+        done.onDeleteHttp(202,"job_4",null);
+        done.onPollHttp(200,"done",null);
+        assertEquals(List.of("gd-byo-gcs"),LocalDataWipe.secretsRemoved(done.requestsWipe(),aliases));
     }
 
     @Test public void pollBackoffAndStatusPath(){
@@ -77,12 +96,10 @@ public final class AccountDeletionTest {
         assertEquals(4000L,flow.nextPollDelayMillis());
         assertEquals(8000L,flow.nextPollDelayMillis());
         assertEquals(8000L,flow.nextPollDelayMillis());
-        AccountDeletion foreign=ready();
-        foreign.onDeleteHttp(202,"job_9","https://evil.example/v2/account/deletions/job_9",null);
-        assertEquals("/v2/account/deletions/job_9",foreign.statusPath);
         AccountDeletion hosted=ready();
-        hosted.onDeleteHttp(202,"job_9","https://gendragoon-free-10068843866.us-central1.run.app/v2/account/deletions/job_9",null);
-        assertEquals("/v2/account/deletions/job_9",hosted.statusPath);
+        hosted.onDeleteHttp(202,"job_9",null);
+        assertEquals(AccountActions.DELETION_STATUS_PATH+"job_9",hosted.statusPath);
+        assertEquals("/v2/account/deletions/",AccountActions.DELETION_STATUS_PATH);
         assertTrue(AccountActions.mergeUnavailable("Photos").contains("name (from Photos)"));
     }
 

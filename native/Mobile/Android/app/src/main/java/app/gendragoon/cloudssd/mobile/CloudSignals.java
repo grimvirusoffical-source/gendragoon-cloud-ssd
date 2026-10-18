@@ -45,7 +45,10 @@ final class CloudSignals {
 
     static boolean shouldToast(Exception error){return !(error instanceof WorkspaceLocked)&&error.getMessage()!=null;}
 
-    /** Firebase ID tokens carry {@code auth_time} in seconds. Missing or older than five minutes is not fresh. */
+    /**
+     * Firebase ID tokens carry {@code auth_time} in seconds. A silent refresh updates {@code iat}
+     * and does not make an older sign-in fresh. Missing or older than five minutes is not fresh.
+     */
     static boolean freshSignIn(String jwt,long nowMs){
         Long auth=authTimeMillis(jwt);
         return auth!=null&&nowMs>=auth&&nowMs-auth<=FRESH_SIGN_IN_MS;

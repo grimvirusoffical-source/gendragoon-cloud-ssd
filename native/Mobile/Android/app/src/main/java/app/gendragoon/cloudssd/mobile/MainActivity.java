@@ -276,7 +276,7 @@ public final class MainActivity extends AppCompatActivity {
                 content.addView(text(deletion.message==null?"Sign in again. The server only accepts a sign-in from the last 5 minutes.":deletion.message,15,false));
                 space(content,16);content.addView(button("Sign in again",this::beginDeletionSignIn));
                 space(content,8);content.addView(button("Cancel",this::cancelDeletion));
-                if(deletion.staleRetries==0&&!deletionSignInStarted){deletionSignInStarted=true;beginDeletionSignIn();}
+                if(!deletionSignInStarted){deletionSignInStarted=true;beginDeletionSignIn();}
             }
             case DELETING, POLLING -> {content.addView(text(deletion.step==AccountDeletion.Step.POLLING?"Deleting your account…":"Starting deletion…",15,false));}
             case DONE -> {
@@ -287,6 +287,10 @@ public final class MainActivity extends AppCompatActivity {
                 content.addView(text(deletion.message==null?"Account deletion did not finish. You can retry.":deletion.message,15,false));
                 space(content,12);content.addView(button("Retry",()->{deletion.retry();showDeleteAccount();}));
                 space(content,8);content.addView(button("Cancel",this::cancelDeletion));
+            }
+            case SIGNED_OUT -> {
+                content.addView(text("Sign in again to continue.",15,false));
+                space(content,16);content.addView(button("Return to sign-in",this::leaveDeletionSignedOut));
             }
             case WIPED -> {
                 content.addView(text("Your account has been deleted.",18,true));space(content,8);
@@ -314,6 +318,7 @@ public final class MainActivity extends AppCompatActivity {
                             if(!tokenTask.isSuccessful()||tokenTask.getResult()==null||tokenTask.getResult().getToken()==null){deletion.message="Sign in again. The server only accepts a sign-in from the last 5 minutes.";showDeleteAccount();return;}
                             String jwt=tokenTask.getResult().getToken();Long authTime=CloudSignals.authTimeMillis(jwt);
                             if(!deletion.acceptFreshSignIn(authTime==null?0L:authTime,System.currentTimeMillis())){showDeleteAccount();return;}
+                            if(deletion.step==AccountDeletion.Step.POLLING){advanceDeletion();return;}
                             sendDelete(jwt,epoch);
                         });
                     });
@@ -329,10 +334,11 @@ public final class MainActivity extends AppCompatActivity {
     private void applyDelete(AccountActions.HttpBody body,int epoch){
         if(epoch!=deletionEpoch||deletion==null)return;
         if(body.status==423&&CloudSignals.CODE_LOCK.equals(body.error)){showLock(WorkspaceLock.decode(body.raw));return;}
-        deletion.onDeleteHttp(body.status,body.jobId,body.statusUrl,body.error);advanceDeletion();
+        deletion.onDeleteHttp(body.status,body.jobId,body.error);advanceDeletion();
     }
     private void advanceDeletion(){
         if(deletion==null)return;
+        if(deletion.step==AccountDeletion.Step.SIGNED_OUT){leaveDeletionSignedOut();return;}
         if(deletion.step==AccountDeletion.Step.POLLING){
             if(deletion.exhausted()){deletion.fail("Account deletion is still running. You can retry.");showDeleteAccount();return;}
             long delay=deletion.nextPollDelayMillis();int epoch=deletionEpoch;showDeleteAccount();main.postDelayed(()->io.execute(()->pollOnce(epoch)),delay);return;
@@ -346,11 +352,12 @@ public final class MainActivity extends AppCompatActivity {
         try{AccountActions.HttpBody body=new CloudApi(owner).pollDeletion(path);runOnUiThread(()->{
             if(epoch!=deletionEpoch||deletion==null||deletion.step!=AccountDeletion.Step.POLLING)return;
             if(body.status==423&&CloudSignals.CODE_LOCK.equals(body.error)){showLock(WorkspaceLock.decode(body.raw));return;}
-            deletion.onPollHttp(body.status,body.state);advanceDeletion();
+            deletion.onPollHttp(body.status,body.state,body.error);advanceDeletion();
         });}catch(Exception error){runOnUiThread(()->{if(epoch!=deletionEpoch||deletion==null)return;deletion.fail(error.getMessage());showDeleteAccount();});}
     }
+    private void leaveDeletionSignedOut(){holdAuthNavigation=false;deletionEpoch++;deletionAuthBusy=false;wiping=false;deletion=null;activeLock=null;auth.signOut();}
     private void finishDeletionLocally(){
-        if(wiping||deletion==null||deletion.step!=AccountDeletion.Step.DONE)return;
+        if(wiping||deletion==null||!deletion.requestsWipe())return;
         wiping=true;holdAuthNavigation=true;deletionEpoch++;showDeleteAccount();
         io.execute(()->{try{eraseAccountData();runOnUiThread(()->{wiping=false;if(deletion!=null)deletion.noteWiped();showDeleteAccount();});}catch(Exception error){runOnUiThread(()->{wiping=false;if(deletion!=null)deletion.message=error.getMessage()==null?"Local data could not be removed.":error.getMessage();showDeleteAccount();});}});
     }

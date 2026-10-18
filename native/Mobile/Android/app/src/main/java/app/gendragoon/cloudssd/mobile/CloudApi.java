@@ -77,24 +77,24 @@ final class CloudApi {
         }finally{c.disconnect();}
     }
     /**
-     * One-shot {@code DELETE /v2/account}. Current contract, adjustable when the route is merged:
-     * {@code 202 {"jobId"}}. Poll {@code GET /v2/account/deletions/{jobId}} for
-     * {@code {"state":"queued"|"running"|"done"|"failed"}}. A second delete returns 401 because the
-     * Firebase user is already gone. Uses {@code freshToken} as given: no session refresh and no retry.
+     * One-shot {@code DELETE /v2/account}. Returns {@code 202 {"jobId"}}. Poll
+     * {@link AccountActions#DELETION_STATUS_PATH} for {@code queued | running | done | failed}.
+     * {@code 401 reauth_required} asks for a new sign-in. {@code 401 invalid_token} returns to
+     * sign-in. Neither wipes local keys. Uses {@code freshToken} as given: no session refresh and no retry.
      */
     AccountActions.HttpBody deleteAccountCall(String freshToken)throws Exception{
         if(freshToken==null||freshToken.isEmpty())throw new Failure(401,"Sign in again to continue.");
         Response response=exchangeAuthorized(ORIGIN+"/v2/account","DELETE",null,Map.of(),freshToken);
         return AccountActions.parse(response.status,new String(response.body,StandardCharsets.UTF_8));
     }
-    /** One-shot poll. A 401 is returned so an already-removed account can be treated as success. */
+    /** One-shot poll of {@link AccountActions#DELETION_STATUS_PATH}. A 401 is returned and does not wipe. */
     AccountActions.HttpBody pollDeletion(String path)throws Exception{
         if(!AccountActions.safeAccountPath(path))throw new Failure(400,"Invalid deletion status route.");
         try{
             Response response=exchangeAuthorized(ORIGIN+path,"GET",null,Map.of(),token(false));
             return AccountActions.parse(response.status,new String(response.body,StandardCharsets.UTF_8));
         }catch(Failure error){
-            if(error.status==401)return new AccountActions.HttpBody(401,"",null,null,null,null);
+            if(error.status==401)return new AccountActions.HttpBody(401,"",error.getMessage()==null?null:"reauth_required",null,null);
             throw error;
         }
     }
