@@ -21,7 +21,8 @@ class CandidateDeploymentTests(unittest.TestCase):
         command = deploy_free.deployment_command("gcloud", "/private/token", "/staged/source", options)
         self.assertIn("--no-traffic", command)
         self.assertEqual(command[command.index("--tag") + 1], "review-0-17-0-20261017")
-        for flag in ("--set-env-vars", "--update-env-vars", "--clear-env-vars", "--set-secrets", "--clear-secrets",
+        self.assertEqual(command[command.index("--update-env-vars") + 1], "NODE_ENV=production")
+        for flag in ("--set-env-vars", "--clear-env-vars", "--set-secrets", "--clear-secrets",
                      "--service-account", "--allow-unauthenticated", "--to-latest", "--min-instances", "--max-instances"):
             self.assertNotIn(flag, command)
 
@@ -47,7 +48,7 @@ class CandidateDeploymentTests(unittest.TestCase):
                                "--service-account", "runtime@example-project.iam.gserviceaccount.com")
         command = deploy_free.deployment_command("gcloud", "token", "source", options)
         self.assertEqual(command[command.index("--update-env-vars") + 1],
-                         "CUSTOMER_BUCKET=example-private-customer-bucket,STORAGE_PROJECT_ID=gendragood-ssd")
+                         "NODE_ENV=production,CUSTOMER_BUCKET=example-private-customer-bucket,STORAGE_PROJECT_ID=gendragood-ssd")
         self.assertEqual(command[command.index("--service-account") + 1], "runtime@example-project.iam.gserviceaccount.com")
         self.assertNotIn("--set-env-vars", command)
         self.assertNotIn("--clear-secrets", command)

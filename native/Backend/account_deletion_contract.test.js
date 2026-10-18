@@ -10,13 +10,14 @@ const express=require("express");
 const {memoryFirestore}=require("./test_firestore");
 const {installedBilling}=require("./billing_gateway");
 const {createLoginGate,TERMS_VERSION}=require("./login_gate");
-const {STATUS_TOKEN_TTL_MS,REAUTH_SECONDS}=require("./account_delete");
+const {STATUS_TOKEN_TTL_MS,REAUTH_SECONDS,supportDiscordStartup,whenSupportSettled}=require("./account_delete");
+const {installV2Errors}=require("./v2_errors");
 const NOW=1_800_000_000_000;
 const TOKEN_RE=/^[A-Za-z0-9_-]{43}$/;
 const hash=uid=>crypto.createHash("sha256").update("gd-v1:"+uid).digest("hex");
 const termsDoc=()=>({termsVersion:TERMS_VERSION,readConfirmed:true,agreed:true});
 
-function harness({uids,terms=uids,authAge=30,holdStripe=false,bucket={deleteFiles:async()=>{}},stripe:stripeOverride}){
+function harness({uids,terms=uids,authAge=30,holdStripe=false,bucket={deleteFiles:async()=>{}},stripe:stripeOverride,v2Errors=false}){
  let now=NOW;
  const db=memoryFirestore([
   ...uids.map(u=>["gd_accounts/"+hash(u),{uid:u}]),
@@ -64,6 +65,8 @@ function harness({uids,terms=uids,authAge=30,holdStripe=false,bucket={deleteFile
   installedBilling({app,db,bucket:bucketImpl,admin:{firestore:{FieldValue:{serverTimestamp:()=>0}}},
    firebaseAuth:gate.firebaseAuth,firebaseAuthWithoutTerms:gate.firebaseAuthWithoutTerms,accountKey:hash,
    env:{},stripeOverride:stripeImpl,adminAuth,now:()=>now});
+  // Production free_server installs JSON /v2 misses after billing (free_server.js:315).
+  if(v2Errors)installV2Errors(app);
   return app;
  };
  const app=build(stripeOverride||stripe);
@@ -93,7 +96,7 @@ function harness({uids,terms=uids,authAge=30,holdStripe=false,bucket={deleteFile
    const text=await res.text();
    let json=null;try{json=JSON.parse(text);}catch(_){}
    if(res.status>=400)errors.push({status:res.status,path,json,text});
-   return {status:res.status,json,text};
+   return {status:res.status,json,text,headers:res.headers};
   },
   del(uid,opts={}){return this.call("DELETE","/v2/account",{token:"idtoken."+uid,body:{confirm:"DELETE"},...opts});},
   poll(jobId,token,base){return this.call("GET","/v2/account/deletions/"+jobId,{token,base});},
@@ -122,7 +125,7 @@ function assertErrorShape(errors){
  }
 }
 
-test("contract 1: production wiring skips Terms only for DELETE /v2/account and GET deletions/:jobId",async()=>{
+test("contract 1: production wiring skips Terms only for DELETE /v2/account and GET deletions/:jobId (the support request is covered by contract 21)",async()=>{
  const h=harness({uids:["u-terms"],terms:[]}); // user has NO Terms record
  await h.listen();
  try{
@@ -830,4 +833,369 @@ test("two concurrent retries of a failed job keep one job and one runner",async(
   assert.equal(done.last.json.status,"done",done.last.text);
   assert.equal(count(log,e=>e.kind==="cancel"),2);
  }finally{h.close();}
+});
+
+// ---------------------------------------------------------------------------
+// Deletion support request (PR #6 56b7f6b, head d33970c). Final spec: Avery,
+// Riley, Casey. POST /v2/account/deletions/:jobId/support-request, no body,
+// Bearer statusToken only, works signed out; the server reads uid from the job.
+// Casey's branch test/pr6-support-request (cc4ee9c) covers emulator concurrency,
+// the deep redaction sweep, 30-day cleanup and stale/notify retry timing; these
+// contracts cover one response per fixture and status code, signed-out auth,
+// the old route, one stub-webhook payload, the prod start gate and a repo guard.
+const fs=require("node:fs"),path=require("node:path"),http=require("node:http"),os=require("node:os");
+const {spawnSync}=require("node:child_process");
+const REPO=path.resolve(__dirname,"../..");
+const SUPPORT_FIXTURES=["support-received","support-repeat","support-not-needed","support-bad-token","support-rate-limited"];
+const fixture=name=>JSON.parse(fs.readFileSync(path.join(REPO,"fixtures/account-deletion",name+".json"),"utf8"));
+// Built from parts so this file never contains a webhook-shaped literal (contract 27).
+const FAKE_HOOK_ID="1".repeat(18),FAKE_HOOK_SECRET="ContractHookSecret_"+"x".repeat(12);
+const FAKE_WEBHOOK=["https:","","discord.com","api","webhooks",FAKE_HOOK_ID,FAKE_HOOK_SECRET].join("/");
+const supportPath=jobId=>"/v2/account/deletions/"+jobId+"/support-request";
+function stripeAuthFailure(){
+ return {subscriptions:{
+  list:async q=>({has_more:false,data:[{id:"sub_"+q.customer,status:"active",customer:q.customer}]}),
+  cancel:async()=>{throw Object.assign(Error("stripe auth"),{type:"authentication_error",statusCode:401});},
+ }};
+}
+// A failed (retryable:false) job through the production wiring.
+async function failedJob(opts={}){
+ const uid=opts.uid||"u-support";
+ const h=harness({uids:[uid],stripe:stripeAuthFailure(),v2Errors:true,...opts.harness});
+ h.db.rows.set("gd_accounts/"+hash(uid),{uid,stripeCustomerId:"cus_support",...(opts.account||{})});
+ for(const [id,data] of Object.entries(opts.workspaces||{}))h.db.rows.set("gd_accounts/"+hash(uid)+"/workspaces/"+id,data);
+ await h.listen();
+ const created=await h.del(uid);
+ assert.equal(created.status,202,created.text);
+ const {last}=await h.pollUntil(created.json.jobId,created.json.statusToken,"failed");
+ assert.equal(last.json.status,"failed",last.text);
+ assert.equal(last.json.retryable,false);
+ return {h,uid,jobId:created.json.jobId,statusToken:created.json.statusToken};
+}
+async function support(h,jobId,token,body){
+ const result=await h.call("POST",supportPath(jobId),body===undefined?{token}:{token,body});
+ await whenSupportSettled();
+ return result;
+}
+function captureLogs(){
+ const lines=[];const saved={};
+ for(const k of ["log","warn","error","info"]){saved[k]=console[k];console[k]=(...a)=>lines.push(a.map(String).join(" "));}
+ return {lines,restore(){Object.assign(console,saved);}};
+}
+// Local HTTP stub standing in for Discord. The notifier only accepts an https
+// discord.com webhook (account_delete.js:231-241), so fetch to FAKE_WEBHOOK is
+// forwarded to the stub; every other fetch (the harness's own calls) passes through.
+async function stubWebhook(reply=204){
+ const posts=[];
+ const server=http.createServer((req,res)=>{
+  const chunks=[];
+  req.on("data",c=>chunks.push(c));
+  req.on("end",()=>{posts.push({method:req.method,url:req.url,headers:req.headers,body:Buffer.concat(chunks).toString("utf8")});
+   res.statusCode=reply;res.end();});
+ });
+ await new Promise(r=>server.listen(0,"127.0.0.1",r));
+ const base="http://127.0.0.1:"+server.address().port;
+ const realFetch=globalThis.fetch;
+ const hadEnv=Object.hasOwn(process.env,"SUPPORT_DISCORD_WEBHOOK_URL"),oldEnv=process.env.SUPPORT_DISCORD_WEBHOOK_URL;
+ process.env.SUPPORT_DISCORD_WEBHOOK_URL=FAKE_WEBHOOK;
+ globalThis.fetch=(url,init)=>{
+  const target=String(url);
+  if(target.startsWith(FAKE_WEBHOOK))return realFetch(base+"/hook",{...init,signal:undefined});
+  return realFetch(url,init);
+ };
+ return {posts,close(){globalThis.fetch=realFetch;
+  if(hadEnv)process.env.SUPPORT_DISCORD_WEBHOOK_URL=oldEnv;else delete process.env.SUPPORT_DISCORD_WEBHOOK_URL;
+  server.close();}};
+}
+function parseMultipart(body,contentType){
+ const boundary=/boundary=([^;\s]+)/.exec(contentType||"")?.[1];
+ assert.ok(boundary,"multipart boundary");
+ const out={};
+ for(const part of String(body).split("--"+boundary).slice(1,-1)){
+  const name=/name="([^"]+)"/.exec(part)?.[1];
+  const filename=/filename="([^"]+)"/.exec(part)?.[1]||null;
+  out[name]={filename,value:part.split("\r\n\r\n").slice(1).join("\r\n\r\n").replace(/\r\n$/,"")};
+ }
+ return out;
+}
+
+test("contract 19: the 5 support fixtures match the spec and regenerate byte-for-byte from d33970c's exporter",()=>{
+ const want={
+  "support-received":[202,["requestId","status"]],
+  "support-repeat":[202,["requestId","status"]],
+  "support-not-needed":[409,["error"]],
+  "support-bad-token":[404,["error"]],
+  "support-rate-limited":[429,["error","retryAfterSec"]],
+ };
+ for(const name of SUPPORT_FIXTURES){
+  const f=fixture(name);
+  assert.equal(f.request.method,"POST",name);
+  assert.match(f.request.path,/^\/v2\/account\/deletions\/[0-9a-f-]{36}\/support-request$/,name);
+  assert.equal(f.request.body,null,name+": the client sends no body");
+  assert.deepEqual(Object.keys(f.request.headers),["authorization"],name+": only the Bearer statusToken is sent");
+  assert.equal(f.request.headers.authorization,"<redacted>",name);
+  assert.equal(f.response.status,want[name][0],name);
+  assert.deepEqual(Object.keys(f.response.body).sort(),want[name][1],name);
+ }
+ const received=fixture("support-received").response.body,repeat=fixture("support-repeat").response.body;
+ assert.equal(received.status,"received");
+ assert.ok(typeof received.requestId==="string"&&received.requestId.length>0);
+ assert.deepEqual(repeat,received,"a repeat returns the same requestId");
+ assert.equal(fixture("support-not-needed").response.body.error,"support_not_needed");
+ assert.equal(fixture("support-bad-token").response.body.error,"not_found");
+ const limited=fixture("support-rate-limited").response.body;
+ assert.equal(limited.error,"rate_limited");
+ assert.ok(Number.isInteger(limited.retryAfterSec)&&limited.retryAfterSec>0);
+ const out=fs.mkdtempSync(path.join(os.tmpdir(),"gd-support-fx-"));
+ try{
+  const run=spawnSync(process.execPath,[path.join(__dirname,"scripts/export_account_deletion_fixtures.js"),out],{encoding:"utf8"});
+  assert.equal(run.status,0,run.stderr);
+  for(const name of SUPPORT_FIXTURES){
+   const fresh=fs.readFileSync(path.join(out,"account-deletion",name+".json"));
+   const committed=fs.readFileSync(path.join(REPO,"fixtures/account-deletion",name+".json"));
+   assert.ok(fresh.equals(committed),name+".json does not regenerate byte-for-byte");
+  }
+ }finally{fs.rmSync(out,{recursive:true,force:true});}
+});
+
+test("contract 20: 202 {status:'received', requestId} for a failed job; a repeat is 202 with the same requestId",async()=>{
+ const {h,jobId,statusToken}=await failedJob();
+ try{
+  const first=await support(h,jobId,statusToken);
+  assert.equal(first.status,202,first.text);
+  assert.deepEqual(Object.keys(first.json).sort(),["requestId","status"]);
+  assert.equal(first.json.status,"received");
+  assert.ok(typeof first.json.requestId==="string"&&first.json.requestId.length>0);
+  assert.match(first.headers.get("cache-control")||"",/no-store/);
+  const again=await support(h,jobId,statusToken);
+  assert.equal(again.status,202,again.text);
+  assert.deepEqual(again.json,first.json,"support-repeat: same requestId");
+  const doc=h.db.rows.get("supportRequests/"+jobId);
+  assert.equal(doc.count,2);
+  assert.equal(JSON.stringify(doc).includes(statusToken),false,"the support record never stores the statusToken");
+ }finally{h.close();}
+});
+
+test("contract 21: signed out - statusToken only, no Firebase or Terms, no body read, uid comes from the job",async()=>{
+ const {h,uid,jobId,statusToken}=await failedJob({uid:"u-signed-out"});
+ try{
+  // The owner has no Firebase session: the ID token no longer verifies and the user record is gone.
+  h.ages.delete(uid);h.users.delete(uid);
+  const reads=h.termsReads;
+  const firebaseOnly=await support(h,jobId,"idtoken."+uid);
+  assert.equal(firebaseOnly.status,404,"a Firebase ID token is not a support credential: "+firebaseOnly.text);
+  assert.deepEqual(firebaseOnly.json,{error:"not_found"});
+  const got=await support(h,jobId,statusToken,{uid:"u-attacker",email:"x@example.com",jobId:"nope"});
+  assert.equal(got.status,202,got.text);
+  assert.equal(h.termsReads,reads,"support never reads Terms");
+  const doc=h.db.rows.get("supportRequests/"+jobId);
+  assert.equal(doc.uid,uid,"uid is looked up from the job, never taken from the client");
+  assert.equal(doc.jobId,jobId);
+  assert.equal(JSON.stringify(doc).includes("u-attacker"),false);
+  assert.equal(JSON.stringify(doc).includes("x@example.com"),false);
+ }finally{h.close();}
+});
+
+test("contract 22: 409 support_not_needed for a queued/running job and for a done job",async()=>{
+ const live=harness({uids:["u-live"],holdStripe:true,v2Errors:true});
+ await live.listen();
+ try{
+  const created=await live.del("u-live");
+  assert.equal(created.status,202,created.text);
+  const early=await support(live,created.json.jobId,created.json.statusToken);
+  assert.equal(early.status,409,early.text);
+  assert.deepEqual(early.json,{error:"support_not_needed"});
+  assert.equal(live.db.rows.has("supportRequests/"+created.json.jobId),false);
+  live.release();
+  const {last}=await live.pollUntil(created.json.jobId,created.json.statusToken,"done");
+  assert.equal(last.json.status,"done");
+  const done=await support(live,created.json.jobId,created.json.statusToken);
+  assert.equal(done.status,409,done.text);
+  assert.deepEqual(done.json,{error:"support_not_needed"},"support-not-needed fixture shape");
+  assert.equal(live.db.rows.has("supportRequests/"+created.json.jobId),false);
+ }finally{live.release();live.close();}
+});
+
+test("contract 23: 404 not_found for a bad, expired or other-job token; 401 unauthorized with no Authorization header",async()=>{
+ const {h,jobId,statusToken}=await failedJob({uid:"u-tokens"});
+ const other=harness({uids:["u-other"],v2Errors:true});
+ await other.listen();
+ try{
+  const otherJob=await other.del("u-other");
+  assert.equal(otherJob.status,202,otherJob.text);
+  const missing=await h.call("POST",supportPath(jobId));
+  assert.equal(missing.status,401,"account_delete.js:1001: "+missing.text);
+  assert.deepEqual(missing.json,{error:"unauthorized"});
+  for(const [label,token] of [["garbage","not-a-token"],["well-formed unknown","A".repeat(43)],
+   ["other job",otherJob.json.statusToken],["Firebase JWT","idtoken.u-tokens"]]){
+   const got=await support(h,jobId,token);
+   assert.equal(got.status,404,label+": "+got.text);
+   assert.deepEqual(got.json,{error:"not_found"},label);
+  }
+  h.setNow(NOW+STATUS_TOKEN_TTL_MS+1);
+  const expired=await support(h,jobId,statusToken);
+  assert.equal(expired.status,404,"expired: "+expired.text);
+  assert.deepEqual(expired.json,{error:"not_found"});
+  assert.equal(h.db.rows.has("supportRequests/"+jobId),false,"no refused call writes a support record");
+ }finally{h.close();other.close();}
+});
+
+test("contract 24: the 6th call in a day is 429 rate_limited with retryAfterSec; requestId never changes",async()=>{
+ const {h,jobId,statusToken}=await failedJob({uid:"u-limit"});
+ try{
+  let requestId;
+  for(let n=1;n<=5;n++){
+   const got=await support(h,jobId,statusToken);
+   assert.equal(got.status,202,n+": "+got.text);
+   requestId=requestId||got.json.requestId;
+   assert.equal(got.json.requestId,requestId);
+  }
+  const limited=await support(h,jobId,statusToken);
+  assert.equal(limited.status,429,limited.text);
+  assert.deepEqual(Object.keys(limited.json).sort(),["error","retryAfterSec"]);
+  assert.equal(limited.json.error,"rate_limited");
+  assert.equal(limited.json.retryAfterSec,86400);
+  assert.equal(limited.headers.get("retry-after"),"86400");
+  h.setNow(NOW+24*60*60*1000);
+  const renewed=await support(h,jobId,statusToken);
+  assert.equal(renewed.status,202,renewed.text);
+  assert.equal(renewed.json.requestId,requestId);
+ }finally{h.close();}
+});
+
+test("contract 25: the old /v2/support/deletion-request route is gone (JSON 404)",async()=>{
+ const {h,jobId,statusToken}=await failedJob({uid:"u-old"});
+ try{
+  for(const [method,opts] of [["POST",{token:statusToken,body:{jobId}}],["POST",{token:"idtoken.u-old",body:{jobId}}],["GET",{token:statusToken}]]){
+   const got=await h.call(method,"/v2/support/deletion-request",opts);
+   assert.equal(got.status,404,method+": "+got.text);
+   assert.deepEqual(got.json,{error:"not_found"},method+": JSON body");
+  }
+  assert.equal(h.db.rows.has("supportRequests/"+jobId),false);
+ }finally{h.close();}
+});
+
+test("contract 26: one Discord post per job per day via a stub webhook - mentions off, spec fields, safe attachment, no secrets anywhere",async()=>{
+ const hook=await stubWebhook(204);
+ const logs=captureLogs();
+ const owner=hash("u-hook");
+ const opaque="22222222-2222-4222-8222-222222222222";
+ const objects=new Set(["customer/"+owner+"/managed/w1/"+opaque,"customer/"+owner+"/managed/w1/Tax return 2025.pdf"]);
+ const bucket={deleteFiles:async()=>{},getFiles:async({prefix})=>[[...objects].filter(k=>k.startsWith(prefix)).map(name=>({name}))]};
+ let ctx;
+ try{
+  ctx=await failedJob({uid:"u-hook",harness:{bucket},workspaces:{
+   w1:{name:"Alpha Projects",wrappedKey:"WRAPPED-KEY-MATERIAL",storageSubscriptionId:"sub_ws1"},
+   w2:{name:{ciphertext:"SEALED-NAME-CIPHERTEXT",iv:"iv"}},
+  }});
+  const {h,jobId,statusToken}=ctx;
+  const first=await support(h,jobId,statusToken);
+  assert.equal(first.status,202,first.text);
+  const again=await support(h,jobId,statusToken);
+  assert.equal(again.status,202,again.text);
+  assert.equal(hook.posts.length,1,"a repeat does not post a second alert");
+  const post=hook.posts[0];
+  assert.equal(post.method,"POST");
+  const parts=parseMultipart(post.body,post.headers["content-type"]);
+  assert.deepEqual(Object.keys(parts).sort(),["files[0]","payload_json"]);
+  const payload=JSON.parse(parts.payload_json.value);
+  assert.deepEqual(payload.allowed_mentions,{parse:[]},"mentions disabled");
+  for(const want of ["u-hook",jobId,"stripe_authentication_error","attempts: 1","w1 Alpha Projects","w2"])
+   assert.ok(payload.content.includes(want),"content lists "+want);
+  assert.equal(parts["files[0]"].filename,"deletion-"+jobId+".json");
+  const file=JSON.parse(parts["files[0]"].value);
+  assert.deepEqual(Object.keys(file).sort(),["firebase","subscriptions","workspaces"]);
+  const w1=file.workspaces.find(w=>w.id==="w1");
+  assert.ok(w1.prefixes.length>0);
+  for(const p of w1.prefixes)assert.deepEqual(Object.keys(p).sort(),["deleted","prefix","remaining","remainingIds"]);
+  assert.ok(w1.prefixes.some(p=>p.remainingIds.includes(opaque)),"remaining object ids are listed");
+  assert.equal(Object.hasOwn(file.workspaces.find(w=>w.id==="w2"),"name"),false,"a sealed name is never sent");
+  for(const s of file.subscriptions)assert.deepEqual(Object.keys(s).sort(),["id","status"]);
+  assert.deepEqual(Object.keys(file.firebase),["status"]);
+  const job=h.db.rows.get("deletion_jobs/"+jobId);
+  assert.equal(job.workspaceNames,undefined,"copied names are cleared once the post is sent");
+  assert.equal(JSON.stringify(h.db.rows.get("supportRequests/"+jobId)).includes("Alpha"),false,"the support record never stores names");
+  const responses=[first.text,again.text].join("\n");
+  const secrets=[statusToken,"idtoken.u-hook",FAKE_WEBHOOK,FAKE_HOOK_SECRET,"WRAPPED-KEY-MATERIAL","SEALED-NAME-CIPHERTEXT","Tax return 2025"];
+  for(const s of secrets){
+   assert.equal(post.body.includes(s),false,"Discord body leaks "+s);
+   assert.equal(logs.lines.join("\n").includes(s),false,"logs leak "+s);
+   assert.equal(responses.includes(s),false,"responses leak "+s);
+  }
+ }finally{logs.restore();hook.close();ctx?.h.close();}
+});
+
+test("contract 26b: a failed Discord forward still returns 202 and logs neither the webhook URL nor the token",async()=>{
+ const hook=await stubWebhook(503);
+ const logs=captureLogs();
+ let ctx;
+ try{
+  ctx=await failedJob({uid:"u-hook-down"});
+  const got=await support(ctx.h,ctx.jobId,ctx.statusToken);
+  assert.equal(got.status,202,got.text);
+  assert.equal(hook.posts.length,1);
+  const doc=ctx.h.db.rows.get("supportRequests/"+ctx.jobId);
+  assert.equal(doc.notify.state,"pending","the forward is retried by the sweep");
+  assert.equal(doc.notify.attempts,1);
+  for(const s of [FAKE_WEBHOOK,FAKE_HOOK_SECRET,ctx.statusToken])
+   assert.equal(logs.lines.join("\n").includes(s),false,"logs leak "+s);
+ }finally{logs.restore();hook.close();ctx?.h.close();}
+});
+
+test("contract 27: production refuses to start without a valid Discord webhook URL and never prints the value",()=>{
+ const notDiscord="https://evil.example/api/webhooks/"+FAKE_HOOK_ID+"/"+FAKE_HOOK_SECRET;
+ const plainHttp=FAKE_WEBHOOK.replace("https:","http:");
+ for(const [label,value] of [["missing",undefined],["empty",""],["not discord",notDiscord],["http",plainHttp],["no token","https://discord.com/api/webhooks/"+FAKE_HOOK_ID]]){
+  const env={NODE_ENV:"production"};
+  if(value!==undefined)env.SUPPORT_DISCORD_WEBHOOK_URL=value;
+  const gate=supportDiscordStartup(env);
+  assert.equal(gate.exit,true,label);
+  assert.match(gate.message,/SUPPORT_DISCORD_WEBHOOK_URL/,label+": names the variable");
+  if(value)assert.equal(gate.message.includes(value),false,label+": never prints the value");
+  assert.equal(gate.message.includes(FAKE_HOOK_SECRET),false,label);
+ }
+ assert.equal(supportDiscordStartup({NODE_ENV:"production",SUPPORT_DISCORD_WEBHOOK_URL:FAKE_WEBHOOK}).exit,false,"a valid webhook starts");
+ const dev=supportDiscordStartup({NODE_ENV:"development"});
+ assert.equal(dev.exit,false,"optional in dev");
+ for(const value of [undefined,notDiscord]){
+  const env={PATH:process.env.PATH,NODE_ENV:"production",CUSTOMER_BUCKET:"gendragoon-test-placeholder",STORAGE_PROJECT_ID:"gendragood-ssd"};
+  if(value)env.SUPPORT_DISCORD_WEBHOOK_URL=value;
+  const run=spawnSync(process.execPath,["-e","require('./free_server.js').start()"],{cwd:__dirname,env,encoding:"utf8",timeout:8000});
+  const output=(run.stdout||"")+(run.stderr||"");
+  assert.equal(run.status,1,(value?"bad":"missing")+" value exits 1 before listening");
+  assert.match(output,/SUPPORT_DISCORD_WEBHOOK_URL/);
+  assert.equal(output.includes("API ready"),false);
+  assert.equal(output.includes(FAKE_HOOK_SECRET),false);
+  assert.equal(output.includes("evil.example"),false);
+ }
+});
+
+// Repo-wide guard. A leaked webhook has a numeric id and a token segment; the
+// bare prefix in error text and docs (account_delete.js:26, README.md:92,
+// docs/API-account.md:161) carries no credential and is allowed.
+const WEBHOOK_URL_RE=/(?:discord|discordapp)\.com\/api\/webhooks\/\d+\/[A-Za-z0-9_-]+/gi;
+function webhookHits(){
+ const files=spawnSync("git",["ls-files","-z"],{cwd:REPO,encoding:"utf8"}).stdout.split("\0").filter(Boolean);
+ assert.ok(files.length>100,"git ls-files returned the repo");
+ const hits=[];
+ for(const rel of files){
+  let text;
+  try{
+   const buf=fs.readFileSync(path.join(REPO,rel));
+   if(buf.length>5_000_000||buf.subarray(0,8000).includes(0))continue;
+   text=buf.toString("utf8");
+  }catch{continue;}
+  text.split("\n").forEach((line,i)=>{if(WEBHOOK_URL_RE.test(line))hits.push(rel+":"+(i+1));WEBHOOK_URL_RE.lastIndex=0;});
+ }
+ return hits;
+}
+// Webhook URLs in tests are assembled at runtime, so a tracked literal is a failure.
+const KNOWN_FAKE_WEBHOOK_LITERALS=[];
+test("contract 28: no Discord webhook URL appears in tracked files or fixtures (beyond the known fake test literal)",()=>{
+ const hits=webhookHits().filter(hit=>!KNOWN_FAKE_WEBHOOK_LITERALS.includes(hit));
+ assert.deepEqual(hits,[]);
+ assert.deepEqual(webhookHits().filter(h=>h.startsWith("fixtures/")),[],"fixtures carry no webhook URL");
+});
+test("contract 28b: strict - no webhook-shaped URL at all in tracked files",()=>{
+ assert.deepEqual(webhookHits(),[]);
 });
