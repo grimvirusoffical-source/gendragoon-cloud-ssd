@@ -105,11 +105,28 @@ The server stores `providerType`, `endpoint`, and `bucketFingerprint`. Credentia
 | --- | --- | --- |
 | `POST /v2/workspaces/:id/byo/register` | `{provider, endpoint, bucketFingerprint}` | Stores the public S3 registration. Does not activate. Unsupported providers are 422. |
 | `POST /v2/workspaces/:id/byo/challenge` | none | `{nonce, expiresAtMs, ttlMs}`. Replaces any previous unused nonce. The client writes that nonce to `.gendragoon-challenge/<nonce>` in its bucket. |
-| `POST /v2/workspaces/:id/byo/verify` | `{presignedUrl}` | The server GETs the presigned URL. Echoing the nonce without a fetch is **400** `BYO_CHALLENGE_PROOF_REQUIRED`. |
+| `POST /v2/workspaces/:id/byo/verify` | `{presignedUrl}` | The server GETs the presigned URL. A missing `presignedUrl`, or a legacy field such as `readBack` or `proofUrl`, is **400** `{error: "presigned_url_required"}`. |
 
 The presigned URL must be `https`, must not carry userinfo, and its host must equal the registered endpoint host exactly (**400** `BYO_ENDPOINT_HOST_MISMATCH`, before any fetch). The path must contain `/.gendragoon-challenge/<nonce>`. The server resolves DNS and rejects private, loopback, and link-local addresses, refuses redirects, limits the response to 1024 bytes, and times out at 3 seconds. The body must equal the nonce. The bucket fingerprint is derived from the object ETag (or a SHA-256 of the body). The nonce is single-use for 10 minutes.
 
-Challenge errors: `BYO_CHALLENGE_MISMATCH`, `BYO_CHALLENGE_EXPIRED`, `BYO_CHALLENGE_USED`, `BYO_CHALLENGE_PROOF_REQUIRED` (all 400). `BYO_NOT_REGISTERED` is 409. Someone else's workspace is 404.
+Challenge errors: `presigned_url_required`, `BYO_CHALLENGE_MISMATCH`, `BYO_CHALLENGE_EXPIRED`, `BYO_CHALLENGE_USED` (all 400). `BYO_NOT_REGISTERED` is 409. Someone else's workspace is 404.
+
+## Request fields
+
+A fixture request body may contain only the fields listed for its route. `byo/verify-missing-url` is the empty-body verify case. Every other verify request is exactly `{presignedUrl}`.
+
+| Route | Body |
+| --- | --- |
+| `POST /v2/projects` | `{name, intentId}` |
+| `GET /v2/workspaces` | none |
+| `GET /v2/projects/:id` | none |
+| `POST /v2/workspaces/:id/cloud/uploads` | `{name, sizeBytes}` |
+| `GET /v2/workspaces/:id/cloud/files` | none |
+| `POST /v2/workspaces/:sourceId/merge` | `{targetId, confirmName}` |
+| `POST /v2/workspaces/:sourceId/merge/preview` | `{targetId, confirmName}` |
+| `POST /v2/workspaces/:id/byo/register` | `{provider, endpoint, bucketFingerprint}` |
+| `POST /v2/workspaces/:id/byo/challenge` | none |
+| `POST /v2/workspaces/:id/byo/verify` | `{presignedUrl}` |
 
 The legacy `POST /v2/workspaces/:id/manual-provider` route still records a local label, and it now rejects secret fields the same way. It does not by itself verify a challenge.
 

@@ -174,7 +174,7 @@ async function byoCases(){
   endpoint,bucketFingerprint:"ab".repeat(8),byoChallenge:{nonce:"expirednonce",expiresAtMs:NOW-1,used:false}});
  const app=await start(db,{byoFetch});
  try{
-  const unsupported=await capture(app.base,"POST","/v2/workspaces/"+id+"/byo/register",{body:{provider:"sftp",endpoint:"sftp.example.com:22",hostFingerprint:"ab".repeat(16)}});
+  const unsupported=await capture(app.base,"POST","/v2/workspaces/"+id+"/byo/register",{body:{provider:"sftp",endpoint:"sftp.example.com:22",bucketFingerprint:"ab".repeat(16)}});
   if(unsupported.response.status!==422||unsupported.response.body?.error!=="byo_provider_unsupported")throw Error("sftp "+JSON.stringify(unsupported.response));
   writeCase("byo","provider-unsupported",unsupported);
   const registered=await capture(app.base,"POST","/v2/workspaces/"+id+"/byo/register",{body:{provider:"s3",endpoint,bucketFingerprint:"ab".repeat(8)}});
@@ -185,9 +185,10 @@ async function byoCases(){
   if(challenge.response.status!==200||typeof nonce!=="string"||typeof challenge.response.body.expiresAtMs!=="number"||typeof challenge.response.body.ttlMs!=="number")
    throw Error("challenge "+JSON.stringify(challenge.response));
   writeCase("byo","challenge",challenge);
-  const proof=await capture(app.base,"POST","/v2/workspaces/"+id+"/byo/verify",{body:{readBack:nonce}});
-  if(proof.response.body?.error!=="BYO_CHALLENGE_PROOF_REQUIRED")throw Error("proof "+JSON.stringify(proof.response));
-  writeCase("byo","verify-proof-required",proof);
+  const missing=await capture(app.base,"POST","/v2/workspaces/"+id+"/byo/verify",{body:{}});
+  if(missing.response.status!==400||JSON.stringify(missing.response.body)!==JSON.stringify({error:"presigned_url_required"}))
+   throw Error("missing url "+JSON.stringify(missing.response));
+  writeCase("byo","verify-missing-url",missing);
   const host=await capture(app.base,"POST","/v2/workspaces/"+id+"/byo/verify",{body:{presignedUrl:"https://attacker.example/.gendragoon-challenge/"+nonce}});
   if(host.response.body?.error!=="BYO_ENDPOINT_HOST_MISMATCH")throw Error("host "+JSON.stringify(host.response));
   writeCase("byo","verify-host-mismatch",host);

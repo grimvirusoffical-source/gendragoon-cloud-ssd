@@ -1,8 +1,6 @@
 {
   "request": {
-    "body": {
-      "readBack": "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20"
-    },
+    "body": {},
     "headers": {
       "authorization": "<redacted>",
       "content-type": "application/json"
@@ -12,8 +10,7 @@
   },
   "response": {
     "body": {
-      "error": "BYO_CHALLENGE_PROOF_REQUIRED",
-      "message": "The server must fetch the challenge object"
+      "error": "presigned_url_required"
     },
     "status": 400
   }

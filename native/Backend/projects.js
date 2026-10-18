@@ -432,9 +432,9 @@ function createProjectService({db,stamp,hash,stripe,env={},prices={},ensureCusto
  }
  async function verifyByo(req,id,body){
   try{rejectProviderSecrets(body||{});}catch(error){throw new ProjectError(error.status||400,error.message,error.code||"BYO_SECRET_REJECTED");}
-  const presignedUrl=typeof body?.presignedUrl==="string"?body.presignedUrl:typeof body?.proofUrl==="string"?body.proofUrl:"";
-  // An echoed nonce is not proof the client can read its bucket.
-  if(!presignedUrl)throw challengeError(400,"The server must fetch the challenge object","BYO_CHALLENGE_PROOF_REQUIRED");
+  // Only presignedUrl is proof. readBack, proofUrl, and a missing URL are not.
+  const presignedUrl=typeof body?.presignedUrl==="string"?body.presignedUrl.trim():"";
+  if(!presignedUrl)throw challengeError(400,"presigned_url_required","presigned_url_required");
   const owner=hash(req.user.uid),ref=refFor(owner,id);
   const snap=await ref.get();
   if(!snap.exists||!owned(snap.data(),owner,id))throw new ProjectError(404,"Project not found","PROJECT_NOT_FOUND");

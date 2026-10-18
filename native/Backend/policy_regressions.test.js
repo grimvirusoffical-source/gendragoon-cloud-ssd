@@ -167,7 +167,9 @@ test("byo challenge: workspace stays inactive without a verified server-side fet
   f.db.rows.set(f.path(idFor(1)),{kind:"byo",accountHash:owner,name:"BYO challenge",provisioned:true,byoActive:true,manualProviderConfigured:true,providerType:"s3",endpoint,bucketFingerprint:"a".repeat(16)});
   assert.equal(projectStatus(f.record(idFor(1))),"pending_activation");
   const issued=await f.service.issueByoChallenge(f.req,idFor(1));
-  await assert.rejects(f.service.verifyByo(f.req,idFor(1),{readBack:"not-the-nonce"}),{status:400,code:"BYO_CHALLENGE_PROOF_REQUIRED"});
+  await assert.rejects(f.service.verifyByo(f.req,idFor(1),{readBack:"not-the-nonce"}),{status:400,code:"presigned_url_required"});
+  await assert.rejects(f.service.verifyByo(f.req,idFor(1),{proofUrl:endpoint+"/.gendragoon-challenge/"+issued.nonce}),{status:400,code:"presigned_url_required"});
+  await assert.rejects(f.service.verifyByo(f.req,idFor(1),{}),{status:400,code:"presigned_url_required"});
   await assert.rejects(f.service.verifyByo(f.req,idFor(1),{presignedUrl:endpoint+"/.gendragoon-challenge/not-the-nonce"}),{status:400,code:"BYO_CHALLENGE_MISMATCH"});
   assert.notEqual(f.record(idFor(1)).byoChallengeVerified,true);
   await f.service.verifyByo(f.req,idFor(1),{presignedUrl:endpoint+"/.gendragoon-challenge/"+issued.nonce});
