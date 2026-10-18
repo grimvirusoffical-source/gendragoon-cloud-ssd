@@ -929,17 +929,67 @@ public final class AccountDeletionTest {
         assertTrue(SupportContact.mailto(job).startsWith("mailto:SUPPORT_CONTACT_PLACEHOLDER@invalid"));
     }
 
-    /** Provisional: workspace list fixtures do not carry monthlyPriceCents yet. */
-    @Test public void provisionalWorkspacePriceUsesServerCentsAndNeverCounts(){
+    @Test public void support404ShowsMailtoAndNeverSignIn(){
+        assertEquals(404,BackendFixtures.responseStatus("support","request-bad-token"));
+        String body=BackendFixtures.responseBody("support","request-bad-token");
+        assertEquals("not_found",JsonFields.string(body,"error"));
+        DeletionSupport.Result missing=DeletionSupport.interpret(404,body,false);
+        DeletionSupport.Result unavailable=DeletionSupport.interpret(503,"<html>unavailable</html>",false);
+        DeletionSupport.Result offline=DeletionSupport.interpret(0,"",true);
+        assertEquals(DeletionSupport.Kind.MAILTO,missing.kind);
+        assertEquals(unavailable.kind,missing.kind);
+        assertEquals(offline.kind,missing.kind);
+        assertTrue(missing.opensMailto());
+
+        AccountActions.HttpBody dead=fixture("status-failed-not-retryable");
+        AccountDeletion flow=AccountDeletion.resume(DeletionReceipt.of(dead.jobId,TOKEN));
+        flow.pollThrough(new Script().respond(dead));
+        assertEquals(AccountDeletion.Step.FAILED,flow.step);
+        assertTrue(flow.showSupport);
+        String kept=flow.message;
+        assertTrue(flow.applySupport(missing));
+        assertEquals(AccountDeletion.Step.FAILED,flow.step);
+        assertNotEquals(AccountDeletion.Step.REAUTH,flow.step);
+        assertNotEquals(AccountDeletion.Step.SIGNED_OUT,flow.step);
+        assertFalse(flow.repeatDelete);
+        assertFalse(flow.clearSession);
+        assertEquals(kept,flow.message);
+        assertFalse(flow.message.contains("Sign in"));
+        assertTrue(flow.showSupport);
+        assertFalse(flow.requestsWipe());
+        assertTrue(SupportContact.mailto(flow.jobId).startsWith("mailto:SUPPORT_CONTACT_PLACEHOLDER@invalid"));
+    }
+
+    /** Riley PR #5 at 568f223. `grandfathered-plus-new` is not in that commit. */
+    @Test public void workspacePriceUsesRileyFixturesAndNeverCounts(){
+        assertEquals("568f223",BackendFixtures.WORKSPACE_PRICE_SHA);
         assertFalse(WorkspacePrice.ENABLED);
-        assertEquals("Personal",WorkspacePrice.pickerText("{\"name\":\"Personal\",\"kind\":\"free\",\"isFree\":true,\"monthlyPriceCents\":0}"));
-        assertEquals("Personal · Free",WorkspacePrice.pickerText("Personal",true,false,0,true));
-        assertEquals("Extra · Free",WorkspacePrice.pickerText("Extra",true,false,0,true));
-        assertEquals("Work · $5/mo",WorkspacePrice.pickerText("Work",false,false,500,true));
-        assertEquals("Plus · $12.50/mo",WorkspacePrice.pickerText("Plus",false,false,1250,true));
-        assertEquals("Bucket · $10/mo",WorkspacePrice.pickerText("Bucket",true,true,1000,true));
-        assertEquals("Unpriced",WorkspacePrice.pickerText("Unpriced",false,false,null,true));
-        assertEquals("Hosted",WorkspacePrice.pickerText("Hosted",null,false,500,true));
+        String freeFirst=BackendFixtures.pricedWorkspaces("free-first").get(0);
+        assertEquals("Free Hosted",WorkspacePrice.pickerText(freeFirst));
+        assertEquals("Free Hosted · Free",WorkspacePrice.pickerText(freeFirst,true));
+        assertEquals("Free",WorkspacePrice.priceLabel(true,true,0));
+        assertEquals("Second Workspace · $5/mo",WorkspacePrice.pickerText(BackendFixtures.pricedWorkspaces("second-paid").get(0),true));
+        assertEquals("Replacement Free · Free",WorkspacePrice.pickerText(BackendFixtures.pricedWorkspaces("delete-free-then-create").get(0),true));
+        List<String> concurrent=BackendFixtures.pricedWorkspaces("concurrent-create-one-free");
+        assertEquals(2,concurrent.size());
+        assertEquals("Concurrent A · Free",WorkspacePrice.pickerText(concurrent.get(0),true));
+        assertEquals("Concurrent B · $5/mo",WorkspacePrice.pickerText(concurrent.get(1),true));
+        List<String> mixed=BackendFixtures.pricedWorkspaces("list-hosted-plus-byo");
+        assertEquals("Free Hosted · $5/mo",WorkspacePrice.pickerText(mixed.get(0),true));
+        assertEquals("Second Workspace · Free",WorkspacePrice.pickerText(mixed.get(1),true));
+        assertEquals("Only BYO · $5/mo",WorkspacePrice.pickerText(BackendFixtures.pricedWorkspaces("list-byo-only").get(0),true));
+        assertEquals("Included",WorkspacePrice.priceLabel(false,true,0));
+        assertEquals("Legacy · Included",WorkspacePrice.pickerText("Legacy",false,true,0,true));
+        assertNull(WorkspacePrice.formatCents(0));
+        assertNull(WorkspacePrice.formatCents(null));
+        assertEquals("Zero",WorkspacePrice.pickerText("Zero",false,false,0,true));
+        assertEquals("$12.50/mo",WorkspacePrice.formatCents(1250));
+        assertFalse(WorkspacePrice.pickerText("Zero",false,false,0,true).contains("$0"));
+        String byo=BackendFixtures.responseBody("workspaces","byo-first-paid");
+        assertEquals(Boolean.FALSE,JsonFields.bool(byo,"isFree"));
+        assertEquals("500",JsonFields.number(byo,"monthlyPriceCents"));
+        assertEquals("$5/mo",WorkspacePrice.priceLabel(false,false,500));
+        assertEquals(Boolean.FALSE,JsonFields.bool(BackendFixtures.responseBody("workspaces","free-to-byo-billable"),"isFree"));
         String lapsed=BackendFixtures.responseBody("workspace-lock","lapsed");
         CloudSignals.Route route=CloudSignals.route(423,lapsed,"POST");
         assertEquals(CloudSignals.Destination.LOCK_SCREEN,route.destination);

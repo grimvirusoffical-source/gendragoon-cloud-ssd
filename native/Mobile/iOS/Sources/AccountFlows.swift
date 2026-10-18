@@ -50,6 +50,13 @@ struct CloudDeletionTransport:DeletionTransport {
     func dismissError(){flow.dismissError();syncReceipt()}
     func noteSupport(_ text:String){flow.message=text}
     func refreshAfterSupport()->Bool { flow.refreshAfterSupport() }
+    /// True when Contact support should open the mailto fallback. Never moves the screen to sign-in.
+    func applySupport(_ result:DeletionSupport.Result)->Bool {
+        var next=flow
+        let mailto=next.applySupport(result)
+        flow=next
+        return mailto
+    }
     func deleteThrough(_ transport:any DeletionTransport,authorization:String) async {
         var next=flow
         await next.deleteThrough(transport,authorization:authorization)
@@ -173,9 +180,11 @@ struct CloudDeletionTransport:DeletionTransport {
         } catch {
             result=DeletionSupport.interpret(status:0,body:"",transportFailed:true)
         }
-        if result.kind==.sent || result.kind==.already,let message=result.message {model.noteSupport(message);return}
-        if result.kind==.refresh,model.refreshAfterSupport() {await poll();return}
-        if result.opensMailto,let url=SupportContact.mailto(jobId:model.flow.jobId){UIApplication.shared.open(url)}
+        if model.applySupport(result) {
+            if let url=SupportContact.mailto(jobId:model.flow.jobId){UIApplication.shared.open(url)}
+            return
+        }
+        if model.flow.keepsPolling() {await poll()}
     }
     private func poll() async {
         let transport=CloudDeletionTransport(cloud:cloud)

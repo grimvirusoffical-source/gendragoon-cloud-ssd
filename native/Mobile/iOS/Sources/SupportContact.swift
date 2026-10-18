@@ -53,9 +53,10 @@ enum DeletionSupport {
     }
     /// 202 `received` (including a repeat with the same `requestId`) shows "Request sent."
     /// 409 `support_not_needed` refreshes deletion status. 429 shows "Request already sent."
-    /// and does not open mailto. A transport failure or HTTP 5xx opens mailto.
+    /// and does not open mailto. A 404, a transport failure, or HTTP 5xx opens mailto and does not
+    /// ask for sign-in. The account may already be deleted.
     static func interpret(status:Int,body:String,transportFailed:Bool)->Result {
-        if transportFailed || status>=500 {return Result(kind:.mailto,requestId:nil,message:nil)}
+        if transportFailed || status>=500 || status==404 {return Result(kind:.mailto,requestId:nil,message:nil)}
         let requestId=CloudSignals.jsonString(body,"requestId")
         if status==202,CloudSignals.jsonString(body,"status")=="received",let requestId,!requestId.isEmpty {
             return Result(kind:.sent,requestId:requestId,message:sent)

@@ -187,6 +187,23 @@ final class AccountDeletion {
         return beginPolling(jobId,statusToken);
     }
 
+    /**
+     * Applies a support-request result. Returns true when the screen should open the mailto fallback.
+     * A 404 does that and does not move to sign-in. The account may already be deleted.
+     */
+    boolean applySupport(DeletionSupport.Result result){
+        if(result==null)return false;
+        if(result.kind==DeletionSupport.Kind.SENT||result.kind==DeletionSupport.Kind.ALREADY){
+            message=result.message;
+            return false;
+        }
+        if(result.kind==DeletionSupport.Kind.REFRESH){
+            refreshAfterSupport();
+            return false;
+        }
+        return result.opensMailto();
+    }
+
     /** A non-retryable failure keeps the job until Dismiss. Dismiss wipes nothing. */
     private void noteNotRetryable(String reportedJobId){
         if(AccountActions.validJob(reportedJobId))this.jobId=reportedJobId;

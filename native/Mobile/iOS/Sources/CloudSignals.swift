@@ -82,29 +82,31 @@ enum CloudSignals {
 
 struct WorkspaceLocked:Error,Sendable { let lock:WorkspaceLock }
 
-/// Workspace price copy. Off until pricing labels ship. `isFree:true` on a hosted workspace shows
-/// "Free". A BYO workspace, or `isFree:false`, shows `monthlyPriceCents` from the server.
-/// The client never counts workspaces and never hardcodes an amount.
+/// Workspace price copy. Off until pricing labels ship. `isFree:true` shows "Free".
+/// `grandfathered:true` shows "Included" (those rows are `isFree:false` and `monthlyPriceCents:0`).
+/// Every other row shows `monthlyPriceCents`. Zero is not a price, so the label is never `$0.00/mo`.
+/// The client does not count workspaces.
 enum WorkspacePrice {
     static let enabled=false
     static let free="Free"
-    static func byo(kind:String)->Bool { kind=="byo" }
-    /// Dollars from server cents. `nil` when the server omitted the amount.
+    static let included="Included"
+    /// Dollars from server cents. `nil` for a missing or zero amount.
     static func formatCents(_ cents:Int?)->String? {
-        guard let cents,cents>=0 else {return nil}
+        guard let cents,cents>0 else {return nil}
         let dollars=cents/100,remainder=cents%100
         if remainder==0 {return "$\(dollars)/mo"}
         return String(format:"$%d.%02d/mo",dollars,remainder)
     }
-    static func pickerText(name:String,isFree:Bool?,byo:Bool,cents:Int?,enabled:Bool=WorkspacePrice.enabled)->String {
+    static func priceLabel(isFree:Bool?,grandfathered:Bool,cents:Int?)->String? {
+        if isFree==true {return free}
+        if grandfathered {return included}
+        return formatCents(cents)
+    }
+    static func pickerText(name:String,isFree:Bool?,grandfathered:Bool,cents:Int?,enabled:Bool=WorkspacePrice.enabled)->String {
         let title=name.isEmpty ? "Workspace" : name
         guard enabled else {return title}
-        if isFree==true && !byo {return title+" · "+free}
-        if byo || isFree==false {
-            guard let price=formatCents(cents) else {return title}
-            return title+" · "+price
-        }
-        return title
+        guard let price=priceLabel(isFree:isFree,grandfathered:grandfathered,cents:cents) else {return title}
+        return title+" · "+price
     }
 }
 

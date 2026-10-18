@@ -921,21 +921,78 @@ final class AccountLogicTests: XCTestCase {
         XCTAssertTrue(SupportContact.mailto(jobId:job)?.absoluteString.hasPrefix("mailto:SUPPORT_CONTACT_PLACEHOLDER@invalid") ?? false)
     }
 
-    /// Provisional: workspace list fixtures do not carry monthlyPriceCents yet.
-    func testProvisionalWorkspacePriceUsesServerCentsAndNeverCounts() throws {
+    func testSupport404ShowsMailtoAndNeverSignIn() async {
+        XCTAssertEqual(BackendFixtures.responseStatus(area:"support",name:"request-bad-token"),404)
+        let body=BackendFixtures.responseBodyString(area:"support",name:"request-bad-token")
+        XCTAssertEqual(CloudSignals.jsonString(body,"error"),"not_found")
+        let missing=DeletionSupport.interpret(status:404,body:body,transportFailed:false)
+        let unavailable=DeletionSupport.interpret(status:503,body:"<html>unavailable</html>",transportFailed:false)
+        let offline=DeletionSupport.interpret(status:0,body:"",transportFailed:true)
+        XCTAssertEqual(missing.kind,.mailto)
+        XCTAssertEqual(unavailable.kind,missing.kind)
+        XCTAssertEqual(offline.kind,missing.kind)
+        XCTAssertTrue(missing.opensMailto)
+        let dead=fixture("status-failed-not-retryable")
+        var flow=AccountDeletion.resume(DeletionReceipt.of(jobId:dead.jobId ?? "",statusToken:token))
+        let script=ScriptedDeletionTransport()
+        script.respond(dead)
+        await flow.pollThrough(script)
+        XCTAssertEqual(flow.step,.failed)
+        XCTAssertTrue(flow.showSupport)
+        let kept=flow.message
+        XCTAssertTrue(flow.applySupport(missing))
+        XCTAssertEqual(flow.step,.failed)
+        XCTAssertNotEqual(flow.step,.reauth)
+        XCTAssertNotEqual(flow.step,.signedOut)
+        XCTAssertFalse(flow.repeatDelete)
+        XCTAssertFalse(flow.clearSession)
+        XCTAssertEqual(flow.message,kept)
+        XCTAssertFalse(flow.message?.contains("Sign in") ?? true)
+        XCTAssertTrue(flow.showSupport)
+        XCTAssertFalse(flow.requestsWipe())
+        XCTAssertTrue(SupportContact.mailto(jobId:flow.jobId)?.absoluteString.hasPrefix("mailto:SUPPORT_CONTACT_PLACEHOLDER@invalid") ?? false)
+    }
+
+    /// Riley PR #5 at 568f223. `grandfathered-plus-new` is not in that commit.
+    func testWorkspacePriceUsesRileyFixturesAndNeverCounts() throws {
+        XCTAssertEqual(BackendFixtures.workspacePriceSHA,"568f223")
         XCTAssertFalse(WorkspacePrice.enabled)
-        let shown=try JSONDecoder().decode(MobileWorkspace.self,from:Data("{\"id\":\"free\",\"name\":\"Personal\",\"kind\":\"free\",\"storageActive\":true,\"provisioned\":true,\"isFree\":true,\"monthlyPriceCents\":0}".utf8))
-        XCTAssertEqual(shown.pickerLabel,"Personal")
-        XCTAssertEqual(WorkspacePrice.pickerText(name:"Personal",isFree:true,byo:false,cents:0,enabled:true),"Personal · Free")
-        XCTAssertEqual(WorkspacePrice.pickerText(name:"Extra",isFree:true,byo:false,cents:0,enabled:true),"Extra · Free")
-        XCTAssertEqual(WorkspacePrice.pickerText(name:"Work",isFree:false,byo:false,cents:500,enabled:true),"Work · $5/mo")
-        XCTAssertEqual(WorkspacePrice.pickerText(name:"Plus",isFree:false,byo:false,cents:1250,enabled:true),"Plus · $12.50/mo")
-        XCTAssertEqual(WorkspacePrice.pickerText(name:"Bucket",isFree:true,byo:true,cents:1000,enabled:true),"Bucket · $10/mo")
-        XCTAssertEqual(WorkspacePrice.pickerText(name:"Unpriced",isFree:false,byo:false,cents:nil,enabled:true),"Unpriced")
+        let freeFirst=BackendFixtures.pricedWorkspaces("free-first")[0]
+        let shown=try JSONDecoder().decode(MobileWorkspace.self,from:JSONSerialization.data(withJSONObject:freeFirst))
+        XCTAssertEqual(shown.pickerLabel,"Free Hosted")
+        XCTAssertEqual(pricedLabel(freeFirst,enabled:false),"Free Hosted")
+        XCTAssertEqual(pricedLabel(freeFirst),"Free Hosted · Free")
+        XCTAssertEqual(WorkspacePrice.priceLabel(isFree:true,grandfathered:true,cents:0),"Free")
+        XCTAssertEqual(pricedLabel(BackendFixtures.pricedWorkspaces("second-paid")[0]),"Second Workspace · $5/mo")
+        XCTAssertEqual(pricedLabel(BackendFixtures.pricedWorkspaces("delete-free-then-create")[0]),"Replacement Free · Free")
+        let concurrent=BackendFixtures.pricedWorkspaces("concurrent-create-one-free")
+        XCTAssertEqual(concurrent.count,2)
+        XCTAssertEqual(pricedLabel(concurrent[0]),"Concurrent A · Free")
+        XCTAssertEqual(pricedLabel(concurrent[1]),"Concurrent B · $5/mo")
+        let mixed=BackendFixtures.pricedWorkspaces("list-hosted-plus-byo")
+        XCTAssertEqual(pricedLabel(mixed[0]),"Free Hosted · $5/mo")
+        XCTAssertEqual(pricedLabel(mixed[1]),"Second Workspace · Free")
+        XCTAssertEqual(pricedLabel(BackendFixtures.pricedWorkspaces("list-byo-only")[0]),"Only BYO · $5/mo")
+        XCTAssertEqual(WorkspacePrice.priceLabel(isFree:false,grandfathered:true,cents:0),"Included")
+        XCTAssertEqual(WorkspacePrice.pickerText(name:"Legacy",isFree:false,grandfathered:true,cents:0,enabled:true),"Legacy · Included")
+        XCTAssertNil(WorkspacePrice.formatCents(0))
+        XCTAssertNil(WorkspacePrice.formatCents(nil))
+        XCTAssertEqual(WorkspacePrice.pickerText(name:"Zero",isFree:false,grandfathered:false,cents:0,enabled:true),"Zero")
+        XCTAssertEqual(WorkspacePrice.formatCents(1250),"$12.50/mo")
+        XCTAssertFalse(WorkspacePrice.pickerText(name:"Zero",isFree:false,grandfathered:false,cents:0,enabled:true).contains("$0"))
+        let byo=(BackendFixtures.sharedBody("workspaces","byo-first-paid"))
+        XCTAssertEqual(byo["isFree"] as? Bool,false)
+        XCTAssertEqual((byo["monthlyPriceCents"] as? NSNumber)?.intValue,500)
+        XCTAssertEqual(WorkspacePrice.priceLabel(isFree:false,grandfathered:false,cents:500),"$5/mo")
+        XCTAssertEqual(BackendFixtures.sharedBody("workspaces","free-to-byo-billable")["isFree"] as? Bool,false)
         let lapsed=CloudSignals.route(status:423,body:BackendFixtures.responseBodyData(area:"workspace-lock",name:"lapsed"),method:"POST")
         XCTAssertEqual(lapsed.destination,.lockScreen)
         XCTAssertEqual(lapsed.lock?.reasonText,"lapsed")
         XCTAssertTrue(lapsed.lock?.requiresPayment==true)
+    }
+
+    private func pricedLabel(_ row:[String:Any],enabled:Bool=true)->String {
+        WorkspacePrice.pickerText(name:row["name"] as? String ?? "Workspace",isFree:row["isFree"] as? Bool,grandfathered:(row["grandfathered"] as? Bool)==true,cents:(row["monthlyPriceCents"] as? NSNumber)?.intValue,enabled:enabled)
     }
 
     private func fixture(_ name:String)->AccountHttp {
@@ -1145,9 +1202,12 @@ final class InvalidTokenDeletionTests: XCTestCase {
 /// The repo-root `fixtures/` directory wins when this branch has it.
 /// `singular-path.json` is JSON. A non-JSON body in a test is synthetic.
 /// Support responses are Riley's d9888be files. The client path is pinned and sends no body.
+/// Workspace price fixtures are the eight `workspaces/` files from PR #5 at 568f223.
+/// `grandfathered-plus-new` is not in that commit.
 private enum BackendFixtures {
     static let accountDeletionSHA="fff0a84"
     static let supportFixtureSHA="d9888be"
+    static let workspacePriceSHA="568f223"
     static let keyEnvelopeSHA="ee4f76f"
     static let sharedFixtureSHA="da39276"
 
@@ -1201,6 +1261,18 @@ private enum BackendFixtures {
         let body=(shared(area:area,name:name)["request"] as? [String:Any])?["body"] ?? [:]
         guard let data=try? JSONSerialization.data(withJSONObject:body) else {return ""}
         return String(data:data,encoding:.utf8) ?? ""
+    }
+
+    /// Named rows from a 568f223 workspace fixture: each `workspaces[]` item, or `project`.
+    static func pricedWorkspaces(_ name:String)->[[String:Any]] {
+        let body=sharedBody("workspaces",name)
+        if let rows=body["workspaces"] as? [[String:Any]],!rows.isEmpty {return rows}
+        if let project=body["project"] as? [String:Any] {return [project]}
+        return []
+    }
+
+    static func sharedBody(_ area:String,_ name:String)->[String:Any] {
+        (shared(area:area,name:name)["response"] as? [String:Any])?["body"] as? [String:Any] ?? [:]
     }
 
     static func listedWorkspaces()->[WorkspaceLock.Item] {

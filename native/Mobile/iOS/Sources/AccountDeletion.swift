@@ -149,6 +149,22 @@ struct AccountDeletion:Equatable {
         guard let jobId,let statusToken,Self.validJob(jobId),Self.validToken(statusToken) else {return false}
         return beginPolling(jobId:jobId,statusToken:statusToken)
     }
+    /// Applies a support-request result. Returns true when the screen should open the mailto fallback.
+    /// A 404 does that and does not move to sign-in. The account may already be deleted.
+    mutating func applySupport(_ result:DeletionSupport.Result)->Bool {
+        switch result.kind {
+        case .sent,.already:
+            message=result.message
+            return false
+        case .refresh:
+            _=refreshAfterSupport()
+            return false
+        case .mailto:
+            return true
+        case .hold:
+            return false
+        }
+    }
     /// A non-retryable failure keeps the job until Dismiss. Dismiss wipes nothing.
     private mutating func noteNotRetryable(_ reportedJobId:String?){
         if let reportedJobId,Self.validJob(reportedJobId) {jobId=reportedJobId}

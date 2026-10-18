@@ -3,8 +3,8 @@ import SwiftUI
 import Network
 
 struct MobileWorkspace:Decodable,Identifiable,Sendable {
-    let id:String;let name:String;let kind:String;let storageActive:Bool;let provisioned:Bool;let isFree:Bool?;let monthlyPriceCents:Int?
-    var pickerLabel:String { WorkspacePrice.pickerText(name:name,isFree:isFree,byo:WorkspacePrice.byo(kind:kind),cents:monthlyPriceCents) }
+    let id:String;let name:String;let kind:String;let storageActive:Bool;let provisioned:Bool;let isFree:Bool?;let grandfathered:Bool?;let monthlyPriceCents:Int?
+    var pickerLabel:String { WorkspacePrice.pickerText(name:name,isFree:isFree,grandfathered:grandfathered==true,cents:monthlyPriceCents) }
 }
 struct MobileExport:Identifiable {let id=UUID();let url:URL}
 @MainActor final class MobileCloudModel:ObservableObject {

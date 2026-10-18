@@ -10,6 +10,8 @@ import java.util.List;
  * Account-deletion fixtures are {@code fixtures/account-deletion} at fff0a84.
  * Support-request responses are {@code fixtures/support} at d9888be. The client path is pinned
  * and sends no body; those files still record {@code POST /v2/support/deletion-request}.
+ * Workspace price fixtures are the eight {@code workspaces/} files from PR #5 at 568f223.
+ * {@code grandfathered-plus-new} is not in that commit.
  * Key-envelope fixtures are {@code fixtures/key-envelope} at ee4f76f.
  * Lock, workspace, merge, BYO, and ownership cases stay on the shared fixtures at da39276.
  * The repo-root {@code fixtures/} directory wins when this branch has it.
@@ -18,6 +20,7 @@ import java.util.List;
 final class BackendFixtures {
     static final String ACCOUNT_DELETION_SHA="fff0a84";
     static final String SUPPORT_FIXTURE_SHA="d9888be";
+    static final String WORKSPACE_PRICE_SHA="568f223";
     static final String KEY_ENVELOPE_SHA="ee4f76f";
     static final String SHARED_FIXTURE_SHA="da39276";
 
@@ -96,6 +99,41 @@ final class BackendFixtures {
         int request=keyAt(file,"request",0);
         String value=jsonValue(file,keyAt(file,"body",request));
         return "null".equals(value)?"":value;
+    }
+
+    /** Named rows from a 568f223 workspace fixture: each `workspaces[]` item, or `project`. */
+    static List<String> pricedWorkspaces(String name){
+        String body=responseBody("workspaces",name);
+        List<String> rows=objectsUnder(body,"workspaces");
+        if(!rows.isEmpty())return rows;
+        String project=objectUnder(body,"project");
+        return project==null?List.of():List.of(project);
+    }
+
+    private static List<String> objectsUnder(String json,String key){
+        int at=json.indexOf("\""+key+"\"");
+        if(at<0)return List.of();
+        int start=json.indexOf('[',at);
+        if(start<0)return List.of();
+        String array=jsonValue(json,start);
+        List<String> rows=new ArrayList<>();
+        int cursor=0;
+        while(cursor<array.length()){
+            int open=array.indexOf('{',cursor);
+            if(open<0)break;
+            String object=jsonValue(array,open);
+            rows.add(object);
+            cursor=open+object.length();
+        }
+        return rows;
+    }
+
+    private static String objectUnder(String json,String key){
+        int at=json.indexOf("\""+key+"\"");
+        if(at<0)return null;
+        int start=json.indexOf('{',at);
+        if(start<0)return null;
+        return jsonValue(json,start);
     }
 
     static List<WorkspaceLock.Item> listedWorkspaces(){

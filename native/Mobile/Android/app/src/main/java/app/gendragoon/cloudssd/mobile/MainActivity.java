@@ -441,9 +441,10 @@ public final class MainActivity extends AppCompatActivity {
             DeletionSupport.Result applied=result;
             runOnUiThread(()->{
                 if(deletion==null)return;
-                if(applied.kind==DeletionSupport.Kind.SENT||applied.kind==DeletionSupport.Kind.ALREADY){deletion.message=applied.message;showDeleteAccount();return;}
-                if(applied.kind==DeletionSupport.Kind.REFRESH&&deletion.refreshAfterSupport()){advanceDeletion();return;}
-                if(applied.opensMailto())openDeletionMailto(current.jobId);
+                boolean mailto=deletion.applySupport(applied);
+                if(mailto){openDeletionMailto(current.jobId);return;}
+                if(deletion.keepsPolling()){advanceDeletion();return;}
+                showDeleteAccount();
             });
         });
     }

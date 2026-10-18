@@ -75,10 +75,11 @@ final class DeletionSupport {
     /**
      * 202 {@code received} (including a repeat with the same {@code requestId}) shows "Request sent."
      * 409 {@code support_not_needed} refreshes deletion status. 429 shows "Request already sent."
-     * and does not open mailto. A transport failure or HTTP 5xx opens mailto.
+     * and does not open mailto. A 404, a transport failure, or HTTP 5xx opens mailto and does not
+     * ask for sign-in. The account may already be deleted.
      */
     static Result interpret(int status,String raw,boolean transportFailed){
-        if(transportFailed||status>=500)return new Result(Kind.MAILTO,null,null);
+        if(transportFailed||status>=500||status==404)return new Result(Kind.MAILTO,null,null);
         String requestId=JsonFields.string(raw,"requestId");
         if(status==202&&"received".equals(JsonFields.string(raw,"status"))&&requestId!=null&&!requestId.isEmpty())return new Result(Kind.SENT,requestId,SENT);
         if(status==409&&"support_not_needed".equals(JsonFields.string(raw,"error")))return new Result(Kind.REFRESH,null,null);
