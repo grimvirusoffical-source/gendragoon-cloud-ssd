@@ -76,6 +76,8 @@ try {
     const node = providers.find((item) => item.id === id);
     if (!node?.disabled || !node.text.includes("Coming soon")) throw new Error(`${id} should be a disabled Coming soon option`);
   }
+  await page.type("[data-testid='byo-access-key-id']", "AKIAIOSFODNN7EXAMPLE");
+  await page.type("[data-testid='byo-secret']", "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY");
   await page.click("[data-testid='byo-challenge']");
   await page.waitForFunction(() => document.querySelector("[data-testid='byo-message']")?.textContent?.includes("Credentials were not included"));
   await shot(page, "connect-storage.png");
@@ -86,7 +88,7 @@ try {
   await page.waitForSelector("[data-testid='delete-account-confirm']");
   await shot(page, "delete-account.png");
   await page.click("[data-testid='delete-account-confirm']");
-  await page.waitForSelector("[data-testid='signed-out']");
+  await page.waitForSelector("[data-testid='delete-account-reauth-prompt']");
 
   await browser.close();
   console.log(`screenshots written to ${outDir}`);

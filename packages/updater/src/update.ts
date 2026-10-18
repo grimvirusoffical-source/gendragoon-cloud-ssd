@@ -1,6 +1,29 @@
 import { createHash, timingSafeEqual } from "node:crypto";
 import type { ReleaseManifest } from "./manifest.js";
 
+/** How long the relaunched app must stay up before the update is kept. */
+export const HEALTH_WINDOW_MS = 60_000;
+
+/** NSIS silent install. The same flag reinstalls the previous installer on rollback. */
+export const NSIS_SILENT_ARGS = ["/S"] as const;
+
+/** Public stable feed. No token. */
+export function publicReleaseFeed(): { repo: string; assetPattern: string } {
+  return {
+    repo: "grimvirusoffical-source/gendragoon-cloud-ssd",
+    assetPattern: "\\.exe$",
+  };
+}
+
+export function silentInstallPlan(file: string): { file: string; args: readonly ["/S"]; healthWindowMs: number } {
+  return { file, args: NSIS_SILENT_ARGS, healthWindowMs: HEALTH_WINDOW_MS };
+}
+
+/** A version that was just rolled back is not offered again. */
+export function updateWouldLoop(candidate: string, rolledBackVersion: string | null): boolean {
+  return rolledBackVersion !== null && candidate === rolledBackVersion;
+}
+
 export class ChecksumError extends Error {
   constructor() {
     super("Release checksum did not match");

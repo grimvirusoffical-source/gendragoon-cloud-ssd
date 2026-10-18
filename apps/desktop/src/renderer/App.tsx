@@ -7,13 +7,19 @@ import {
   byoSecretId,
   categorize,
   challengeObjectKey,
+  DeletionNotFoundError,
+  DeletionNotRetryableError,
+  SUPPORT_CONTACT,
   deleteAccountAndWipe,
   deletionAuthFailure,
+  dismissDeletion,
   GenDragoonClient,
   openWorkspaceKey,
   MemorySecretStore,
   performOwnershipChallenge,
+  presignChallengeGet,
   reduceAccount,
+  retryDeletion,
   registrationRequiresChallenge,
   toServerByoRegistration,
   treeNode,
@@ -32,7 +38,7 @@ import { AccountSurface, AppShell, ByoSetup, FileBrowser, SettingsView, type She
 
 const secrets = new MemorySecretStore();
 
-/** Demo stand-in for GET /v2/access. The next payload is applied after a delete. */
+/** Local plan view. Lock state comes from workspace records and HTTP 423, not from /v2/access. */
 const LOCKED_ACCESS: AccessResponse = {
   locked: true,
   cap: 10,
@@ -124,6 +130,7 @@ export function App() {
   const [signedOut, setSignedOut] = useState<null | "deleted" | "invalid-token" | "signed-out">(null);
   const [deleting, setDeleting] = useState(false);
   const [reauthRequired, setReauthRequired] = useState(false);
+  const [deletionNotice, setDeletionNotice] = useState<{ message: string; retryable: boolean; support?: string } | null>(null);
   const [access, setAccess] = useState<AccessResponse>(LOCKED_ACCESS);
   const [account, setAccount] = useState<AccountState>(() => accountFromAssessment(LOCKED_ACCESS));
   const mode: BrowserMode = view === "backup" ? "backup" : "upload";
@@ -165,7 +172,7 @@ export function App() {
     setSettings((current) => updateSortMapping(current, extension, category));
   }
 
-  async function onChallenge(input: { provider: ByoProviderId; endpoint: string; bucket: string }) {
+  async function onChallenge(input: { provider: ByoProviderId; endpoint: string; bucket: string; accessKeyId?: string; secretAccessKey?: string }) {
     try {
       const record = await toServerByoRegistration(input);
       if (!registrationRequiresChallenge()) {
@@ -198,9 +205,17 @@ export function App() {
             // The device writes the object with the keychain secret. That secret is not returned.
           },
           async presignGet(key) {
-            const stamp = new Date(started).toISOString().replace(/[-:]/g, "").replace(/\.\d{3}/, "");
-            const host = new URL(record.endpoint).host;
-            return `https://${host}/${input.bucket}/${key}?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Date=${stamp}&X-Amz-Expires=300&X-Amz-SignedHeaders=host&X-Amz-Signature=device`;
+            if (!input.accessKeyId || !input.secretAccessKey) {
+              throw new Error("Access Key ID and Secret Access Key are required");
+            }
+            return presignChallengeGet({
+              endpoint: record.endpoint,
+              bucket: input.bucket,
+              key,
+              accessKeyId: input.accessKeyId,
+              secretAccessKey: input.secretAccessKey,
+              expiresInSeconds: 300,
+            });
           },
         },
       });
@@ -216,40 +231,57 @@ export function App() {
     await secrets.set(byoSecretId(workspaceId), new TextEncoder().encode(secret));
   }
 
+  function onAuthFailure(signal: "signed_out" | "reauth_required") {
+    if (signal === "reauth_required") {
+      setReauthRequired(true);
+      setStatus("Sign in again");
+      return;
+    }
+    setSignedOut("invalid-token");
+  }
+
+  function noticeForResult(result: { status: string; retryable?: boolean }) {
+    if (result.status !== "failed") return null;
+    return {
+      message: result.retryable ? "Account deletion failed. You can retry it." : "Account deletion failed.",
+      retryable: result.retryable === true,
+    };
+  }
+
   async function onDeleteAccount(reauthenticatedAt = new Date().toISOString()) {
     setDeleting(true);
     try {
       const token = await window.gendragoon?.getIdToken?.();
       const apiBase = import.meta.env.VITE_API_BASE;
       const workspaceIds = workspaces.map((workspace) => workspace.id);
-      if (apiBase && token) {
-        const client = new GenDragoonClient({ baseUrl: apiBase, getToken: async () => token });
-        await deleteAccountAndWipe({
-          client,
-          reauthenticatedAt,
-          idToken: token,
-          workspaceIds,
-          secrets,
-        });
-      } else {
-        await deleteAccountAndWipe({
-          client: {
-            async deleteAccount() {
-              return { jobId: "local" };
-            },
-            async deletionStatus() {
-              return { jobId: "local", status: "done" };
-            },
-          },
-          reauthenticatedAt,
-          idToken: token,
-          workspaceIds,
-          secrets,
-        });
+      if (!apiBase || !token) {
+        setReauthRequired(true);
+        setStatus("Sign in again");
+        return;
       }
+      const client = new GenDragoonClient({ baseUrl: apiBase, getToken: async () => token });
+      const result = await deleteAccountAndWipe({
+        client,
+        reauthenticatedAt,
+        idToken: token,
+        workspaceIds,
+        secrets,
+        secureStore: secrets,
+        onAuthFailure,
+      });
+      const notice = noticeForResult(result);
+      setDeletionNotice(notice);
       setReauthRequired(false);
-      setSignedOut("deleted");
+      if (!notice) setSignedOut("deleted");
     } catch (error) {
+      if (error instanceof DeletionNotRetryableError) {
+        setDeletionNotice({ message: error.message, retryable: false, support: SUPPORT_CONTACT.value });
+        return;
+      }
+      if (error instanceof DeletionNotFoundError) {
+        setDeletionNotice({ message: error.message, retryable: true });
+        return;
+      }
       const auth = deletionAuthFailure(error);
       if (auth === "reauth") {
         setReauthRequired(true);
@@ -264,6 +296,45 @@ export function App() {
     } finally {
       setDeleting(false);
     }
+  }
+
+  async function onRetryDeletion() {
+    setDeleting(true);
+    try {
+      const token = await window.gendragoon?.getIdToken?.();
+      const apiBase = import.meta.env.VITE_API_BASE;
+      if (!apiBase || !token) {
+        setReauthRequired(true);
+        setStatus("Sign in again");
+        return;
+      }
+      const client = new GenDragoonClient({ baseUrl: apiBase, getToken: async () => token });
+      const result = await retryDeletion({
+        client,
+        reauthenticatedAt: new Date().toISOString(),
+        idToken: token,
+        workspaceIds: workspaces.map((workspace) => workspace.id),
+        secrets,
+        secureStore: secrets,
+        onAuthFailure,
+      });
+      const notice = noticeForResult(result);
+      setDeletionNotice(notice);
+      if (!notice) setSignedOut("deleted");
+    } catch (error) {
+      if (error instanceof DeletionNotRetryableError) {
+        setDeletionNotice({ message: error.message, retryable: false, support: SUPPORT_CONTACT.value });
+        return;
+      }
+      onWriteFailure(error);
+    } finally {
+      setDeleting(false);
+    }
+  }
+
+  async function onDismissDeletion() {
+    await dismissDeletion(secrets);
+    setDeletionNotice(null);
   }
 
   async function onPassphrase(passphrase: string) {
@@ -377,6 +448,11 @@ export function App() {
         reauthRequired={reauthRequired}
         onSignInAgain={onSignInAgain}
         onPassphrase={(passphrase) => void onPassphrase(passphrase)}
+        deletionMessage={deletionNotice?.message}
+        deletionRetryable={deletionNotice?.retryable}
+        supportContact={deletionNotice?.support}
+        onRetryDeletion={() => void onRetryDeletion()}
+        onDismissDeletion={() => void onDismissDeletion()}
       />
     );
   }

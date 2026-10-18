@@ -12,6 +12,7 @@ import {
   reauthenticatedAtForDelete,
   workspaceKeyId,
 } from "../src/index.js";
+import { loadServerFixture } from "./fixtures/server/load.js";
 
 function jsonResponse(status: number, body: unknown): Response {
   return new Response(JSON.stringify(body), {
@@ -84,7 +85,7 @@ describe("DELETE /v2/account contract", () => {
   it("polls the plural deletions path until done and does not wipe on succeeded", async () => {
     const secrets = new MemorySecretStore();
     await secrets.set(workspaceKeyId("w1"), new Uint8Array([1]));
-    const states = ["succeeded", "done"] as const;
+    const states = ["queued", "done"] as const;
     let reads = 0;
     const result = await deleteAccountAndWipe({
       client: {
@@ -116,7 +117,7 @@ describe("DELETE /v2/account contract", () => {
       getToken: () => "fresh-token",
       fetch: async () => {
         calls += 1;
-        return jsonResponse(401, { code: "reauth_required", error: "sign in again" });
+        return jsonResponse(401, loadServerFixture("account-deletion", "reauth-required").response.body);
       },
     });
     const error = await deleteAccountAndWipe({
@@ -137,7 +138,7 @@ describe("DELETE /v2/account contract", () => {
     const client = new GenDragoonClient({
       baseUrl: "https://api.example.test",
       getToken: () => "stale-token",
-      fetch: async () => jsonResponse(401, { code: "invalid_token", error: "expired" }),
+      fetch: async () => jsonResponse(401, loadServerFixture("account-deletion", "invalid-token").response.body),
     });
     const error = await deleteAccountAndWipe({
       client,
@@ -153,7 +154,7 @@ describe("DELETE /v2/account contract", () => {
   it("polls a 410 account_deleted job and wipes only after done", async () => {
     const secrets = new MemorySecretStore();
     await secrets.set(workspaceKeyId("w1"), new Uint8Array([9]));
-    const states = ["accepted", "done"] as const;
+    const states = ["queued", "done"] as const;
     let reads = 0;
     const seen: string[] = [];
     const client = new GenDragoonClient({

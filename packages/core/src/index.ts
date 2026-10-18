@@ -1,3 +1,13 @@
+export {
+  commitManifest,
+  manifestUploadRequest,
+  manifestVersionKey,
+  mergeManifestFiles,
+  putManifestBytes,
+  readManifestVersion,
+  rememberManifestVersion,
+} from "./manifest-cas.js";
+export { replaceEncryptedObject, uploadEncryptedObject } from "./upload.js";
 export { planSummary } from "./policy.js";
 export type {
   ProjectStatus,
@@ -32,8 +42,11 @@ export {
   performOwnershipChallenge,
   assertChallengeGetUrl,
   byoMayActivate,
+  presignChallengeGet,
+  createSigV4ChallengeWriter,
 } from "./byo.js";
 export type {
+  S3ChallengeCredentials,
   ByoProviderId,
   LaterByoProviderId,
   StorageProvider,
@@ -78,8 +91,10 @@ export {
   AccountDeletedError,
   ApiError,
   DeletionNotFoundError,
+  DeletionNotRetryableError,
   InvalidTokenError,
   ReauthRequiredError,
+  SUPPORT_CONTACT,
   WorkspaceLockedError,
   deletionAuthFailure,
   isAccountDeleted,
@@ -96,9 +111,11 @@ export {
   viewAfterFailure,
   deleteAccountAndWipe,
   dismissAccountDeletion,
+  dismissDeletion,
   resumeAccountDeletion,
+  retryDeletion,
 } from "./account.js";
-export type { AccountPhase, AccountLockReason, AccountState, AccountEvent } from "./account.js";
+export type { AccountPhase, AccountLockReason, AccountState, AccountEvent, DeletionAuthSignal } from "./account.js";
 export {
   SIGNED_URL_MAX_MS,
   REAUTH_WINDOW_MS,
@@ -126,13 +143,20 @@ export {
   sealBytes,
   openBytes,
   bytesToBase64,
+  bytesToBase64Url,
+  base64UrlToBytes,
 } from "./seal.js";
 export {
   PASSPHRASE_LOSS_WARNING,
+  KDF_MAX_ITERATIONS,
+  KDF_MAX_MEMORY_KIB,
   createKeyEnvelope,
   unwrapWorkspaceKey,
   assertKeyEnvelope,
   openWorkspaceKey,
+  publishKeyEnvelope,
+  establishWorkspaceKey,
+  rewrapWorkspaceKey,
 } from "./envelope.js";
 export type { SecretStore, SecureStore, SealedName, LibraryManifest } from "./seal.js";
 export { MemorySecretStore as MemorySecureStore } from "./seal.js";
@@ -161,11 +185,13 @@ export type {
   ByoProofResponse,
   AccessResponse,
   StorageOp,
-  StorageAccess,
-  StorageOperation,
+  StorageMode,
   StorageUrlRequest,
+  StorageObjectUrl,
   StorageLink,
   StorageUrlResponse,
+  Argon2idKdf,
+  ScryptKdf,
   DeleteAccountRequest,
   DeleteAccountAccepted,
   AccountDeletionStatus,

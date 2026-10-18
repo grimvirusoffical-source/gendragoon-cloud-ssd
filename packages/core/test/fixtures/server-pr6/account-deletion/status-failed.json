@@ -1,0 +1,18 @@
+{
+  "request": {
+    "body": null,
+    "headers": {
+      "authorization": "<redacted>"
+    },
+    "method": "GET",
+    "path": "/v2/account/deletions/00000000-0000-4000-8000-000000000004"
+  },
+  "response": {
+    "body": {
+      "jobId": "00000000-0000-4000-8000-000000000004",
+      "retryable": true,
+      "status": "failed"
+    },
+    "status": 200
+  }
+}

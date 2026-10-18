@@ -87,13 +87,13 @@ describe("sort-map.json: one shared map", () => {
 });
 
 describe("server-decided plan and lock are reflected, not recomputed", () => {
-  it("client.access() passes server plan fields through unchanged", async () => {
+  it("does not call /v2/access; plan fields are rendered from the server payload", async () => {
     const seen: string[] = [];
-    const body = { locked: false, cap: 20, activeCount: 13, overCap: false, unpaidIds: [], lapsedIds: [],
-      readable: true, downloadsAllowed: true, uploadsBlocked: false, normalUseBlocked: false };
-    const res = await clientReturning(200, body, seen).access();
-    expect(res).toMatchObject({ cap: 20, activeCount: 13, locked: false });
-    expect(seen).toEqual(["GET https://api.example.test/v2/access"]);
+    const client = clientReturning(200, { workspaces: [] }, seen);
+    expect("access" in client).toBe(false);
+    await client.listWorkspaces();
+    expect(seen.some((line) => line.includes("/v2/access"))).toBe(false);
+    expect(seen).toEqual(["GET https://api.example.test/v2/workspaces"]);
   });
   it("lock state follows the server flag even when counts look over the cap", () => {
     expect(accountFromAssessment({ locked: false, overCap: false, unpaidIds: [] })).toEqual(ready);
@@ -127,8 +127,9 @@ describe("423 workspace_lock maps to the delete/merge lock screen", () => {
     }
   }
   it("reads and downloads stay allowed while locked; uploads are refused client-side", () => {
-    expect(storageOperations({ intent: "download", oid: "f1", locked: true }).operations).toEqual([{ op: "download", oid: "f1" }]);
-    expect(() => storageOperations({ intent: "upload", oid: "f1", sizeBytes: 1, locked: true })).toThrow(WorkspaceLockedError);
+    expect(storageOperations({ intent: "download", oid: "f1", locked: true })).toEqual({ op: "get", objects: ["f1"] });
+    expect(() => storageOperations({ intent: "delete", oid: "f1", locked: true })).toThrow(WorkspaceLockedError);
+    expect(() => storageOperations({ intent: "upload", oid: "f1", locked: true })).toThrow(WorkspaceLockedError);
     const notLock = new ApiError(500, "REQUEST_FAILED", "x");
     expect(applyApiFailure(ready, notLock)).toEqual(ready);
   });
@@ -192,7 +193,7 @@ describe("delete account: DELETE /v2/account", () => {
     for (const id of ["w1", "b1"]) { expect(await secrets.get(workspaceKeyId(id))).toBeNull(); expect(await secrets.get(byoSecretId(id))).toBeNull(); }
   });
   it("TODO(contract): deletion job is polled until it finishes (core reads status once today)", async () => {
-    const states = ["accepted", "running", "done"] as const;
+    const states = ["queued", "running", "done"] as const;
     let i = 0;
     const client = { deleteAccount: async () => ({ jobId: "j" }), deletionStatus: async () => ({ jobId: "j", status: states[Math.min(i++, 2)] ?? "done" }) };
     const res = await deleteAccountAndWipe({ client, reauthenticatedAt: new Date().toISOString(), workspaceIds: [], secrets: new MemorySecretStore() });

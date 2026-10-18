@@ -2,5 +2,43 @@
   "repository": "grimvirusoffical-source/gendragoon-cloud-ssd",
   "url": "https://github.com/grimvirusoffical-source/gendragoon-cloud-ssd",
   "branch": "fix/backend-workspace-policy",
-  "commit": "da3927627fee76103981714f9f8ffa954843b74b"
+  "commit": "da3927627fee76103981714f9f8ffa954843b74b",
+  "sources": [
+    {
+      "branch": "fix/backend-workspace-policy",
+      "commit": "da3927627fee76103981714f9f8ffa954843b74b",
+      "areas": [
+        "workspace-lock",
+        "workspaces",
+        "merge",
+        "byo",
+        "ownership"
+      ]
+    },
+    {
+      "branch": "fix/account-deletion",
+      "pullRequest": 6,
+      "commit": "9d0f056430450fa97ae513181c9fd48852fd63bf",
+      "areas": [
+        "account-deletion",
+        "errors"
+      ]
+    },
+    {
+      "branch": "feat/workspace-key-envelope",
+      "pullRequest": 9,
+      "commit": "24fba029b6674ee4410ececec11b0935ba713960",
+      "areas": [
+        "key-envelope"
+      ]
+    },
+    {
+      "branch": "feat/scoped-bucket-auth",
+      "pullRequest": 7,
+      "commit": "8267784a790bbe8418b3cbe36e8a4b91849b0e81",
+      "areas": [
+        "storage-urls"
+      ]
+    }
+  ]
 }

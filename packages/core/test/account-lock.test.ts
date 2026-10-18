@@ -60,7 +60,7 @@ describe("delete account polling", () => {
   it("polls GET status until the job is done, then wipes local keys", async () => {
     const secrets = new MemorySecretStore();
     await secrets.set(workspaceKeyId("w1"), new Uint8Array([1]));
-    const states = ["accepted", "running", "done"] as const;
+    const states = ["queued", "running", "done"] as const;
     let reads = 0;
     const client = {
       deleteAccount: async () => ({ jobId: "job-1" }),

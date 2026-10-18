@@ -153,12 +153,13 @@ describe("GenDragoonClient", () => {
         seen.push({ method: init?.method, url, body: init?.body ? JSON.parse(String(init.body)) : null });
         if (url.endsWith("/storage-urls")) {
           return jsonResponse(200, {
+            bucket: "gd-customer",
             prefix: "customers/abc/workspaces/ws/",
+            mode: "read",
+            op: "get",
             expiresAt: new Date(Date.now() + 5 * 60 * 1000).toISOString(),
-            access: "read-only",
-            links: [{
-              op: "download",
-              oid: "oid",
+            urls: [{
+              object: "oid",
               method: "GET",
               url: "https://storage.googleapis.com/customers/abc/workspaces/ws/oid?X-Goog-Signature=1",
               expiresAt: new Date(Date.now() + 5 * 60 * 1000).toISOString(),
@@ -169,8 +170,8 @@ describe("GenDragoonClient", () => {
         return jsonResponse(200, { jobId: "job-1", status: "done", confirmation: "deleted", firebaseUserDeleted: true });
       },
     });
-    const links = await client.storageUrls("ws", { operations: [{ op: "download", oid: "oid" }] });
-    expect(links.access).toBe("read-only");
+    const links = await client.storageUrls("ws", { op: "get", objects: ["oid"] });
+    expect(links.mode).toBe("read");
     expect(seen[0]?.url).toBe("https://api.example.test/v2/workspaces/ws/storage-urls");
     await expect(client.deleteAccount({ reauthenticatedAt: new Date(Date.now() - 6 * 60 * 1000).toISOString() })).rejects.toMatchObject({
       status: 401,
@@ -179,7 +180,7 @@ describe("GenDragoonClient", () => {
     const staleServer = new GenDragoonClient({
       baseUrl: "https://api.example.test",
       getToken: () => "fresh-token",
-      fetch: async () => jsonResponse(401, { error: "sign in again", code: "reauth_required" }),
+      fetch: async () => jsonResponse(401, { error: "reauth_required" }),
     });
     await expect(staleServer.deleteAccount({ reauthenticatedAt: new Date().toISOString() })).rejects.toMatchObject({
       status: 401,

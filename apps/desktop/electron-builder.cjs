@@ -1,4 +1,8 @@
-const signing = Boolean(process.env.CSC_LINK || process.env.WIN_CSC_LINK);
+const { signingFromEnv } = require("./nsis-signing.cjs");
+
+const signing = signingFromEnv();
+if (signing.certificateFile && !process.env.CSC_LINK) process.env.CSC_LINK = signing.certificateFile;
+if (signing.certificatePassword && !process.env.CSC_KEY_PASSWORD) process.env.CSC_KEY_PASSWORD = signing.certificatePassword;
 
 /** Mac is intentionally absent. The Mac product remains the SwiftUI app. */
 module.exports = {
@@ -7,10 +11,12 @@ module.exports = {
   directories: { output: "release" },
   files: ["dist/**/*", "package.json"],
   asar: true,
-  forceCodeSigning: false,
+  forceCodeSigning: signing.enabled && process.env.GENDRAGOON_NSIS_REQUIRE_SIGNATURE === "1",
   win: {
     target: [{ target: "nsis" }],
-    signAndEditExecutable: signing,
+    signAndEditExecutable: signing.enabled,
+    certificateFile: signing.certificateFile || undefined,
+    certificatePassword: signing.certificatePassword || undefined,
   },
   nsis: {
     oneClick: false,
@@ -21,6 +27,6 @@ module.exports = {
   publish: {
     provider: "github",
     owner: "grimvirusoffical-source",
-    repo: "gendragoon-apps",
+    repo: "gendragoon-cloud-ssd",
   },
 };

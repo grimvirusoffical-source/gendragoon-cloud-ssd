@@ -80,20 +80,27 @@ describe("storage links", () => {
 
   it("rejects upload links when the workspace is locked and rejects long-lived URLs", () => {
     expect(() => storageOperations({ intent: "upload", oid: "oid", locked: true })).toThrow(WorkspaceLockedError);
-    expect(storageOperations({ intent: "download", oid: "oid", locked: true }).operations[0]?.op).toBe("download");
+    expect(storageOperations({ intent: "download", oid: "oid", locked: true }).op).toBe("get");
+    expect(storageOperations({ intent: "delete", oid: "oid", locked: false })).toEqual({ op: "delete", objects: ["oid"] });
     expect(() => assertStorageUrlResponse({
       prefix,
+      mode: "write",
+      op: "put",
       expiresAt: new Date(now + SIGNED_URL_MAX_MS + 1000).toISOString(),
-      access: "read-write",
-      links: [],
+      urls: [{
+        object: "oid",
+        method: "PUT",
+        url: `https://storage.googleapis.com/${prefix}oid?X-Goog-Signature=abc`,
+        expiresAt: new Date(now + SIGNED_URL_MAX_MS + 1000).toISOString(),
+      }],
     }, now)).toThrow(/15 minutes/);
     expect(() => assertStorageUrlResponse({
       prefix,
+      mode: "read",
+      op: "get",
       expiresAt,
-      access: "read-only",
-      links: [{
-        op: "upload",
-        oid: "oid",
+      urls: [{
+        object: "oid",
         method: "PUT",
         url: `https://storage.googleapis.com/${prefix}oid?X-Goog-Signature=abc`,
         expiresAt,
@@ -103,13 +110,12 @@ describe("storage links", () => {
 
   it("accepts a prefix-scoped download link and uploads ciphertext without a bearer token", async () => {
     const link = {
-      op: "upload" as const,
-      oid: "oid",
+      object: "oid",
       method: "PUT" as const,
       url: `https://storage.googleapis.com/${prefix}oid?X-Goog-Algorithm=GOOG4-RSA-SHA256`,
       expiresAt,
     };
-    assertStorageUrlResponse({ prefix, expiresAt, access: "read-write", links: [link] }, now);
+    assertStorageUrlResponse({ prefix, expiresAt, mode: "write", op: "put", urls: [link] }, now);
     let authorization: string | null = "unset";
     await putSignedObject(link, new Uint8Array([1, 2, 3]), async (_input, init) => {
       authorization = new Headers(init?.headers).get("Authorization");
