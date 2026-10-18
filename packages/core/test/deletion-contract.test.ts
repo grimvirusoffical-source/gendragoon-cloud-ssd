@@ -19,7 +19,7 @@
  *
  * The older cases below still use the PR #6 shapes written in this file. The
  * invalid_token ruling cases at the end load Riley's generated bodies from
- * fixtures/server-pr6/account-deletion (PR #6 9d0f056, see SOURCE.json there).
+ * fixtures/server-pr6/account-deletion (PR #6 fff0a84, see SOURCE.json there).
  */
 import { describe, expect, it } from "vitest";
 import {
@@ -459,7 +459,7 @@ describe("deletion rulings: bare 401 and poll 404", () => {
  * for a bearer that looks like a Firebase ID token; for a statusToken it answers 404. The
  * statusToken + invalid_token tests below are Avery's safety net for a server that ever does.
  *
- * Every server reply here is a body from Riley's generated fixtures (PR #6 9d0f056).
+ * Every server reply here is a body from Riley's generated fixtures (PR #6 fff0a84).
  * The 410 / poll-404 / status-done fixtures share job ...0005, so they chain as one job.
  * The status token in the fixtures is the literal "<redacted>"; it is still the opaque
  * token the client must store and send back.
@@ -468,7 +468,7 @@ describe("deletion rulings: bare 401 and poll 404", () => {
  * deletionAuthFailure(error) === "sign-out". The shell clears its session on that and
  * nothing else. After sign-out getToken throws, which is how these tests model it.
  */
-describe("deletion ruling: 401 invalid_token (Firebase token -> sign-out; statusToken poll -> sign-in safety net) (fixtures 9d0f056)", () => {
+describe("deletion ruling: 401 invalid_token (Firebase token -> sign-out; statusToken poll -> sign-in safety net) (fixtures fff0a84)", () => {
   const reply = (name: string): Reply => {
     const fx = loadDeletionFixture(name);
     return { status: fx.response.status, body: fx.response.body };
@@ -534,18 +534,51 @@ describe("deletion ruling: 401 invalid_token (Firebase token -> sign-out; status
     expect(await saved(secureStore, TOKEN_KEY)).toBe(ACCEPTED_BODY.statusToken);
   });
 
-  it("status-unauthorized on a poll: polling stops, error surfaces as 401 unauthorized, job kept, nothing wiped (no sign-in/sign-out ruling for this code yet)", async () => {
+  /**
+   * Avery's ruling (Oct 18): a status GET that gets 401 {error:"unauthorized"} (Riley's
+   * status-unauthorized) or a 401 with no code calls onAuthFailure("reauth_required"), never
+   * "signed_out", stops polling, keeps jobId + statusToken, and wipes nothing. Only an
+   * invalid_token on a Firebase-token request maps to "signed_out".
+   * The hook assertions come last so a failure there is the missing signal, not setup.
+   */
+  async function pollWith401(body: unknown) {
     const secrets = await seededSecrets();
     const secureStore = new MemorySecretStore();
-    const r = await startDeletion({ del: [reply("accepted")], status: [reply("status-unauthorized")] }, secrets, secureStore);
+    const now = Date.now();
+    const tok = idToken(Math.floor(now / 1000) - 30);
+    const srv = server({ del: [reply("accepted")], status: [{ status: 401, body }] });
+    const signals: Array<{ signal: unknown; error: unknown }> = [];
+    const input = {
+      client: new GenDragoonClient({ baseUrl: BASE, getToken: () => tok, fetch: srv.fetchImpl }),
+      reauthenticatedAt: "", idToken: tok, workspaceIds: WS, secrets, secureStore, now,
+      sleep: async () => {}, timeoutMs: 60_000, backoffMs: [1],
+      onAuthFailure: (signal: unknown, error: unknown) => { signals.push({ signal, error }); },
+    };
+    const error = await deleteAccountAndWipe(input as Parameters<typeof deleteAccountAndWipe>[0])
+      .then(() => undefined, (caught: unknown) => caught);
+    return { error, calls: srv.calls, secrets, secureStore, signals };
+  }
+
+  async function expectReauthStopKeep(r: Awaited<ReturnType<typeof pollWith401>>) {
     const gets = statusCalls(r.calls);
+    // The scripted server repeats the 401, so a loop would show up as extra GETs.
     expect(gets).toHaveLength(1);
-    // Core always sends the statusToken, so a real server would not answer this request with "unauthorized".
     expect(gets[0]!.auth).toBe(`Bearer ${ACCEPTED_BODY.statusToken}`);
-    expect(r.error).toMatchObject({ status: 401, code: "unauthorized" });
-    expect(await keysLeft(secrets)).toBe(2);
-    expect(await saved(secureStore, JOB_KEY)).toBe(ACCEPTED_BODY.jobId);
-    expect(await saved(secureStore, TOKEN_KEY)).toBe(ACCEPTED_BODY.statusToken);
+    expect(r.error).toMatchObject({ status: 401 });
+    expect(await keysLeft(r.secrets)).toBe(2);
+    expect(await saved(r.secureStore, JOB_KEY)).toBe(ACCEPTED_BODY.jobId);
+    expect(await saved(r.secureStore, TOKEN_KEY)).toBe(ACCEPTED_BODY.statusToken);
+    expect(r.signals.some((s) => s.signal === "signed_out")).toBe(false);
+    expect(r.signals.map((s) => s.signal)).toContain("reauth_required");
+  }
+
+  it("BUG(contract): status-unauthorized on a poll -> onAuthFailure('reauth_required'), polling stops, job kept, nothing wiped (account.ts:201-204 rethrows with no onAuthFailure call; client.ts:396-401 leaves 401 unauthorized a generic ApiError)", async () => {
+    await expectReauthStopKeep(await pollWith401(STATUS_UNAUTHORIZED.response.body));
+  });
+
+  it("BUG(contract): bare 401 with no code on a poll (DERIVED body {}) -> onAuthFailure('reauth_required'), polling stops, job kept, nothing wiped (account.ts:201-204 rethrows with no onAuthFailure call)", async () => {
+    // DERIVED: Riley has no status fixture for a 401 without a code.
+    await expectReauthStopKeep(await pollWith401({}));
   });
 
   it("DELETE -> invalid_token: sign-out signal, no wipe, no poll, no job invented, SecureStore untouched", async () => {
@@ -749,15 +782,13 @@ describe("deletion ruling: 401 invalid_token (Firebase token -> sign-out; status
  * - A status-token poll on a dead token is 404 (keep the job, Retry), not 401.
  * - Clear the saved job only on `done` or when the user dismisses. Wipe local data only on `done`.
  *
- * Real fixtures (PR #6 9d0f056): accepted (job ...0001), status-failed (job ...0004,
+ * Real fixtures (PR #6 fff0a84): accepted (job ...0001), status-failed (job ...0004,
  * retryable:true), retry-after-failed (202 {status:"queued"}, job ...0004, new token),
- * retry-not-retryable (409 {error:"deletion_not_retryable", jobId:...00aa}), status-queued /
+ * status-failed-not-retryable (job ...0009, retryable:false), retry-not-retryable (409
+ * {error:"deletion_not_retryable", jobId:...0009}, same permanent-failure job), status-queued /
  * status-running / status-done (jobs ...0002 / ...0003 / ...0005). Each fixture is its own
  * capture, so the jobId inside a poll body can differ from the job being polled; the tests
  * check the request path the client builds, not the jobId echoed in those bodies.
- *
- * Still DERIVED (Riley's set has no capture for it): a poll returning `failed` with
- * `retryable: false`. Used by the two "failed+non-retryable" poll tests below.
  *
  * Token redaction: every fixture token is the literal "<redacted>", so the retry 202's "new"
  * token is byte-equal to the 202 token it replaces. Core only checks non-empty, so nothing
@@ -771,7 +802,7 @@ describe("deletion ruling: 401 invalid_token (Firebase token -> sign-out; status
  * The Retry tests start from the state the ruling requires after `failed` (the job and its
  * previous token saved), so they fail only on the Retry behavior, not on the clearing bug.
  */
-describe("deletion ruling: failed is not terminal (fixtures 9d0f056)", () => {
+describe("deletion ruling: failed is not terminal (fixtures fff0a84)", () => {
   const fx = (name: string) => loadDeletionFixture(name);
   const reply = (name: string): Reply => ({ status: fx(name).response.status, body: fx(name).response.body });
   const FAILED = fx("status-failed");
@@ -784,8 +815,8 @@ describe("deletion ruling: failed is not terminal (fixtures 9d0f056)", () => {
   const RETRY_BODY = RETRY.response.body as { jobId: string; status: string; statusToken: string };
   const NOT_RETRYABLE = fx("retry-not-retryable");
   const NOT_RETRYABLE_BODY = NOT_RETRYABLE.response.body as { error: string; jobId: string };
-  /** DERIVED: status-failed with retryable:false. Riley's set has no non-retryable poll capture. */
-  const failedNonRetryable = (): Reply => ({ status: 200, body: { ...FAILED_BODY, retryable: false } });
+  const FAILED_NR = fx("status-failed-not-retryable");
+  const FAILED_NR_BODY = FAILED_NR.response.body as { jobId: string; status: string; retryable: boolean };
   /** Client-side saved token from before the retry; distinct from "<redacted>" so a replacement is visible. */
   const PREVIOUS_TOKEN = "<redacted:previous>";
 
@@ -859,6 +890,11 @@ describe("deletion ruling: failed is not terminal (fixtures 9d0f056)", () => {
     expect(NOT_RETRYABLE.response.status).toBe(409);
     expect(NOT_RETRYABLE_BODY).toEqual({ error: "deletion_not_retryable", jobId: expect.stringMatching(/^[0-9a-f-]{36}$/) });
     expect(NOT_RETRYABLE_BODY).not.toHaveProperty("statusToken");
+    expect(FAILED_NR.request).toMatchObject({ method: "GET", path: `/v2/account/deletions/${FAILED_NR_BODY.jobId}` });
+    expect(FAILED_NR.response.status).toBe(200);
+    expect(FAILED_NR_BODY).toEqual({ jobId: FAILED_NR_BODY.jobId, status: "failed", retryable: false });
+    // retry-not-retryable is the repeat DELETE for that same permanently failed job.
+    expect(NOT_RETRYABLE_BODY.jobId).toBe(FAILED_NR_BODY.jobId);
   });
 
   it("failed+retryable: stops polling, returns retryable:true for the Retry button, wipes nothing", async () => {
@@ -963,10 +999,10 @@ describe("deletion ruling: failed is not terminal (fixtures 9d0f056)", () => {
     expect(await keysLeft(secrets)).toBe(2);
   });
 
-  it("BUG(contract): failed+non-retryable (DERIVED body) keeps the job until the user dismisses, then clears it without wiping (account.ts:218-219 clears on failed)", async () => {
+  it("BUG(contract): failed+non-retryable (real status-failed-not-retryable) keeps the job until the user dismisses, then clears it without wiping (account.ts:218-219 clears on failed)", async () => {
     const secrets = await seededSecrets();
     const secureStore = new MemorySecretStore();
-    const r = await attempt({ del: [reply("accepted")], status: [failedNonRetryable()] }, secrets, secureStore);
+    const r = await attempt({ del: [reply("accepted")], status: [reply("status-failed-not-retryable")] }, secrets, secureStore);
     expect(r.result).toMatchObject({ status: "failed", retryable: false });
     expect(await keysLeft(secrets)).toBe(2);
     expect(await saved(secureStore, JOB_KEY)).toBe(ACCEPTED_BODY.jobId);
@@ -978,9 +1014,9 @@ describe("deletion ruling: failed is not terminal (fixtures 9d0f056)", () => {
     expect(await keysLeft(secrets)).toBe(2);
   });
 
-  it("failed+non-retryable (DERIVED body) is surfaced as retryable:false and wipes nothing", async () => {
+  it("failed+non-retryable (real status-failed-not-retryable) is surfaced as retryable:false and wipes nothing", async () => {
     const secrets = await seededSecrets();
-    const r = await attempt({ del: [reply("accepted")], status: [failedNonRetryable()] }, secrets, new MemorySecretStore());
+    const r = await attempt({ del: [reply("accepted")], status: [reply("status-failed-not-retryable")] }, secrets, new MemorySecretStore());
     expect(r.error).toBeUndefined();
     expect(r.result).toMatchObject({ status: "failed", retryable: false });
     expect(await keysLeft(secrets)).toBe(2);
@@ -1026,12 +1062,12 @@ describe("deletion ruling: failed is not terminal (fixtures 9d0f056)", () => {
  * and they differ, `error` wins. Avery: `error` ALWAYS wins when it is non-empty, token-shaped
  * or not (no pattern fallback to `code`).
  *
- * CONTRACT-EDGE CASE, DERIVED BODIES: the server never sends `code` (PR #6 9d0f056 and every
+ * CONTRACT-EDGE CASE, DERIVED BODIES: the server never sends `code` (PR #6 fff0a84 and every
  * fixture in server-pr6/account-deletion carry only `error`), so no real fixture has both.
  * Each body below is a real fixture body with a conflicting `code` added. The request and
  * status come from the fixture unchanged.
  */
-describe("deletion ruling: `error` wins over `code` when they differ (contract edge, DERIVED from 9d0f056 fixtures)", () => {
+describe("deletion ruling: `error` wins over `code` when they differ (contract edge, DERIVED from fff0a84 fixtures)", () => {
   const withCode = (name: string, code: string): Reply => {
     const f = loadDeletionFixture(name);
     return { status: f.response.status, body: { ...(f.response.body as Record<string, unknown>), code } };

@@ -87,9 +87,9 @@ describe("vendored server fixtures", () => {
   it("records the later fixture commits", () => {
     const sources = (source as { sources?: { commit: string }[] }).sources ?? [];
     const commits = sources.map((item) => item.commit);
-    expect(commits).toContain("9d0f056430450fa97ae513181c9fd48852fd63bf");
+    expect(commits).toContain("fff0a84b6d75acb3a79cff7f146450c486efbe56");
     expect(commits).toContain("8267784a790bbe8418b3cbe36e8a4b91849b0e81");
-    expect(commits).toContain("24fba029b6674ee4410ececec11b0935ba713960");
+    expect(commits).toContain("ee4f76f07bc798635002ae2c272fb47d83db7698");
   });
 
   it("a blank presignedUrl is omitted and verify-missing-url is presigned_url_required", async () => {

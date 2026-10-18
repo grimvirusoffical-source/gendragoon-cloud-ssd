@@ -18,7 +18,7 @@
     {
       "branch": "fix/account-deletion",
       "pullRequest": 6,
-      "commit": "9d0f056430450fa97ae513181c9fd48852fd63bf",
+      "commit": "fff0a84b6d75acb3a79cff7f146450c486efbe56",
       "areas": [
         "account-deletion",
         "errors"
@@ -27,7 +27,7 @@
     {
       "branch": "feat/workspace-key-envelope",
       "pullRequest": 9,
-      "commit": "24fba029b6674ee4410ececec11b0935ba713960",
+      "commit": "ee4f76f07bc798635002ae2c272fb47d83db7698",
       "areas": [
         "key-envelope"
       ]

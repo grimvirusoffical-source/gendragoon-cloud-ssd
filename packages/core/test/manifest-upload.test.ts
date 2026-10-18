@@ -85,7 +85,7 @@ describe("manifest compare-and-swap", () => {
         expect(generation).toBe("9");
         if (uploads === 1) throw new ApiError(412, "stale_version", "stale");
         expect(manifest.files.map((file) => file.oid).sort()).toEqual(["a", "b"]);
-        expect(manifest.files.find((file) => file.oid === "a")?.path).toBe("a.txt (from Other)");
+        expect(manifest.files.find((file) => file.oid === "a")?.path).toBe("a.txt");
         expect(manifest.version).toBeGreaterThan(remote.version);
       },
     });
@@ -210,7 +210,7 @@ describe("SigV4 challenge URL", () => {
 
 describe("workspace key adoption and file replacement", () => {
   const passphrase = "correct horse";
-  const fast = { opsLimit: 1, memLimit: 8192 };
+  const fast = { opsLimit: 1, memLimit: 19 * 1024 * 1024 };
 
   it("two devices racing on create adopt the same key and decrypt each other's files", async () => {
     let stored: Awaited<ReturnType<typeof createKeyEnvelope>> | null = null;

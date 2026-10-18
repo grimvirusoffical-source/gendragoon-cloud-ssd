@@ -1,0 +1,33 @@
+{
+  "local": {
+    "version": 4,
+    "prunedThroughVersion": 0,
+    "files": [
+      { "fileId": "doc", "path": "doc.txt", "writtenAtVersion": 3 },
+      { "fileId": "other", "path": "other.txt", "writtenAtVersion": 2 }
+    ],
+    "tombstones": []
+  },
+  "remote": {
+    "version": 5,
+    "prunedThroughVersion": 0,
+    "files": [
+      { "fileId": "other", "path": "other.txt", "writtenAtVersion": 2 }
+    ],
+    "tombstones": [
+      { "fileId": "doc", "deletedAtVersion": 5, "deletedAtMs": 1700000000000 }
+    ]
+  },
+  "lastSyncedVersion": 4,
+  "nowMs": 1700086400000,
+  "expected": {
+    "version": 6,
+    "prunedThroughVersion": 0,
+    "files": [
+      { "fileId": "other", "path": "other.txt", "writtenAtVersion": 2 }
+    ],
+    "tombstones": [
+      { "fileId": "doc", "deletedAtVersion": 5, "deletedAtMs": 1700000000000 }
+    ]
+  }
+}

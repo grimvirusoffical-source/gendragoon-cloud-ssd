@@ -1,12 +1,17 @@
 export {
+  TOMBSTONE_TTL_MS,
   commitManifest,
+  manifestSyncedKey,
   manifestUploadRequest,
   manifestVersionKey,
   mergeManifestFiles,
+  mergeSealedManifest,
   putManifestBytes,
+  readLastSyncedVersion,
   readManifestVersion,
   rememberManifestVersion,
 } from "./manifest-cas.js";
+export type { ManifestMergeDocument, ManifestMergeFile } from "./manifest-cas.js";
 export { replaceEncryptedObject, uploadEncryptedObject } from "./upload.js";
 export { planSummary } from "./policy.js";
 export type {
@@ -160,7 +165,7 @@ export {
   establishWorkspaceKey,
   rewrapWorkspaceKey,
 } from "./envelope.js";
-export type { SecretStore, SecureStore, SealedName, LibraryManifest } from "./seal.js";
+export type { SecretStore, SecureStore, SealedName, LibraryManifest, ManifestTombstone } from "./seal.js";
 export { MemorySecretStore as MemorySecureStore } from "./seal.js";
 export type {
   HealthResponse,

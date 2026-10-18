@@ -45,7 +45,8 @@ function loadSodium(): Promise<typeof sodium> {
 /**
  * Wrap one workspace key. Argon2id is the default.
  * Scrypt is used only when `kdf` is `"scrypt"`. An Argon2id failure stays an Argon2id failure.
- * `memoryKiB` above 1048576 or `iterations` above 10 is rejected before derivation.
+ * `memoryKiB` below 19456 or above 1048576, or `iterations` above 10, is rejected before derivation.
+ * Scrypt `N` must be a power of two from 2^14 through 2^20, or it is rejected before derivation.
  */
 export async function createKeyEnvelope(
   workspaceKey: Uint8Array,
@@ -99,7 +100,7 @@ export async function createKeyEnvelope(
     const r = options.scrypt?.r ?? 8;
     const p = options.scrypt?.p ?? 1;
     assertScryptN(N);
-    if (N < 2 ** 14 || N > 2 ** 20 || r !== 8 || !Number.isInteger(p) || p < 1 || p > 4) {
+    if (r !== 8 || !Number.isInteger(p) || p < 1 || p > 4) {
       throw new ApiError(422, "envelope_invalid", "Key envelope is unreadable");
     }
     kdf = { alg: "scrypt", N, r, p };
@@ -205,7 +206,7 @@ function assertKdf(value: unknown): asserts value is Argon2idKdf | ScryptKdf {
     const r = record.r as number;
     const p = record.p as number;
     assertScryptN(N);
-    if (N < 2 ** 14 || N > 2 ** 20 || r !== 8 || !Number.isInteger(p) || p < 1 || p > 4) {
+    if (r !== 8 || !Number.isInteger(p) || p < 1 || p > 4) {
       throw invalidEnvelope();
     }
     return;
@@ -213,15 +214,19 @@ function assertKdf(value: unknown): asserts value is Argon2idKdf | ScryptKdf {
   throw invalidEnvelope();
 }
 
-/** Reject scrypt `N` before any derivation. Same code the server uses for bad KDF parameters. */
+/** Reject scrypt `N` before any derivation. The server allows only a power of two from 2^14 through 2^20. */
 function assertScryptN(N: unknown): void {
-  if (typeof N !== "number" || !Number.isInteger(N) || N < 2 || (N & (N - 1)) !== 0) {
+  const powerOfTwo = typeof N === "number" && Number.isInteger(N) && N >= 2 ** 14 && N <= 2 ** 20 && (N & (N - 1)) === 0;
+  if (!powerOfTwo) {
     throw new ApiError(422, "kdf_params_invalid", "Key derivation parameters are not allowed.");
   }
 }
 
+/** Server minimum. 19 MiB, the same floor `createKeyEnvelope` uses by default. */
+const ARGON_MIN_MEMORY_KIB = 19 * 1024;
+
 function assertArgonCaps(memoryKiB: unknown, iterations: unknown): void {
-  if (!Number.isInteger(memoryKiB) || (memoryKiB as number) < 1 || (memoryKiB as number) > KDF_MAX_MEMORY_KIB) {
+  if (!Number.isInteger(memoryKiB) || (memoryKiB as number) < ARGON_MIN_MEMORY_KIB || (memoryKiB as number) > KDF_MAX_MEMORY_KIB) {
     throw invalidEnvelope();
   }
   if (!Number.isInteger(iterations) || (iterations as number) < 1 || (iterations as number) > KDF_MAX_ITERATIONS) {
@@ -256,15 +261,29 @@ export async function openWorkspaceKey(input: {
   opsLimit?: number;
   memLimit?: number;
   argon2id?: Argon2;
+  get?: () => Promise<KeyEnvelope>;
+  put?: (envelope: KeyEnvelope) => Promise<unknown>;
 }): Promise<{ state: "cached" | "unlocked" | "needs-passphrase"; key?: Uint8Array; envelope?: KeyEnvelope }> {
   const name = workspaceKeyId(input.workspaceId);
   const cached = await input.store.get(name);
   if (cached && cached.byteLength === KEY_BYTES) return { state: "cached", key: cached };
   if (input.create) {
     if (!input.passphrase) return { state: "needs-passphrase" };
+    if (input.get && input.put) {
+      const established = await establishWorkspaceKey({
+        store: input.store,
+        workspaceId: input.workspaceId,
+        passphrase: input.passphrase,
+        get: input.get,
+        put: input.put,
+        kdf: input.kdf,
+        opsLimit: input.opsLimit,
+        memLimit: input.memLimit,
+      });
+      return { state: "unlocked", key: established.key, envelope: established.envelope };
+    }
     const key = await createWorkspaceKey();
     const envelope = await createKeyEnvelope(key, input.passphrase, input);
-    await input.store.set(name, key);
     return { state: "unlocked", key, envelope };
   }
   if (!input.envelope || !input.passphrase) return { state: "needs-passphrase" };
@@ -322,6 +341,17 @@ export async function establishWorkspaceKey(input: {
       const adopted = await unwrapWorkspaceKey(remote, input.passphrase);
       await input.store.set(workspaceKeyId(input.workspaceId), adopted);
       return { key: adopted, envelope: remote, adopted: true };
+    }
+    if (error instanceof ApiError && error.status === 412) {
+      const remote = await input.get();
+      const key = await unwrapWorkspaceKey(remote, input.passphrase);
+      const retry = await createKeyEnvelope(key, input.passphrase, {
+        version: remote.version + 1,
+        ...kdfOptions(remote),
+      });
+      await input.put(retry);
+      await input.store.set(workspaceKeyId(input.workspaceId), key);
+      return { key, envelope: retry, adopted: true };
     }
     throw error;
   }
