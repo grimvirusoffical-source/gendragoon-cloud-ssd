@@ -265,13 +265,24 @@ def verify_parent(pid, app):
     return identity
 
 
-def ensure_quiet(app, allowed_pids=(), samples=1, primary=None):
+def ensure_quiet(app, allowed_pids=(), samples=1, primary=None, parent=None):
     allowed = {os.getpid(), *allowed_pids}
     support = control.support()
     mount = Path.home() / "GenDragoon Cloud SSD"
-    watched = (Path(app), support / "Cache", support / "LaunchSessions", mount)
+    # UI services can retain the original executable until its parent quits.
+    # Nothing replaces the bundle during this phase. Only its readers may
+    # finish with that exact parent; cloud/cache resources remain protected.
+    # With no live parent, every bundle reference must also be closed.
+    watched = (support / "Cache", support / "LaunchSessions", mount)
+    if parent is None:
+        watched = (Path(app), *watched)
+    else:
+        allowed.add(parent.pid)
     prefixes = tuple(str(path).rstrip("/") + "/" for path in watched)
     for sample in range(samples):
+        if parent is not None and (Path(parent.executable) != auto.app_executable(app)
+                or control.identify(parent.pid, Path(parent.executable)) != parent):
+            raise RuntimeError("Original application identity changed during quiet verification")
         if primary is None:
             control.ensure_idle(app)
         else:
@@ -301,13 +312,15 @@ def ensure_quiet(app, allowed_pids=(), samples=1, primary=None):
             time.sleep(1)
 
 
-def quiesce_primary(app, parent_pid):
+def quiesce_primary(app, parent_pid=None):
+    parent = verify_parent(parent_pid, app) if parent_pid is not None else None
+    allowed = () if parent is None else (parent.pid,)
     primary = primary_mount(app)
     if primary is None:
-        ensure_quiet(app, (parent_pid,))
+        ensure_quiet(app, allowed, parent=parent)
         return
     for sample in range(QUIET_SAMPLES):
-        ensure_quiet(app, (parent_pid,), primary=primary)
+        ensure_quiet(app, allowed, primary=primary, parent=parent)
         if sample + 1 < QUIET_SAMPLES:
             time.sleep(PRIMARY_QUIET_INTERVAL)
     # Check the kernel path, UID and start time again immediately before the
@@ -322,7 +335,7 @@ def quiesce_primary(app, parent_pid):
         if time.monotonic() >= deadline:
             raise RuntimeError("Primary mount did not shut down normally; update postponed")
         time.sleep(0.25)
-    ensure_quiet(app, (parent_pid,))
+    ensure_quiet(app, allowed, parent=parent)
 
 
 def retained_request(app, pid, channel):
@@ -338,7 +351,7 @@ def retained_request(app, pid, channel):
         stage = auto.staged_valid(strict=True)
         if stage is None or not stage.get("bundleDigest"):
             raise RuntimeError("No fully verified update is staged for this channel")
-        ensure_quiet(app, (pid,), primary=primary_mount(app))
+        ensure_quiet(app, (pid,), primary=primary_mount(app), parent=identity)
         original_digest = auto.bundle_digest(app)
         root = control.ensure_directory(auto.ROOT / "restart-workers", Path.home(), private=True)
         request_id = uuid.uuid4().hex

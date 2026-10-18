@@ -124,6 +124,9 @@ class RestartWorkerTests(unittest.TestCase):
         path.write_text(json.dumps(state));path.chmod(0o600)
         before=path.read_bytes()
         with self.assertRaisesRegex(RuntimeError,"queued or running"):worker.ensure_queue_idle(self.support)
+        with self.quiet_environment():
+            with self.assertRaisesRegex(RuntimeError,"queued or running"):
+                worker.ensure_quiet(self.app,parent=self.identity)
         self.assertEqual(path.read_bytes(),before)
         self.assertEqual(source.read_text(),"original")
 
@@ -136,6 +139,76 @@ class RestartWorkerTests(unittest.TestCase):
                  mock.patch.object(worker.os,"kill") as signal_app:
                 with self.assertRaises(RuntimeError):worker.ensure_quiet(self.app)
                 signal_app.assert_not_called()
+
+    def quiet_environment(self):
+        stack = ExitStack()
+        for patch in (mock.patch.object(control, "ensure_idle"),
+                      mock.patch.object(control, "processes", return_value=[]),
+                      mock.patch.object(control, "identify", return_value=self.identity),
+                      mock.patch.object(worker.launcher, "sessions", return_value={"active": False}),
+                      mock.patch.object(worker.launcher, "open_files", return_value=[])):
+            stack.enter_context(patch)
+        return stack
+
+    def test_bundle_reader_may_finish_with_exact_parent_but_blocks_after_quit(self):
+        before = auto.bundle_digest(self.app)
+        opened = [(888, str(auto.app_executable(self.app)))]
+        with self.quiet_environment(), \
+             mock.patch.object(worker.launcher, "open_files", return_value=opened), \
+             mock.patch.object(worker.os, "kill") as signal_process:
+            worker.ensure_quiet(self.app, parent=self.identity)
+            with self.assertRaisesRegex(RuntimeError, "files are still open"):
+                worker.ensure_quiet(self.app)
+            signal_process.assert_not_called()
+        self.assertEqual(auto.bundle_digest(self.app), before)
+
+    def test_prequit_keeps_cloud_cache_session_helper_and_dirty_guards(self):
+        with self.quiet_environment(), mock.patch.object(worker.os, "kill") as signal_process:
+            for path in (self.support / "Cache/vfs/working", self.support / "LaunchSessions/working",
+                         self.home / "GenDragoon Cloud SSD/cloud-file"):
+                with self.subTest(path=path), \
+                     mock.patch.object(worker.launcher, "open_files", return_value=[(888, str(path))]):
+                    with self.assertRaisesRegex(RuntimeError, "files are still open"):
+                        worker.ensure_quiet(self.app, parent=self.identity)
+            with mock.patch.object(worker.launcher, "sessions", return_value={"active": True}):
+                with self.assertRaisesRegex(RuntimeError, "session or cloud mount"):
+                    worker.ensure_quiet(self.app, parent=self.identity)
+            with mock.patch.object(control, "processes", return_value=[(888, 1, os.getuid(), "gendragoon_library.py upload")]):
+                with self.assertRaisesRegex(RuntimeError, "file operation is active"):
+                    worker.ensure_quiet(self.app, parent=self.identity)
+            metadata = self.support / "Cache/vfsMeta/remote/dirty"
+            metadata.parent.mkdir(parents=True)
+            metadata.write_text('{"Dirty":true}')
+            with self.assertRaisesRegex(RuntimeError, "Unsynced or unknown"):
+                worker.ensure_quiet(self.app, parent=self.identity)
+            signal_process.assert_not_called()
+
+    def test_prequit_parent_identity_change_cannot_defer_bundle_guard(self):
+        changed = control.ProcessIdentity(self.identity.pid, self.identity.executable, "reused PID")
+        with self.quiet_environment(), mock.patch.object(control, "identify", return_value=changed), \
+             mock.patch.object(worker.launcher, "open_files") as opened:
+            with self.assertRaisesRegex(RuntimeError, "identity changed"):
+                worker.ensure_quiet(self.app, parent=self.identity)
+            opened.assert_not_called()
+
+    def test_worker_requires_bundle_readers_closed_after_parent_exit_before_install(self):
+        directory, receipt = self.snapshot()
+        before = auto.bundle_digest(self.app)
+        read_fd, write_fd = os.pipe()
+        with self.quiet_environment(), \
+             mock.patch.object(worker, "load_runtime"), mock.patch.object(control, "require_mac"), \
+             mock.patch.object(worker, "verify_parent", return_value=self.identity), \
+             mock.patch.object(auto, "validate_app"), mock.patch.object(auto, "app_pids", return_value=[]), \
+             mock.patch.object(worker, "quiesce_primary"), mock.patch.object(worker, "wait_for_parent") as waited, \
+             mock.patch.object(worker.launcher, "open_files", return_value=[(888, str(auto.app_executable(self.app)))]), \
+             mock.patch.object(auto, "install_worker") as install:
+            self.assertEqual(worker.run_worker(directory, write_fd), 1)
+            waited.assert_called_once()
+            install.assert_not_called()
+        acknowledgement = json.loads(os.read(read_fd, 8192));os.close(read_fd)
+        self.assertEqual(acknowledgement["state"], "scheduled")
+        self.assertEqual(json.loads(auto.STATUS.read_text())["state"], "postponed")
+        self.assertEqual(auto.bundle_digest(self.app), before)
 
     def test_changed_stage_fails_worker_before_ack_or_parent_wait(self):
         directory,receipt=self.snapshot()
@@ -198,6 +271,7 @@ class RestartWorkerTests(unittest.TestCase):
         primary = control.ProcessIdentity(4100,str(self.resources/"rclone"),"original")
         calls = []
         with mock.patch.object(worker,"primary_mount",return_value=primary), \
+             mock.patch.object(worker,"verify_parent",return_value=self.identity), \
              mock.patch.object(worker,"ensure_quiet",side_effect=lambda *a,**kw:calls.append("quiet")), \
              mock.patch.object(control,"identify",return_value=primary), \
              mock.patch.object(control,"wait_for_exit",side_effect=lambda *a,**kw:calls.append("exit")), \
@@ -211,6 +285,7 @@ class RestartWorkerTests(unittest.TestCase):
         primary = control.ProcessIdentity(4100,str(self.resources/"rclone"),"original")
         for failure in ("busy","reused"):
             with self.subTest(failure=failure), mock.patch.object(worker,"primary_mount",return_value=primary), \
+                 mock.patch.object(worker,"verify_parent",return_value=self.identity), \
                  mock.patch.object(worker,"ensure_quiet",side_effect=RuntimeError("dirty or open") if failure=="busy" else None), \
                  mock.patch.object(control,"identify",return_value=control.ProcessIdentity(primary.pid,primary.executable,"new start")), \
                  mock.patch.object(worker.time,"sleep"), mock.patch.object(worker.os,"kill") as signal_app:
