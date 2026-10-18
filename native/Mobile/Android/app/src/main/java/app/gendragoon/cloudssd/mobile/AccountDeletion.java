@@ -181,6 +181,12 @@ final class AccountDeletion {
         return true;
     }
 
+    /** A support 409 {@code support_not_needed} polls the saved job again. Nothing is wiped. */
+    boolean refreshAfterSupport(){
+        if(!AccountActions.validJob(jobId)||!AccountActions.validToken(statusToken))return false;
+        return beginPolling(jobId,statusToken);
+    }
+
     /** A non-retryable failure keeps the job until Dismiss. Dismiss wipes nothing. */
     private void noteNotRetryable(String reportedJobId){
         if(AccountActions.validJob(reportedJobId))this.jobId=reportedJobId;
@@ -367,19 +373,38 @@ final class AccountDeletion {
 }
 
 /**
- * Replaces a file only in this order: upload the new chunks, PUT the manifest with ifGeneration
- * (on 412, refetch and retry), delete the old chunks, then trash the local original.
- * Mobile uploads are raw bytes with {@code X-Chunk-SHA256}. Chunks are not sealed.
+ * Matches Expo {@code ENCRYPTED_WORKSPACE_ENABLED}. Off until native adopts the shared sealed
+ * manifest and the {@code packages/core/test/vectors/manifest-merge/} vectors. File replace is
+ * the only encrypted-workspace write path on mobile, and it stays off with this flag.
+ */
+final class EncryptedWorkspace {
+    static final boolean ENCRYPTED_WORKSPACE_ENABLED=false;
+    private EncryptedWorkspace(){}
+}
+
+/**
+ * Replaces a file only when {@link EncryptedWorkspace#ENCRYPTED_WORKSPACE_ENABLED} is on:
+ * upload the new chunks, PUT the manifest once with ifGeneration, delete the old chunks, then
+ * trash the local original. A 412 stops. The new chunks stay, the old chunks stay, and the local
+ * original stays. There is no second PUT and no refetch. Mobile uploads are raw bytes with
+ * {@code X-Chunk-SHA256}. This is not the shared sealed manifest.
  */
 final class FileReplacement {
+    static final String CHANGED_ON_ANOTHER_DEVICE="changed on another device, retry";
     static final class Conflict extends Exception {
         final long generation;
         Conflict(long generation){this.generation=generation;}
     }
+    /** Recoverable. The caller may try the replace again later. Nothing remote was overwritten. */
+    static final class ChangedOnAnotherDevice extends Exception {
+        ChangedOnAnotherDevice(){super(CHANGED_ON_ANOTHER_DEVICE);}
+    }
+    static final class Disabled extends Exception {
+        Disabled(){super("Encrypted workspace writes are off.");}
+    }
     interface Store {
         void uploadChunks(String objectId) throws Exception;
         long putManifest(long ifGeneration,String objectId) throws Exception;
-        long refetchGeneration() throws Exception;
         void deleteOldChunks(String objectId) throws Exception;
         void trashLocalOriginal() throws Exception;
     }
@@ -391,21 +416,22 @@ final class FileReplacement {
     }
     private FileReplacement(){}
     static void replace(Store store,Manifest manifest,String newObjectId) throws Exception {
+        replace(store,manifest,newObjectId,EncryptedWorkspace.ENCRYPTED_WORKSPACE_ENABLED);
+    }
+    static void replace(Store store,Manifest manifest,String newObjectId,boolean enabled) throws Exception {
+        if(!enabled)throw new Disabled();
         String oldId=manifest.objectId;
         store.uploadChunks(newObjectId);
-        long generation=manifest.generation;
-        boolean committed=false;
-        for(int attempt=0;attempt<2&&!committed;attempt++){
-            try{
-                long next=store.putManifest(generation,newObjectId);
-                manifest.objectId=newObjectId;
-                manifest.generation=next;
-                committed=true;
-            }catch(Conflict conflict){
-                generation=store.refetchGeneration();
-            }
+        try{
+            long next=store.putManifest(manifest.generation,newObjectId);
+            manifest.objectId=newObjectId;
+            manifest.generation=next;
+        }catch(Conflict conflict){
+            manifest.objectId=oldId;
+            manifest.oldReadable=true;
+            manifest.localTrashed=false;
+            throw new ChangedOnAnotherDevice();
         }
-        if(!committed)return;
         try{
             store.deleteOldChunks(oldId);
             manifest.oldReadable=false;

@@ -829,24 +829,15 @@ final class AccountLogicTests: XCTestCase {
         var upload=FileReplacement.Manifest(objectId:"old-object",generation:3)
         let uploadStore=MemoryReplacement()
         uploadStore.failUpload=true
-        XCTAssertThrowsError(try FileReplacement.replace(uploadStore,manifest:&upload,newObjectId:"new-object"))
+        XCTAssertThrowsError(try FileReplacement.replace(uploadStore,manifest:&upload,newObjectId:"new-object",enabled:true))
         XCTAssertEqual(upload.objectId,"old-object")
         XCTAssertTrue(upload.oldReadable)
         XCTAssertFalse(upload.localTrashed)
 
-        var conflicted=FileReplacement.Manifest(objectId:"old-object",generation:3)
-        let conflictStore=MemoryReplacement()
-        conflictStore.conflict=true
-        try FileReplacement.replace(conflictStore,manifest:&conflicted,newObjectId:"new-object")
-        XCTAssertFalse(conflictStore.trashedBeforeRetry)
-        XCTAssertEqual(conflictStore.events,["upload","put","refetch","put","delete","trash"])
-        XCTAssertEqual(conflicted.objectId,"new-object")
-        XCTAssertTrue(conflicted.localTrashed)
-
         var put=FileReplacement.Manifest(objectId:"old-object",generation:3)
         let putStore=MemoryReplacement()
         putStore.failPut=true
-        XCTAssertThrowsError(try FileReplacement.replace(putStore,manifest:&put,newObjectId:"new-object"))
+        XCTAssertThrowsError(try FileReplacement.replace(putStore,manifest:&put,newObjectId:"new-object",enabled:true))
         XCTAssertEqual(put.objectId,"old-object")
         XCTAssertTrue(put.oldReadable)
         XCTAssertFalse(put.localTrashed)
@@ -854,11 +845,94 @@ final class AccountLogicTests: XCTestCase {
         var deleted=FileReplacement.Manifest(objectId:"old-object",generation:3)
         let deleteStore=MemoryReplacement()
         deleteStore.failDelete=true
-        try FileReplacement.replace(deleteStore,manifest:&deleted,newObjectId:"new-object")
+        try FileReplacement.replace(deleteStore,manifest:&deleted,newObjectId:"new-object",enabled:true)
         XCTAssertEqual(deleted.objectId,"old-object")
         XCTAssertTrue(deleted.oldReadable)
         XCTAssertFalse(deleted.localTrashed)
         XCTAssertFalse(deleteStore.events.contains("trash"))
+    }
+
+    func testConflict412NeverPutsAgainAndKeepsTheOldCopy() {
+        XCTAssertFalse(EncryptedWorkspace.ENCRYPTED_WORKSPACE_ENABLED)
+        var blocked=FileReplacement.Manifest(objectId:"old-object",generation:3)
+        let blockedStore=MemoryReplacement()
+        XCTAssertThrowsError(try FileReplacement.replace(blockedStore,manifest:&blocked,newObjectId:"new-object")) { error in
+            XCTAssertTrue(error is FileReplacement.Disabled)
+        }
+        XCTAssertEqual(blockedStore.events,[])
+        XCTAssertEqual(blocked.objectId,"old-object")
+        XCTAssertFalse(blocked.localTrashed)
+
+        var conflicted=FileReplacement.Manifest(objectId:"old-object",generation:3)
+        let conflictStore=MemoryReplacement()
+        conflictStore.conflict=true
+        XCTAssertThrowsError(try FileReplacement.replace(conflictStore,manifest:&conflicted,newObjectId:"new-object",enabled:true)) { error in
+            XCTAssertEqual((error as? LocalizedError)?.errorDescription,"changed on another device, retry")
+        }
+        XCTAssertEqual(conflictStore.events,["upload","put"])
+        XCTAssertEqual(conflictStore.puts,1)
+        XCTAssertEqual(conflictStore.uploaded,["new-object"])
+        XCTAssertTrue(conflictStore.deleted.isEmpty)
+        XCTAssertFalse(conflictStore.events.contains("trash"))
+        XCTAssertFalse(conflictStore.events.contains("refetch"))
+        XCTAssertEqual(conflicted.objectId,"old-object")
+        XCTAssertEqual(conflicted.generation,Int64(3))
+        XCTAssertTrue(conflicted.oldReadable)
+        XCTAssertFalse(conflicted.localTrashed)
+    }
+
+    func testSupportRequestUsesRileyFixturesAndSendsNoBody() {
+        XCTAssertEqual(BackendFixtures.supportFixtureSHA,"d9888be")
+        XCTAssertFalse(DeletionSupport.enabled)
+        let job="00000000-0000-4000-8000-00000000000a"
+        XCTAssertFalse(DeletionSupport.call(jobId:job,statusToken:token).send)
+        let call=DeletionSupport.call(jobId:job,statusToken:token,enabled:true)
+        XCTAssertEqual(call.path,"/v2/account/deletions/"+job+"/support-request")
+        XCTAssertEqual(call.authorization,"Bearer "+token)
+        XCTAssertEqual(BackendFixtures.responseStatus(area:"support",name:"request-received"),202)
+        XCTAssertEqual(BackendFixtures.responseStatus(area:"support",name:"request-repeat"),202)
+        let received=BackendFixtures.responseBodyString(area:"support",name:"request-received")
+        let repeat=BackendFixtures.responseBodyString(area:"support",name:"request-repeat")
+        let first=DeletionSupport.interpret(status:202,body:received,transportFailed:false)
+        let again=DeletionSupport.interpret(status:202,body:repeat,transportFailed:false)
+        XCTAssertEqual(first.kind,.sent)
+        XCTAssertEqual(again.kind,.sent)
+        XCTAssertEqual(first.message,"Request sent.")
+        XCTAssertEqual(first.requestId,again.requestId)
+        XCTAssertFalse(first.requestId?.isEmpty ?? true)
+        XCTAssertEqual(BackendFixtures.responseStatus(area:"support",name:"request-not-failed"),409)
+        let refresh=DeletionSupport.interpret(status:409,body:BackendFixtures.responseBodyString(area:"support",name:"request-not-failed"),transportFailed:false)
+        XCTAssertEqual(refresh.kind,.refresh)
+        XCTAssertFalse(refresh.opensMailto)
+        var flow=AccountDeletion.resume(DeletionReceipt.of(jobId:job,statusToken:token))
+        XCTAssertTrue(flow.refreshAfterSupport())
+        XCTAssertEqual(flow.step,.polling)
+        XCTAssertFalse(flow.requestsWipe())
+        XCTAssertEqual(BackendFixtures.responseStatus(area:"support",name:"request-rate-limited"),429)
+        let limited=DeletionSupport.interpret(status:429,body:BackendFixtures.responseBodyString(area:"support",name:"request-rate-limited"),transportFailed:false)
+        XCTAssertEqual(limited.kind,.already)
+        XCTAssertEqual(limited.message,"Request already sent.")
+        XCTAssertFalse(limited.opensMailto)
+        XCTAssertTrue(DeletionSupport.interpret(status:503,body:"",transportFailed:false).opensMailto)
+        XCTAssertTrue(DeletionSupport.interpret(status:0,body:"",transportFailed:true).opensMailto)
+        XCTAssertTrue(SupportContact.mailto(jobId:job)?.absoluteString.hasPrefix("mailto:SUPPORT_CONTACT_PLACEHOLDER@invalid") ?? false)
+    }
+
+    /// Provisional: workspace list fixtures do not carry monthlyPriceCents yet.
+    func testProvisionalWorkspacePriceUsesServerCentsAndNeverCounts() throws {
+        XCTAssertFalse(WorkspacePrice.enabled)
+        let shown=try JSONDecoder().decode(MobileWorkspace.self,from:Data("{\"id\":\"free\",\"name\":\"Personal\",\"kind\":\"free\",\"storageActive\":true,\"provisioned\":true,\"isFree\":true,\"monthlyPriceCents\":0}".utf8))
+        XCTAssertEqual(shown.pickerLabel,"Personal")
+        XCTAssertEqual(WorkspacePrice.pickerText(name:"Personal",isFree:true,byo:false,cents:0,enabled:true),"Personal · Free")
+        XCTAssertEqual(WorkspacePrice.pickerText(name:"Extra",isFree:true,byo:false,cents:0,enabled:true),"Extra · Free")
+        XCTAssertEqual(WorkspacePrice.pickerText(name:"Work",isFree:false,byo:false,cents:500,enabled:true),"Work · $5/mo")
+        XCTAssertEqual(WorkspacePrice.pickerText(name:"Plus",isFree:false,byo:false,cents:1250,enabled:true),"Plus · $12.50/mo")
+        XCTAssertEqual(WorkspacePrice.pickerText(name:"Bucket",isFree:true,byo:true,cents:1000,enabled:true),"Bucket · $10/mo")
+        XCTAssertEqual(WorkspacePrice.pickerText(name:"Unpriced",isFree:false,byo:false,cents:nil,enabled:true),"Unpriced")
+        let lapsed=CloudSignals.route(status:423,body:BackendFixtures.responseBodyData(area:"workspace-lock",name:"lapsed"),method:"POST")
+        XCTAssertEqual(lapsed.destination,.lockScreen)
+        XCTAssertEqual(lapsed.lock?.reasonText,"lapsed")
+        XCTAssertTrue(lapsed.lock?.requiresPayment==true)
     }
 
     private func fixture(_ name:String)->AccountHttp {
@@ -900,25 +974,25 @@ private final class MemoryReplacement:ReplacementStore {
     var conflict=false
     var failPut=false
     var failDelete=false
-    var trashedBeforeRetry=true
+    var puts=0
+    var uploaded:[String]=[]
+    var deleted:[String]=[]
     var events:[String]=[]
     func uploadChunks(objectId:String) throws {
         events.append("upload")
+        uploaded.append(objectId)
         if failUpload { throw ReplacementFailure.upload }
     }
     func putManifest(ifGeneration:Int64,objectId:String) throws -> Int64 {
         events.append("put")
-        if conflict {
-            conflict=false
-            trashedBeforeRetry=events.contains("trash")
-            throw FileReplacement.Conflict(generation:9)
-        }
+        puts+=1
+        if conflict { throw FileReplacement.Conflict(generation:9) }
         if failPut { throw ReplacementFailure.put }
         return ifGeneration+1
     }
-    func refetchGeneration() throws -> Int64 { events.append("refetch"); return 9 }
     func deleteOldChunks(objectId:String) throws {
         events.append("delete")
+        deleted.append(objectId)
         if failDelete { throw ReplacementFailure.delete }
     }
     func trashLocalOriginal() throws { events.append("trash") }
@@ -1067,8 +1141,10 @@ final class InvalidTokenDeletionTests: XCTestCase {
 
 /// The repo-root `fixtures/` directory wins when this branch has it.
 /// `singular-path.json` is JSON. A non-JSON body in a test is synthetic.
+/// Support responses are Riley's d9888be files. The client path is pinned and sends no body.
 private enum BackendFixtures {
     static let accountDeletionSHA="fff0a84"
+    static let supportFixtureSHA="d9888be"
     static let keyEnvelopeSHA="ee4f76f"
     static let sharedFixtureSHA="da39276"
 

@@ -821,7 +821,7 @@ public final class AccountDeletionTest {
     @Test public void fileReplacementFailureLeavesTheOldCopyReadable() throws Exception {
         FileReplacement.Manifest upload=manifest();
         try{
-            FileReplacement.replace(new MemoryStore(){public void uploadChunks(String objectId) throws Exception{throw new IOException("chunk");}},upload,"new-object");
+            FileReplacement.replace(new MemoryStore(){public void uploadChunks(String objectId) throws Exception{throw new IOException("chunk");}},upload,"new-object",true);
             throw new AssertionError("upload should fail");
         }catch(IOException expected){
             assertEquals("chunk",expected.getMessage());
@@ -830,29 +830,9 @@ public final class AccountDeletionTest {
         assertTrue(upload.oldReadable);
         assertFalse(upload.localTrashed);
 
-        FileReplacement.Manifest conflicted=manifest();
-        boolean[] held={false,false};
-        FileReplacement.replace(new MemoryStore(){
-            int puts;
-            public long putManifest(long ifGeneration,String objectId) throws Exception {
-                puts++;
-                if(puts==1){
-                    held[0]="old-object".equals(conflicted.objectId)&&conflicted.oldReadable;
-                    held[1]=!conflicted.localTrashed;
-                    throw new FileReplacement.Conflict(9);
-                }
-                return 10;
-            }
-            public long refetchGeneration(){return 9;}
-        },conflicted,"new-object");
-        assertTrue(held[0]);
-        assertTrue(held[1]);
-        assertEquals("new-object",conflicted.objectId);
-        assertTrue(conflicted.localTrashed);
-
         FileReplacement.Manifest put=manifest();
         try{
-            FileReplacement.replace(new MemoryStore(){public long putManifest(long ifGeneration,String objectId) throws Exception{throw new IOException("put");}},put,"new-object");
+            FileReplacement.replace(new MemoryStore(){public long putManifest(long ifGeneration,String objectId) throws Exception{throw new IOException("put");}},put,"new-object",true);
             throw new AssertionError("put should fail");
         }catch(IOException expected){
             assertEquals("put",expected.getMessage());
@@ -862,10 +842,109 @@ public final class AccountDeletionTest {
         assertFalse(put.localTrashed);
 
         FileReplacement.Manifest deleted=manifest();
-        FileReplacement.replace(new MemoryStore(){public void deleteOldChunks(String objectId) throws Exception{throw new IOException("delete");}},deleted,"new-object");
+        FileReplacement.replace(new MemoryStore(){public void deleteOldChunks(String objectId) throws Exception{throw new IOException("delete");}},deleted,"new-object",true);
         assertEquals("old-object",deleted.objectId);
         assertTrue(deleted.oldReadable);
         assertFalse(deleted.localTrashed);
+    }
+
+    @Test public void conflict412NeverPutsAgainAndKeepsTheOldCopy() throws Exception {
+        assertFalse(EncryptedWorkspace.ENCRYPTED_WORKSPACE_ENABLED);
+        FileReplacement.Manifest blocked=manifest();
+        int[] uploads={0};
+        try{
+            FileReplacement.replace(new MemoryStore(){public void uploadChunks(String objectId){uploads[0]++;}},blocked,"new-object");
+            throw new AssertionError("the flag should stop the write");
+        }catch(FileReplacement.Disabled expected){
+            assertEquals(0,uploads[0]);
+        }
+        assertEquals("old-object",blocked.objectId);
+        assertFalse(blocked.localTrashed);
+
+        FileReplacement.Manifest conflicted=manifest();
+        int[] puts={0};
+        String[] deleted={null};
+        boolean[] trashed={false};
+        String[] uploaded={null};
+        try{
+            FileReplacement.replace(new MemoryStore(){
+                public void uploadChunks(String objectId){uploaded[0]=objectId;}
+                public long putManifest(long ifGeneration,String objectId) throws Exception {puts[0]++;throw new FileReplacement.Conflict(9);}
+                public void deleteOldChunks(String objectId){deleted[0]=objectId;}
+                public void trashLocalOriginal(){trashed[0]=true;}
+            },conflicted,"new-object",true);
+            throw new AssertionError("412 should stop");
+        }catch(FileReplacement.ChangedOnAnotherDevice error){
+            assertEquals("changed on another device, retry",error.getMessage());
+        }
+        assertEquals(1,puts[0]);
+        assertEquals("new-object",uploaded[0]);
+        assertNull(deleted[0]);
+        assertFalse(trashed[0]);
+        assertEquals("old-object",conflicted.objectId);
+        assertEquals(3,conflicted.generation);
+        assertTrue(conflicted.oldReadable);
+        assertFalse(conflicted.localTrashed);
+    }
+
+    @Test public void supportRequestUsesRileyFixturesAndSendsNoBody(){
+        assertEquals("d9888be",BackendFixtures.SUPPORT_FIXTURE_SHA);
+        assertFalse(DeletionSupport.ENABLED);
+        String job="00000000-0000-4000-8000-00000000000a";
+        DeletionSupport.Call off=DeletionSupport.call(job,TOKEN);
+        assertFalse(off.send);
+        assertNull(off.body);
+        DeletionSupport.Call call=DeletionSupport.call(job,TOKEN,true);
+        assertTrue(call.send);
+        assertEquals("/v2/account/deletions/"+job+"/support-request",call.path);
+        assertEquals("Bearer "+TOKEN,call.authorization());
+        assertNull(call.body);
+        assertEquals(202,BackendFixtures.responseStatus("support","request-received"));
+        assertEquals(202,BackendFixtures.responseStatus("support","request-repeat"));
+        String received=BackendFixtures.responseBody("support","request-received");
+        String repeat=BackendFixtures.responseBody("support","request-repeat");
+        DeletionSupport.Result first=DeletionSupport.interpret(202,received,false);
+        DeletionSupport.Result again=DeletionSupport.interpret(202,repeat,false);
+        assertEquals(DeletionSupport.Kind.SENT,first.kind);
+        assertEquals(DeletionSupport.Kind.SENT,again.kind);
+        assertEquals("Request sent.",first.message);
+        assertEquals(first.requestId,again.requestId);
+        assertFalse(first.requestId.isEmpty());
+        assertEquals(409,BackendFixtures.responseStatus("support","request-not-failed"));
+        assertEquals("support_not_needed",JsonFields.string(BackendFixtures.responseBody("support","request-not-failed"),"error"));
+        DeletionSupport.Result refresh=DeletionSupport.interpret(409,BackendFixtures.responseBody("support","request-not-failed"),false);
+        assertEquals(DeletionSupport.Kind.REFRESH,refresh.kind);
+        assertFalse(refresh.opensMailto());
+        AccountDeletion flow=AccountDeletion.resume(DeletionReceipt.of(job,TOKEN));
+        assertTrue(flow.refreshAfterSupport());
+        assertEquals(AccountDeletion.Step.POLLING,flow.step);
+        assertFalse(flow.requestsWipe());
+        assertEquals(429,BackendFixtures.responseStatus("support","request-rate-limited"));
+        DeletionSupport.Result limited=DeletionSupport.interpret(429,BackendFixtures.responseBody("support","request-rate-limited"),false);
+        assertEquals(DeletionSupport.Kind.ALREADY,limited.kind);
+        assertEquals("Request already sent.",limited.message);
+        assertFalse(limited.opensMailto());
+        assertTrue(DeletionSupport.interpret(503,"",false).opensMailto());
+        assertTrue(DeletionSupport.interpret(0,"",true).opensMailto());
+        assertTrue(SupportContact.mailto(job).startsWith("mailto:SUPPORT_CONTACT_PLACEHOLDER@invalid"));
+    }
+
+    /** Provisional: workspace list fixtures do not carry monthlyPriceCents yet. */
+    @Test public void provisionalWorkspacePriceUsesServerCentsAndNeverCounts(){
+        assertFalse(WorkspacePrice.ENABLED);
+        assertEquals("Personal",WorkspacePrice.pickerText("{\"name\":\"Personal\",\"kind\":\"free\",\"isFree\":true,\"monthlyPriceCents\":0}"));
+        assertEquals("Personal · Free",WorkspacePrice.pickerText("Personal",true,false,0,true));
+        assertEquals("Extra · Free",WorkspacePrice.pickerText("Extra",true,false,0,true));
+        assertEquals("Work · $5/mo",WorkspacePrice.pickerText("Work",false,false,500,true));
+        assertEquals("Plus · $12.50/mo",WorkspacePrice.pickerText("Plus",false,false,1250,true));
+        assertEquals("Bucket · $10/mo",WorkspacePrice.pickerText("Bucket",true,true,1000,true));
+        assertEquals("Unpriced",WorkspacePrice.pickerText("Unpriced",false,false,null,true));
+        assertEquals("Hosted",WorkspacePrice.pickerText("Hosted",null,false,500,true));
+        String lapsed=BackendFixtures.responseBody("workspace-lock","lapsed");
+        CloudSignals.Route route=CloudSignals.route(423,lapsed,"POST");
+        assertEquals(CloudSignals.Destination.LOCK_SCREEN,route.destination);
+        assertEquals("lapsed",route.lock.reasonText());
+        assertTrue(route.lock.requiresPayment());
     }
 
     private static FileReplacement.Manifest manifest(){
@@ -878,7 +957,6 @@ public final class AccountDeletionTest {
     private static class MemoryStore implements FileReplacement.Store {
         public void uploadChunks(String objectId) throws Exception {}
         public long putManifest(long ifGeneration,String objectId) throws Exception {return ifGeneration+1;}
-        public long refetchGeneration() throws Exception {return 4;}
         public void deleteOldChunks(String objectId) throws Exception {}
         public void trashLocalOriginal() throws Exception {}
     }

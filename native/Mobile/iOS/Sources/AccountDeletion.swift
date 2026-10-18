@@ -144,6 +144,11 @@ struct AccountDeletion:Equatable {
         step = .polling;wipe=false;dropReceipt=false;repeatDelete=false;showSupport=false;dismissible=false;message=nil
         return true
     }
+    /// A support 409 `support_not_needed` polls the saved job again. Nothing is wiped.
+    mutating func refreshAfterSupport()->Bool {
+        guard let jobId,let statusToken,Self.validJob(jobId),Self.validToken(statusToken) else {return false}
+        return beginPolling(jobId:jobId,statusToken:statusToken)
+    }
     /// A non-retryable failure keeps the job until Dismiss. Dismiss wipes nothing.
     private mutating func noteNotRetryable(_ reportedJobId:String?){
         if let reportedJobId,Self.validJob(reportedJobId) {jobId=reportedJobId}
@@ -281,11 +286,14 @@ struct AccountDeletion:Equatable {
     static func validJob(_ jobId:String)->Bool { !jobId.isEmpty }
     /// Non-empty only. No length or character-set check. Redacted fixture tokens such as `<redacted>` stay valid.
     static func validToken(_ token:String)->Bool { !token.isEmpty }
-    static func statusPath(jobId:String)->String? {
+    static func encodeJob(_ jobId:String)->String? {
         guard validJob(jobId) else {return nil}
         var allowed=CharacterSet.alphanumerics
         allowed.insert(charactersIn:"-_.~")
-        guard let encoded=jobId.addingPercentEncoding(withAllowedCharacters:allowed) else {return nil}
+        return jobId.addingPercentEncoding(withAllowedCharacters:allowed)
+    }
+    static func statusPath(jobId:String)->String? {
+        guard let encoded=encodeJob(jobId) else {return nil}
         return deletionStatusPath+encoded
     }
     static func safeAccountPath(_ path:String)->Bool {
@@ -336,35 +344,45 @@ struct DeletionExchange: Equatable {
     var failed:Bool
 }
 
-/// Replaces a file only in this order: upload the new chunks, PUT the manifest with ifGeneration
-/// (on 412, refetch and retry), delete the old chunks, then trash the local original.
-/// Mobile uploads are raw bytes with `X-Chunk-SHA256`. Chunks are not sealed.
+/// Matches Expo `ENCRYPTED_WORKSPACE_ENABLED`. Off until native adopts the shared sealed
+/// manifest and the `packages/core/test/vectors/manifest-merge/` vectors. File replace is the
+/// only encrypted-workspace write path on mobile, and it stays off with this flag.
+enum EncryptedWorkspace {
+    static let ENCRYPTED_WORKSPACE_ENABLED=false
+}
+
+/// Replaces a file only when `ENCRYPTED_WORKSPACE_ENABLED` is on: upload the new chunks, PUT the
+/// manifest once with ifGeneration, delete the old chunks, then trash the local original.
+/// A 412 stops. The new chunks stay, the old chunks stay, and the local original stays.
+/// There is no second PUT and no refetch. Mobile uploads are raw bytes with `X-Chunk-SHA256`.
+/// This is not the shared sealed manifest.
 enum FileReplacement {
+    static let changedOnAnotherDevice="changed on another device, retry"
     struct Conflict:Error { let generation:Int64 }
+    struct ChangedOnAnotherDevice:LocalizedError,Equatable {
+        var errorDescription:String? { FileReplacement.changedOnAnotherDevice }
+    }
+    struct Disabled:Error {}
     struct Manifest {
         var objectId:String
         var generation:Int64
         var oldReadable=true
         var localTrashed=false
     }
-    static func replace(_ store:any ReplacementStore,manifest:inout Manifest,newObjectId:String) throws {
+    static func replace(_ store:any ReplacementStore,manifest:inout Manifest,newObjectId:String,enabled:Bool=EncryptedWorkspace.ENCRYPTED_WORKSPACE_ENABLED) throws {
+        guard enabled else { throw Disabled() }
         let oldId=manifest.objectId
         try store.uploadChunks(objectId:newObjectId)
-        var generation=manifest.generation
-        var committed=false
-        var attempt=0
-        while attempt<2 && !committed {
-            attempt+=1
-            do {
-                let next=try store.putManifest(ifGeneration:generation,objectId:newObjectId)
-                manifest.objectId=newObjectId
-                manifest.generation=next
-                committed=true
-            } catch is Conflict {
-                generation=try store.refetchGeneration()
-            }
+        do {
+            let next=try store.putManifest(ifGeneration:manifest.generation,objectId:newObjectId)
+            manifest.objectId=newObjectId
+            manifest.generation=next
+        } catch is Conflict {
+            manifest.objectId=oldId
+            manifest.oldReadable=true
+            manifest.localTrashed=false
+            throw ChangedOnAnotherDevice()
         }
-        if !committed {return}
         do {
             try store.deleteOldChunks(objectId:oldId)
             manifest.oldReadable=false
@@ -381,7 +399,6 @@ enum FileReplacement {
 protocol ReplacementStore: AnyObject {
     func uploadChunks(objectId:String) throws
     func putManifest(ifGeneration:Int64,objectId:String) throws -> Int64
-    func refetchGeneration() throws -> Int64
     func deleteOldChunks(objectId:String) throws
     func trashLocalOriginal() throws
 }

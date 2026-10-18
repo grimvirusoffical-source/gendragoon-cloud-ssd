@@ -48,6 +48,8 @@ struct CloudDeletionTransport:DeletionTransport {
     }
     func askForSignIn(_ text:String){flow.askForSignIn(text)}
     func dismissError(){flow.dismissError();syncReceipt()}
+    func noteSupport(_ text:String){flow.message=text}
+    func refreshAfterSupport()->Bool { flow.refreshAfterSupport() }
     func deleteThrough(_ transport:any DeletionTransport,authorization:String) async {
         var next=flow
         await next.deleteThrough(transport,authorization:authorization)
@@ -114,9 +116,7 @@ struct CloudDeletionTransport:DeletionTransport {
                         Text(model.flow.message ?? "Account deletion did not finish. You can retry.")
                         if model.flow.offersRetry() { Button("Retry"){model.retry()} }
                         if model.flow.showSupport {
-                            Button("Contact support"){
-                                if let url=SupportContact.mailto(jobId:model.flow.jobId){UIApplication.shared.open(url)}
-                            }.accessibilityIdentifier("deletion-support")
+                            Button("Contact support"){Task{await contactSupport()}}.accessibilityIdentifier("deletion-support")
                         }
                         if model.flow.canDismiss() { Button("Dismiss"){model.dismissError();dismiss()} }
                         else { Button("Cancel"){dismiss()} }
@@ -159,6 +159,23 @@ struct CloudDeletionTransport:DeletionTransport {
         }catch let error as GDTransferError where error.status==401 {
             model.askForSignIn(error.message)
         }catch{model.fail(error.localizedDescription)}
+    }
+    private func contactSupport() async {
+        let call=DeletionSupport.call(jobId:model.flow.jobId,statusToken:model.flow.statusToken)
+        guard call.send,let path=call.path,let token=call.statusToken else {
+            if let url=SupportContact.mailto(jobId:model.flow.jobId){UIApplication.shared.open(url)}
+            return
+        }
+        let result:DeletionSupport.Result
+        do {
+            let http=try await cloud.requestDeletionSupport(path:path,statusToken:token)
+            result=DeletionSupport.interpret(status:http.status,body:http.raw,transportFailed:false)
+        } catch {
+            result=DeletionSupport.interpret(status:0,body:"",transportFailed:true)
+        }
+        if result.kind==.sent || result.kind==.already,let message=result.message {model.noteSupport(message);return}
+        if result.kind==.refresh,model.refreshAfterSupport() {await poll();return}
+        if result.opensMailto,let url=SupportContact.mailto(jobId:model.flow.jobId){UIApplication.shared.open(url)}
     }
     private func poll() async {
         let transport=CloudDeletionTransport(cloud:cloud)

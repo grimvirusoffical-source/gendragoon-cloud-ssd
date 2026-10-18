@@ -2,13 +2,18 @@ import Foundation
 import SwiftUI
 import Network
 
-struct MobileWorkspace:Decodable,Identifiable,Sendable {let id:String;let name:String;let kind:String;let storageActive:Bool;let provisioned:Bool}
+struct MobileWorkspace:Decodable,Identifiable,Sendable {
+    let id:String;let name:String;let kind:String;let storageActive:Bool;let provisioned:Bool;let isFree:Bool?;let monthlyPriceCents:Int?
+    var pickerLabel:String { WorkspacePrice.pickerText(name:name,isFree:isFree,byo:WorkspacePrice.byo(kind:kind),cents:monthlyPriceCents) }
+}
 struct MobileExport:Identifiable {let id=UUID();let url:URL}
 @MainActor final class MobileCloudModel:ObservableObject {
     @Published var selected="free"
     @Published var removeOriginals=false
     private var selectionKey:String { "GenDragoon.workspace."+GDTransferClient.digest(Data(owner.utf8)) }
     @Published var choices:[MobileWorkspace]=[]
+    /// Price for the `free` slot. "Free" only when that workspace's server `isFree` is true.
+    @Published var freePickerLabel="Workspace"
     @Published var config:GDTransferConfig?
     @Published var files:[GDCloudItem]=[]
     @Published var status="Opening your workspace…"
@@ -33,7 +38,7 @@ struct MobileExport:Identifiable {let id=UUID();let url:URL}
         let expected=session.uid
         do {
             if owner != expected {
-                task?.cancel();config=nil;files=[];choices=[];export=nil;selected="free"
+                task?.cancel();config=nil;files=[];choices=[];export=nil;selected="free";freePickerLabel="Workspace"
                 client=try GDTransferClient(endpoint:URL(string:"https://gendragoon-free-10068843866.us-central1.run.app")!,accountID:expected){[weak session] force in
                     guard let session,await session.uid==expected else{throw GDTransferError(message:"Your account changed. Please sign in again.",status:401)}
                     return try await session.token(force:force)
@@ -54,6 +59,8 @@ struct MobileExport:Identifiable {let id=UUID();let url:URL}
         struct Response:Decodable{let workspaces:[MobileWorkspace];let ownerBenefits:Bool?}
         let response=try JSONDecoder().decode(Response.self,from:await client.json("v2/workspaces"))
         ownerBenefits=response.ownerBenefits == true
+        if let free=response.workspaces.first(where:{$0.id=="free"}) {freePickerLabel=free.pickerLabel}
+        else {freePickerLabel="Workspace"}
         choices=response.workspaces.filter{$0.kind=="paid"&&$0.storageActive&&$0.provisioned}
         if ownerBenefits && !didChooseOwnerWorkspace {if let ownerSpace=choices.first(where:{$0.name=="Owner • All features"}){selected=ownerSpace.id};didChooseOwnerWorkspace=true}
         if selected != "free" && !choices.contains(where:{$0.id==selected}){selected="free"}
@@ -163,6 +170,17 @@ struct MobileExport:Identifiable {let id=UUID();let url:URL}
     func deleteAccount(freshToken:String) async throws -> AccountHttp {
         guard let client else{throw GDTransferError(message:"Sign in again to continue.",status:401)}
         return try await client.deleteAccount(freshToken:freshToken)
+    }
+    /// Posts the pinned support route with the status token and no body. A missing Firebase user still sends.
+    func requestDeletionSupport(path:String,statusToken:String) async throws -> AccountHttp {
+        let transport:GDTransferClient
+        if let client {transport=client}
+        else {
+            transport=try GDTransferClient(endpoint:URL(string:"https://gendragoon-free-10068843866.us-central1.run.app")!,accountID:"deletion"){_ in
+                throw GDTransferError(message:"Sign in again to continue.",status:401)
+            }
+        }
+        return try await transport.requestDeletionSupport(path:path,statusToken:statusToken)
     }
     /// Polls with the status token. A missing Firebase user still polls. A 401 with no JSON code is `reauth_required`.
     func pollDeletion(_ path:String,statusToken:String) async throws -> AccountHttp {

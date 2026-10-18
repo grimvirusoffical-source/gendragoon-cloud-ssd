@@ -92,6 +92,17 @@ final class CloudApi {
      * {@code Authorization} is {@code Bearer statusToken}. A 401 is returned and does not wipe.
      * The token is not logged.
      */
+    /**
+     * {@code POST /v2/account/deletions/:jobId/support-request} with no body.
+     * {@code Authorization} is the status token, so this works while signed out.
+     * The constructor argument is not sent.
+     */
+    static AccountActions.HttpBody postDeletionSupport(String path,String statusToken)throws Exception{
+        if(!DeletionSupport.ENABLED)throw new Failure(400,"Support requests are off.");
+        if(path==null||!path.startsWith("/v2/account/deletions/")||!path.endsWith("/support-request")||path.contains("..")||statusToken==null||statusToken.isEmpty())throw new Failure(400,"Invalid support request.");
+        Response response=new CloudApi("deletion-support").exchangeAuthorized(ORIGIN+path,"POST",null,Map.of(),statusToken);
+        return AccountActions.parse(response.status,new String(response.body,StandardCharsets.UTF_8));
+    }
     AccountActions.HttpBody pollDeletion(String path,String statusToken)throws Exception{
         AccountActions.PollCall call=AccountActions.pollCall(path,statusToken);
         if(call==null)throw new Failure(400,"Invalid deletion status route.");

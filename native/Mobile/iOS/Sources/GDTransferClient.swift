@@ -321,6 +321,17 @@ actor GDTransferClient {
     /// One-shot poll of `AccountDeletion.deletionStatusPath`.
     /// `Authorization` is `Bearer statusToken`, which still works after the Firebase user is gone.
     /// A 401 is returned and does not wipe. The token is not logged.
+    /// `POST /v2/account/deletions/:jobId/support-request` with no body.
+    /// `Authorization` is the status token, which still works after the Firebase user is gone.
+    func requestDeletionSupport(path:String,statusToken:String) async throws -> AccountHttp {
+        guard DeletionSupport.enabled else {throw GDTransferError(message:"Support requests are off.",status:400)}
+        let transport=path.hasPrefix("/") ? String(path.dropFirst()) : path
+        guard transport.hasPrefix("v2/account/deletions/"),transport.hasSuffix("/support-request"),!transport.contains("..") else {
+            throw GDTransferError(message:"Invalid support request.",status:400)
+        }
+        let(data,http)=try await once(path:transport,method:"POST",token:statusToken,body:nil)
+        return AccountHttp.parse(status:http.statusCode,data:data)
+    }
     func accountDeletionStatus(path:String,statusToken:String) async throws -> AccountHttp {
         guard let call=AccountDeletion.pollCall(path:path,statusToken:statusToken) else {throw GDTransferError(message:"Invalid deletion status route.",status:400)}
         let transport=call.path.hasPrefix("/") ? String(call.path.dropFirst()) : call.path

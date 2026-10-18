@@ -25,3 +25,64 @@ public final class SupportContact {
         catch(UnsupportedEncodingException error){return "mailto:"+ADDRESS;}
     }
 }
+
+/**
+ * Contact support for a deletion that cannot be retried. Off until the endpoint is turned on.
+ * The only path is {@code POST} {@link #PATH}. There is no request body: no {@code jobId} field,
+ * no uid, and no user data. {@code Authorization} is {@code Bearer statusToken}, so this still
+ * works while signed out. Riley's {@code d9888be} fixtures describe the responses.
+ */
+final class DeletionSupport {
+    static final boolean ENABLED=false;
+    /** Pinned. {@code POST /v2/account/deletions/:jobId/support-request}. */
+    static final String PATH="/v2/account/deletions/%s/support-request";
+    static final String SENT="Request sent.";
+    static final String ALREADY="Request already sent.";
+
+    enum Kind { SENT, ALREADY, REFRESH, MAILTO, HOLD }
+
+    static final class Call {
+        final boolean send;
+        final String path;
+        final String statusToken;
+        /** Always null. The pinned route takes no body. */
+        final byte[] body=null;
+        private Call(boolean send,String path,String statusToken){this.send=send;this.path=path;this.statusToken=statusToken;}
+        static Call mailto(){return new Call(false,null,null);}
+        String authorization(){return statusToken==null?null:"Bearer "+statusToken;}
+    }
+
+    static final class Result {
+        final Kind kind;
+        final String requestId;
+        final String message;
+        Result(Kind kind,String requestId,String message){this.kind=kind;this.requestId=requestId;this.message=message;}
+        boolean opensMailto(){return kind==Kind.MAILTO;}
+    }
+
+    private DeletionSupport(){}
+
+    static Call call(String jobId,String statusToken){return call(jobId,statusToken,ENABLED);}
+
+    static Call call(String jobId,String statusToken,boolean enabled){
+        if(!enabled)return Call.mailto();
+        String encoded=AccountActions.encodeJob(jobId);
+        if(encoded==null||!AccountActions.validToken(statusToken))return Call.mailto();
+        if(encoded.indexOf('/')>=0||encoded.indexOf('\\')>=0||encoded.contains(".."))return Call.mailto();
+        return new Call(true,String.format(java.util.Locale.ROOT,PATH,encoded),statusToken);
+    }
+
+    /**
+     * 202 {@code received} (including a repeat with the same {@code requestId}) shows "Request sent."
+     * 409 {@code support_not_needed} refreshes deletion status. 429 shows "Request already sent."
+     * and does not open mailto. A transport failure or HTTP 5xx opens mailto.
+     */
+    static Result interpret(int status,String raw,boolean transportFailed){
+        if(transportFailed||status>=500)return new Result(Kind.MAILTO,null,null);
+        String requestId=JsonFields.string(raw,"requestId");
+        if(status==202&&"received".equals(JsonFields.string(raw,"status"))&&requestId!=null&&!requestId.isEmpty())return new Result(Kind.SENT,requestId,SENT);
+        if(status==409&&"support_not_needed".equals(JsonFields.string(raw,"error")))return new Result(Kind.REFRESH,null,null);
+        if(status==429)return new Result(Kind.ALREADY,null,ALREADY);
+        return new Result(Kind.HOLD,null,null);
+    }
+}

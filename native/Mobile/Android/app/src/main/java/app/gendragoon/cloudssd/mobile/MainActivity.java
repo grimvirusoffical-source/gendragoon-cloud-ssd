@@ -44,7 +44,7 @@ public final class MainActivity extends AppCompatActivity {
     private LinearLayout root,content,fileList;private TextView status,transferText;private LinearProgressIndicator transferProgress;
     private MaterialButton upload,folderUpload,pause,refresh;private SwitchMaterial saver;private CheckBox removeOriginals;private boolean applicationsOnly=false;
     private long loadSerial=0;
-    private String uid="",workspace="free",query="",sort="name";private boolean loading=false,workBusy=false;private int pageSize=100;
+    private String uid="",workspace="free",query="",sort="name",freeWorkspaceLabel="Workspace";private boolean loading=false,workBusy=false;private int pageSize=100;
     private List<JSONObject> files=new ArrayList<>();private final Set<UUID> handled=new HashSet<>();
     private boolean holdAuthNavigation=false;private WorkspaceLock activeLock;private AccountDeletion deletion;
     private boolean deletionSignInStarted=false,deletionAuthBusy=false,wiping=false;private int deletionEpoch=0;
@@ -132,15 +132,15 @@ public final class MainActivity extends AppCompatActivity {
     }
     private void load(){if(uid.isEmpty())return;String owner=uid,chosen=workspace;long serial=++loadSerial;loading=true;updateButtons();
         io.execute(()->{try{
-            CloudApi api=new CloudApi(owner);JSONArray all=api.get("/v2/workspaces").getJSONArray("workspaces");List<JSONObject> spaces=new ArrayList<>();for(int n=0;n<all.length();n++){JSONObject s=all.getJSONObject(n);if("paid".equals(s.optString("kind"))&&s.optBoolean("storageActive")&&s.optBoolean("provisioned"))spaces.add(s);}
+            CloudApi api=new CloudApi(owner);JSONArray all=api.get("/v2/workspaces").getJSONArray("workspaces");List<JSONObject> spaces=new ArrayList<>();String freeLabel="Workspace";for(int n=0;n<all.length();n++){JSONObject s=all.getJSONObject(n);if("free".equals(s.optString("id")))freeLabel=WorkspacePrice.pickerText(s.toString());if("paid".equals(s.optString("kind"))&&s.optBoolean("storageActive")&&s.optBoolean("provisioned"))spaces.add(s);}
             String effective=chosen;boolean found=chosen.equals("free");for(JSONObject entry:spaces)if(chosen.equals(entry.optString("id")))found=true;if(!found)effective="free";
             JSONObject config=null;List<JSONObject> list=new ArrayList<>();try{config=api.get(CloudApi.workspace(effective)+"/config");list=api.files(effective);}catch(CloudApi.Failure e){if(e.status!=404||!effective.equals("free"))throw e;}
-            JSONObject cfg=config;List<JSONObject> loaded=list;String verifiedWorkspace=effective;runOnUiThread(()->{if(serial!=loadSerial||!owner.equals(uid))return;loading=false;activeLock=null;lockFiles.clear();lockFilesFor="";if(deletion==null||deletion.step!=AccountDeletion.Step.POLLING)deletion=null;workspace=verifiedWorkspace;rememberSpaces(spaces);getSharedPreferences("gd-settings",MODE_PRIVATE).edit().putString("workspace:"+uid,workspace).apply();files=loaded;if(deletion!=null&&deletion.step==AccountDeletion.Step.POLLING)return;showLibrary(spaces,cfg);});
+            JSONObject cfg=config;List<JSONObject> loaded=list;String verifiedWorkspace=effective;String verifiedFreeLabel=freeLabel;runOnUiThread(()->{if(serial!=loadSerial||!owner.equals(uid))return;loading=false;activeLock=null;lockFiles.clear();lockFilesFor="";if(deletion==null||deletion.step!=AccountDeletion.Step.POLLING)deletion=null;workspace=verifiedWorkspace;freeWorkspaceLabel=verifiedFreeLabel;rememberSpaces(spaces);getSharedPreferences("gd-settings",MODE_PRIVATE).edit().putString("workspace:"+uid,workspace).apply();files=loaded;if(deletion!=null&&deletion.step==AccountDeletion.Step.POLLING)return;showLibrary(spaces,cfg);});
         }catch(Exception e){runOnUiThread(()->{if(serial!=loadSerial||!owner.equals(uid))return;loading=false;if(e instanceof WorkspaceLocked locked){showLock(locked.lock);return;}updateButtons();say(e.getMessage());});}});
     }
     private void showLibrary(List<JSONObject> spaces,JSONObject cfg){
         boolean dataSaver=getPreferences(MODE_PRIVATE).getBoolean("data-saver",false);shell();TextView eyebrow=text("YOUR DIGITAL SPACE",9,true);eyebrow.setTextColor(accent);eyebrow.setLetterSpacing(.18f);content.addView(eyebrow);space(content,10);content.addView(text("My cloud",38,true));TextView subtitle=text("Everything you need. Nothing in your way.",13,false);subtitle.setTextColor(muted);content.addView(subtitle);space(content,20);
-        List<String> ids=new ArrayList<>(List.of("free")),names=new ArrayList<>(List.of("Free · 2 GB"));for(JSONObject s:spaces){ids.add(s.optString("id"));names.add(s.optString("name"));}
+        List<String> ids=new ArrayList<>(List.of("free")),names=new ArrayList<>(List.of(freeWorkspaceLabel));for(JSONObject s:spaces){ids.add(s.optString("id"));names.add(WorkspacePrice.pickerText(s.toString()));}
         Spinner selected=new Spinner(this);ArrayAdapter<String> adapter=new ArrayAdapter<>(this,android.R.layout.simple_spinner_dropdown_item,names);selected.setAdapter(adapter);selected.setSelection(Math.max(0,ids.indexOf(workspace)));selected.setEnabled(!workBusy&&!loading);content.addView(selected,new LinearLayout.LayoutParams(-1,dp(48)));selected.setOnItemSelectedListener(new android.widget.AdapterView.OnItemSelectedListener(){public void onNothingSelected(android.widget.AdapterView<?> p){}public void onItemSelected(android.widget.AdapterView<?> p,View v,int pos,long id){if(!ids.get(pos).equals(workspace)){workspace=ids.get(pos);getSharedPreferences("gd-settings",MODE_PRIVATE).edit().putString("workspace:"+uid,workspace).apply();query="";load();}}});
         LinearLayout panel=inside(card(content));
         if(cfg==null){panel.addView(text("Start with 2 GB, on us.",24,true));space(panel,12);panel.addView(text("Private storage with resumable transfers and integrity checks. No payment required.",14,false));space(panel,16);panel.addView(button("Create free workspace",()->{String owner=uid;io.execute(()->{try{new CloudApi(owner).request("/v1/free","POST",new JSONObject().put("name","My Free Cloud"));runOnUiThread(this::load);}catch(Exception e){report(e);}});}));status();say("Create your free workspace to begin.");return;}
@@ -314,7 +314,7 @@ public final class MainActivity extends AppCompatActivity {
             case FAILED -> {
                 content.addView(text(deletion.message==null?"Account deletion did not finish. You can retry.":deletion.message,15,false));
                 if(deletion.offersRetry()){space(content,12);content.addView(button("Retry",()->{deletion.retry();if(deletion.step==AccountDeletion.Step.POLLING){advanceDeletion();return;}deletionSignInStarted=false;showDeleteAccount();}));}
-                if(deletion.showSupport){space(content,8);MaterialButton support=button("Contact support",()->{try{startActivity(new Intent(Intent.ACTION_SENDTO,Uri.parse(SupportContact.mailto(deletion.jobId))));}catch(Exception ignored){}});support.setContentDescription("deletion-support");content.addView(support);}
+                if(deletion.showSupport){space(content,8);MaterialButton support=button("Contact support",this::contactDeletionSupport);support.setContentDescription("deletion-support");content.addView(support);}
                 if(deletion.canDismiss()){space(content,8);content.addView(button("Dismiss",this::dismissDeletionError));}
                 else{space(content,8);content.addView(button("Cancel",this::cancelDeletion));}
             }
@@ -430,6 +430,24 @@ public final class MainActivity extends AppCompatActivity {
             catch(Exception error){say(error.getMessage()==null?"Keys could not be saved on this device.":error.getMessage());}
         }).show();
     }
+    private void contactDeletionSupport(){
+        AccountDeletion current=deletion;if(current==null)return;
+        DeletionSupport.Call call=DeletionSupport.call(current.jobId,current.statusToken);
+        if(!call.send){openDeletionMailto(current.jobId);return;}
+        io.execute(()->{
+            DeletionSupport.Result result;
+            try{AccountActions.HttpBody http=CloudApi.postDeletionSupport(call.path,call.statusToken);result=DeletionSupport.interpret(http.status,http.raw,false);}
+            catch(Exception error){result=DeletionSupport.interpret(0,"",true);}
+            DeletionSupport.Result applied=result;
+            runOnUiThread(()->{
+                if(deletion==null)return;
+                if(applied.kind==DeletionSupport.Kind.SENT||applied.kind==DeletionSupport.Kind.ALREADY){deletion.message=applied.message;showDeleteAccount();return;}
+                if(applied.kind==DeletionSupport.Kind.REFRESH&&deletion.refreshAfterSupport()){advanceDeletion();return;}
+                if(applied.opensMailto())openDeletionMailto(current.jobId);
+            });
+        });
+    }
+    private void openDeletionMailto(String jobId){try{startActivity(new Intent(Intent.ACTION_SENDTO,Uri.parse(SupportContact.mailto(jobId))));}catch(Exception ignored){}}
     private void advanceDeletion(){
         if(deletion==null)return;
         if(deletion.step==AccountDeletion.Step.REAUTH)deletionSignInStarted=false;

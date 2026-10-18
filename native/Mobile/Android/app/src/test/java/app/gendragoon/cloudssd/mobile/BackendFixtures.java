@@ -8,6 +8,8 @@ import java.util.List;
 
 /**
  * Account-deletion fixtures are {@code fixtures/account-deletion} at fff0a84.
+ * Support-request responses are {@code fixtures/support} at d9888be. The client path is pinned
+ * and sends no body; those files still record {@code POST /v2/support/deletion-request}.
  * Key-envelope fixtures are {@code fixtures/key-envelope} at ee4f76f.
  * Lock, workspace, merge, BYO, and ownership cases stay on the shared fixtures at da39276.
  * The repo-root {@code fixtures/} directory wins when this branch has it.
@@ -15,6 +17,7 @@ import java.util.List;
  */
 final class BackendFixtures {
     static final String ACCOUNT_DELETION_SHA="fff0a84";
+    static final String SUPPORT_FIXTURE_SHA="d9888be";
     static final String KEY_ENVELOPE_SHA="ee4f76f";
     static final String SHARED_FIXTURE_SHA="da39276";
 

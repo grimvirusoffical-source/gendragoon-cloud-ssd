@@ -125,7 +125,7 @@ private struct MobileLibrary:View {
     var body:some View{NavigationStack{
         ScrollView{VStack(alignment:.leading,spacing:20){
             HStack{VStack(alignment:.leading,spacing:7){Text("YOUR DIGITAL SPACE").font(.system(size:9,weight:.bold,design:.monospaced)).tracking(2).foregroundStyle(violet);Text("My cloud").font(.largeTitle.weight(.bold)).tracking(-1);Text("Everything you need. Nothing in your way.").font(.caption).foregroundStyle(.secondary)};Spacer();Image(systemName:"cloud.fill").font(.system(size:37)).foregroundStyle(violet).padding(15).background(violet.opacity(0.12),in:RoundedRectangle(cornerRadius:21))}
-            Picker("Workspace",selection:$cloud.selected){Text("Free · 2 GB").tag("free");ForEach(cloud.choices){Text($0.name).tag($0.id)}}.pickerStyle(.menu).frame(maxWidth:.infinity,alignment:.leading).padding(8).background(panel,in:RoundedRectangle(cornerRadius:11)).disabled(cloud.busy)
+            Picker("Workspace",selection:$cloud.selected){Text(cloud.freePickerLabel).tag("free");ForEach(cloud.choices){Text($0.pickerLabel).tag($0.id)}}.pickerStyle(.menu).frame(maxWidth:.infinity,alignment:.leading).padding(8).background(panel,in:RoundedRectangle(cornerRadius:11)).disabled(cloud.busy)
             if let c=cloud.config{
                 HStack(spacing:12){metric("Used / total",size(c.usedBytes)+" / "+size(c.quotaBytes));metric("Parallel transfers",String((cloud.dataSaver||cloud.constrainedNetwork) ? 1:min(4,c.transfer.workers)))}
                 ProgressView(value:min(1,Double(c.usedBytes+c.reservedBytes)/Double(max(1,c.quotaBytes)))).tint(violet)
