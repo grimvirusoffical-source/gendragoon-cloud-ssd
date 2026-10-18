@@ -136,6 +136,13 @@ private struct GDBillingSelection: Codable, Equatable {
             if authenticated && login?.userID != expected { throw GDTransferError(message: "Your account changed. Refresh billing.", status: 401) }
             let code = (response as? HTTPURLResponse)?.statusCode ?? 0
             if authenticated && code == 401 && attempt == 0 { continue }
+            if code == 423 {
+                let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] ?? [:]
+                if object["error"] as? String == "workspace_lock" {
+                    Task { @MainActor in GDWorkspaceLock.shared.present(json: object) }
+                    throw GDTransferError(message: "This account is over its workspace limit. Delete or merge the extra workspaces. Downloads stay available.", status: 423)
+                }
+            }
             guard (200...299).contains(code) else {
                 let reason = ((try? JSONSerialization.jsonObject(with: data)) as? [String: Any])?["error"] as? String
                 throw GDTransferError(message: reason ?? "Billing is temporarily unavailable. Please retry.", status: code)

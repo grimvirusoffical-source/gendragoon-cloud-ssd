@@ -419,6 +419,12 @@ class PreviewChannelTests(unittest.TestCase):
         with mock.patch.object(auto,"request_json",side_effect=fetch),mock.patch.object(auto,"installed_version",return_value="0.18.0"), \
              mock.patch.object(auto,"build_of",return_value=23):
             with mock.patch.object(auto,"CHANNEL","stable"):self.assertIsNone(auto.latest())
+            package["automaticUpdateEligible"]=True
+            with mock.patch.object(auto,"CHANNEL","stable"):
+                eligible=auto.latest()
+                self.assertEqual(eligible["version"],base)
+                self.assertEqual(eligible["releaseTag"],tag)
+            package["automaticUpdateEligible"]=False
             with mock.patch.object(auto,"CHANNEL","preview"):
                 result=auto.latest()
                 self.assertEqual(result["version"],base);self.assertEqual(result["releaseTag"],tag)

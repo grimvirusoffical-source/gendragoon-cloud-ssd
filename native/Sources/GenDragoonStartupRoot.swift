@@ -170,6 +170,14 @@ import Foundation
         defer{if transferRenewalID==identifier{transferRenewal=nil;transferRenewalID=nil}}
         return try await task.value
     }
+    func signedInWithin(seconds: TimeInterval) -> Bool {
+        stage == .ready && !idToken.isEmpty && Date().timeIntervalSince(lastVerified) < seconds
+    }
+    func requireFreshSignIn(message: String) {
+        logout(preserveStatus: true)
+        status = message
+        stage = .login
+    }
     func verifiedBearerToken() -> String? {
         guard stage == .ready, !idToken.isEmpty, !userID.isEmpty else { return nil }
         return idToken
@@ -211,7 +219,14 @@ import Foundation
                 var request=URLRequest(url:base.appendingPathComponent("v2/account/entitlements"))
                 request.setValue("Bearer "+token,forHTTPHeaderField:"Authorization");request.timeoutInterval=30
                 let(data,response)=try await URLSession.shared.data(for:request)
-                guard self.userID==owner,(response as? HTTPURLResponse)?.statusCode==200,
+                let http = response as? HTTPURLResponse
+                if http?.statusCode == 423,
+                   let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+                   object["error"] as? String == "workspace_lock" {
+                    GDWorkspaceLock.shared.present(json: object)
+                    return
+                }
+                guard self.userID==owner,http?.statusCode==200,
                     let result=(try? JSONSerialization.jsonObject(with:data)) as? [String:Any],
                     let adFree=result["adFree"] as? Bool else {self.adStatusKnown=false;return}
                 self.isAdFree=adFree;self.adStatusKnown=true

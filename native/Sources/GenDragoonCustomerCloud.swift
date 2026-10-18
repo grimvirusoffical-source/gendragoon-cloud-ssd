@@ -340,16 +340,12 @@ enum GDProjectContent: String { case files, applications }
                     for item in ready {
                         group.addTask {
                             try Task.checkCancellation()
-                            let saved = try await client.upload(source: URL(fileURLWithPath: item.path), workspace: workspace,
-                                constrained: constrained, metadata: item.metadata, maximumWorkers: perFileWorkers) { progress in
-                                    await monitor.update(key: item.key, size: item.sizeBytes, restoring: false, progress: progress)
+                            let exchanged = try await client.hostedRoundTrip(source: URL(fileURLWithPath: item.path), workspace: workspace,
+                                metadata: item.metadata) { progress in
+                                    await monitor.update(key: item.key, size: item.sizeBytes, restoring: progress.phase == "Downloading sealed file", progress: progress)
                                 }
                             try Task.checkCancellation()
-                            let downloaded = try await client.download(file: saved, workspace: workspace,
-                                constrained: constrained, maximumWorkers: perFileWorkers) { progress in
-                                    await monitor.update(key: item.key, size: item.sizeBytes, restoring: true, progress: progress)
-                                }
-                            return GDProjectUploadedFile(prepared: item, saved: saved, downloaded: downloaded)
+                            return GDProjectUploadedFile(prepared: item, saved: exchanged.item, downloaded: exchanged.file)
                         }
                     }
                     while let copy = try await group.next() { copies.append(copy) }

@@ -102,6 +102,7 @@ private struct GDDraftWorkspace: Identifiable, Codable {
     @StateObject private var native = GDNativeWorkspace.shared
     @StateObject private var customer = GDFreeCustomerModel()
     @ObservedObject private var activity = GDUpdateActivity.shared
+    @ObservedObject private var workspaceLock = GDWorkspaceLock.shared
     @State private var page:GDPage = .cloud
     @AppStorage("gd.commercial.preview.welcomeSeen") private var welcomeSeen = false
     @AppStorage("gd.commercial.preview.selectedTier") private var selectedTier = "1TB"
@@ -189,6 +190,9 @@ private struct GDDraftWorkspace: Identifiable, Codable {
         .onReceive(NotificationCenter.default.publisher(for:GDProjectPreferences.selectionChanged)) { customer.selectionChanged($0) }
         .onReceive(NotificationCenter.default.publisher(for:NSApplication.didBecomeActiveNotification)) { _ in
             customer.refresh(); loginSession.checkAdEntitlement()
+        }
+        .sheet(isPresented: $workspaceLock.presented) {
+            GDWorkspaceLockScreen()
         }
     }
     private var sidebar:some View {
@@ -512,11 +516,8 @@ private struct GDDraftWorkspace: Identifiable, Codable {
             }
             GenDragoonStripePurchases(focus:"ads")
             GenDragoonAutomaticUpdateStatus()
-            GDPanel {
-                AccountResetSection(isBusy: native.maintenanceBusy,
-                    acquireExclusiveOperation: { native.acquireReset() },
-                    releaseExclusiveOperation: { native.releaseReset() })
-            }
+            GDPanel { GDSortMapEditor() }
+            GDPanel { GDAccountDeletionSection() }
             GenDragoonAPIKeysPanel()
         }
     }

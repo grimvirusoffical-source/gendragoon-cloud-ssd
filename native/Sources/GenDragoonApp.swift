@@ -744,57 +744,9 @@ struct GDManagedAppSession: Identifiable {
         Panel(title: "Google Cloud · Browser Login") {
                         Text("GenDragoonSSD · Personal Cloud Storage. Hosted workspaces use your signed-in account on the shared customer bucket. A bucket you connect is S3-compatible and is $5/month. Google Cloud uses S3/HMAC keys. SFTP, Azure, and WebDAV are coming soon. Customer Google sign-in uses the separate Firebase project (gendragoonssd).")
                             .font(.system(size: 12)).foregroundStyle(.gray)
-                        HStack(spacing: 10) {
-                            ActionButton(title: "Connect Google Cloud · Opera", systemName: "person.crop.circle.badge.checkmark", action: cloud.connectGoogle, isPrimary: true, isDisabled: cloud.cloudBusy)
-                            ActionButton(title: "Refresh Projects", systemName: "arrow.clockwise", action: cloud.loadProjects, isDisabled: cloud.cloudBusy)
-                        }
                         Text(cloud.accountStatus).font(.system(size: 12)).foregroundStyle(.gray).textSelection(.enabled)
-                        if !cloud.projects.isEmpty {
-                            VStack(alignment: .leading, spacing: 6) {
-                                Text("GOOGLE CLOUD PROJECT").font(.system(size: 10, weight: .medium)).foregroundStyle(.gray)
-                                Picker("", selection: $cloud.projectID) {
-                                    Text("Choose a project").tag("")
-                                    if !cloud.projectID.isEmpty && !cloud.projects.contains(where: { $0.id == cloud.projectID }) {
-                                        Text("Manual: \(cloud.projectID)").tag(cloud.projectID)
-                                    }
-                                    ForEach(cloud.projects) { option in
-                                        Text("\(option.name) (\(option.id))").tag(option.id)
-                                    }
-                                }.labelsHidden().frame(maxWidth: .infinity)
-                                    .onChange(of: cloud.projectID) { _ in cloud.loadBuckets() }
-                            }
-                        }
-                        HStack(spacing: 10) {
-                            VStack(alignment: .leading, spacing: 5) {
-                                Text("STORAGE PROJECT ID · \(GDProjects.displayName)").font(.system(size: 10, weight: .medium)).foregroundStyle(.gray)
-                                TextField(GDProjects.storageProjectID, text: $cloud.projectID)
-                                    .textFieldStyle(.roundedBorder)
-                            }
-                            ActionButton(title: "Load Buckets", systemName: "tray.full", action: cloud.loadBuckets, isDisabled: cloud.cloudBusy || cloud.projectID.isEmpty)
-                                .frame(width: 145)
-                        }
-                        VStack(alignment: .leading, spacing: 6) {
-                            Text("STORAGE BUCKET").font(.system(size: 10, weight: .medium)).foregroundStyle(.gray)
-                            if !cloud.buckets.isEmpty {
-                                Picker("", selection: $cloud.bucket) {
-                                    ForEach(cloud.buckets, id: \.self) { name in Text(name).tag(name) }
-                                }.labelsHidden().frame(maxWidth: .infinity)
-                            }
-                            TextField("gen-dragoon-ssd", text: $cloud.bucket)
-                                .textFieldStyle(.roundedBorder)
-                            Text("Keep the existing storage ID: \(GDProjects.storageProjectID). Firebase customer authentication uses \(GDProjects.firebaseProjectID); these project IDs are intentionally different.")
-                                .font(.system(size: 10)).foregroundStyle(.gray)
-                        }
-                        HStack(spacing: 10) {
-                            ActionButton(title: "Verify & Connect Bucket", systemName: "externaldrive.badge.checkmark", action: cloud.useSelectedBucket, isPrimary: true, isDisabled: cloud.cloudBusy || cloud.busy || cloud.projectID.isEmpty || cloud.bucket.isEmpty)
-                            ActionButton(title: "Refresh Buckets", systemName: "arrow.clockwise", action: cloud.loadBuckets, isDisabled: cloud.cloudBusy)
-                        }
-                        HStack(spacing: 10) {
-                            ActionButton(title: "Test Connection", systemName: "checkmark.shield", action: cloud.testConnection, isDisabled: cloud.busy || cloud.cloudBusy)
-                            ActionButton(title: "Cloud Console", systemName: "arrow.up.right", action: cloud.openCloudConsole)
-                        }
-                        Text("Selected: \(cloud.projectID) / \(cloud.bucket)")
-                            .font(.system(size: 11, design: .monospaced)).foregroundStyle(.gray)
+                        Text("Hosted storage uses your signed-in GenDragoon account and short-lived URLs. This Mac seals files before upload. Google Cloud project, bucket, and console buttons are not part of that flow.")
+                            .font(.system(size: 12)).foregroundStyle(.gray)
                     }
     }
 }

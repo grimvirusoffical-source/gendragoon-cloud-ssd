@@ -218,10 +218,10 @@ def request_json(url):
 def latest():
     releases=request_json("https://api.github.com/repos/"+REPO+"/releases?per_page=30")
     if not isinstance(releases,list):raise RuntimeError("Invalid release listing")
+    # Stable may take a GitHub prerelease only when package-status.json says
+    # automaticUpdateEligible. Preview can see prereleases; the flag is checked below.
     entries=sorted((x for x in releases if isinstance(x,dict) and not x.get("draft")
-             and (CHANNEL=="preview" or not x.get("prerelease"))
-             and RELEASE_TAG.fullmatch(str(x.get("tag_name","")))
-             and (CHANNEL=="preview" or TAG.fullmatch(str(x.get("tag_name",""))))),
+             and RELEASE_TAG.fullmatch(str(x.get("tag_name","")))),
              key=lambda x:tuple(map(int,RELEASE_TAG.fullmatch(x["tag_name"]).groups()[:3]))+
                  ((0 if x.get("prerelease") else 1),int(RELEASE_TAG.fullmatch(x["tag_name"]).group(5) or 0)),reverse=True)
     for r in entries:
@@ -509,6 +509,19 @@ def launch_app(app=None,timeout=20):
         if not handled:raise
         return handled
 
+def confirm_relaunch_health(app, records):
+    """The replacement stays only when the same processes are still that app."""
+    if not records:
+        raise RuntimeError("Updated app failed its health check")
+    live = process_records(app, [item["pid"] for item in records])
+    expected = [(item["pid"], item["executable"], item["started"]) for item in records]
+    seen = [(item["pid"], item["executable"], item["started"]) for item in live]
+    if seen != expected:
+        raise RuntimeError("Updated app failed its health check")
+    validate_app(app, "v" + version_of(app))
+    return "healthy"
+
+
 def process_records(app,pids):
     from gendragoon_app_control import identify
     records=[]
@@ -585,10 +598,11 @@ def install_worker(pid=0,quiet=True,relaunch=False,expected_stage=None,safety_ch
                          launchStatus="pending" if relaunch else "not_requested")
             if relaunch:launched=launch_app(APP)
             records=process_records(APP,launched) if launched else []
+            readiness = confirm_relaunch_health(APP, records) if relaunch else "not_requested"
             write_status("installed",version=meta["version"],backupPath=str(backup),
                          build=build_of(APP),request_id=request_id,channel=CHANNEL,launchedProcesses=records,
                          launchStatus="exact_executable_observed" if launched else "not_requested",
-                         functionalReadiness="not_tested")
+                         functionalReadiness=readiness)
         except Exception as failure:
             failed_copy=None
             try:

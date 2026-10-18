@@ -25,6 +25,7 @@ from pathlib import Path
 
 sys.dont_write_bytecode = True
 os.environ["PYTHONDONTWRITEBYTECODE"] = "1"
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from gendragoon_aes import VaultError, open_seal, seal
 
@@ -113,6 +114,25 @@ def validate_session(workspace_id, body, now=None):
             raise StorageError("A signed URL is outside this workspace.")
         checked.append({"op": op, "name": name, "method": method, "url": url})
     return {"prefix": prefix, "expiresAt": body["expiresAt"], "readOnly": read_only, "urls": checked}
+
+
+def interpret_workspace_lock(status, body):
+    """HTTP 423 workspace_lock opens delete-or-merge. Other errors stay ordinary."""
+    if status != 423 or not isinstance(body, dict) or body.get("error") != "workspace_lock":
+        return None
+    unpaid = body.get("unpaidWorkspaceIds") or []
+    if not isinstance(unpaid, list) or any(not isinstance(item, str) or not item for item in unpaid):
+        unpaid = []
+    over = body.get("overBy")
+    if not isinstance(over, int) or over < 0:
+        over = 0
+    return {
+        "screen": "delete-or-merge",
+        "reason": str(body.get("reason") or "workspace_lock")[:80],
+        "overBy": over,
+        "unpaidWorkspaceIds": unpaid[:50],
+        "message": "This account is over its workspace limit. Delete or merge the extra workspaces. Downloads stay available.",
+    }
 
 
 def object_name(display_name, key):

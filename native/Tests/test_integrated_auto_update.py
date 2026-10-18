@@ -268,10 +268,20 @@ class AutoUpdateTests(unittest.TestCase):
         self.assertEqual((old_backup / "keep").read_text(), "pre-existing backup")
         self.assertEqual(data.read_text(), "keep this")
         self.assertEqual(status["launchStatus"], "exact_executable_observed")
-        self.assertEqual(status["functionalReadiness"], "not_tested")
+        self.assertEqual(status["functionalReadiness"], "healthy")
         self.assertEqual(status["launchedProcesses"], [{"pid":4200,"uid":os.getuid(),
                          "executable":str(self.app/"Contents/MacOS/GenDragoon Cloud SSD"),"started":"fixture-start"}])
         self.assertTrue(any(command == ["/usr/bin/open", "-n", str(self.app)] for command in self.calls))
+
+    def test_failed_health_check_rolls_back_previous_app(self):
+        self.stage()
+        with self.mac(), mock.patch.object(updater, "confirm_relaunch_health",
+                                            side_effect=RuntimeError("Updated app failed its health check")):
+            self.assertEqual(updater.install_worker(relaunch=True)["event"], "rolled_back")
+        self.assert_original()
+        status = json.loads(self.status.read_text())
+        self.assertEqual(status["state"], "rolled_back")
+        self.assertIn("health check", status["error"])
 
     def test_launch_failure_rolls_back_previous_app(self):
         self.stage()

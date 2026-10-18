@@ -281,12 +281,47 @@ def source_path(value):
     return path
 
 
+CONTENT_HASH_LIMIT = 8 * 1024 * 1024
+RECENT_CONTENT_WINDOW_NS = 5_000_000_000
+
+
+def content_digest(item, info):
+    """Hash bytes when size and mtime would not reveal a same-size edit."""
+    recent = time.time_ns() - min(info.st_mtime_ns, info.st_ctime_ns) <= RECENT_CONTENT_WINDOW_NS
+    if info.st_size > CONTENT_HASH_LIMIT and not recent:
+        return None
+    to_read = info.st_size if info.st_size <= CONTENT_HASH_LIMIT else min(info.st_size, 1024 * 1024)
+    digest = hashlib.sha256()
+    try:
+        descriptor = os.open(item, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    except OSError as exc:
+        raise WorkspaceError("invalid_source", "A source file could not be read") from exc
+    try:
+        observed = os.fstat(descriptor)
+        if not stat.S_ISREG(observed.st_mode):
+            raise WorkspaceError("source_changed", "A source changed while being selected; try again")
+        remaining = to_read
+        while remaining:
+            block = os.read(descriptor, min(remaining, 1024 * 1024))
+            if not block:
+                break
+            digest.update(block)
+            remaining -= len(block)
+        after = os.fstat(descriptor)
+    finally:
+        os.close(descriptor)
+    if (after.st_size, after.st_mtime_ns) != (info.st_size, info.st_mtime_ns):
+        raise WorkspaceError("source_changed", "A source changed while being selected; try again")
+    return digest.hexdigest()
+
+
 def fingerprint(path):
     """Hash identity/metadata for the complete tree without following symlinks.
 
     Library upload additionally hashes content manifests around backup/offload.
     This selection fingerprint catches replacements and ordinary edits between
-    selection, enqueue, and worker admission without reading big file contents.
+    selection, enqueue, and worker admission. Same-size edits that land inside
+    one timestamp tick are included by hashing file bytes.
     """
     digest, count = hashlib.sha256(), 0
     first = path.lstat()
@@ -300,8 +335,10 @@ def fingerprint(path):
         count += 1
         if count > MAX_FINGERPRINT_ENTRIES:
             raise WorkspaceError("source_too_large", "This source exceeds the safe tree entry limit")
+        content = content_digest(item, info) if stat.S_ISREG(info.st_mode) and not stat.S_ISLNK(info.st_mode) else None
         record = [relative, info.st_dev, info.st_ino, info.st_mode, info.st_size,
-                  info.st_mtime_ns, info.st_ctime_ns, os.readlink(item) if stat.S_ISLNK(info.st_mode) else None]
+                  info.st_mtime_ns, info.st_ctime_ns, os.readlink(item) if stat.S_ISLNK(info.st_mode) else None,
+                  content]
         digest.update(json.dumps(record, separators=(",", ":")).encode())
     add(path, "")
     def unavailable(error):

@@ -211,10 +211,6 @@ enum GDNativeHelper {
     @ObservedObject var native: GDNativeWorkspace
     var content: GDProjectContent = .applications
     @ObservedObject private var activity = GDUpdateActivity.shared
-    @State private var candidateProject = ""
-    @State private var candidateBucket = ""
-    @State private var candidateRemote = "gendragoon"
-    @State private var candidatePrefix = "GenDragoon-App-Library"
     @State private var showCleanup = false
     @State private var showConnection = false
     @State private var showUpload = false
@@ -244,30 +240,9 @@ enum GDNativeHelper {
                 VStack(alignment: .leading, spacing: 12) {
                     Text("Bring-your-own Google Cloud uses S3/HMAC keys. SFTP, Azure, and WebDAV are coming soon and have no connect flow. Performance features cost extra unless you stay on the free performance tier.")
                         .font(.caption).foregroundStyle(.secondary)
-                    HStack {
-                        Button("Connect Google Cloud") { native.connectGoogle() }
-                            .buttonStyle(.borderedProminent).tint(.purple).disabled(locked)
-                        Button("Refresh Projects & Buckets") { Task { await native.refreshCloudChoices() } }.disabled(locked)
-                        Button("Cloud Console") { cloud.openCloudConsole() }
-                    }
+                    Text("Hosted files use the signed-in account. A bucket you connect uses S3-compatible keys kept in the macOS Keychain. This screen does not ask for a Google Cloud project, a Cloud Console link, or a destination to verify.")
+                        .font(.caption).foregroundStyle(.secondary)
                     Text(cloud.accountStatus).font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
-                    DisclosureGroup("Bring your own Google Cloud bucket") {
-                        VStack(alignment: .leading, spacing: 8) {
-                            Text("Enter a Google Cloud project you own. The Owner role is checked only for this destination. The current destination changes only after access is verified.")
-                                .font(.caption).foregroundStyle(.secondary)
-                            HStack {
-                                TextField("Google Cloud project ID", text: $candidateProject)
-                                TextField("Bucket name", text: $candidateBucket)
-                            }.textFieldStyle(.roundedBorder)
-                            HStack {
-                                TextField("Remote name", text: $candidateRemote)
-                                TextField("Upload folder", text: $candidatePrefix)
-                            }.textFieldStyle(.roundedBorder)
-                            Button("Verify & Use This Destination") {
-                                native.verify(project: candidateProject, bucket: candidateBucket, remote: candidateRemote, prefix: candidatePrefix)
-                            }.disabled(locked || candidateProject.isEmpty || candidateBucket.isEmpty)
-                        }.padding(.top, 8)
-                    }
                 }.frame(maxWidth: .infinity, alignment: .leading).padding(8)
             }
             if showUpload || native.upload.hasRunningJob || native.upload.hasQueuedJobs {
@@ -317,16 +292,7 @@ enum GDNativeHelper {
             showUpload = true
             return true
         } isTargeted: { dropTarget = $0 }
-        .task {
-            candidateProject = cloud.projectID
-            candidateBucket = cloud.bucket
-            candidateRemote = cloud.remote
-            await native.start()
-            if let selected = native.selectedDestination {
-                candidateProject = selected.project; candidateBucket = selected.bucket
-                candidateRemote = selected.remote; candidatePrefix = selected.prefix
-            }
-        }
+        .task { await native.start() }
     }
 }
 

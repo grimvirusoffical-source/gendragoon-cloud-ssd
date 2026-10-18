@@ -1,6 +1,7 @@
 import Foundation
 import CryptoKit
 import Darwin
+import Security
 
 struct GDTransferProfile:Decodable,Sendable {
     let workers:Int
@@ -105,7 +106,7 @@ actor GDTransferClient {
                 guard attributes[.type] as? FileAttributeType == .typeDirectory,
                       (attributes[.ownerAccountID] as? NSNumber)?.uint32Value==getuid(),
                       ((attributes[.posixPermissions] as? NSNumber)?.intValue ?? 0)&0o022==0 else {
-                    throw GDTransferError(message:"The local transfer cache has unsafe permissions. Choose Reset App before starting a transfer.",status:0)
+                    throw GDTransferError(message:"The local transfer cache has unsafe permissions. Sign out and back in before starting a transfer.",status:0)
                 }
             }
         }
@@ -135,6 +136,13 @@ actor GDTransferClient {
                 for(key,value) in headers {request.setValue(value,forHTTPHeaderField:key)}
                 let(body,response)=try await session.data(for:request)
                 guard let http=response as? HTTPURLResponse else {throw GDTransferError(message:"No cloud response.",status:0)}
+                if http.statusCode == 423 {
+                    let object = (try? JSONSerialization.jsonObject(with: body)) as? [String: Any] ?? [:]
+                    if object["error"] as? String == "workspace_lock" {
+                        Task { @MainActor in GDWorkspaceLock.shared.present(json: object) }
+                        throw GDTransferError(message: "This account is over its workspace limit. Delete or merge the extra workspaces. Downloads stay available.", status: 423)
+                    }
+                }
                 if (200...299).contains(http.statusCode){return(body,http)}
                 let reason=((try? JSONSerialization.jsonObject(with:body)) as? [String:Any])?["error"] as? String
                 let failure=GDTransferError(message:reason ?? "Cloud request failed (HTTP \(http.statusCode)).",status:http.statusCode)
@@ -299,6 +307,125 @@ actor GDTransferClient {
         await progress(GDTransferProgress(completed:size,total:size,bytesPerSecond:0,phase:"Saved and verified"))
         return saved
     }
+    /// Hosted bytes go through POST /v2/workspaces/:id/storage-urls. The file and
+    /// its name are AES-256-GCM sealed on this Mac. The response is refused when
+    /// it contains a Google credential or a URL that lives longer than 15 minutes.
+    func hostedRoundTrip(source:URL,workspace:String,metadata:GDCloudUploadMetadata,progress:@escaping Progress) async throws -> (item:GDCloudItem,file:URL) {
+        let (size, _) = try Self.attributes(source)
+        guard size >= 0, size <= 5 * 1024 * 1024 * 1024 else { throw GDTransferError(message:"File exceeds this workspace's file limit.",status:0) }
+        let key = try GDHostedVault.key()
+        let plaintext = try Data(contentsOf: source, options: .mappedIfSafe)
+        guard plaintext.count == Int(size) else { throw GDTransferError(message:"The source file changed. Upload stopped without deleting it.",status:0) }
+        let sealedFile = try AES.GCM.seal(plaintext, using: key)
+        let sealedName = try AES.GCM.seal(Data(metadata.originalName.utf8), using: key)
+        guard let fileCombined = sealedFile.combined, let nameCombined = sealedName.combined else {
+            throw GDTransferError(message:"The file could not be sealed on this Mac.",status:0)
+        }
+        if String(decoding: fileCombined, as: UTF8.self).localizedCaseInsensitiveContains(metadata.originalName) && metadata.originalName.count > 3 {
+            throw GDTransferError(message:"The original file name would still be visible.",status:0)
+        }
+        let token = nameCombined.base64EncodedString().replacingOccurrences(of: "+", with: "-").replacingOccurrences(of: "/", with: "_").replacingOccurrences(of: "=", with: "")
+        if token.localizedCaseInsensitiveContains(metadata.originalName) {
+            throw GDTransferError(message:"The original file name would still be visible.",status:0)
+        }
+        let request: [String: Any] = ["objects": [
+            ["op": "upload", "name": token],
+            ["op": "download", "name": token],
+        ]]
+        let payload = try JSONSerialization.data(withJSONObject: request)
+        let sessionData = try await send("v2/workspaces/\(workspace)/storage-urls", method: "POST", data: payload).0
+        let urls = try Self.validateStorageSession(workspace: workspace, data: sessionData, name: token)
+        await progress(GDTransferProgress(completed: 0, total: size, bytesPerSecond: 0, phase: "Uploading sealed file"))
+        _ = try await Self.signedTransfer(url: urls.upload, method: urls.uploadMethod, body: fileCombined)
+        await progress(GDTransferProgress(completed: size, total: size, bytesPerSecond: 0, phase: "Downloading sealed file"))
+        let downloaded = try await Self.signedTransfer(url: urls.download, method: "GET", body: nil)
+        let box = try AES.GCM.SealedBox(combined: downloaded)
+        let opened = try AES.GCM.open(box, using: key)
+        guard opened == plaintext else { throw GDTransferError(message:"The downloaded file failed its integrity check.",status:0) }
+        let restored = root.appendingPathComponent("hosted-"+UUID().uuidString.lowercased()+".part")
+        try persist(opened, to: restored)
+        let item = GDCloudItem(id: UUID().uuidString.lowercased(), name: token, sizeBytes: size, generation: nil,
+            crc32c: "sealed", kind: metadata.kind, originalName: metadata.originalName,
+            archiveFormat: metadata.archiveFormat, manifestSHA256: metadata.manifestSHA256, logicalBytes: metadata.logicalBytes)
+        await progress(GDTransferProgress(completed: size, total: size, bytesPerSecond: 0, phase: "Saved and verified"))
+        return (item, restored)
+    }
+    private struct StorageURLs { let upload: URL; let uploadMethod: String; let download: URL }
+    private static func validateStorageSession(workspace: String, data: Data, name: String) throws -> StorageURLs {
+        guard let body = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            throw GDTransferError(message:"Storage session was empty.",status:0)
+        }
+        try rejectGoogleSecrets(body)
+        let prefix = body["prefix"] as? String ?? ""
+        guard prefix.contains(workspace), !prefix.hasPrefix("/"), !prefix.contains("..") else {
+            throw GDTransferError(message:"Storage session is not scoped to this workspace.",status:0)
+        }
+        guard let expires = body["expiresAt"] as? String else {
+            throw GDTransferError(message:"Signed URLs need an expiry.",status:0)
+        }
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        var moment = formatter.date(from: expires)
+        if moment == nil {
+            formatter.formatOptions = [.withInternetDateTime]
+            moment = formatter.date(from: expires)
+        }
+        guard let moment else {
+            throw GDTransferError(message:"Signed URL expiry is not a time.",status:0)
+        }
+        let remaining = moment.timeIntervalSinceNow
+        guard remaining > 0, remaining <= 15 * 60 else {
+            throw GDTransferError(message:"Signed URLs must expire within 15 minutes.",status:0)
+        }
+        guard let readOnly = body["readOnly"] as? Bool else {
+            throw GDTransferError(message:"Storage session did not say whether uploads are allowed.",status:0)
+        }
+        if readOnly { throw GDTransferError(message:"This workspace is locked. Uploads stay off until it is unlocked.",status:423) }
+        guard let rows = body["urls"] as? [[String: Any]] else {
+            throw GDTransferError(message:"Storage session did not include a signed URL.",status:0)
+        }
+        func one(_ op: String) throws -> (URL, String) {
+            guard let row = rows.first(where: { $0["op"] as? String == op && $0["name"] as? String == name }),
+                  let method = (row["method"] as? String)?.uppercased(),
+                  let text = row["url"] as? String, let url = URL(string: text),
+                  url.scheme == "https", url.host != nil, url.user == nil, url.password == nil,
+                  url.path.contains(workspace) else {
+                throw GDTransferError(message:"A signed URL is outside this workspace.",status:0)
+            }
+            return (url, method)
+        }
+        let upload = try one("upload")
+        guard ["PUT", "POST"].contains(upload.1) else { throw GDTransferError(message:"An upload URL has an unexpected method.",status:0) }
+        let download = try one("download")
+        guard ["GET", "HEAD"].contains(download.1) else { throw GDTransferError(message:"A download URL has an unexpected method.",status:0) }
+        return StorageURLs(upload: upload.0, uploadMethod: upload.1, download: download.0)
+    }
+    private static func rejectGoogleSecrets(_ value: Any) throws {
+        let secretKeys: Set<String> = ["access_token", "accessToken", "refresh_token", "refreshToken", "id_token", "idToken", "private_key", "privateKey", "client_secret", "clientSecret", "googleCredentials", "authorization", "secretAccessKey", "sessionToken"]
+        if let dict = value as? [String: Any] {
+            for (key, item) in dict {
+                if secretKeys.contains(key) { throw GDTransferError(message:"Hosted storage must not hand this Mac a Google credential.",status:0) }
+                try rejectGoogleSecrets(item)
+            }
+        } else if let list = value as? [Any] {
+            for item in list { try rejectGoogleSecrets(item) }
+        }
+    }
+    private static func signedTransfer(url: URL, method: String, body: Data?) async throws -> Data {
+        var request = URLRequest(url: url)
+        request.httpMethod = method
+        request.httpBody = body
+        request.timeoutInterval = 300
+        if body != nil {
+            request.setValue("application/octet-stream", forHTTPHeaderField: "Content-Type")
+        }
+        let (data, response) = try await URLSession.shared.data(for: request)
+        let code = (response as? HTTPURLResponse)?.statusCode ?? 0
+        guard (200...299).contains(code) else {
+            throw GDTransferError(message:"The signed storage URL was refused (HTTP \(code)).",status:code)
+        }
+        return data
+    }
     func acknowledgeUpload(fileID:String) {
         if let state=uploadedStates.removeValue(forKey:fileID) {try? FileManager.default.removeItem(at:state)}
     }
@@ -373,6 +500,40 @@ actor GDTransferClient {
     func delete(fileID:String,workspace:String) async throws {
         guard UUID(uuidString:fileID) != nil else{throw GDTransferError(message:"Invalid file.",status:0)}
         _=try await send(safeWorkspace(workspace)+"/files/"+fileID,method:"DELETE")
+    }
+}
+enum GDHostedVault {
+    private static let service = "app.gendragoon.cloudssd"
+    private static let account = "hosted-aes-256"
+    static func key() throws -> SymmetricKey {
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: account,
+            kSecReturnData as String: true,
+            kSecMatchLimit as String: kSecMatchLimitOne,
+        ]
+        var item: CFTypeRef?
+        let status = SecItemCopyMatching(query as CFDictionary, &item)
+        if status == errSecSuccess, let data = item as? Data, data.count == 32 {
+            return SymmetricKey(data: data)
+        }
+        var bytes = [UInt8](repeating: 0, count: 32)
+        guard SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes) == errSecSuccess else {
+            throw GDTransferError(message: "Could not create the device encryption key.", status: 0)
+        }
+        let data = Data(bytes)
+        let add: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: account,
+            kSecValueData as String: data,
+            kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly,
+        ]
+        guard SecItemAdd(add as CFDictionary, nil) == errSecSuccess else {
+            throw GDTransferError(message: "Could not save the device encryption key in the Keychain.", status: 0)
+        }
+        return SymmetricKey(data: data)
     }
 }
 enum GDCRC32C {
