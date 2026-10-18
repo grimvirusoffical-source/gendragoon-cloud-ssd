@@ -184,6 +184,13 @@ describe("vendored cloud-ssd fixtures", () => {
     const pays = name === "lapsed" || name === "over-cap-and-lapsed";
     if (pays) expect(screen.getByTestId("pay-to-restore")).toBeTruthy();
     else expect(screen.queryByTestId("pay-to-restore")).toBeNull();
+    if (name === "merge-in-progress") {
+      expect(textOf(screen.getByTestId("merge-in-progress-detail"))).toBe(
+        "Uploads and changes stay paused until the merge finishes.",
+      );
+    } else {
+      expect(screen.queryByTestId("merge-in-progress-detail")).toBeNull();
+    }
   });
 
   it("pay to restore is the action for a lapsed lock", async () => {

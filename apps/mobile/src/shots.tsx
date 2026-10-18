@@ -156,15 +156,15 @@ export function ShotFrame(props: { id: ShotId }) {
         {props.id === "byo-s3" ? <ConnectStorageScreen /> : null}
         {props.id === "pricing-free-first" ? (
           <NewWorkspaceScreen
-            quote={{ isFree: true, grandfathered: true, monthlyPriceCents: 0 }}
-            byoQuote={{ isFree: false, grandfathered: false, monthlyPriceCents: 500 }}
+            quote={{ isFree: true, grandfathered: true, monthlyPriceCents: 0, feeWaived: false }}
+            byoQuote={{ isFree: false, grandfathered: false, monthlyPriceCents: 500, feeWaived: false }}
             onCreate={() => undefined}
           />
         ) : null}
         {props.id === "pricing-create-byo" ? (
           <NewWorkspaceScreen
-            quote={{ isFree: true, grandfathered: true, monthlyPriceCents: 0 }}
-            byoQuote={{ isFree: false, grandfathered: false, monthlyPriceCents: 500 }}
+            quote={{ isFree: true, grandfathered: true, monthlyPriceCents: 0, feeWaived: false }}
+            byoQuote={{ isFree: false, grandfathered: false, monthlyPriceCents: 500, feeWaived: false }}
             initialName="Vacation photos"
             initialStorage="byo"
             initialProviderId="aws"
@@ -181,6 +181,7 @@ export function ShotFrame(props: { id: ShotId }) {
                 isFree: false,
                 grandfathered: false,
                 monthlyPriceCents: 500,
+                feeWaived: false,
               },
               {
                 id: "11111111-1111-4111-8111-000000000002",
@@ -189,6 +190,7 @@ export function ShotFrame(props: { id: ShotId }) {
                 isFree: true,
                 grandfathered: true,
                 monthlyPriceCents: 0,
+                feeWaived: false,
               },
             ]}
             unpaidIds={["11111111-1111-4111-8111-000000000001"]}
@@ -208,6 +210,7 @@ export function ShotFrame(props: { id: ShotId }) {
                 isFree: false,
                 grandfathered: false,
                 monthlyPriceCents: 500,
+                feeWaived: false,
               },
               {
                 id: "11111111-1111-4111-8111-000000000001",
@@ -216,6 +219,7 @@ export function ShotFrame(props: { id: ShotId }) {
                 isFree: true,
                 grandfathered: false,
                 monthlyPriceCents: 0,
+                feeWaived: false,
               },
             ]}
             unpaidIds={[]}

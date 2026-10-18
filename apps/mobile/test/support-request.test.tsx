@@ -247,6 +247,62 @@ describe("deletion support request", () => {
     openURL.mockRestore();
   });
 
+  it("PROVISIONAL: a local 401 unauthorized or a 401 with no code mails and never asks for sign-in", async () => {
+    // Riley has not shipped a support-request 401 fixture. Both cases are local until that file exists.
+    const unauthorized = await requestDeletionSupport({
+      baseUrl: "https://api.example.test",
+      jobId,
+      statusToken: TOKEN,
+      fetchImpl: (async () => responseFor(401, { error: "unauthorized" })) as typeof fetch,
+    });
+    const noCode = await requestDeletionSupport({
+      baseUrl: "https://api.example.test",
+      jobId,
+      statusToken: TOKEN,
+      fetchImpl: (async () => new Response("", { status: 401 })) as typeof fetch,
+    });
+    expect(unauthorized).toEqual({ kind: "fallback" });
+    expect(noCode).toEqual({ kind: "fallback" });
+
+    const openURL = jest.spyOn(Linking, "openURL").mockResolvedValue(undefined as never);
+    const onReauth = jest.fn();
+    const secrets = new MemorySecretStore();
+    await secrets.set("account-deletion:status-token", new TextEncoder().encode(TOKEN));
+    const mailto = supportContactTarget(SUPPORT_CONTACT.value, jobId);
+    expect(mailto).toBe(`mailto:${SUPPORT_CONTACT.value}?subject=${encodeURIComponent(`Account deletion ${jobId}`)}`);
+    const screen = await render(
+      <DeleteAccountScreen
+        frame="not-retryable"
+        jobId={jobId}
+        supportEndpointEnabled
+        apiBase="https://api.example.test"
+        supportFetch={(async () => responseFor(401, { error: "unauthorized" })) as typeof fetch}
+        activeTransfers={0}
+        secrets={secrets}
+        workspaceIds={["ws-1"]}
+        idToken=""
+        client={{
+          async deleteAccount() {
+            return { jobId };
+          },
+          async deletionStatus() {
+            return { jobId, status: "failed", retryable: false };
+          },
+        }}
+        onReauth={onReauth}
+        onSignedOut={() => undefined}
+        onDone={() => undefined}
+        onError={() => undefined}
+      />,
+    );
+    await fireEvent.press(screen.getByTestId("contact-support"));
+    await waitFor(() => expect(openURL).toHaveBeenCalledWith(mailto));
+    expect(onReauth).not.toHaveBeenCalled();
+    expect(screen.queryByTestId("deletion-reauth")).toBeNull();
+    expect(screen.queryByText("Sign in again. Your last sign-in is older than 5 minutes.")).toBeNull();
+    openURL.mockRestore();
+  });
+
   it("409 refreshes deletion status and 429 shows the already-sent message", async () => {
     const openURL = jest.spyOn(Linking, "openURL").mockResolvedValue(undefined as never);
     const secrets = new MemorySecretStore();

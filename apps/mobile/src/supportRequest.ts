@@ -23,9 +23,9 @@ export function deletionSupportRequestPath(jobId: string): string {
  * Provisional call. A 202 `{status:"received", requestId}` is success, including
  * a repeat of the same requestId. 409 `support_not_needed` means the job is not
  * failed, so the caller refreshes deletion status. 429 is already sent.
- * A network error, HTTP 404, or HTTP 5xx falls back to the support contact.
- * 404 must not ask the user to sign in: the account may already be deleted.
- * Only 202, a repeat send, 409, and 429 have their own UI.
+ * A network error, HTTP 401, HTTP 404, or HTTP 5xx falls back to the support contact.
+ * 401 `unauthorized`, a 401 with no code, and 404 must not ask the user to sign in:
+ * the account may already be deleted. Only 202, a repeat send, 409, and 429 have their own UI.
  */
 export async function requestDeletionSupport(input: {
   baseUrl: string;
@@ -56,6 +56,8 @@ export async function requestDeletionSupport(input: {
       return { kind: "sent", requestId: body.requestId };
     }
   }
+  // 401 (`unauthorized` or no code) and 404 match a network error or 5xx.
+  if (response.status === 401 || response.status === 404) return { kind: "fallback" };
   return { kind: "fallback" };
 }
 

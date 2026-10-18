@@ -7,6 +7,9 @@ export const FIXTURE_SOURCE_SHA = "da3927627fee76103981714f9f8ffa954843b74b";
 /** cloud-ssd PR #6 support fixtures. The rest of account-deletion stays on fff0a84. */
 export const SUPPORT_FIXTURE_SHA = "d33970cbf0175a74898c37a8a624a92b1c1a5a94";
 
+/** cloud-ssd PR #5 tip that adds `workspaces/owner-fee-waived.json`. */
+export const OWNER_FEE_WAIVED_SHA = "0715b1a933a3ee3bb489e28a6122475403bb341d";
+
 /** Files whose source commit differs from the rest of their area. */
 export const FIXTURE_SOURCE_SHA_BY_FILE: Record<string, string> = {
   "account-deletion/support-received.json": SUPPORT_FIXTURE_SHA,
@@ -14,6 +17,7 @@ export const FIXTURE_SOURCE_SHA_BY_FILE: Record<string, string> = {
   "account-deletion/support-bad-token.json": SUPPORT_FIXTURE_SHA,
   "account-deletion/support-rate-limited.json": SUPPORT_FIXTURE_SHA,
   "account-deletion/support-not-needed.json": SUPPORT_FIXTURE_SHA,
+  "workspaces/owner-fee-waived.json": OWNER_FEE_WAIVED_SHA,
 };
 
 /** Later fixture areas, keyed by the directory under fixtures/. */

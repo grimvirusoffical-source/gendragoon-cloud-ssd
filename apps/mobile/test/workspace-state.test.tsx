@@ -20,13 +20,14 @@ const FREE_ID = "11111111-1111-4111-8111-000000000001";
 const PAID_ID = "11111111-1111-4111-8111-000000000002";
 const PAY_BY = Date.UTC(2026, 9, 21);
 
-function row(partial: Pick<WorkspaceRecord, "id" | "name"> & Partial<WorkspaceRecord>): WorkspaceRecord {
+function row(partial: Pick<WorkspaceRecord, "id" | "name"> & Partial<WorkspaceRecord>): WorkspaceRecord & { feeWaived: boolean } {
   return {
     kind: "paid",
     isFree: false,
     grandfathered: false,
     monthlyPriceCents: 500,
     projectStatus: "active",
+    feeWaived: false,
     ...partial,
   };
 }

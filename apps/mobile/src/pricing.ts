@@ -3,20 +3,34 @@
  * Free, Included, and cent formatting live in core.
  * `feeWaived` is not on core's helper yet (296cb96). Until
  * `workspacePriceLabel` returns Included for that flag, this file does.
+ * The flag is required: a missing or non-boolean value is a parse error,
+ * not `false`.
  */
 import { parseWorkspacePrice, workspacePriceLabel, type WorkspacePrice } from "@gendragoon/core";
 
-function feeWaived(value: unknown): boolean {
-  return !!value && typeof value === "object" && (value as { feeWaived?: unknown }).feeWaived === true;
+/** Reads `feeWaived`. Missing and non-booleans throw; they are not false. */
+export function parseFeeWaived(value: unknown): boolean {
+  if (!value || typeof value !== "object" || !Object.prototype.hasOwnProperty.call(value, "feeWaived")) {
+    throw new TypeError("Workspace feeWaived is missing");
+  }
+  const flag = (value as { feeWaived: unknown }).feeWaived;
+  if (typeof flag !== "boolean") throw new TypeError("Workspace feeWaived is missing");
+  return flag;
 }
 
 export function serverPriceLabel(value: unknown): string | null {
-  const waived = feeWaived(value);
+  let waived: boolean;
+  try {
+    waived = parseFeeWaived(value);
+  } catch (error) {
+    if (error instanceof TypeError) return null;
+    throw error;
+  }
   try {
     const price = parseWorkspacePrice(value);
-    const label = workspacePriceLabel(waived ? { ...price, feeWaived: true } as WorkspacePrice : price);
+    const label = workspacePriceLabel(price);
     if (price.isFree) return label;
-    if (waived && label !== "Included") return "Included";
+    if (waived) return "Included";
     return label;
   } catch (error) {
     if (error instanceof TypeError) return waived ? "Included" : null;
@@ -32,18 +46,7 @@ export function grandfatheringEnded(value: unknown): boolean {
 /** Price to show once register reports `grandfatheringEnded`. Core formats the cents. */
 export function grandfatheringEndedPrice(value: unknown): string | null {
   if (!grandfatheringEnded(value)) return null;
-  const parsed = serverPriceLabel(value);
-  if (parsed) return parsed;
-  if (!value || typeof value !== "object") return null;
-  const record = value as { grandfathered?: unknown; monthlyPriceCents?: unknown; isFree?: unknown };
-  if (record.grandfathered !== false || typeof record.monthlyPriceCents !== "number" || !Number.isInteger(record.monthlyPriceCents)) {
-    return null;
-  }
-  return workspacePriceLabel({
-    isFree: record.isFree === true,
-    grandfathered: false,
-    monthlyPriceCents: record.monthlyPriceCents,
-  });
+  return serverPriceLabel(value);
 }
 
 /** `$5.00/mo` from core's cent formatter. Zero and missing amounts stay blank. */

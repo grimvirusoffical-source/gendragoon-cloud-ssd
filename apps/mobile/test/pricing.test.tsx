@@ -1,9 +1,9 @@
 import { parseWorkspacePrice, workspacePriceLabel, type WorkspacePrice, type WorkspaceRecord } from "@gendragoon/core";
 import { fireEvent, render } from "@testing-library/react-native";
 import { WORKSPACE_PRICING_ENABLED } from "../src/flags";
-import { additionalWorkspaceFeeText, grandfatheringEndedPrice, includedPricingEndsWarning, serverPriceLabel, workspaceQuoteExplanation } from "../src/pricing";
+import { additionalWorkspaceFeeText, grandfatheringEndedPrice, includedPricingEndsWarning, parseFeeWaived, serverPriceLabel, workspaceQuoteExplanation } from "../src/pricing";
 import { ConnectStorageScreen, LockScreen, NewWorkspaceScreen, WorkspacesScreen } from "../src/screens";
-import { FIXTURE_SOURCE_SHA_BY_AREA, loadFixture } from "./loadFixture";
+import { FIXTURE_SOURCE_SHA_BY_AREA, OWNER_FEE_WAIVED_SHA, loadFixture } from "./loadFixture";
 
 const PRICING_SHA = "4c3dd13587fae1ddfa907ad2b84c0886d7794ade";
 
@@ -61,7 +61,10 @@ describe("workspace price labels", () => {
     );
     expect(body.workspaces[0]?.monthlyPriceCents).toBe(500);
     expect(body.workspaces[0]?.isFree).toBe(false);
-    expect(screen.getByTestId("workspace-price-11111111-1111-4111-8111-000000000003").props.children).toBe("$5.00");
+    expect(() => parseFeeWaived(body.workspaces[0])).toThrow(TypeError);
+    expect(serverPriceLabel(body.workspaces[0])).toBeNull();
+    expect(workspacePriceLabel(parseWorkspacePrice(body.workspaces[0]))).toBe("$5.00");
+    expect(screen.queryByTestId("workspace-price-11111111-1111-4111-8111-000000000003")).toBeNull();
     expect(screen.queryByText("Free")).toBeNull();
     expect(screen.queryByText("$0.00/mo")).toBeNull();
   });
@@ -77,8 +80,12 @@ describe("workspace price labels", () => {
         onMerge={() => undefined}
       />,
     );
-    expect(screen.getByTestId("workspace-price-11111111-1111-4111-8111-000000000001").props.children).toBe("$5.00");
-    expect(screen.getByTestId("workspace-price-11111111-1111-4111-8111-000000000002").props.children).toBe("Free");
+    expect(serverPriceLabel(body.workspaces[0])).toBeNull();
+    expect(serverPriceLabel(body.workspaces[1])).toBeNull();
+    expect(workspacePriceLabel(parseWorkspacePrice(body.workspaces[0]))).toBe("$5.00");
+    expect(workspacePriceLabel(parseWorkspacePrice(body.workspaces[1]))).toBe("Free");
+    expect(screen.queryByTestId("workspace-price-11111111-1111-4111-8111-000000000001")).toBeNull();
+    expect(screen.queryByTestId("workspace-price-11111111-1111-4111-8111-000000000002")).toBeNull();
     expect(screen.queryByText("$0.00/mo")).toBeNull();
   });
 
@@ -97,7 +104,7 @@ describe("workspace price labels", () => {
       <NewWorkspaceScreen quote={free.response.body.project} byoQuote={byo.response.body} onCreate={() => undefined} />,
     );
     expect(screen.getByTestId("new-workspace-explain").props.children).toBe("Your first hosted workspace is free");
-    expect(screen.getByTestId("new-workspace-price").props.children).toBe("Free");
+    expect(screen.queryByTestId("new-workspace-price")).toBeNull();
     expect(screen.getByTestId("create-workspace")).toBeDisabled();
     await fireEvent.changeText(screen.getByTestId("workspace-name"), "Vacation photos");
     expect(screen.getByTestId("create-workspace")).not.toBeDisabled();
@@ -109,7 +116,14 @@ describe("workspace price labels", () => {
       <NewWorkspaceScreen quote={paid.response.body.project} onCreate={() => undefined} />,
     );
     expect(second.getByTestId("new-workspace-explain").props.children).toBe("Additional workspaces are $5.00/mo");
-    expect(second.getByTestId("new-workspace-price").props.children).toBe("$5.00");
+    expect(second.queryByTestId("new-workspace-price")).toBeNull();
+    const priced = await render(
+      <NewWorkspaceScreen
+        quote={{ isFree: true, grandfathered: false, monthlyPriceCents: 0, feeWaived: false }}
+        onCreate={() => undefined}
+      />,
+    );
+    expect(priced.getByTestId("new-workspace-price").props.children).toBe("Free");
   });
 
   it("labels a BYO register at 500 cents and keeps one free workspace in a concurrent create", () => {
@@ -134,6 +148,9 @@ describe("workspace price labels", () => {
     expect(() => parseWorkspacePrice({ name: "no price" })).toThrow(TypeError);
     expect(serverPriceLabel(null)).toBeNull();
     expect(serverPriceLabel({ name: "no price" })).toBeNull();
+    expect(() => parseFeeWaived({ isFree: false, grandfathered: false, monthlyPriceCents: 500 })).toThrow(TypeError);
+    expect(serverPriceLabel({ isFree: false, grandfathered: false, monthlyPriceCents: 500 })).toBeNull();
+    expect(serverPriceLabel({ isFree: false, grandfathered: false, monthlyPriceCents: 500, feeWaived: false })).toBe("$5.00");
     expect(serverPriceLabel({ isFree: false, grandfathered: false, monthlyPriceCents: 500, feeWaived: true })).toBe("Included");
     expect(serverPriceLabel({ isFree: true, grandfathered: false, monthlyPriceCents: 0, feeWaived: true })).toBe("Free");
     expect(serverPriceLabel({ feeWaived: true })).toBe("Included");
@@ -148,7 +165,9 @@ describe("workspace price labels", () => {
       grandfathered: false,
       isFree: false,
       monthlyPriceCents: 500,
+      feeWaived: false,
     };
+    expect(grandfatheringEndedPrice({ ...body, feeWaived: undefined })).toBeNull();
     expect(grandfatheringEndedPrice(body)).toBe("$5.00");
     expect(includedPricingEndsWarning(500)).toBe(
       "Switching to your own storage ends this workspace's included pricing. It will cost $5.00/mo.",
@@ -174,8 +193,38 @@ describe("workspace price labels", () => {
     );
     expect(workspacePriceLabel(parseWorkspacePrice(body.workspaces[0]))).toBe("Included");
     expect(workspacePriceLabel(parseWorkspacePrice(body.workspaces[1]))).toBe("Free");
-    expect(screen.getByTestId("workspace-price-11111111-1111-4111-8111-000000000008").props.children).toBe("Included");
-    expect(screen.getByTestId("workspace-price-11111111-1111-4111-8111-000000000009").props.children).toBe("Free");
+    expect(serverPriceLabel(body.workspaces[0])).toBeNull();
+    expect(serverPriceLabel(body.workspaces[1])).toBeNull();
+    expect(screen.queryByTestId("workspace-price-11111111-1111-4111-8111-000000000008")).toBeNull();
+    expect(screen.queryByTestId("workspace-price-11111111-1111-4111-8111-000000000009")).toBeNull();
+    expect(screen.queryByText("$0.00")).toBeNull();
+    expect(screen.queryByText("$0.00/mo")).toBeNull();
+  });
+
+  it("labels owner-fee-waived as Included", async () => {
+    const fixture = loadFixture<{
+      feeWaived: boolean;
+      project: { id: string; name: string; kind: "paid"; isFree: boolean; grandfathered: boolean; monthlyPriceCents: number; feeWaived: boolean };
+    }>("workspaces/owner-fee-waived.json");
+    expect(fixture.sourceSha).toBe(OWNER_FEE_WAIVED_SHA);
+    expect(fixture.sourcePath).toBe("fixtures/workspaces/owner-fee-waived.json");
+    const project = fixture.response.body.project;
+    expect(parseFeeWaived(project)).toBe(true);
+    expect(parseFeeWaived(fixture.response.body)).toBe(true);
+    expect(serverPriceLabel(project)).toBe("Included");
+    const withoutFee = { ...project };
+    delete (withoutFee as { feeWaived?: boolean }).feeWaived;
+    expect(() => parseFeeWaived(withoutFee)).toThrow(TypeError);
+    expect(serverPriceLabel(withoutFee)).toBeNull();
+    const screen = await render(
+      <WorkspacesScreen
+        workspaces={[project]}
+        unpaidIds={[]}
+        onDelete={() => undefined}
+        onMerge={() => undefined}
+      />,
+    );
+    expect(screen.getByTestId(`workspace-price-${project.id}`).props.children).toBe("Included");
     expect(screen.queryByText("$0.00")).toBeNull();
     expect(screen.queryByText("$0.00/mo")).toBeNull();
   });

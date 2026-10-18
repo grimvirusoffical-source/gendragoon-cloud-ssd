@@ -172,6 +172,11 @@ export function LockScreen(props: {
       {props.lock ? (
         <Text testID="lock-reason" style={styles.help}>{lockReasonMessage(props.lock.reason, props.lock.overBy)}</Text>
       ) : null}
+      {props.lock?.reason === "merge_in_progress" ? (
+        <Text testID="merge-in-progress-detail" style={styles.help}>
+          Uploads and changes stay paused until the merge finishes.
+        </Text>
+      ) : null}
       {rows.map((workspace) => (
         <Text key={workspace.id} testID={`lock-workspace-${workspace.id}`} style={styles.help}>
           {workspace.name}{workspace.unpaid ? " · unpaid" : ""}
@@ -247,7 +252,7 @@ export interface ServerMergeResult {
   copied: number;
 }
 
-export type ListedWorkspace = WorkspaceRecord;
+export type ListedWorkspace = WorkspaceRecord & { feeWaived?: boolean };
 
 export function NewWorkspaceScreen(props: {
   /** Server quote for a hosted workspace. Not a client-side count. */
