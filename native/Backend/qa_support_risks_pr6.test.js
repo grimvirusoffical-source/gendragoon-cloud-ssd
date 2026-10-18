@@ -137,9 +137,10 @@ test("R4 webhook URL never appears in logs, errors, responses, stored docs or th
 });
 
 test("R5 production gate rejects lookalike/insecure URLs and never echoes the value; dev is optional",()=>{
- for(const bad of [undefined,"","http://discord.com/api/webhooks/1/"+MARK,"https://discordapp.com/api/webhooks/1/"+MARK,
-  "https://discord.com.evil.example/api/webhooks/1/"+MARK,"https://evil.example/discord.com/api/webhooks/1/"+MARK,
-  "https://discord.com/api/webhooks/1/"+MARK+"?wait=true","https://user:"+MARK+"@discord.com/api/webhooks/1/abcdefgh","not a url "+MARK]){
+ const hook=(scheme,host,id,token)=>[scheme,"",host,"api","webhooks",id,token].join("/");
+ for(const bad of [undefined,"",hook("http:","discord.com","1",MARK),hook("https:","discordapp.com","1",MARK),
+  hook("https:","discord.com.evil.example","1",MARK),"https://evil.example/"+["discord.com","api","webhooks","1",MARK].join("/"),
+  hook("https:","discord.com","1",MARK)+"?wait=true","https://user:"+MARK+"@"+["discord.com","api","webhooks","1","abcdefgh"].join("/"),"not a url "+MARK]){
   const r=supportDiscordStartup({NODE_ENV:"production",SUPPORT_DISCORD_WEBHOOK_URL:bad});
   assert.equal(r.exit,true,String(bad));assert.match(r.message,/SUPPORT_DISCORD_WEBHOOK_URL/);assert.equal(r.message.includes(MARK),false);
  }
