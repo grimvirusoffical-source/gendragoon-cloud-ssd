@@ -9,7 +9,7 @@ Clients do not hold GCP credentials for the managed bucket. They also do not inv
 3. `POST /v2/workspaces/:id/storage-urls` takes `{ "op": "get" | "put" | "delete", "objects": ["…"] }` and returns `{ "mode": "read" | "write" | "delete", "urls": [{ "object", "url", "method" }] }`. A manifest put also sends `ifGeneration` as a decimal string.
 4. Each URL is `https`, has no userinfo, contains the workspace prefix, and expires in at most 15 minutes.
 5. The client uploads or downloads ciphertext at that URL. It does not send an `Authorization` header or any key material.
-6. A locked workspace (over the cap, or unpaid) receives `mode: "read"` and GET links only. A put or delete returns HTTP 423 `{ "error": "workspace_lock", "reason", "overBy", "unpaidWorkspaceIds" }`. Get stays allowed.
+6. A locked workspace (over the cap, or unpaid) receives `mode: "read"` and GET links only. A put or delete returns HTTP 423 `{ "error": "workspace_lock", "reason", "overBy", "unpaidWorkspaceIds" }`. Get stays allowed. A `reason: "lapsed"` lock names `unpaidWorkspaceIds` and leaves every other workspace writable.
 
 ## Encryption
 

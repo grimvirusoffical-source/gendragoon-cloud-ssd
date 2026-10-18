@@ -56,13 +56,18 @@ export interface Workspace {
   kind: WorkspaceKind;
   /** Server flag. The client does not decide this by counting workspaces. */
   isFree: boolean;
-  /** Server cents. 0 exactly when `isFree` or `grandfathered` is true. */
+  /** Server cents. 0 exactly when `isFree`, `grandfathered`, or `feeWaived` is true. */
   monthlyPriceCents: number;
   /**
    * Server flag. Required on list items and create `project` objects.
-   * The price label is Included only when this is true and `isFree` is false.
+   * The price label is Included when this is true and `isFree` is false.
    */
   grandfathered: boolean;
+  /**
+   * Server flag. Required on list items and create `project` objects.
+   * A waived fee is Included, and its cents are 0.
+   */
+  feeWaived: boolean;
   /** Present on paid/BYO server documents. Omitted from today's public payload. */
   accountHash?: string;
   /** Legacy free project only (`tenants/{accountKey}/workspaces/free`). */
@@ -233,6 +238,17 @@ export interface ByoProofResponse {
   bucketFingerprint?: string;
 }
 
+/**
+ * POST /v2/workspaces/:id/byo/register success body.
+ * `grandfatheringEnded` is copied through when the server sends it.
+ */
+export interface ByoRegisterResponse {
+  grandfatheringEnded?: boolean;
+  isFree?: boolean;
+  monthlyPriceCents?: number;
+  feeWaived?: boolean;
+}
+
 /** Proposed login/plan-change payload. Server is source of truth. */
 export interface AccessResponse {
   locked: boolean;
@@ -318,6 +334,17 @@ export interface AccountDeletionStatus {
   /** Present on `failed`. Retry is offered only when this is true. */
   retryable?: boolean;
 }
+
+/**
+ * POST /v2/account/deletions/:jobId/support-request.
+ * The status token saved for that job is the only credential. A missing
+ * session is not sign-in. `fallback` carries the exported SUPPORT_CONTACT.
+ */
+export type DeletionSupportResult =
+  | { kind: "received"; requestId: string }
+  | { kind: "already_sent"; retryAfterSec?: number }
+  | { kind: "not_needed"; status: AccountDeletionStatus }
+  | { kind: "fallback"; contact: { value: string; isPlaceholder: boolean } };
 
 /** Argon2id parameters on the wire. `memoryKiB` is libsodium's byte memLimit / 1024. `iterations` is opsLimit. */
 export interface Argon2idKdf {

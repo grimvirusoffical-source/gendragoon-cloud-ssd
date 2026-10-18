@@ -14,11 +14,8 @@
  * Server bodies are Riley's generated fixtures (fixtures/server-pr6/account-deletion,
  * support-*.json from d33970c). Bodies marked DERIVED have no fixture.
  *
- * `requestDeletionSupport` does not exist in core yet, so every behavior case is
- * `it.fails`. Each does its setup (and checks it) BEFORE it calls the function,
- * so it fails only because the export is missing. A reference implementation
- * was used to confirm every case passes once the function exists. Remove the
- * markers when it lands.
+ * `requestDeletionSupport` is the core export. Each case checks its setup, then
+ * calls that function. Assertions below are Morgan's contract from 12d5024.
  *
  * Proposed shape (Avery can rename; update the CoreSupport type below):
  *   requestDeletionSupport(jobId, { client, secureStore, onAuthFailure?, clearSession? })
@@ -155,13 +152,11 @@ describe("deletion support request: setup sanity (passes today)", () => {
     expect(await res.json()).toEqual(fx("support-received").response.body);
     const deps = await t.deps();
     expect(await read(deps.secureStore, TOKEN_KEY)).toBe(STATUS_TOKEN);
-    // Tripwire: fails once core exports the function, so the it.fails markers below get removed.
-    expect((core as Record<string, unknown>).requestDeletionSupport).toBeUndefined();
   });
 });
 
-describe("requestDeletionSupport(jobId) (not in core yet -> it.fails)", () => {
-  it.fails("sends POST .../support-request with Bearer statusToken only: no Firebase token, no body, no uid, works signed out", async () => {
+describe("requestDeletionSupport(jobId, { client, secureStore })", () => {
+  it("sends POST .../support-request with Bearer statusToken only: no Firebase token, no body, no uid, works signed out", async () => {
     const jobId = jobOf("support-received");
     const t = setup(jobId, { support: [reply("support-received")] });
     const deps = await t.deps();
@@ -179,7 +174,7 @@ describe("requestDeletionSupport(jobId) (not in core yet -> it.fails)", () => {
     expect(t.srv.calls).toHaveLength(1);
   });
 
-  it.fails("202 support-received -> { kind: 'received', requestId } and the saved job stays", async () => {
+  it("202 support-received -> { kind: 'received', requestId } and the saved job stays", async () => {
     const jobId = jobOf("support-received");
     const t = setup(jobId, { support: [reply("support-received")] });
     const deps = await t.deps();
@@ -189,7 +184,7 @@ describe("requestDeletionSupport(jobId) (not in core yet -> it.fails)", () => {
     await expectNoSignInAndJobKept(t, deps.secureStore, jobId);
   });
 
-  it.fails("a repeat (support-repeat) returns the same requestId with the same statusToken", async () => {
+  it("a repeat (support-repeat) returns the same requestId with the same statusToken", async () => {
     const jobId = jobOf("support-repeat");
     const t = setup(jobId, { support: [reply("support-received"), reply("support-repeat")] });
     const deps = await t.deps();
@@ -203,7 +198,7 @@ describe("requestDeletionSupport(jobId) (not in core yet -> it.fails)", () => {
     await expectNoSignInAndJobKept(t, deps.secureStore, jobId);
   });
 
-  it.fails("409 support-not-needed refreshes the status with the statusToken and returns it", async () => {
+  it("409 support-not-needed refreshes the status with the statusToken and returns it", async () => {
     const jobId = jobOf("support-not-needed");
     // DERIVED: real status-running body with this fixture's job id.
     const running = { ...(fx("status-running").response.body as object), jobId };
@@ -218,7 +213,7 @@ describe("requestDeletionSupport(jobId) (not in core yet -> it.fails)", () => {
     await expectNoSignInAndJobKept(t, deps.secureStore, jobId);
   });
 
-  it.fails("429 support-rate-limited -> { kind: 'already_sent', retryAfterSec } without throwing or signing in", async () => {
+  it("429 support-rate-limited -> { kind: 'already_sent', retryAfterSec } without throwing or signing in", async () => {
     const jobId = jobOf("support-rate-limited");
     const t = setup(jobId, { support: [reply("support-rate-limited")] });
     const deps = await t.deps();
@@ -228,7 +223,7 @@ describe("requestDeletionSupport(jobId) (not in core yet -> it.fails)", () => {
     await expectNoSignInAndJobKept(t, deps.secureStore, jobId);
   });
 
-  it.fails("404 support-bad-token -> fallback SUPPORT_CONTACT, never routes to sign-in (Grok Bot + Casey's 404 rule)", async () => {
+  it("404 support-bad-token -> fallback SUPPORT_CONTACT, never routes to sign-in (Grok Bot + Casey's 404 rule)", async () => {
     const jobId = jobOf("support-bad-token");
     const t = setup(jobId, { support: [reply("support-bad-token")] });
     const deps = await t.deps();
@@ -239,7 +234,7 @@ describe("requestDeletionSupport(jobId) (not in core yet -> it.fails)", () => {
     expect(t.srv.calls).toHaveLength(1);
   });
 
-  it.fails("401 {error:'unauthorized'} and a bare 401 (DERIVED, account_delete.js:1001) are treated like 404: fallback, never sign-in (pending Avery's pin)", async () => {
+  it("401 {error:'unauthorized'} and a bare 401 (DERIVED, account_delete.js:1001) are treated like 404: fallback, never sign-in (pending Avery's pin)", async () => {
     const jobId = jobOf("support-bad-token");
     for (const body of [{ error: "unauthorized" }, {}]) {
       const t = setup(jobId, { support: [{ status: 401, body }] });
@@ -251,7 +246,7 @@ describe("requestDeletionSupport(jobId) (not in core yet -> it.fails)", () => {
     }
   });
 
-  it.fails("a network error, 500 or 503 (DERIVED) -> fallback SUPPORT_CONTACT", async () => {
+  it("a network error, 500 or 503 (DERIVED) -> fallback SUPPORT_CONTACT", async () => {
     const jobId = jobOf("support-received");
     for (const r of ["network", { status: 500, body: { error: "internal" } }, { status: 503 }] as Reply[]) {
       const t = setup(jobId, { support: [r] });
@@ -262,7 +257,7 @@ describe("requestDeletionSupport(jobId) (not in core yet -> it.fails)", () => {
     }
   });
 
-  it.fails("no saved statusToken -> fallback SUPPORT_CONTACT without any request", async () => {
+  it("no saved statusToken -> fallback SUPPORT_CONTACT without any request", async () => {
     const jobId = jobOf("support-received");
     const t = setup(jobId, { support: [reply("support-received")] }, null);
     const deps = await t.deps();
