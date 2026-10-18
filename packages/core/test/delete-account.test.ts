@@ -340,41 +340,47 @@ describe("accountUidFromIdToken", () => {
     expect(accountUidFromIdToken(token)).toBeNull();
   });
 
-  it("treats a uid that differs from the job's saved uid as not this account, with no auth action", async () => {
-    const secrets = new MemorySecretStore();
-    const encode = (text: string) => new TextEncoder().encode(text);
-    await secrets.set("account-deletion:job-id", encode("job-uid"));
-    await secrets.set("account-deletion:status-token", encode("token-uid"));
-    await secrets.set("account-deletion:uid", encode("user-1"));
-    await secrets.set(workspaceKeyId("w1"), new Uint8Array([1]));
-    let requests = 0;
-    let tokenReads = 0;
-    // Constructed so any network or token use would be counted; the uid check must use neither.
-    new GenDragoonClient({
-      baseUrl: "https://api.example.test",
-      getToken: () => {
-        tokenReads += 1;
-        return "fresh-token";
-      },
-      fetch: async () => {
-        requests += 1;
-        return jsonResponse(500, {});
-      },
-    });
-    const savedUid = new TextDecoder().decode((await secrets.get("account-deletion:uid"))!);
-    const otherAccount = unsignedToken({ sub: "user-2", user_id: "user-2" });
-    let uid: string | null = "unset";
-    expect(() => {
-      uid = accountUidFromIdToken(otherAccount);
-    }).not.toThrow();
-    expect(uid).toBe("user-2");
-    expect(uid === savedUid).toBe(false);
-    expect(requests).toBe(0);
-    expect(tokenReads).toBe(0);
-    expect(new TextDecoder().decode((await secrets.get("account-deletion:job-id"))!)).toBe("job-uid");
-    expect(new TextDecoder().decode((await secrets.get("account-deletion:status-token"))!)).toBe("token-uid");
-    expect(new TextDecoder().decode((await secrets.get("account-deletion:uid"))!)).toBe("user-1");
-    expect(await secrets.get(workspaceKeyId("w1"))).not.toBeNull();
-    expect(accountUidFromIdToken(unsignedToken({ sub: "user-1" }))).toBe(savedUid);
+  it("returns null without throwing for a token over 16 KB", () => {
+    const big = unsignedToken({ sub: "user-1", pad: "x".repeat(16 * 1024) });
+    expect(big.length).toBeGreaterThan(16 * 1024);
+    expect(() => accountUidFromIdToken(big)).not.toThrow();
+    expect(accountUidFromIdToken(big)).toBeNull();
+    const padFor = (target: number) => {
+      const base = unsignedToken({ sub: "user-1", pad: "" }).length;
+      // Each 3 payload bytes become 4 base64url characters.
+      return "x".repeat(Math.floor(((target - base) * 3) / 4));
+    };
+    const justUnder = unsignedToken({ sub: "user-1", pad: padFor(16 * 1024) });
+    expect(justUnder.length).toBeLessThanOrEqual(16 * 1024);
+    expect(accountUidFromIdToken(justUnder)).toBe("user-1");
+  });
+
+  it.each([
+    ["a space", "user 1"],
+    ["a control character", "user\n1"],
+    ["a non-ASCII character", "usér-1"],
+    ["DEL (0x7F)", "user\u007f1"],
+    ["129 characters", "a".repeat(129)],
+  ])("returns null without throwing when sub contains %s", (_label, sub) => {
+    const token = unsignedToken({ sub });
+    expect(() => accountUidFromIdToken(token)).not.toThrow();
+    expect(accountUidFromIdToken(token)).toBeNull();
+  });
+
+  it("accepts a sub of 1 and 128 printable ASCII characters", () => {
+    expect(accountUidFromIdToken(unsignedToken({ sub: "a" }))).toBe("a");
+    const longest = "!~".repeat(64);
+    expect(accountUidFromIdToken(unsignedToken({ sub: longest }))).toBe(longest);
+  });
+
+  it.each([
+    ["an empty signature", ""],
+    ["a signature with non-base64url characters", "ab+/="],
+    ["a signature with a space", "ab cd"],
+  ])("returns null without throwing for %s", (_label, signature) => {
+    const [header, payload] = unsignedToken({ sub: "user-1" }).split(".");
+    const token = `${header}.${payload}.${signature}`;
+    expect(() => accountUidFromIdToken(token)).not.toThrow();
+    expect(accountUidFromIdToken(token)).toBeNull();
   });
 });
