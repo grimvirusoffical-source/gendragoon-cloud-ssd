@@ -751,7 +751,7 @@ final class AccountLogicTests: XCTestCase {
         XCTAssertTrue(LocalWipePlan.keychainServicesRemoved(wipe:blocked.requestsWipe()).isEmpty)
     }
 
-    func testVendoredKeyEnvelopeAndPayloadTooLargeAreLoaded() {
+    func testVendoredKeyEnvelopeAndPayloadTooLargeAreLoaded() throws {
         XCTAssertEqual(BackendFixtures.accountDeletionSHA,"fff0a84")
         XCTAssertEqual(BackendFixtures.keyEnvelopeSHA,"ee4f76f")
         let tooLarge=AccountHttp.parse(status:BackendFixtures.responseStatus(area:"errors",name:"payload-too-large"),data:BackendFixtures.responseBodyData(area:"errors",name:"payload-too-large"))
@@ -764,8 +764,11 @@ final class AccountLogicTests: XCTestCase {
         XCTAssertFalse(huge.requestsWipe())
         XCTAssertEqual(BackendFixtures.responseStatus(area:"key-envelope",name:"create"),201)
         XCTAssertTrue(BackendFixtures.requestPath(area:"key-envelope",name:"create").hasSuffix("/key-envelope"))
-        XCTAssertTrue(BackendFixtures.requestBodyString(area:"key-envelope",name:"create").contains("+/v7"))
-        XCTAssertTrue(BackendFixtures.responseBodyString(area:"key-envelope",name:"create").contains("-_v7"))
+        let envelopeRequest=BackendFixtures.requestBody(area:"key-envelope",name:"create")
+        XCTAssertTrue((envelopeRequest["wrappedKey"] as? String)?.contains("+/v7") ?? false)
+        XCTAssertTrue((envelopeRequest["iv"] as? String)?.contains("+/v7") ?? false)
+        let envelopeResponse=try XCTUnwrap(JSONSerialization.jsonObject(with:BackendFixtures.responseBodyData(area:"key-envelope",name:"create")) as? [String:Any])
+        XCTAssertTrue((envelopeResponse["wrappedKey"] as? String)?.contains("-_v7") ?? false)
         let conflict=AccountHttp.parse(status:BackendFixtures.responseStatus(area:"key-envelope",name:"conflict"),data:BackendFixtures.responseBodyData(area:"key-envelope",name:"conflict"))
         XCTAssertEqual(conflict.status,409)
         XCTAssertEqual(conflict.error,"envelope_exists")
