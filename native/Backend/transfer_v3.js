@@ -32,6 +32,26 @@ function publicItem(id,data){
   ...(data.archiveFormat?{archiveFormat:data.archiveFormat,manifestSHA256:data.manifestSHA256}:{}),
   createdAt:data.createdAt?.toDate?data.createdAt.toDate().toISOString():null};
 }
+// Firestore Standard rejects arrays directly containing arrays. Persist map entries,
+// while keeping the existing pair-array HTTP protocol and legacy job reads compatible.
+function receivedRanges(job){
+ const size=job.sizeBytes,raw=job.receivedRanges===undefined?[]:job.receivedRanges;
+ if(!Number.isSafeInteger(size)||size<0||size>MAX_FILE||!Array.isArray(raw))
+  throw problem(409,"Stored upload progress is invalid");
+ const count=Math.ceil(size/CHUNK);let previousEnd=-2;
+ return raw.map(value=>{
+  let start,end;
+  if(Array.isArray(value)&&value.length===2)[start,end]=value;
+  else if(value&&typeof value==="object"&&!Array.isArray(value)&&
+    Object.keys(value).length===2&&Object.hasOwn(value,"start")&&Object.hasOwn(value,"end"))
+   ({start,end}=value);
+  else throw problem(409,"Stored upload progress is invalid");
+  if(!Number.isSafeInteger(start)||!Number.isSafeInteger(end)||start<0||end<start||
+    end>=count||start<=previousEnd+1)throw problem(409,"Stored upload progress is invalid");
+  previousEnd=end;return [start,end];
+ });
+}
+function storedRanges(ranges){return ranges.map(([start,end])=>({start,end}));}
 function contains(ranges,index){return ranges.some(([a,b])=>index>=a&&index<=b);}
 function addRange(ranges,index){
  const sorted=[...ranges.map(x=>[...x]),[index,index]].sort((a,b)=>a[0]-b[0]),out=[];
@@ -104,9 +124,9 @@ function registerTransferV3({app,db,bucket,firebaseAuth,accountKey,FieldValue,ap
  const stamp=()=>FieldValue.serverTimestamp();
  const jobRef=(c,id)=>{if(!UUID.test(id))throw problem(400,"Invalid upload");return c.ref.collection("uploads").doc(id);};
  const temp=(c,id)=>c.prefix+"/tmp-v3/"+id+"/";
- function statusOf(x){return {status:x.status,uploadId:x.id,chunkBytes:CHUNK,
+ function statusOf(x){const ranges=receivedRanges(x);return {status:x.status,uploadId:x.id,chunkBytes:CHUNK,
   totalChunks:Math.ceil(x.sizeBytes/CHUNK),sizeBytes:x.sizeBytes,
-  receivedRanges:x.receivedRanges||[],nextIndex:nextMissing(x.receivedRanges||[]),
+  receivedRanges:ranges,nextIndex:nextMissing(ranges),
   uploadedBytes:x.uploadedBytes||0};}
  router.use(express.json({limit:"8kb"}));
  route("get","/config",async(req,res)=>{
@@ -181,7 +201,7 @@ function registerTransferV3({app,db,bucket,firebaseAuth,accountKey,FieldValue,ap
    const ref=jobRef(c,req.params.id);
    await serial(c.key+req.params.id+":"+index,async()=>{
     const snap=await ref.get();if(!snap.exists||snap.data().protocol!==3)throw problem(404,"Upload not found");
-    const job=snap.data(),count=Math.ceil(job.sizeBytes/CHUNK),ranges=job.receivedRanges||[];
+    const job=snap.data(),count=Math.ceil(job.sizeBytes/CHUNK),ranges=receivedRanges(job);
     if(job.status!=="active")throw problem(409,"Upload not active");
     if(index>=count||length!==Math.min(CHUNK,job.sizeBytes-index*CHUNK))throw problem(400,"Incorrect chunk size");
     if(index>nextMissing(ranges)+256)throw problem(429,"Too many out-of-order chunks; complete earlier chunks first");
@@ -204,8 +224,8 @@ function registerTransferV3({app,db,bucket,firebaseAuth,accountKey,FieldValue,ap
     }
     await db.runTransaction(async tx=>{
      const current=await tx.get(ref);if(!current.exists||current.data().status!=="active")throw problem(409,"Upload changed");
-     const r=current.data().receivedRanges||[];if(contains(r,index))return;
-     tx.update(ref,{receivedRanges:addRange(r,index),uploadedBytes:FieldValue.increment(length),updatedAt:stamp()});
+     const r=receivedRanges(current.data());if(contains(r,index))return;
+     tx.update(ref,{receivedRanges:storedRanges(addRange(r,index)),uploadedBytes:FieldValue.increment(length),updatedAt:stamp()});
     });
    });
   });
@@ -218,7 +238,7 @@ function registerTransferV3({app,db,bucket,firebaseAuth,accountKey,FieldValue,ap
    if(!snap.exists||snap.data().protocol!==3)throw problem(404,"Upload not found");
    const job=snap.data(),count=Math.ceil(job.sizeBytes/CHUNK);
    if(job.status==="completed"){response={saved:true,fileId:req.params.id};return;}
-   if(!["active","assembling"].includes(job.status)||nextMissing(job.receivedRanges||[])!==count||job.uploadedBytes!==job.sizeBytes)
+   if(!["active","assembling"].includes(job.status)||nextMissing(receivedRanges(job))!==count||job.uploadedBytes!==job.sizeBytes)
     throw problem(409,"Upload incomplete");
    if(job.status==="active")await ref.update({status:"assembling",assemblyLevel:0,assemblyCursor:0,updatedAt:stamp()});
    let level=job.assemblyLevel||0,cursor=job.assemblyCursor||0,operations=0;
@@ -296,4 +316,4 @@ function registerTransferV3({app,db,bucket,firebaseAuth,accountKey,FieldValue,ap
   nativeFilesExtensionsInstalled:false,checkoutProvider:"stripe",checkoutEnabled:process.env.STRIPE_CHECKOUT_ENABLED==="true"}));
  return {router,profile};
 }
-module.exports={registerTransferV3,addRange,contains,nextMissing,profile,itemMetadata,publicItem,CHUNK,MAX_FILE};
+module.exports={registerTransferV3,receivedRanges,storedRanges,addRange,contains,nextMissing,profile,itemMetadata,publicItem,CHUNK,MAX_FILE};

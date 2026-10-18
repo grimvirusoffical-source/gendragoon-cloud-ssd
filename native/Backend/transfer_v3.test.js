@@ -1,12 +1,22 @@
 "use strict";
 const test=require("node:test"),assert=require("node:assert/strict"),express=require("express");
 const crypto=require("node:crypto"),{Readable}=require("node:stream");
-const {registerTransferV3,addRange,nextMissing,profile,CHUNK}=require("./transfer_v3");
+const {registerTransferV3,receivedRanges,storedRanges,addRange,nextMissing,profile,CHUNK}=require("./transfer_v3");
 const {parseRange}=require("./range_download");
 const {TransferGovernor}=require("./performance");
 const {TransferGovernor:FreeGovernor}=require("./free_performance");
 const hash=x=>crypto.createHash("sha256").update("gd-v1:"+x).digest("hex");
 const owner=hash("test-owner"),wid="ad075169-b982-4acb-a26d-7da17915b18f";
+// Match Firestore Standard's persisted value constraint, including transaction writes.
+// Maps may contain arrays, but arrays cannot directly contain another array.
+function assertFirestoreValue(value,inArray=false){
+ if(Array.isArray(value)){
+  if(inArray)throw Error("Firestore Standard does not allow nested arrays");
+  for(const item of value)assertFirestoreValue(item,true);
+ }else if(value&&typeof value==="object"){
+  for(const item of Object.values(value))assertFirestoreValue(item,false);
+ }
+}
 function fixture(tier="free",delay=0,saturate=0){
  let release;const barrier=saturate?new Promise(r=>{release=r}):null;
  let reached=false;
@@ -14,8 +24,8 @@ function fixture(tier="free",delay=0,saturate=0){
  const stamp=()=>({toMillis:()=>Date.now()});
  function ref(path){return {path,id:path.split("/").at(-1),collection:name=>collection(path+"/"+name),
   get:async()=>({exists:docs.has(path),data:()=>docs.get(path),id:path.split("/").at(-1),ref:ref(path)}),
-  create:async d=>{if(docs.has(path))throw Error("EXISTS");docs.set(path,{...d});},
-  update:async d=>{const old=docs.get(path);if(!old)throw Error("MISSING");const value={...old};for(const [k,v]of Object.entries(d))value[k]=v&&typeof v==="object"&&"increment"in v?(old[k]||0)+v.increment:v;docs.set(path,value);},
+  create:async d=>{assertFirestoreValue(d);if(docs.has(path))throw Error("EXISTS");docs.set(path,{...d});},
+  update:async d=>{assertFirestoreValue(d);const old=docs.get(path);if(!old)throw Error("MISSING");const value={...old};for(const [k,v]of Object.entries(d))value[k]=v&&typeof v==="object"&&"increment"in v?(old[k]||0)+v.increment:v;docs.set(path,value);},
   delete:async()=>docs.delete(path)};}
  function collection(path,filters=[],limit=1e6,cursor=null){return {
   doc:id=>ref(path+"/"+id),where:(k,_op,v)=>collection(path,[...filters,[k,v]],limit,cursor),
@@ -24,7 +34,7 @@ function fixture(tier="free",delay=0,saturate=0){
   get:async()=>{let list=[...docs].filter(([k,v])=>k.startsWith(path+"/")&&k.slice(path.length+1).indexOf("/")<0&&filters.every(([a,b])=>v[a]===b));if(cursor)list=list.slice(list.findIndex(([k])=>k.endsWith("/"+cursor))+1);return {docs:list.slice(0,limit).map(([k,v])=>({id:k.split("/").at(-1),data:()=>v,ref:ref(k)}))};}
  };}
  const db={collection,failNextCommit:false,runTransaction:fn=>{
-  const run=txQueue.catch(()=>{}).then(async()=>{const writes=[];const result=await fn({get:r=>r.get(),create:(r,d)=>writes.push(()=>r.create(d)),update:(r,d)=>writes.push(()=>r.update(d)),delete:r=>writes.push(()=>r.delete())});if(db.failNextCommit){db.failNextCommit=false;throw Error("Simulated database interruption");}for(const write of writes)await write();return result;});txQueue=run;return run;
+  const run=txQueue.catch(()=>{}).then(async()=>{const writes=[];const result=await fn({get:r=>r.get(),create:(r,d)=>{assertFirestoreValue(d);writes.push(()=>r.create(d));},update:(r,d)=>{assertFirestoreValue(d);writes.push(()=>r.update(d));},delete:r=>writes.push(()=>r.delete())});if(db.failNextCommit){db.failNextCommit=false;throw Error("Simulated database interruption");}for(const write of writes)await write();return result;});txQueue=run;return run;
  }};
  const bucket={file:key=>({
   save:async(buffer,opts)=>{active++;peak=Math.max(peak,active);try{if(barrier&&!reached){if(active>=saturate){reached=true;release()}let timeout;try{await Promise.race([barrier,new Promise((_,reject)=>{timeout=setTimeout(()=>reject(Error("Expected concurrency was not reached")),10000)})])}finally{clearTimeout(timeout)}}if(delay)await new Promise(r=>setTimeout(r,delay));if(objects.has(key)&&opts.preconditionOpts?.ifGenerationMatch===0)throw Object.assign(Error("EXISTS"),{code:412});objects.set(key,{buffer:Buffer.from(buffer),generation:String(generation++),metadata:opts.metadata?.metadata||{}});}finally{active--; }},
@@ -60,12 +70,67 @@ test("single HTTP byte ranges: suffix, open ended, clamping and invalid ranges",
 test("compact out-of-order completion ranges never skip missing chunks",()=>{
  let r=[];for(const i of [3,1,4,1])r=addRange(r,i);assert.deepEqual(r,[[1,1],[3,4]]);assert.equal(nextMissing(r),0);r=addRange(r,0);assert.equal(nextMissing(r),2);r=addRange(r,2);assert.deepEqual(r,[[0,4]]);assert.equal(nextMissing(r),5);
 });
+test("Firestore persistence rejects nested arrays and accepts map receipt entries",()=>{
+ assert.throws(()=>assertFirestoreValue({receivedRanges:[[0,0]]}),/nested arrays/);
+ assert.doesNotThrow(()=>assertFirestoreValue({receivedRanges:[{start:0,end:0}]}));
+ assert.doesNotThrow(()=>assertFirestoreValue({items:[{values:[1,2]}]}));
+});
+test("stored map and legacy pair receipts preserve protocol and reject corrupt progress",()=>{
+ const job={sizeBytes:CHUNK*5},pairs=[[0,1],[3,4]];
+ assert.deepEqual(receivedRanges({...job,receivedRanges:storedRanges(pairs)}),pairs);
+ assert.deepEqual(receivedRanges({...job,receivedRanges:pairs}),pairs);
+ assert.deepEqual(receivedRanges({sizeBytes:0,receivedRanges:[]}),[]);
+ for(const value of [null,{},[[0]],[[0,0,0]],[[0,5]],[[-1,0]],[[2,1]],[[0,0.5]],
+  [[0,1],[1,2]],[[0,0],[1,1]],[[3,3],[0,0]],[{start:0,end:0,extra:1}],
+  [{start:0}],[[0,"0"]]]){
+  assert.throws(()=>receivedRanges({...job,receivedRanges:value}),{status:409});
+ }
+ assert.throws(()=>receivedRanges({sizeBytes:0,receivedRanges:[{start:0,end:0}]}),{status:409});
+ assert.throws(()=>receivedRanges({sizeBytes:NaN,receivedRanges:[]}),{status:409});
+});
+test("legacy stored receipts resume, rewrite as maps and finalize without double accounting",async()=>{
+ const f=fixture();try{
+  const parts=[Buffer.alloc(CHUNK,3),Buffer.from("legacy tail")],size=CHUNK+parts[1].length;
+  const j=await f.create("legacy.bin",size),path=f.wsPath+"/uploads/"+j.uploadId;
+  assert.equal((await f.chunk(j.uploadId,0,parts[0])).status,200);
+  f.docs.set(path,{...f.docs.get(path),receivedRanges:[[0,0]]});
+  const state=await(await f.call("/uploads/"+j.uploadId)).json();
+  assert.deepEqual(state.receivedRanges,[[0,0]]);assert.equal(state.nextIndex,1);
+  assert.equal((await f.chunk(j.uploadId,0,parts[0])).status,200);
+  assert.equal((await f.chunk(j.uploadId,1,parts[1])).status,200);
+  assert.deepEqual(f.docs.get(path).receivedRanges,[{start:0,end:1}]);
+  assert.equal(f.docs.get(path).uploadedBytes,size);
+  assert.equal((await f.call("/uploads/"+j.uploadId+"/finalize",{method:"POST"})).status,200);
+  assert.deepEqual(Buffer.from(await(await f.call("/files/"+j.uploadId+"/download")).arrayBuffer()),Buffer.concat(parts));
+  assert.equal(f.docs.get(f.wsPath).usedBytes,size);assert.equal(f.docs.get(f.wsPath).reservedBytes,0);
+ }finally{await f.close();}
+});
+test("zero-byte files finalize without receipt entries and restore empty bytes",async()=>{
+ const f=fixture();try{
+  const j=await f.create("empty.txt",0);
+  assert.equal((await f.call("/uploads/"+j.uploadId+"/finalize",{method:"POST"})).status,200);
+  const response=await f.call("/files/"+j.uploadId+"/download");
+  assert.equal(response.status,200);assert.equal((await response.arrayBuffer()).byteLength,0);
+  assert.equal(f.docs.get(f.wsPath).usedBytes,0);assert.equal(f.docs.get(f.wsPath).reservedBytes,0);
+ }finally{await f.close();}
+});
+test("corrupt stored receipts fail closed before writes or finalization",async()=>{
+ const f=fixture();try{
+  const j=await f.create("corrupt.bin",1),path=f.wsPath+"/uploads/"+j.uploadId;
+  f.docs.set(path,{...f.docs.get(path),receivedRanges:[{start:0,end:1}]});
+  assert.equal((await f.call("/uploads/"+j.uploadId)).status,409);
+  assert.equal((await f.chunk(j.uploadId,0,Buffer.from("x"))).status,409);
+  assert.equal((await f.call("/uploads/"+j.uploadId+"/finalize",{method:"POST"})).status,409);
+  assert.equal(f.objects.size,0);assert.equal(f.docs.get(f.wsPath).reservedBytes,1);
+ }finally{await f.close();}
+});
 test("free upload, resume, SHA verification, range restore and quota integrity",async()=>{
  const f=fixture();try{
   const bytes=crypto.randomBytes(64*1024),requestId=crypto.randomUUID(),job=await f.create("mobile-file.bin",bytes.length,requestId);
   assert.equal((await f.create("mobile-file.bin",bytes.length,requestId)).uploadId,job.uploadId);assert.equal(f.docs.get(f.wsPath).reservedBytes,bytes.length);
   const bad=await f.chunk(job.uploadId,0,bytes,"0".repeat(64));assert.equal(bad.status,422);assert.equal(f.objects.size,0);
   let put=await f.chunk(job.uploadId,0,bytes);assert.equal(put.status,200,await put.text());
+  assert.deepEqual(f.docs.get(f.wsPath+"/uploads/"+job.uploadId).receivedRanges,[{start:0,end:0}]);
   put=await f.chunk(job.uploadId,0,bytes);assert.equal(put.status,200);const conflict=await f.chunk(job.uploadId,0,Buffer.alloc(bytes.length));assert.equal(conflict.status,409);
   const state=await(await f.call("/uploads/"+job.uploadId)).json();assert.deepEqual(state.receivedRanges,[[0,0]]);assert.equal(state.uploadedBytes,bytes.length);
   for(let i=0;i<2;i++){const final=await f.call("/uploads/"+job.uploadId+"/finalize",{method:"POST"});assert.equal(final.status,200,await final.text());}
