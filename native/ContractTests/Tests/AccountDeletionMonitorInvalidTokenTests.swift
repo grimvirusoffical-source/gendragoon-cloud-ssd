@@ -19,6 +19,9 @@ final class AccountDeletionMonitorInvalidTokenTests: XCTestCase {
         struct Sent: Equatable { var method: String; var path: String; var authorization: String; var body: [String: String]? }
         var replies: [(status: Int, json: [String: Any])]
         var sent: [Sent] = []
+        init(replies: [(status: Int, json: [String: Any])]) {
+            self.replies = replies
+        }
         func send(method: String, path: String, authorization: String, body: [String: String]?) async throws -> (status: Int, json: [String: Any]) {
             sent.append(Sent(method: method, path: path, authorization: authorization, body: body))
             let next = replies.count > 1 ? replies.removeFirst() : replies[0]

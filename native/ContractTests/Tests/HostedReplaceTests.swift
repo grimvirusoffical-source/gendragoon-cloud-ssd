@@ -36,6 +36,9 @@ final class HostedReplaceTests: XCTestCase {
         struct Sent: Equatable { var kind: String; var op: String?; var objects: [String]; var ifGeneration: String?; var generationMatch: String?; var method: String }
         var replies: [(status: Int, json: [String: Any], data: Data, headers: [String: String])]
         var sent: [Sent] = []
+        init(replies: [(status: Int, json: [String: Any], data: Data, headers: [String: String])]) {
+            self.replies = replies
+        }
         func signedURLs(body: [String: Any]) async throws -> (status: Int, json: [String: Any]) {
             let objects = body["objects"] as? [String] ?? []
             sent.append(Sent(kind: "urls", op: body["op"] as? String, objects: objects, ifGeneration: body["ifGeneration"] as? String, generationMatch: nil, method: "POST"))
@@ -100,7 +103,9 @@ final class HostedReplaceTests: XCTestCase {
         let manifestPuts = script.sent.filter { $0.generationMatch != nil }
         XCTAssertEqual(manifestPuts.map(\.generationMatch), ["42", "43"])
         XCTAssertEqual(script.sent.filter { $0.ifGeneration != nil }.map(\.ifGeneration), ["42", "43"])
-        let oldPlain = try GDSealedManifest.openChunk(sealed: try GDSealedManifest.sealChunk(plaintext: Data("old".utf8), key: key, fileID: fileID, objectID: oldID, index: 0, manifestVersion: UInt32(stored.sealedVersion), isFinal: true), key: key, fileID: fileID, objectID: oldID, index: 0, manifestVersion: UInt32(stored.sealedVersion), isFinal: true)
+        let sealedVersion = UInt32(stored.sealedVersion)
+        let resealed = try GDSealedManifest.sealChunk(plaintext: Data("old".utf8), key: key, fileID: fileID, objectID: oldID, index: 0, manifestVersion: sealedVersion, isFinal: true)
+        let oldPlain = try GDSealedManifest.openChunk(sealed: resealed, key: key, fileID: fileID, objectID: oldID, index: 0, manifestVersion: sealedVersion, isFinal: true)
         XCTAssertEqual(oldPlain, Data("old".utf8))
         var trashed = 0
         _ = trashed

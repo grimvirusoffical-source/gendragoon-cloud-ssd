@@ -403,6 +403,15 @@ def command(args,timeout=80):
         (directory/'fixture-observed.json').write_text(json.dumps({'workerPID':os.getpid(),'sessionID':os.getsid(0),'launchedPID':process.pid,'librarySource':w.launcher.lib.__file__}))
     return ''
 w.auto.subprocess_ok=command
+# The production health window is 60s. This adapter advances that clock so the
+# real confirm_relaunch_health loop finishes while the fixture process is alive.
+_health_clock={"t":0.0}
+def _health_now():
+    return _health_clock["t"]
+def _health_sleep(seconds):
+    _health_clock["t"]+=float(seconds)
+w.auto._health_now=_health_now
+w.auto._health_sleep=_health_sleep
 sys.exit(w.main(sys.argv[4:]))
 '''
 

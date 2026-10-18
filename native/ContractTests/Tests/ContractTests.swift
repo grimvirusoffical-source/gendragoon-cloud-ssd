@@ -375,7 +375,9 @@ final class AccountDeletionContractTests: XCTestCase {
         let fixture = try GDFixtureFile.load("account-deletion", "retry-not-retryable")
         XCTAssertEqual(fixture.status, 409)
         XCTAssertThrowsError(try GDAccountContract.deletionNotRetryable(status: fixture.status, json: fixture.body)) { error in
-            let typed = try XCTUnwrap(error as? GDDeletionNotRetryable)
+            guard let typed = error as? GDDeletionNotRetryable else {
+                return XCTFail("409 deletion_not_retryable raises GDDeletionNotRetryable")
+            }
             XCTAssertEqual(typed.jobId, "00000000-0000-4000-8000-0000000000aa")
         }
         XCTAssertNoThrow(try GDAccountContract.deletionNotRetryable(status: 202, json: fixture.body))

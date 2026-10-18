@@ -19,7 +19,8 @@ class UpdateActivityTests(unittest.TestCase):
         updater = (NATIVE / "Sources/GenDragoonAutoUpdate.swift").read_text()
         activity = updater[updater.index("final class GDUpdateActivity:"):updater.index("@MainActor final class GDUpdateCoordinator:")]
         app = (NATIVE / "Sources/GenDragoonApp.swift").read_text()
-        delegate = app[app.index("@MainActor final class GDAppLifetime:"):app.index("\n@main",app.index("@MainActor final class GDAppLifetime:"))]
+        start = app.index("@MainActor final class GDAppLifetime:")
+        delegate = app[start:]
         login = (NATIVE / "Sources/GenDragoonStartupRoot.swift").read_text()
         handler = login[login.index("        out.fileHandleForReading.readabilityHandler ="):login.index("        task.terminationHandler=")]
         eof_probe = """
