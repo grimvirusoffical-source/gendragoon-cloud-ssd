@@ -113,13 +113,13 @@ enum WorkspacePrice {
 }
 
 /// A 409 `workspace_busy` keeps the workspace. A `deleting` row shows "Deleting..." and
-/// disables its actions. An unpaid BYO workspace locks only itself. The 3-day grace period
-/// is a non-blocking "Payment due" banner with a Pay button.
+/// disables its actions. An unpaid BYO workspace locks only itself. During grace the server
+/// sends `graceEndsAt`; the client shows a non-blocking "Payment due" banner with that date and
+/// a Pay button, and never assumes a grace length.
 enum WorkspacePolicy {
     static let busy="busy, try again"
     static let deleting="Deleting..."
     static let paymentDue="Payment due"
-    static let graceMs:Int64=3*24*60*60*1000
     static func keepsWorkspace(status:Int,error:String?)->Bool { status==409 && error=="workspace_busy" }
     static func deleteNotice(status:Int,error:String?)->String? { keepsWorkspace(status:status,error:error) ? busy : nil }
     static func isDeleting(_ projectStatus:String?)->Bool { projectStatus=="deleting" }
@@ -141,11 +141,19 @@ enum WorkspacePolicy {
         if lock.reasonText != "lapsed" {return true}
         return locksThisWorkspace(id:selectedId,kind:kind,isFree:isFree,unpaidIds:lock.unpaidIds)
     }
-    /// `paidThroughMs <= now < paidThroughMs + 3 days`, and the workspace is not already lapsed.
-    static func isPaymentDue(paidThroughMs:Int64?,nowMs:Int64,lapsed:Bool)->Bool {
-        guard !lapsed,let paidThroughMs else {return false}
-        let end=paidThroughMs+graceMs
-        return nowMs>=paidThroughMs && nowMs<end
+    /// Due while `now < graceEndsAt` from the server, and the workspace is not already lapsed.
+    static func isPaymentDue(graceEndsAtMs:Int64?,nowMs:Int64,lapsed:Bool)->Bool {
+        guard !lapsed,let graceEndsAtMs,graceEndsAtMs>0 else {return false}
+        return nowMs<graceEndsAtMs
+    }
+    /// Banner copy. The date is the server `graceEndsAt`, formatted in UTC.
+    static func paymentDueText(graceEndsAtMs:Int64)->String {
+        let formatter=DateFormatter()
+        formatter.locale=Locale(identifier:"en_US_POSIX")
+        formatter.timeZone=TimeZone(identifier:"UTC")
+        formatter.dateFormat="MMM d, yyyy"
+        let date=formatter.string(from:Date(timeIntervalSince1970:TimeInterval(graceEndsAtMs)/1000))
+        return paymentDue+". Pay by "+date+" to keep using this workspace."
     }
 }
 

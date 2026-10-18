@@ -3,7 +3,7 @@ import SwiftUI
 import Network
 
 struct MobileWorkspace:Decodable,Identifiable,Sendable {
-    let id:String;let name:String;let kind:String;let storageActive:Bool;let provisioned:Bool;let isFree:Bool?;let grandfathered:Bool?;let feeWaived:Bool;let monthlyPriceCents:Int?;let projectStatus:String?;let lapsed:Bool?;let paidThroughMs:Int64?
+    let id:String;let name:String;let kind:String;let storageActive:Bool;let provisioned:Bool;let isFree:Bool?;let grandfathered:Bool?;let feeWaived:Bool;let monthlyPriceCents:Int?;let projectStatus:String?;let lapsed:Bool?;let paidThroughMs:Int64?;let graceEndsAt:Int64?;let checkoutUrl:String?
     var pickerLabel:String { WorkspacePolicy.rowTitle(WorkspacePrice.pickerText(name:name,isFree:isFree,grandfathered:grandfathered==true,feeWaived:feeWaived,cents:monthlyPriceCents),projectStatus:projectStatus) }
 }
 struct MobileExport:Identifiable {let id=UUID();let url:URL}
@@ -29,6 +29,10 @@ struct MobileExport:Identifiable {let id=UUID();let url:URL}
     @Published var workspaceLock:WorkspaceLock?
     /// Non-blocking grace banner. An unpaid workspace does not set this.
     @Published var paymentDueBanner=false
+    /// Server-dated banner copy while `paymentDueBanner` is on.
+    @Published var paymentDueText=""
+    /// Server checkout link for the Pay button, when the list provides one.
+    @Published var paymentCheckout:URL?
     @Published var actionsEnabled=true
     @Published var selectedLocked=false
     @Published var deletingIDs:Set<String>=[]
@@ -75,7 +79,9 @@ struct MobileExport:Identifiable {let id=UUID();let url:URL}
         let open=response.workspaces.first{$0.id==selected}
         actionsEnabled=WorkspacePolicy.actionsEnabled(open?.projectStatus)
         selectedLocked=WorkspacePolicy.locksThisWorkspace(id:selected,kind:open?.kind,isFree:open?.isFree,unpaidIds:unpaid)
-        paymentDueBanner=WorkspacePolicy.isPaymentDue(paidThroughMs:open?.paidThroughMs,nowMs:Int64(Date().timeIntervalSince1970*1000),lapsed:open?.lapsed==true)
+        paymentDueBanner=WorkspacePolicy.isPaymentDue(graceEndsAtMs:open?.graceEndsAt,nowMs:Int64(Date().timeIntervalSince1970*1000),lapsed:open?.lapsed==true)
+        paymentDueText=paymentDueBanner ? WorkspacePolicy.paymentDueText(graceEndsAtMs:open?.graceEndsAt ?? 0) : ""
+        paymentCheckout=open?.checkoutUrl.flatMap{URL(string:$0)}.flatMap{$0.scheme=="https" ? $0 : nil}
         deletingIDs=Set(response.workspaces.filter{WorkspacePolicy.isDeleting($0.projectStatus)}.map(\.id))
         do{let nextConfig=try await client.configuration(workspace:selected);let nextFiles=try await client.list(workspace:selected);config=nextConfig;files=nextFiles;status="Your files are ready."}
         catch let e as GDTransferError where e.status==404 && selected=="free"{config=nil;files=[];status="Create your free 2 GB workspace to begin."}

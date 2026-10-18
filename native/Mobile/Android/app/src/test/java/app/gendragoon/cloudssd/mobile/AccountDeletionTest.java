@@ -968,36 +968,89 @@ public final class AccountDeletionTest {
         assertTrue(SupportContact.mailto(flow.jobId).startsWith("mailto:SUPPORT_CONTACT_PLACEHOLDER@invalid"));
     }
 
-    /**
-     * Provisional. Riley's {@code support-unauthorized} fixture has not landed on PR #6
-     * ({@code d33970c}), so this 401 body is local.
-     */
-    @Test public void provisionalSupportUnauthorizedOpensMailtoAndNeverSignIn(){
+    /** Riley PR #6 at {@code 0486412}: {@code support-unauthorized.json}. Required, no auth header at all. */
+    @Test public void supportUnauthorizedFixtureOpensMailtoAndNeverSignIn(){
         assertFalse(DeletionSupport.ENABLED);
-        String unauthorized="{\"error\":\"unauthorized\"}";
+        assertEquals(401,BackendFixtures.responseStatus("account-deletion","support-unauthorized"));
+        String unauthorized=BackendFixtures.responseBody("account-deletion","support-unauthorized");
+        assertEquals("unauthorized",JsonFields.string(unauthorized,"error"));
+        assertEquals("",BackendFixtures.requestBody("account-deletion","support-unauthorized"));
+        assertTrue(BackendFixtures.requestPath("account-deletion","support-unauthorized").endsWith("/support-request"));
         DeletionSupport.Result coded=DeletionSupport.interpret(401,unauthorized,false);
-        DeletionSupport.Result blank=DeletionSupport.interpret(401,"",false);
-        DeletionSupport.Result noCode=DeletionSupport.interpret(401,"{}",false);
         assertEquals(DeletionSupport.Kind.MAILTO,coded.kind);
-        assertEquals(coded.kind,blank.kind);
-        assertEquals(coded.kind,noCode.kind);
-        assertTrue(coded.opensMailto());
-        assertEquals(DeletionSupport.Kind.HOLD,DeletionSupport.interpret(401,"{\"error\":\"invalid_token\"}",false).kind);
+        assertEquals(DeletionSupport.Kind.MAILTO,DeletionSupport.interpret(401,"",false).kind);
+        assertEquals(DeletionSupport.Kind.MAILTO,DeletionSupport.interpret(401,"{}",false).kind);
+        assertEquals(DeletionSupport.Kind.MAILTO,DeletionSupport.interpret(401,"{\"error\":\"invalid_token\"}",false).kind);
 
         AccountActions.HttpBody dead=fixture("status-failed-not-retryable");
         AccountDeletion flow=AccountDeletion.resume(DeletionReceipt.of(dead.jobId,TOKEN));
         flow.pollThrough(new Script().respond(dead));
-        assertEquals(AccountDeletion.Step.FAILED,flow.step);
         String kept=flow.message;
         assertTrue(flow.applySupport(coded));
         assertEquals(AccountDeletion.Step.FAILED,flow.step);
-        assertNotEquals(AccountDeletion.Step.REAUTH,flow.step);
-        assertNotEquals(AccountDeletion.Step.SIGNED_OUT,flow.step);
         assertFalse(flow.repeatDelete);
         assertFalse(flow.clearSession);
         assertEquals(kept,flow.message);
         assertFalse(flow.message.contains("Sign in"));
-        assertTrue(SupportContact.mailto(flow.jobId).startsWith("mailto:SUPPORT_CONTACT_PLACEHOLDER@invalid"));
+    }
+
+    @Test public void supportOtherClientErrorsAndServerErrorsOpenMailto(){
+        for(int status:new int[]{400,403,404,405,409,410,413,422,500,502,503}){
+            DeletionSupport.Result result=DeletionSupport.interpret(status,"{\"error\":\"x\"}",false);
+            assertEquals("status "+status,DeletionSupport.Kind.MAILTO,result.kind);
+        }
+        assertEquals(DeletionSupport.Kind.MAILTO,DeletionSupport.interpret(0,"",true).kind);
+        assertEquals(DeletionSupport.Kind.MAILTO,DeletionSupport.interpret(202,"{}",false).kind);
+        AccountActions.HttpBody dead=fixture("status-failed-not-retryable");
+        for(int status:new int[]{400,403,413,422}){
+            AccountDeletion flow=AccountDeletion.resume(DeletionReceipt.of(dead.jobId,TOKEN));
+            flow.pollThrough(new Script().respond(dead));
+            assertTrue(flow.applySupport(DeletionSupport.interpret(status,"",false)));
+            assertEquals(AccountDeletion.Step.FAILED,flow.step);
+            assertTrue(flow.showSupport);
+        }
+    }
+
+    @Test public void supportJobMismatchSendsNothing(){
+        String job=fixture("status-failed-not-retryable").jobId;
+        DeletionSupport.Call match=DeletionSupport.call(job,job,TOKEN,true);
+        assertTrue(match.send);
+        DeletionSupport.Call other=DeletionSupport.call(job,"00000000-0000-4000-8000-0000000000ff",TOKEN,true);
+        assertFalse(other.send);
+        assertNull(other.path);
+        assertNull(other.authorization());
+        assertFalse(DeletionSupport.call(job,null,TOKEN,true).send);
+        assertFalse(DeletionSupport.call(job,job,TOKEN,false).send);
+    }
+
+    @Test public void supportRefreshFailureAfter409OpensMailtoAndNeverSignIn(){
+        AccountActions.HttpBody dead=fixture("status-failed-not-retryable");
+        DeletionSupport.Result refresh=DeletionSupport.interpret(409,BackendFixtures.responseBody("account-deletion","support-not-needed"),false);
+        assertEquals(DeletionSupport.Kind.REFRESH,refresh.kind);
+        // Transport failure, a 5xx and a 401 on the refresh all fall back to mail.
+        Object[] failures={new java.io.IOException("offline"),AccountActions.parse(503,""),AccountActions.parse(401,"{\"error\":\"invalid_token\"}")};
+        for(Object failure:failures){
+            AccountDeletion flow=AccountDeletion.resume(DeletionReceipt.of(dead.jobId,TOKEN));
+            flow.pollThrough(new Script().respond(dead));
+            assertFalse(flow.applySupport(refresh));
+            assertTrue(flow.keepsPolling());
+            Script script=new Script();
+            if(failure instanceof Exception e)script.fail(e);else script.respond((AccountActions.HttpBody)failure);
+            flow.pollThrough(script);
+            assertTrue(flow.openSupportMailto);
+            assertEquals(AccountDeletion.Step.FAILED,flow.step);
+            assertNotEquals(AccountDeletion.Step.REAUTH,flow.step);
+            assertFalse(flow.clearSession);
+            assertTrue(flow.showSupport);
+            assertFalse(flow.message.contains("Sign in"));
+        }
+        // A successful refresh keeps the normal status flow.
+        AccountDeletion ok=AccountDeletion.resume(DeletionReceipt.of(dead.jobId,TOKEN));
+        ok.pollThrough(new Script().respond(dead));
+        ok.applySupport(refresh);
+        ok.pollThrough(new Script().respond(dead));
+        assertFalse(ok.openSupportMailto);
+        assertFalse(ok.supportRefresh);
     }
 
     /** Riley PR #5 at 0715b1a. Labels come from the server fields. {@code feeWaived} is required. */
@@ -1097,13 +1150,17 @@ public final class AccountDeletionTest {
         String hosted=BackendFixtures.responseBody("workspaces","make-hosted");
         long through=Long.parseLong(JsonFields.number(hosted,"paidThroughMs"));
         long graceEnd=Long.parseLong(JsonFields.number(hosted,"graceEndsAt"));
-        assertEquals(through+WorkspacePolicy.GRACE_MS,graceEnd);
-        assertTrue(WorkspacePolicy.paymentDue(through,through,false));
-        assertTrue(WorkspacePolicy.paymentDue(through,graceEnd-1,false));
-        assertFalse(WorkspacePolicy.paymentDue(through,graceEnd,false));
-        assertFalse(WorkspacePolicy.paymentDue(through,through-1,false));
-        assertFalse(WorkspacePolicy.paymentDue(through,through,true));
+        // #5 is still blocked; this fixture may be regenerated. The client uses graceEndsAt as sent
+        // and never adds a grace length to paidThroughMs.
+        assertTrue(graceEnd>through);
+        assertTrue(WorkspacePolicy.paymentDue(graceEnd,through,false));
+        assertTrue(WorkspacePolicy.paymentDue(graceEnd,graceEnd-1,false));
+        assertFalse(WorkspacePolicy.paymentDue(graceEnd,graceEnd,false));
+        assertFalse(WorkspacePolicy.paymentDue(graceEnd,through,true));
         assertFalse(WorkspacePolicy.paymentDue(null,through,false));
+        // A different server date moves the banner with it.
+        assertTrue(WorkspacePolicy.paymentDue(graceEnd+86_400_000L*10,graceEnd+1,false));
+        assertEquals("Payment due. Pay by Nov 20, 2023 to keep using this workspace.",WorkspacePolicy.paymentDueText(graceEnd));
         assertEquals("Payment due",WorkspacePolicy.PAYMENT_DUE);
         assertEquals(201,BackendFixtures.responseStatus("workspaces","byo-in-grace"));
         assertTrue(BackendFixtures.requestPath("workspaces","byo-in-grace").contains("11111111-1111-4111-8111-000000000021"));

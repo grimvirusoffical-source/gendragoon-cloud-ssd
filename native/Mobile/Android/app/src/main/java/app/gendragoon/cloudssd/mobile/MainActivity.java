@@ -37,7 +37,7 @@ import java.util.*;
 import java.util.concurrent.*;
 
 public final class MainActivity extends AppCompatActivity {
-    private final int background=Color.rgb(16,16,26),surface=Color.rgb(30,24,42),accent=Color.rgb(197,160,255),muted=Color.rgb(183,171,203);
+    private final int background=Theme.BG,surface=Theme.SURFACE,accent=Theme.KICKER,muted=Theme.MUTED;
     private final ExecutorService io=Executors.newFixedThreadPool(3);
     private final Handler main=new Handler(Looper.getMainLooper());
     private FirebaseAuth auth;private CredentialManager credentials;private FirebaseAuth.AuthStateListener listener;
@@ -46,6 +46,7 @@ public final class MainActivity extends AppCompatActivity {
     private long loadSerial=0;
     private String uid="",workspace="free",query="",sort="name",freeWorkspaceLabel="Workspace";private boolean loading=false,workBusy=false;private int pageSize=100;
     private boolean selectedDeleting=false,selectedLocked=false,paymentDue=false,listedWorkspace=false;
+    private long paymentDueAt=0L;private String paymentCheckout="";
     private final Set<String> deletingIds=new HashSet<>();
     private List<JSONObject> files=new ArrayList<>();private final Set<UUID> handled=new HashSet<>();
     private boolean holdAuthNavigation=false;private WorkspaceLock activeLock;private AccountDeletion deletion;
@@ -90,17 +91,23 @@ public final class MainActivity extends AppCompatActivity {
     }
     @Override protected void onDestroy(){if(listener!=null)auth.removeAuthStateListener(listener);io.shutdownNow();super.onDestroy();}
     private int dp(float n){return Math.round(n*getResources().getDisplayMetrics().density);}
-    private TextView text(String value,int sp,boolean bold){TextView t=new TextView(this);t.setText(value);t.setTextSize(sp);t.setTextColor(Color.WHITE);t.setTypeface(Typeface.create("sans-serif",bold?Typeface.BOLD:Typeface.NORMAL));t.setLineSpacing(dp(3),1);return t;}
+    private TextView text(String value,int sp,boolean bold){TextView t=new TextView(this);t.setText(value);t.setTextSize(sp);t.setTextColor(Theme.TEXT);t.setTypeface(Typeface.create("sans-serif",bold?Typeface.BOLD:Typeface.NORMAL));t.setLineSpacing(dp(3),1);return t;}
     private void space(LinearLayout parent,int size){View v=new View(this);parent.addView(v,new LinearLayout.LayoutParams(1,dp(size)));}
     private LinearLayout vertical(){LinearLayout p=new LinearLayout(this);p.setOrientation(LinearLayout.VERTICAL);return p;}
-    private MaterialButton button(String label,Runnable action){MaterialButton b=new MaterialButton(this);b.setText(label);b.setAllCaps(false);b.setCornerRadius(dp(12));b.setMinHeight(dp(48));b.setTextColor(Color.rgb(30,16,43));b.setBackgroundTintList(ColorStateList.valueOf(accent));b.setOnClickListener(v->action.run());return b;}
-    private MaterialCardView card(LinearLayout parent){MaterialCardView c=new MaterialCardView(this);c.setCardBackgroundColor(surface);c.setRadius(dp(19));c.setStrokeColor(Color.rgb(62,47,81));c.setStrokeWidth(dp(1));c.setCardElevation(0);LinearLayout.LayoutParams lp=new LinearLayout.LayoutParams(-1,-2);lp.setMargins(0,dp(8),0,dp(8));parent.addView(c,lp);return c;}
+    private MaterialButton button(String label,Runnable action){return button(label,Theme.Tone.PRIMARY,action);}
+    /** One button style per tone. Disabled is a muted surface with muted text, not faded. At least 48dp. */
+    private MaterialButton button(String label,Theme.Tone tone,Runnable action){MaterialButton b=new MaterialButton(this);b.setText(label);b.setAllCaps(false);b.setCornerRadius(dp(12));b.setMinHeight(dp(Theme.TOUCH_DP));b.setMinimumHeight(dp(Theme.TOUCH_DP));b.setMinWidth(dp(Theme.TOUCH_DP));b.setMinimumWidth(dp(Theme.TOUCH_DP));b.setInsetTop(0);b.setInsetBottom(0);tone(b,tone);if(b.getContentDescription()==null)b.setContentDescription(label);b.setOnClickListener(v->action.run());return b;}
+    private CheckBox checkbox(){CheckBox c=new CheckBox(this);c.setMinHeight(dp(Theme.TOUCH_DP));c.setTextColor(Theme.TEXT);c.setButtonTintList(ColorStateList.valueOf(Theme.KICKER));return c;}
+    private void tone(MaterialButton b,Theme.Tone tone){int[][] states={{-android.R.attr.state_enabled},{}};b.setBackgroundTintList(new ColorStateList(states,new int[]{Theme.DISABLED_BG,Theme.background(tone)}));b.setTextColor(new ColorStateList(states,new int[]{Theme.DISABLED_TEXT,Theme.foreground(tone)}));b.setStrokeColor(new ColorStateList(states,new int[]{Theme.BORDER,Theme.stroke(tone)}));b.setStrokeWidth(tone==Theme.Tone.PRIMARY?0:dp(1));}
+    private android.graphics.drawable.GradientDrawable rounded(int fill,int radiusDp,int strokeColor){android.graphics.drawable.GradientDrawable d=new android.graphics.drawable.GradientDrawable();d.setColor(fill);d.setCornerRadius(dp(radiusDp));d.setStroke(dp(1),strokeColor);return d;}
+    private void openCheckout(){String url=paymentCheckout;if(url!=null&&url.startsWith("https://")){try{startActivity(new Intent(Intent.ACTION_VIEW,Uri.parse(url)));return;}catch(Exception ignored){}}say(WorkspacePolicy.PAYMENT_DUE);}
+    private MaterialCardView card(LinearLayout parent){MaterialCardView c=new MaterialCardView(this);c.setCardBackgroundColor(surface);c.setRadius(dp(19));c.setStrokeColor(Theme.CARD_BORDER);c.setStrokeWidth(dp(1));c.setCardElevation(0);LinearLayout.LayoutParams lp=new LinearLayout.LayoutParams(-1,-2);lp.setMargins(0,dp(8),0,dp(8));parent.addView(c,lp);return c;}
     private LinearLayout inside(MaterialCardView card){LinearLayout p=vertical();p.setPadding(dp(19),dp(20),dp(19),dp(20));card.addView(p);return p;}
     private void shell(){
         root=vertical();root.setBackgroundColor(background);setContentView(root);
         ViewCompat.setOnApplyWindowInsetsListener(root,(v,insets)->{androidx.core.graphics.Insets bars=insets.getInsets(WindowInsetsCompat.Type.systemBars());v.setPadding(bars.left,bars.top,bars.right,bars.bottom);return insets;});
         LinearLayout bar=new LinearLayout(this);bar.setGravity(Gravity.CENTER_VERTICAL);bar.setPadding(dp(21),dp(12),dp(16),dp(8));TextView logo=text("GENDRAGOON  /  CLOUD SSD",10,true);logo.setLetterSpacing(.12f);logo.setTextColor(accent);bar.addView(logo,new LinearLayout.LayoutParams(0,-2,1));
-        if(!uid.isEmpty()){MaterialButton account=button("Account",this::account);account.setTextSize(10);account.setBackgroundTintList(ColorStateList.valueOf(surface));account.setTextColor(accent);bar.addView(account);}
+        if(!uid.isEmpty()){MaterialButton account=button("Account",this::account);account.setTextSize(10);tone(account,Theme.Tone.SECONDARY);bar.addView(account);}
         root.addView(bar);ScrollView scroll=new ScrollView(this);scroll.setFillViewport(true);content=vertical();content.setPadding(dp(20),dp(15),dp(20),dp(32));scroll.addView(content);root.addView(scroll,new LinearLayout.LayoutParams(-1,0,1));
         status=null;transferProgress=null;transferText=null;upload=null;folderUpload=null;removeOriginals=null;pause=null;refresh=null;saver=null;
     }
@@ -128,7 +135,7 @@ public final class MainActivity extends AppCompatActivity {
     private String asset(String name)throws IOException{try(InputStream in=getAssets().open(name);ByteArrayOutputStream out=new ByteArrayOutputStream()){byte[] b=new byte[8192];int n;while((n=in.read(b))>=0)out.write(b,0,n);return out.toString("UTF-8");}}
     private void showTerms(){shell();content.addView(text("Before you begin",30,true));space(content,12);content.addView(text("Read the Terms before saving your agreement to your Google account.",14,false));
         LinearLayout panel=inside(card(content));TextView body=text("",12,false);try{body.setText(asset("terms.txt"));}catch(Exception e){body.setText("Terms unavailable. Do not continue.");}body.setTextIsSelectable(true);panel.addView(body);
-        CheckBox read=new CheckBox(this);read.setText("I confirm I have read the Terms");content.addView(read);CheckBox agree=new CheckBox(this);agree.setText("I agree to the Terms and Privacy Notice");content.addView(agree);
+        CheckBox read=checkbox();read.setText("I confirm I have read the Terms");content.addView(read);CheckBox agree=checkbox();agree.setText("I agree to the Terms and Privacy Notice");content.addView(agree);
         content.addView(button("Read the Privacy Notice",()->{try{new MaterialAlertDialogBuilder(this).setTitle("Privacy Notice").setMessage(asset("privacy.txt")).setPositiveButton("Done",null).show();}catch(Exception e){say(e.getMessage());}}));
         MaterialButton accept=button("Accept and continue",()->{if(!read.isChecked()||!agree.isChecked())return;String owner=uid;io.execute(()->{try{new CloudApi(owner).acceptTerms();runOnUiThread(()->{if(uid.equals(owner))load();});}catch(Exception e){report(e);}});});accept.setEnabled(false);read.setOnCheckedChangeListener((b,c)->accept.setEnabled(c&&agree.isChecked()));agree.setOnCheckedChangeListener((b,c)->accept.setEnabled(c&&read.isChecked()));content.addView(accept);status();
     }
@@ -139,17 +146,18 @@ public final class MainActivity extends AppCompatActivity {
             JSONObject openRow=selectedRow;if(openRow==null)for(int n=0;n<all.length();n++){JSONObject s=all.getJSONObject(n);if(effective.equals(s.optString("id")))openRow=s;}
             boolean deleting=openRow!=null&&WorkspacePolicy.isDeleting(openRow.optString("projectStatus"));
             boolean lockedHere=WorkspacePolicy.locksThisWorkspace(effective,openRow==null?null:openRow.optString("kind"),openRow==null?null:boolOrNull(openRow,"isFree"),unpaid);
-            Long paidThrough=null;if(openRow!=null&&openRow.has("paidThroughMs")&&!openRow.isNull("paidThroughMs"))paidThrough=openRow.optLong("paidThroughMs");
-            boolean due=openRow!=null&&WorkspacePolicy.paymentDue(paidThrough,System.currentTimeMillis(),openRow.optBoolean("lapsed"));
+            Long graceEnds=null;if(openRow!=null&&openRow.has("graceEndsAt")&&!openRow.isNull("graceEndsAt"))graceEnds=openRow.optLong("graceEndsAt");
+            boolean due=openRow!=null&&WorkspacePolicy.paymentDue(graceEnds,System.currentTimeMillis(),openRow.optBoolean("lapsed"));
+            long dueAt=due?graceEnds:0L;String dueCheckout=openRow==null?"":openRow.optString("checkoutUrl","");
             boolean known=openRow!=null;Set<String> deletingRows=new HashSet<>();for(int n=0;n<all.length();n++){JSONObject s=all.getJSONObject(n);if(WorkspacePolicy.isDeleting(s.optString("projectStatus")))deletingRows.add(s.optString("id"));}
             JSONObject config=null;List<JSONObject> list=new ArrayList<>();try{config=api.get(CloudApi.workspace(effective)+"/config");list=api.files(effective);}catch(WorkspaceLocked locked){if(WorkspacePolicy.blocksLibrary(effective,openRow==null?null:openRow.optString("kind"),openRow==null?null:boolOrNull(openRow,"isFree"),locked.lock))throw locked;}catch(CloudApi.Failure e){if(e.status!=404||!effective.equals("free"))throw e;}
-            JSONObject cfg=config;List<JSONObject> loaded=list;String verifiedWorkspace=effective;String verifiedFreeLabel=freeLabel;runOnUiThread(()->{if(serial!=loadSerial||!owner.equals(uid))return;loading=false;activeLock=null;lockFiles.clear();lockFilesFor="";if(deletion==null||deletion.step!=AccountDeletion.Step.POLLING)deletion=null;workspace=verifiedWorkspace;freeWorkspaceLabel=verifiedFreeLabel;selectedDeleting=deleting;selectedLocked=lockedHere;paymentDue=due;listedWorkspace=known;deletingIds.clear();deletingIds.addAll(deletingRows);rememberSpaces(spaces);getSharedPreferences("gd-settings",MODE_PRIVATE).edit().putString("workspace:"+uid,workspace).apply();files=loaded;if(deletion!=null&&deletion.step==AccountDeletion.Step.POLLING)return;showLibrary(spaces,cfg);});
+            JSONObject cfg=config;List<JSONObject> loaded=list;String verifiedWorkspace=effective;String verifiedFreeLabel=freeLabel;runOnUiThread(()->{if(serial!=loadSerial||!owner.equals(uid))return;loading=false;activeLock=null;lockFiles.clear();lockFilesFor="";if(deletion==null||deletion.step!=AccountDeletion.Step.POLLING)deletion=null;workspace=verifiedWorkspace;freeWorkspaceLabel=verifiedFreeLabel;selectedDeleting=deleting;selectedLocked=lockedHere;paymentDue=due;paymentDueAt=dueAt;paymentCheckout=dueCheckout;listedWorkspace=known;deletingIds.clear();deletingIds.addAll(deletingRows);rememberSpaces(spaces);getSharedPreferences("gd-settings",MODE_PRIVATE).edit().putString("workspace:"+uid,workspace).apply();files=loaded;if(deletion!=null&&deletion.step==AccountDeletion.Step.POLLING)return;showLibrary(spaces,cfg);});
         }catch(Exception e){runOnUiThread(()->{if(serial!=loadSerial||!owner.equals(uid))return;loading=false;if(e instanceof WorkspaceLocked locked){showLock(locked.lock);return;}updateButtons();say(e.getMessage());});}});
     }
     private void showLibrary(List<JSONObject> spaces,JSONObject cfg){
         boolean dataSaver=getPreferences(MODE_PRIVATE).getBoolean("data-saver",false);shell();TextView eyebrow=text("YOUR DIGITAL SPACE",9,true);eyebrow.setTextColor(accent);eyebrow.setLetterSpacing(.18f);content.addView(eyebrow);space(content,10);content.addView(text("My cloud",38,true));TextView subtitle=text("Everything you need. Nothing in your way.",13,false);subtitle.setTextColor(muted);content.addView(subtitle);space(content,20);
         List<String> ids=new ArrayList<>(List.of("free")),names=new ArrayList<>(List.of(freeWorkspaceLabel));for(JSONObject s:spaces){ids.add(s.optString("id"));names.add(WorkspacePolicy.rowTitle(WorkspacePrice.pickerText(s.toString()),s.optString("projectStatus")));}
-        if(paymentDue){space(content,12);content.addView(text(WorkspacePolicy.PAYMENT_DUE,16,true));MaterialButton pay=button("Pay",()->say(WorkspacePolicy.PAYMENT_DUE));pay.setContentDescription("payment-due");content.addView(pay);}
+        if(paymentDue){space(content,12);LinearLayout due=inside(card(content));due.setBackground(rounded(Theme.WARN_BG,14,Theme.WARN_BORDER));TextView dueText=text(WorkspacePolicy.paymentDueText(paymentDueAt),14,false);dueText.setTextColor(Theme.WARN_TEXT);dueText.setAccessibilityLiveRegion(View.ACCESSIBILITY_LIVE_REGION_POLITE);due.addView(dueText);space(due,8);MaterialButton pay=button("Pay",this::openCheckout);pay.setContentDescription("Pay for this workspace");pay.setTag("payment-due");due.addView(pay,new LinearLayout.LayoutParams(-2,dp(48)));}
         Spinner selected=new Spinner(this);ArrayAdapter<String> adapter=new ArrayAdapter<>(this,android.R.layout.simple_spinner_dropdown_item,names);selected.setAdapter(adapter);selected.setSelection(Math.max(0,ids.indexOf(workspace)));selected.setEnabled(!workBusy&&!loading);content.addView(selected,new LinearLayout.LayoutParams(-1,dp(48)));selected.setOnItemSelectedListener(new android.widget.AdapterView.OnItemSelectedListener(){public void onNothingSelected(android.widget.AdapterView<?> p){}public void onItemSelected(android.widget.AdapterView<?> p,View v,int pos,long id){if(!ids.get(pos).equals(workspace)){workspace=ids.get(pos);getSharedPreferences("gd-settings",MODE_PRIVATE).edit().putString("workspace:"+uid,workspace).apply();query="";load();}}});
         LinearLayout panel=inside(card(content));
         if(cfg==null&&!listedWorkspace){panel.addView(text("Start with 2 GB, on us.",24,true));space(panel,12);panel.addView(text("Private storage with resumable transfers and integrity checks. No payment required.",14,false));space(panel,16);panel.addView(button("Create free workspace",()->{String owner=uid;io.execute(()->{try{new CloudApi(owner).request("/v1/free","POST",new JSONObject().put("name","My Free Cloud"));runOnUiThread(this::load);}catch(Exception e){report(e);}});}));status();say("Create your free workspace to begin.");return;}
@@ -159,12 +167,12 @@ public final class MainActivity extends AppCompatActivity {
         content.addView(text("Choose app packages such as APKs, any files, or a complete folder. Android installs compatible APKs with your approval. Desktop and iOS applications are stored for their own devices.",12,false));
         upload=button("↑  Upload files / applications",()->picker.launch(new String[]{"*/*"}));content.addView(upload);
         folderUpload=button("↑  Upload complete folder",()->folderPicker.launch(null));content.addView(folderUpload);
-        removeOriginals=new CheckBox(this);removeOriginals.setText("Remove selected originals after verified upload and complete restore check");content.addView(removeOriginals);
-        CheckBox applicationFilter=new CheckBox(this);applicationFilter.setText("Show Applications");applicationFilter.setChecked(applicationsOnly);applicationFilter.setOnCheckedChangeListener((view,checked)->{applicationsOnly=checked;drawFiles();});content.addView(applicationFilter);
-        saver=new SwitchMaterial(this);saver.setText("Data saver");saver.setChecked(dataSaver);saver.setOnCheckedChangeListener((v,checked)->getPreferences(MODE_PRIVATE).edit().putBoolean("data-saver",checked).apply());content.addView(saver);
+        removeOriginals=checkbox();removeOriginals.setText("Remove selected originals after verified upload and complete restore check");content.addView(removeOriginals);
+        CheckBox applicationFilter=checkbox();applicationFilter.setText("Show Applications");applicationFilter.setChecked(applicationsOnly);applicationFilter.setOnCheckedChangeListener((view,checked)->{applicationsOnly=checked;drawFiles();});content.addView(applicationFilter);
+        saver=new SwitchMaterial(this);saver.setMinHeight(dp(Theme.TOUCH_DP));saver.setTextColor(Theme.TEXT);saver.setText("Data saver");saver.setChecked(dataSaver);saver.setOnCheckedChangeListener((v,checked)->getPreferences(MODE_PRIVATE).edit().putBoolean("data-saver",checked).apply());content.addView(saver);
         transferProgress=new LinearProgressIndicator(this);transferProgress.setIndicatorColor(accent);transferProgress.setVisibility(workBusy?View.VISIBLE:View.GONE);content.addView(transferProgress);transferText=text("",12,false);transferText.setTextColor(muted);content.addView(transferText);pause=button("Pause transfer",()->WorkManager.getInstance(this).cancelUniqueWork("GenDragoonTransfer"));pause.setVisibility(workBusy?View.VISIBLE:View.GONE);content.addView(pause);
         LinearLayout controls=new LinearLayout(this);controls.setGravity(Gravity.CENTER_VERTICAL);EditText search=new EditText(this);search.setHint("Find a file…");search.setText(query);search.setSingleLine(true);search.setTextSize(14);controls.addView(search,new LinearLayout.LayoutParams(0,dp(52),1));refresh=button("Refresh",this::load);controls.addView(refresh);content.addView(controls);search.addTextChangedListener(new TextWatcher(){public void beforeTextChanged(CharSequence s,int start,int count,int after){}public void onTextChanged(CharSequence s,int start,int before,int count){query=s.toString();pageSize=100;drawFiles();}public void afterTextChanged(Editable e){}});
-        MaterialButton sortButton=button("Sort files",()->new MaterialAlertDialogBuilder(this).setTitle("Sort files").setItems(new String[]{"Name A–Z","Largest first","Smallest first"},(d,which)->{sort=which==1?"largest":which==2?"smallest":"name";drawFiles();}).show());sortButton.setBackgroundTintList(ColorStateList.valueOf(surface));sortButton.setTextColor(accent);content.addView(sortButton);
+        MaterialButton sortButton=button("Sort files",()->new MaterialAlertDialogBuilder(this).setTitle("Sort files").setItems(new String[]{"Name A–Z","Largest first","Smallest first"},(d,which)->{sort=which==1?"largest":which==2?"smallest":"name";drawFiles();}).show());tone(sortButton,Theme.Tone.SECONDARY);content.addView(sortButton);
         fileList=vertical();content.addView(fileList);drawFiles();status();say("Your private files and application packages are ready.");space(content,12);TextView help=text("Uploads run as a visible background transfer. If paused, choose the same file to resume. Restored files can be shared to other apps.",11,false);help.setTextColor(muted);content.addView(help);updateButtons();
     }
     private void drawFiles(){if(fileList==null)return;fileList.removeAllViews();List<JSONObject> visible=new ArrayList<>();for(JSONObject f:files)if((!applicationsOnly||SelectionArchive.isApplication(f.optString("name")))&&f.optString("name").toLowerCase(Locale.ROOT).contains(query.toLowerCase(Locale.ROOT)))visible.add(f);
@@ -172,7 +180,7 @@ public final class MainActivity extends AppCompatActivity {
         if(visible.isEmpty()){TextView empty=text(files.isEmpty()?"No cloud files yet.\nUpload your first file to get started.":"No matching files.",16,false);empty.setGravity(Gravity.CENTER);empty.setTextColor(muted);empty.setPadding(0,dp(35),0,dp(35));fileList.addView(empty);return;}
         for(JSONObject file:visible.subList(0,Math.min(pageSize,visible.size()))){LinearLayout p=inside(card(fileList));TextView title=text(file.optString("name"),14,true);title.setMaxLines(3);p.addView(title);space(p,7);TextView size=text(Formatter.formatFileSize(this,file.optLong("sizeBytes")),11,false);size.setTextColor(muted);p.addView(size);space(p,8);LinearLayout actions=new LinearLayout(this);actions.setGravity(Gravity.END);
             MaterialButton restore=button("Restore",()->enqueueDownload(file));restore.setEnabled(!workBusy);actions.addView(restore);
-            MaterialButton remove=button("Delete",()->new MaterialAlertDialogBuilder(this).setTitle("Delete cloud copy?").setMessage("Remove "+file.optString("name")+" from cloud storage? Local copies are unchanged.").setNegativeButton("Cancel",null).setPositiveButton("Delete",(d,w)->{String owner=uid,where=workspace;io.execute(()->{try{new CloudApi(owner).request(CloudApi.workspace(where)+"/files/"+file.getString("id"),"DELETE",(JSONObject)null);runOnUiThread(()->{if(owner.equals(uid))load();});}catch(Exception e){report(e);}});}).show());remove.setEnabled(!workBusy&&!selectedDeleting);remove.setBackgroundTintList(ColorStateList.valueOf(surface));remove.setTextColor(Color.rgb(222,172,188));actions.addView(remove);p.addView(actions);
+            MaterialButton remove=button("Delete",()->new MaterialAlertDialogBuilder(this).setTitle("Delete cloud copy?").setMessage("Remove "+file.optString("name")+" from cloud storage? Local copies are unchanged.").setNegativeButton("Cancel",null).setPositiveButton("Delete",(d,w)->{String owner=uid,where=workspace;io.execute(()->{try{new CloudApi(owner).request(CloudApi.workspace(where)+"/files/"+file.getString("id"),"DELETE",(JSONObject)null);runOnUiThread(()->{if(owner.equals(uid))load();});}catch(Exception e){report(e);}});}).show());remove.setEnabled(!workBusy&&!selectedDeleting);tone(remove,Theme.Tone.DANGER);actions.addView(remove);p.addView(actions);
         }
         if(visible.size()>pageSize)fileList.addView(button("Show more files",()->{pageSize+=100;drawFiles();}));
     }
@@ -233,7 +241,7 @@ public final class MainActivity extends AppCompatActivity {
         if(ByoFeature.showInSettings())box.addView(button("Bring-your-own storage",this::showByo));
         androidx.appcompat.app.AlertDialog[] shown=new androidx.appcompat.app.AlertDialog[1];
         MaterialButton delete=button("Delete account",()->{if(workBusy||shown[0]==null)return;shown[0].dismiss();deletionEpoch++;foreignSession=false;deletionOwnerUid=user.getUid();deletionOwnerEmail=user.getEmail()==null?"":user.getEmail();deletionOwnerGoogleId=googleProviderId(user);deletionSignInStarted=false;wiping=false;holdAuthNavigation=true;DeletionReceipt saved=DeletionReceiptVault.read(this);if(saved!=null){deletionOwnerUid=DeletionSignIn.ownerUid(saved,deletionOwnerUid);deletion=AccountDeletion.resume(saved);advanceDeletion();return;}deletion=new AccountDeletion();showDeleteAccount();});
-        delete.setEnabled(!workBusy);delete.setBackgroundTintList(ColorStateList.valueOf(Color.rgb(120,32,48)));delete.setTextColor(Color.WHITE);box.addView(delete);
+        delete.setEnabled(!workBusy);tone(delete,Theme.Tone.DANGER);box.addView(delete);
         box.addView(button("Sign out",()->{WorkManager.getInstance(this).cancelUniqueWork("GenDragoonTransfer");auth.signOut();}));
         shown[0]=new MaterialAlertDialogBuilder(this).setTitle(user.getEmail()==null?"Account":user.getEmail()).setView(box).setNegativeButton("Done",null).create();shown[0].show();
     }
@@ -260,8 +268,8 @@ public final class MainActivity extends AppCompatActivity {
             LinearLayout panel=inside(card(content));panel.addView(text(rowDeleting?WorkspacePolicy.DELETING:item.label(),16,true));space(panel,8);
             LinearLayout actions=new LinearLayout(this);
             if(!activeLock.requiresPayment()){
-                MaterialButton remove=button(WorkspaceLock.ACTION_DELETE,()->confirmDeleteWorkspace(item));remove.setEnabled(item.id!=null&&!workBusy&&!rowDeleting);remove.setBackgroundTintList(ColorStateList.valueOf(Color.rgb(120,32,48)));remove.setTextColor(Color.WHITE);actions.addView(remove);
-                MaterialButton merge=button(WorkspaceLock.ACTION_MERGE,()->chooseMerge(item));merge.setEnabled(item.id!=null&&!workBusy&&!rowDeleting);merge.setBackgroundTintList(ColorStateList.valueOf(surface));merge.setTextColor(accent);actions.addView(merge);
+                MaterialButton remove=button(WorkspaceLock.ACTION_DELETE,()->confirmDeleteWorkspace(item));remove.setEnabled(item.id!=null&&!workBusy&&!rowDeleting);tone(remove,Theme.Tone.DANGER);actions.addView(remove);
+                MaterialButton merge=button(WorkspaceLock.ACTION_MERGE,()->chooseMerge(item));merge.setEnabled(item.id!=null&&!workBusy&&!rowDeleting);tone(merge,Theme.Tone.SECONDARY);actions.addView(merge);
             }
             MaterialButton download=button(WorkspaceLock.ACTION_DOWNLOAD,()->listWorkspaceFiles(item));download.setEnabled(item.id!=null&&!workBusy&&CloudSignals.allowsTransfer("GET",true));actions.addView(download);
             panel.addView(actions);
@@ -309,7 +317,7 @@ public final class MainActivity extends AppCompatActivity {
                 content.addView(text("Type DELETE to confirm. You will sign in with Google again immediately before the account is deleted.",15,false));
                 space(content,12);EditText phrase=new EditText(this);phrase.setHint("Type DELETE");phrase.setSingleLine(true);content.addView(phrase);
                 MaterialButton confirm=button("Delete account",()->{if(deletion.confirmPhrase(phrase.getText().toString())){deletionSignInStarted=false;showDeleteAccount();}});
-                confirm.setEnabled(false);confirm.setBackgroundTintList(ColorStateList.valueOf(Color.rgb(120,32,48)));confirm.setTextColor(Color.WHITE);
+                confirm.setEnabled(false);tone(confirm,Theme.Tone.DANGER);
                 phrase.addTextChangedListener(new TextWatcher(){public void beforeTextChanged(CharSequence s,int a,int b,int c){}public void onTextChanged(CharSequence s,int a,int b,int c){confirm.setEnabled(AccountDeletion.CONFIRM_PHRASE.equals(s.toString()));}public void afterTextChanged(Editable e){}});
                 space(content,12);content.addView(confirm);space(content,8);content.addView(button("Cancel",this::cancelDeletion));
             }
@@ -327,7 +335,7 @@ public final class MainActivity extends AppCompatActivity {
             case FAILED -> {
                 content.addView(text(deletion.message==null?"Account deletion did not finish. You can retry.":deletion.message,15,false));
                 if(deletion.offersRetry()){space(content,12);content.addView(button("Retry",()->{deletion.retry();if(deletion.step==AccountDeletion.Step.POLLING){advanceDeletion();return;}deletionSignInStarted=false;showDeleteAccount();}));}
-                if(deletion.showSupport){space(content,8);MaterialButton support=button("Contact support",this::contactDeletionSupport);support.setContentDescription("deletion-support");content.addView(support);}
+                if(deletion.showSupport){space(content,8);MaterialButton support=button("Contact support",this::contactDeletionSupport);support.setContentDescription("Contact support by email");support.setTag("deletion-support");content.addView(support);}
                 if(deletion.canDismiss()){space(content,8);content.addView(button("Dismiss",this::dismissDeletionError));}
                 else{space(content,8);content.addView(button("Cancel",this::cancelDeletion));}
             }
@@ -445,7 +453,8 @@ public final class MainActivity extends AppCompatActivity {
     }
     private void contactDeletionSupport(){
         AccountDeletion current=deletion;if(current==null)return;
-        DeletionSupport.Call call=DeletionSupport.call(current.jobId,current.statusToken);
+        DeletionReceipt saved=DeletionReceiptVault.read(this);
+        DeletionSupport.Call call=DeletionSupport.call(current.jobId,saved==null?null:saved.jobId,current.statusToken,DeletionSupport.ENABLED);
         if(!call.send){openDeletionMailto(current.jobId);return;}
         io.execute(()->{
             DeletionSupport.Result result;
@@ -482,6 +491,7 @@ public final class MainActivity extends AppCompatActivity {
         runOnUiThread(()->{
             if(epoch!=deletionEpoch||deletion==null||!deletion.keepsPolling())return;
             deletion.completePoll(exchange);
+            if(deletion.openSupportMailto){deletion.openSupportMailto=false;openDeletionMailto(deletion.jobId);}
             AccountActions.HttpBody body=deletion.lastBody;
             if(body!=null&&body.status==423&&CloudSignals.CODE_LOCK.equals(body.error))activeLock=WorkspaceLock.decode(body.raw).named(knownSpaces);
             advanceDeletion();

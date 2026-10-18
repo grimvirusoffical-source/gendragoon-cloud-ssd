@@ -32,7 +32,7 @@ enum DeletionSupport {
     static let pathFormat="/v2/account/deletions/%@/support-request"
     static let sent="Request sent."
     static let already="Request already sent."
-    enum Kind:Equatable { case sent, already, refresh, mailto, hold }
+    enum Kind:Equatable { case sent, already, refresh, mailto }
     struct Call:Equatable {
         var send:Bool
         var path:String?
@@ -46,18 +46,21 @@ enum DeletionSupport {
         var message:String?
         var opensMailto:Bool { kind == .mailto }
     }
-    static func call(jobId:String?,statusToken:String?)->Call { call(jobId:jobId,statusToken:statusToken,enabled:enabled) }
-    static func call(jobId:String?,statusToken:String?,enabled:Bool)->Call {
-        guard enabled,let jobId,AccountDeletion.validJob(jobId),let statusToken,AccountDeletion.validToken(statusToken) else {return .mailto}
+    static func call(jobId:String?,statusToken:String?)->Call { call(jobId:jobId,savedJobId:jobId,statusToken:statusToken,enabled:enabled) }
+    static func call(jobId:String?,statusToken:String?,enabled:Bool)->Call { call(jobId:jobId,savedJobId:jobId,statusToken:statusToken,enabled:enabled) }
+    /// Sends nothing unless `jobId` is the job saved on this device. A mismatch opens mailto.
+    static func call(jobId:String?,savedJobId:String?,statusToken:String?,enabled:Bool)->Call {
+        guard enabled,let jobId,jobId==savedJobId,AccountDeletion.validJob(jobId),let statusToken,AccountDeletion.validToken(statusToken) else {return .mailto}
         guard let encoded=AccountDeletion.encodeJob(jobId),!encoded.contains("/"),!encoded.contains("\\"),!encoded.contains("..") else {return .mailto}
         return Call(send:true,path:String(format:pathFormat,encoded),statusToken:statusToken)
     }
     /// 202 `received` (including a repeat with the same `requestId`) shows "Request sent."
     /// 409 `support_not_needed` refreshes deletion status. 429 shows "Request already sent."
-    /// and does not open mailto. A 404, a 401 `unauthorized`, a 401 with no code, a transport
-    /// failure, or HTTP 5xx opens mailto and does not ask for sign-in. The account may already be deleted.
+    /// and does not open mailto. Everything else opens mailto and never asks for sign-in: any 401,
+    /// a 404, any other 4xx (400, 403, 413, 422, ...), HTTP 5xx, a transport failure, or a malformed
+    /// success. The account may already be deleted.
     static func interpret(status:Int,body:String,transportFailed:Bool)->Result {
-        if transportFailed || status>=500 || status==404 || unauthorized(status:status,body:body) {
+        if transportFailed || status>=500 || status==404 || status==401 {
             return Result(kind:.mailto,requestId:nil,message:nil)
         }
         let requestId=CloudSignals.jsonString(body,"requestId")
@@ -68,12 +71,6 @@ enum DeletionSupport {
             return Result(kind:.refresh,requestId:nil,message:nil)
         }
         if status==429 {return Result(kind:.already,requestId:nil,message:already)}
-        return Result(kind:.hold,requestId:nil,message:nil)
-    }
-    /// A support-request 401 `unauthorized`, or a 401 with no code, matches a 404.
-    private static func unauthorized(status:Int,body:String)->Bool {
-        guard status==401 else {return false}
-        let code=CloudSignals.jsonString(body,"error") ?? CloudSignals.jsonString(body,"code")
-        return code==nil || code?.isEmpty==true || code=="unauthorized"
+        return Result(kind:.mailto,requestId:nil,message:nil)
     }
 }

@@ -45,6 +45,10 @@ final class AccountDeletion {
     /** A DELETE 404 with no saved job. Show the error without Retry. */
     boolean plainError;
     AccountActions.HttpBody lastBody;
+    /** A support 409 asked for a status refresh. If that refresh fails, fall back to mailto. */
+    boolean supportRefresh;
+    /** Set when a failed support refresh needs the screen to open the mailto fallback once. */
+    boolean openSupportMailto;
 
     void continueFromExplain(){if(step==Step.EXPLAIN)step=Step.CONFIRM;}
 
@@ -198,10 +202,22 @@ final class AccountDeletion {
             return false;
         }
         if(result.kind==DeletionSupport.Kind.REFRESH){
-            refreshAfterSupport();
+            if(!refreshAfterSupport()){supportFallback();return true;}
+            supportRefresh=true;
             return false;
         }
-        return result.opensMailto();
+        if(result.opensMailto()){supportFallback();return true;}
+        return false;
+    }
+
+    /** Mailto fallback for a support request. Stays on the failure screen; never moves to sign-in. */
+    private void supportFallback(){
+        supportRefresh=false;
+        showSupport=true;
+        dismissible=true;
+        dropReceipt=false;
+        wipe=false;
+        if(step!=Step.FAILED||message==null)fail("We couldn't reach support. Email us and we'll finish deleting your account.");
     }
 
     /** A non-retryable failure keeps the job until Dismiss. Dismiss wipes nothing. */
@@ -377,6 +393,16 @@ final class AccountDeletion {
 
     void completePoll(Exchange exchange){
         if(!keepsPolling())return;
+        if(supportRefresh){
+            boolean ok=exchange!=null&&!exchange.failed&&exchange.body!=null&&exchange.body.status>=200&&exchange.body.status<300;
+            supportRefresh=false;
+            if(!ok){
+                lastBody=exchange==null?null:exchange.body;
+                supportFallback();
+                openSupportMailto=true;
+                return;
+            }
+        }
         if(exchange==null||exchange.failed||exchange.body==null){
             plainError=false;
             lastBody=null;

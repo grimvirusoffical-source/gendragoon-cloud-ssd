@@ -8,7 +8,7 @@ struct AccountDeletedScreen:View {
             Text("Your account has been deleted.").font(.title.bold())
             Text("Hosted workspaces and this device's copy of your data have been erased. Bring-your-own storage was not changed.").foregroundStyle(.secondary)
             Button("Return to sign-in"){session.returnToSignIn()}.buttonStyle(.borderedProminent).controlSize(.large)
-        }.padding(28).frame(maxWidth:.infinity,maxHeight:.infinity,alignment:.topLeading).background(Color(red:0.064,green:0.055,blue:0.10))
+        }.padding(28).frame(maxWidth:.infinity,maxHeight:.infinity,alignment:.topLeading).background(GDTheme.bg)
     }
 }
 
@@ -50,6 +50,7 @@ struct CloudDeletionTransport:DeletionTransport {
     func dismissError(){flow.dismissError();syncReceipt()}
     func noteSupport(_ text:String){flow.message=text}
     func refreshAfterSupport()->Bool { flow.refreshAfterSupport() }
+    func acknowledgeSupportMailto(){flow.openSupportMailto=false}
     /// True when Contact support should open the mailto fallback. Never moves the screen to sign-in.
     func applySupport(_ result:DeletionSupport.Result)->Bool {
         var next=flow
@@ -109,7 +110,7 @@ struct CloudDeletionTransport:DeletionTransport {
                     case .confirm:
                         Text("Type DELETE to confirm. You will sign in with Google again immediately before the account is deleted.").accessibilityIdentifier("delete-confirm")
                         TextField("Type DELETE",text:$phrase).textInputAutocapitalization(.characters).autocorrectionDisabled().textFieldStyle(.roundedBorder)
-                        Button("Delete account",role:.destructive){if model.confirm(phrase){Task{await authenticateAndDelete()}}}.buttonStyle(.borderedProminent).disabled(phrase != AccountDeletion.confirmPhrase || working)
+                        Button("Delete account",role:.destructive){if model.confirm(phrase){Task{await authenticateAndDelete()}}}.buttonStyle(GDButtonStyle(tone:.danger)).accessibilityHint("Permanently deletes your account").disabled(phrase != AccountDeletion.confirmPhrase || working)
                     case .reauth:
                         Text(model.flow.message ?? "Sign in again. The server only accepts a sign-in from the last 5 minutes.")
                         Button("Sign in again"){Task{await authenticateAndDelete()}}.buttonStyle(.borderedProminent).disabled(working)
@@ -139,7 +140,7 @@ struct CloudDeletionTransport:DeletionTransport {
                         Text("Your account has been deleted.")
                     }
                 }.padding(24)
-            }.background(Color(red:0.064,green:0.055,blue:0.10))
+            }.background(GDTheme.bg)
         }.interactiveDismissDisabled(true)
         .task(id:model.flow.step){await onStep()}
     }
@@ -168,7 +169,7 @@ struct CloudDeletionTransport:DeletionTransport {
         }catch{model.fail(error.localizedDescription)}
     }
     private func contactSupport() async {
-        let call=DeletionSupport.call(jobId:model.flow.jobId,statusToken:model.flow.statusToken)
+        let call=DeletionSupport.call(jobId:model.flow.jobId,savedJobId:DeletionReceiptVault.load()?.jobId,statusToken:model.flow.statusToken,enabled:DeletionSupport.enabled)
         guard call.send,let path=call.path,let token=call.statusToken else {
             if let url=SupportContact.mailto(jobId:model.flow.jobId){await UIApplication.shared.open(url)}
             return
@@ -185,6 +186,10 @@ struct CloudDeletionTransport:DeletionTransport {
             return
         }
         if model.flow.keepsPolling() {await poll()}
+        if model.flow.openSupportMailto {
+            model.acknowledgeSupportMailto()
+            if let url=SupportContact.mailto(jobId:model.flow.jobId){await UIApplication.shared.open(url)}
+        }
     }
     private func poll() async {
         let transport=CloudDeletionTransport(cloud:cloud)
@@ -239,21 +244,21 @@ struct CloudDeletionTransport:DeletionTransport {
                             Text(rowDeleting ? WorkspacePolicy.deleting : item.label).font(.headline)
                             HStack{
                                 if !resolved.requiresPayment {
-                                    Button(WorkspaceLock.actionDelete,role:.destructive){pendingDelete=item}.disabled(item.workspaceID==nil || cloud.busy || rowDeleting)
+                                    Button(WorkspaceLock.actionDelete,role:.destructive){pendingDelete=item}.buttonStyle(GDButtonStyle(tone:.danger)).accessibilityLabel(WorkspaceLock.actionDelete+" "+(rowDeleting ? WorkspacePolicy.deleting : item.label)).disabled(item.workspaceID==nil || cloud.busy || rowDeleting)
                                     mergeControl(item).disabled(cloud.busy || rowDeleting)
                                 }
-                                Button(WorkspaceLock.actionDownload){Task{await list(item)}}.disabled(item.workspaceID==nil || cloud.busy || !CloudSignals.allowsTransfer(method:"GET",locked:true))
+                                Button(WorkspaceLock.actionDownload){Task{await list(item)}}.buttonStyle(GDButtonStyle(tone:.secondary)).disabled(item.workspaceID==nil || cloud.busy || !CloudSignals.allowsTransfer(method:"GET",locked:true))
                             }
                             if listing==item.workspaceID {
                                 if files.isEmpty { Text("No files to download in this workspace.").font(.caption).foregroundStyle(.secondary) }
                                 ForEach(files){file in Button(file.name){cloud.restore(file,from:item.workspaceID)}.disabled(cloud.busy)}
                             }
-                        }.padding(16).frame(maxWidth:.infinity,alignment:.leading).background(Color(red:0.115,green:0.093,blue:0.16),in:RoundedRectangle(cornerRadius:16))
+                        }.padding(16).frame(maxWidth:.infinity,alignment:.leading).background(GDTheme.surface,in:RoundedRectangle(cornerRadius:16))
                     }
                     if !notice.isEmpty { Text(notice).font(.footnote) }
                     Button("Check again"){Task{await recheck()}}.buttonStyle(.borderedProminent)
                 }.padding(24)
-            }.background(Color(red:0.064,green:0.055,blue:0.10))
+            }.background(GDTheme.bg)
         }
         .interactiveDismissDisabled(true)
         .task{if lock.workspaces.contains(where:{$0.name==nil || $0.name?.isEmpty==true}){await cloud.refreshLockNames()}}

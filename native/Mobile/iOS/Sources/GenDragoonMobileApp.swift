@@ -4,9 +4,65 @@ import UniformTypeIdentifiers
 import GoogleSignIn
 import GoogleSignInSwift
 
-private let violet=Color(red:0.74,green:0.58,blue:0.98)
-private let canvas=Color(red:0.064,green:0.055,blue:0.10)
-private let panel=Color(red:0.115,green:0.093,blue:0.16)
+/// Dark purple tokens shared with the Expo app (gendragoon-apps `apps/mobile/src/theme.ts` at `f1d3487`)
+/// and Android `Theme.java`. Text pairs are AA; `testThemeContrastIsAA` checks them.
+enum GDTheme {
+    static func hex(_ value:UInt32)->Color { Color(red:Double(value>>16&0xFF)/255,green:Double(value>>8&0xFF)/255,blue:Double(value&0xFF)/255) }
+    static let bgHex:UInt32=0x100E17,surfaceHex:UInt32=0x1C1828,raisedHex:UInt32=0x241F34,textHex:UInt32=0xF6F3FB,mutedHex:UInt32=0xB3ADC4
+    static let kickerHex:UInt32=0xC8B7FF,primaryHex:UInt32=0x6D4AFF,secondaryBgHex:UInt32=0x2A2142,secondaryTextHex:UInt32=0xDDD4FF
+    static let dangerBgHex:UInt32=0x2C1A2B,dangerTextHex:UInt32=0xFFC2D1,warnBgHex:UInt32=0x2E2622,warnTextHex:UInt32=0xFFE3A3
+    static let bg=hex(bgHex),surface=hex(surfaceHex),raised=hex(raisedHex),text=hex(textHex),muted=hex(mutedHex),kicker=hex(kickerHex)
+    static let primary=hex(primaryHex),secondaryBg=hex(secondaryBgHex),secondaryBorder=hex(0x5B4A99),secondaryText=hex(secondaryTextHex)
+    static let dangerBg=hex(dangerBgHex),dangerBorder=hex(0x7A3A52),dangerText=hex(dangerTextHex)
+    static let warnBg=hex(warnBgHex),warnBorder=hex(0x6B5622),warnText=hex(warnTextHex),border=hex(0x3A3352)
+    /// Minimum touch target in points.
+    static let touch:CGFloat=44
+    static func contrast(_ fg:UInt32,_ bg:UInt32)->Double {
+        func lum(_ v:UInt32)->Double {
+            let c=[Double(v>>16&0xFF),Double(v>>8&0xFF),Double(v&0xFF)].map{$0/255}.map{$0<=0.03928 ? $0/12.92 : pow(($0+0.055)/1.055,2.4)}
+            return 0.2126*c[0]+0.7152*c[1]+0.0722*c[2]
+        }
+        let a=lum(fg),b=lum(bg)
+        return (max(a,b)+0.05)/(min(a,b)+0.05)
+    }
+}
+
+/// Primary, secondary and a soft destructive style. Disabled is a muted surface with muted text, not faded.
+struct GDButtonStyle:ButtonStyle {
+    enum Tone { case primary, secondary, danger }
+    var tone:Tone = .primary
+    @Environment(\.isEnabled) private var enabled
+    func makeBody(configuration:Configuration)->some View {
+        let fill:Color = !enabled ? GDTheme.raised : tone == .primary ? GDTheme.primary : tone == .danger ? GDTheme.dangerBg : GDTheme.secondaryBg
+        let ink:Color = !enabled ? GDTheme.muted : tone == .primary ? .white : tone == .danger ? GDTheme.dangerText : GDTheme.secondaryText
+        let edge:Color = !enabled ? GDTheme.border : tone == .primary ? GDTheme.primary : tone == .danger ? GDTheme.dangerBorder : GDTheme.secondaryBorder
+        configuration.label.font(.body.weight(.semibold)).foregroundStyle(ink)
+            .padding(.horizontal,16).frame(minWidth:GDTheme.touch,minHeight:GDTheme.touch)
+            .background(fill,in:RoundedRectangle(cornerRadius:12))
+            .overlay(RoundedRectangle(cornerRadius:12).stroke(edge,lineWidth:1))
+            .opacity(configuration.isPressed ? 0.85 : 1)
+            .contentShape(Rectangle())
+    }
+}
+
+/// Non-blocking "Payment due" banner. Shows the server `graceEndsAt` date; no grace length is assumed.
+struct PaymentDueBanner:View {
+    let text:String
+    let pay:()->Void
+    var body:some View {
+        VStack(alignment:.leading,spacing:10){
+            Text(text).font(.subheadline).foregroundStyle(GDTheme.warnText)
+            Button("Pay",action:pay).buttonStyle(GDButtonStyle(tone:.primary)).accessibilityIdentifier("payment-due").accessibilityLabel("Pay for this workspace")
+        }.padding(14).frame(maxWidth:.infinity,alignment:.leading)
+        .background(GDTheme.warnBg,in:RoundedRectangle(cornerRadius:12))
+        .overlay(RoundedRectangle(cornerRadius:12).stroke(GDTheme.warnBorder,lineWidth:1))
+        .accessibilityElement(children:.contain)
+    }
+}
+
+private let violet=GDTheme.kicker
+private let canvas=GDTheme.bg
+private let panel=GDTheme.surface
 @main struct GenDragoonMobileApp:App {
     @StateObject private var session=MobileSession()
     var body:some Scene{WindowGroup{MobileRoot().environmentObject(session).preferredColorScheme(.dark).tint(violet).onOpenURL{_ = GIDSignIn.sharedInstance.handle($0)}}}
@@ -55,7 +111,7 @@ private struct GraceBannerPreview:View {
     var body:some View {
         ScrollView{VStack(alignment:.leading,spacing:20){
             Text("My cloud").font(.largeTitle.weight(.bold)).accessibilityIdentifier("payment-grace")
-            HStack{Text(WorkspacePolicy.paymentDue).font(.headline);Spacer();Button("Pay"){}.accessibilityIdentifier("payment-due")}.padding(14).background(panel,in:RoundedRectangle(cornerRadius:12))
+            PaymentDueBanner(text:WorkspacePolicy.paymentDueText(graceEndsAtMs:1700518400000)){}
             Text("Uploads stay available during the grace period.").foregroundStyle(.secondary)
         }.padding(20)}.background(canvas)
     }
@@ -140,7 +196,9 @@ private struct MobileLibrary:View {
             HStack{VStack(alignment:.leading,spacing:7){Text("YOUR DIGITAL SPACE").font(.system(size:9,weight:.bold,design:.monospaced)).tracking(2).foregroundStyle(violet);Text("My cloud").font(.largeTitle.weight(.bold)).tracking(-1);Text("Everything you need. Nothing in your way.").font(.caption).foregroundStyle(.secondary)};Spacer();Image(systemName:"cloud.fill").font(.system(size:37)).foregroundStyle(violet).padding(15).background(violet.opacity(0.12),in:RoundedRectangle(cornerRadius:21))}
             Picker("Workspace",selection:$cloud.selected){Text(cloud.freePickerLabel).tag("free");ForEach(cloud.choices){Text($0.pickerLabel).tag($0.id)}}.pickerStyle(.menu).frame(maxWidth:.infinity,alignment:.leading).padding(8).background(panel,in:RoundedRectangle(cornerRadius:11)).disabled(cloud.busy)
             if cloud.paymentDueBanner {
-                HStack{Text(WorkspacePolicy.paymentDue).font(.headline);Spacer();Button("Pay"){cloud.status=WorkspacePolicy.paymentDue}.accessibilityIdentifier("payment-due")}.padding(14).background(panel,in:RoundedRectangle(cornerRadius:12))
+                PaymentDueBanner(text:cloud.paymentDueText){
+                    if let url=cloud.paymentCheckout {UIApplication.shared.open(url)} else {cloud.status=WorkspacePolicy.paymentDue}
+                }
             }
             if let c=cloud.config{
                 HStack(spacing:12){metric("Used / total",size(c.usedBytes)+" / "+size(c.quotaBytes));metric("Parallel transfers",String((cloud.dataSaver||cloud.constrainedNetwork) ? 1:min(4,c.transfer.workers)))}

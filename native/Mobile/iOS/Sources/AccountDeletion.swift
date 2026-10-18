@@ -31,6 +31,10 @@ struct AccountDeletion:Equatable {
     var repeatDelete=false
     /// Non-retryable failure. The screen shows `SupportContact.address` next to Dismiss.
     var showSupport=false
+    /// A support 409 asked for a status refresh. If that refresh fails, fall back to mailto.
+    var supportRefresh=false
+    /// Set when a failed support refresh needs the screen to open the mailto fallback once.
+    var openSupportMailto=false
     /// Dismiss clears the saved job and wipes nothing.
     var dismissible=false
     /// Dismiss already cleared the job. Retry must not send DELETE after that.
@@ -157,13 +161,18 @@ struct AccountDeletion:Equatable {
             message=result.message
             return false
         case .refresh:
-            _=refreshAfterSupport()
+            if !refreshAfterSupport() {supportFallback();return true}
+            supportRefresh=true
             return false
         case .mailto:
+            supportFallback()
             return true
-        case .hold:
-            return false
         }
+    }
+    /// Mailto fallback for a support request. Stays on the failure screen; never moves to sign-in.
+    private mutating func supportFallback(){
+        supportRefresh=false;showSupport=true;dismissible=true;dropReceipt=false;wipe=false
+        if step != .failed || message==nil {fail("We couldn't reach support. Email us and we'll finish deleting your account.")}
     }
     /// A non-retryable failure keeps the job until Dismiss. Dismiss wipes nothing.
     private mutating func noteNotRetryable(_ reportedJobId:String?){
@@ -283,6 +292,16 @@ struct AccountDeletion:Equatable {
     }
     mutating func completePoll(_ exchange:DeletionExchange) {
         guard keepsPolling() else {return}
+        if supportRefresh {
+            supportRefresh=false
+            let ok = !exchange.failed && (exchange.body.map{$0.status>=200 && $0.status<300} ?? false)
+            if !ok {
+                lastHttp=exchange.body
+                supportFallback()
+                openSupportMailto=true
+                return
+            }
+        }
         guard !exchange.failed,let body=exchange.body else {
             plainError=false
             lastHttp=nil

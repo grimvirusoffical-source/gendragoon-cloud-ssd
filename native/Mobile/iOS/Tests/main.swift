@@ -961,34 +961,97 @@ final class AccountLogicTests: XCTestCase {
         XCTAssertTrue(SupportContact.mailto(jobId:flow.jobId)?.absoluteString.hasPrefix("mailto:SUPPORT_CONTACT_PLACEHOLDER@invalid") ?? false)
     }
 
-    /// Provisional. Riley's `support-unauthorized` fixture has not landed on PR #6 (`d33970c`), so this 401 body is local.
-    func testProvisionalSupportUnauthorizedOpensMailtoAndNeverSignIn() async {
+    /// Riley PR #6 at `0486412`: `support-unauthorized.json`. Required, no auth header at all.
+    func testSupportUnauthorizedFixtureOpensMailtoAndNeverSignIn() async {
         XCTAssertFalse(DeletionSupport.enabled)
-        let unauthorized="{\"error\":\"unauthorized\"}"
+        XCTAssertEqual(BackendFixtures.responseStatus(area:"account-deletion",name:"support-unauthorized"),401)
+        let unauthorized=BackendFixtures.responseBodyString(area:"account-deletion",name:"support-unauthorized")
+        XCTAssertEqual(CloudSignals.jsonString(unauthorized,"error"),"unauthorized")
+        XCTAssertEqual(BackendFixtures.requestBodyString(area:"account-deletion",name:"support-unauthorized"),"")
+        XCTAssertTrue(BackendFixtures.requestPath(area:"account-deletion",name:"support-unauthorized").hasSuffix("/support-request"))
         let coded=DeletionSupport.interpret(status:401,body:unauthorized,transportFailed:false)
-        let blank=DeletionSupport.interpret(status:401,body:"",transportFailed:false)
-        let noCode=DeletionSupport.interpret(status:401,body:"{}",transportFailed:false)
         XCTAssertEqual(coded.kind,.mailto)
-        XCTAssertEqual(blank.kind,coded.kind)
-        XCTAssertEqual(noCode.kind,coded.kind)
-        XCTAssertTrue(coded.opensMailto)
-        XCTAssertEqual(DeletionSupport.interpret(status:401,body:"{\"error\":\"invalid_token\"}",transportFailed:false).kind,.hold)
+        XCTAssertEqual(DeletionSupport.interpret(status:401,body:"",transportFailed:false).kind,.mailto)
+        XCTAssertEqual(DeletionSupport.interpret(status:401,body:"{}",transportFailed:false).kind,.mailto)
+        XCTAssertEqual(DeletionSupport.interpret(status:401,body:"{\"error\":\"invalid_token\"}",transportFailed:false).kind,.mailto)
         let dead=fixture("status-failed-not-retryable")
         var flow=AccountDeletion.resume(DeletionReceipt.of(jobId:dead.jobId ?? "",statusToken:token))
         let script=ScriptedDeletionTransport()
         script.respond(dead)
         await flow.pollThrough(script)
-        XCTAssertEqual(flow.step,.failed)
         let kept=flow.message
         XCTAssertTrue(flow.applySupport(coded))
         XCTAssertEqual(flow.step,.failed)
-        XCTAssertNotEqual(flow.step,.reauth)
-        XCTAssertNotEqual(flow.step,.signedOut)
         XCTAssertFalse(flow.repeatDelete)
         XCTAssertFalse(flow.clearSession)
         XCTAssertEqual(flow.message,kept)
         XCTAssertFalse(flow.message?.contains("Sign in") ?? true)
-        XCTAssertTrue(SupportContact.mailto(jobId:flow.jobId)?.absoluteString.hasPrefix("mailto:SUPPORT_CONTACT_PLACEHOLDER@invalid") ?? false)
+    }
+
+    func testSupportOtherClientErrorsAndServerErrorsOpenMailto() async {
+        for status in [400,403,404,405,409,410,413,422,500,502,503] {
+            XCTAssertEqual(DeletionSupport.interpret(status:status,body:"{\"error\":\"x\"}",transportFailed:false).kind,.mailto,"status \(status)")
+        }
+        XCTAssertEqual(DeletionSupport.interpret(status:0,body:"",transportFailed:true).kind,.mailto)
+        XCTAssertEqual(DeletionSupport.interpret(status:202,body:"{}",transportFailed:false).kind,.mailto)
+        let dead=fixture("status-failed-not-retryable")
+        for status in [400,403,413,422] {
+            var flow=AccountDeletion.resume(DeletionReceipt.of(jobId:dead.jobId ?? "",statusToken:token))
+            let script=ScriptedDeletionTransport()
+            script.respond(dead)
+            await flow.pollThrough(script)
+            XCTAssertTrue(flow.applySupport(DeletionSupport.interpret(status:status,body:"",transportFailed:false)))
+            XCTAssertEqual(flow.step,.failed)
+            XCTAssertTrue(flow.showSupport)
+        }
+    }
+
+    func testSupportJobMismatchSendsNothing() {
+        let job=fixture("status-failed-not-retryable").jobId ?? ""
+        XCTAssertTrue(DeletionSupport.call(jobId:job,savedJobId:job,statusToken:token,enabled:true).send)
+        let other=DeletionSupport.call(jobId:job,savedJobId:"00000000-0000-4000-8000-0000000000ff",statusToken:token,enabled:true)
+        XCTAssertFalse(other.send)
+        XCTAssertNil(other.path)
+        XCTAssertNil(other.authorization)
+        XCTAssertFalse(DeletionSupport.call(jobId:job,savedJobId:nil,statusToken:token,enabled:true).send)
+        XCTAssertFalse(DeletionSupport.call(jobId:job,savedJobId:job,statusToken:token,enabled:false).send)
+    }
+
+    func testSupportRefreshFailureAfter409OpensMailtoAndNeverSignIn() async {
+        let dead=fixture("status-failed-not-retryable")
+        let refresh=DeletionSupport.interpret(status:409,body:BackendFixtures.responseBodyString(area:"account-deletion",name:"support-not-needed"),transportFailed:false)
+        XCTAssertEqual(refresh.kind,.refresh)
+        let failures:[Result<AccountHttp,Error>]=[
+            .failure(ReplacementFailure.offline),
+            .success(AccountHttp.parse(status:503,data:Data())),
+            .success(AccountHttp.parse(status:401,data:Data("{\"error\":\"invalid_token\"}".utf8))),
+        ]
+        for failure in failures {
+            var flow=AccountDeletion.resume(DeletionReceipt.of(jobId:dead.jobId ?? "",statusToken:token))
+            let first=ScriptedDeletionTransport()
+            first.respond(dead)
+            await flow.pollThrough(first)
+            XCTAssertFalse(flow.applySupport(refresh))
+            XCTAssertTrue(flow.keepsPolling())
+            let script=ScriptedDeletionTransport()
+            switch failure {
+            case .success(let body): script.respond(body)
+            case .failure(let error): script.fail(error)
+            }
+            await flow.pollThrough(script)
+            XCTAssertTrue(flow.openSupportMailto)
+            XCTAssertEqual(flow.step,.failed)
+            XCTAssertNotEqual(flow.step,.reauth)
+            XCTAssertFalse(flow.clearSession)
+            XCTAssertTrue(flow.showSupport)
+            XCTAssertFalse(flow.message?.contains("Sign in") ?? true)
+        }
+        var ok=AccountDeletion.resume(DeletionReceipt.of(jobId:dead.jobId ?? "",statusToken:token))
+        let a=ScriptedDeletionTransport();a.respond(dead);await ok.pollThrough(a)
+        _=ok.applySupport(refresh)
+        let b=ScriptedDeletionTransport();b.respond(dead);await ok.pollThrough(b)
+        XCTAssertFalse(ok.openSupportMailto)
+        XCTAssertFalse(ok.supportRefresh)
     }
 
     /// Riley PR #5 at 0715b1a. Labels come from the server fields. `feeWaived` is required.
@@ -1054,6 +1117,17 @@ final class AccountLogicTests: XCTestCase {
     }
 
     /// Riley PR #5 at 0715b1a. Busy and deleting use the documented status strings. Lock and grace use the fixtures.
+    func testThemeContrastIsAA() {
+        let pairs:[(UInt32,UInt32)]=[
+            (GDTheme.textHex,GDTheme.bgHex),(GDTheme.textHex,GDTheme.surfaceHex),(GDTheme.mutedHex,GDTheme.surfaceHex),
+            (GDTheme.mutedHex,GDTheme.raisedHex),(GDTheme.kickerHex,GDTheme.bgHex),(0xFFFFFF,GDTheme.primaryHex),
+            (GDTheme.secondaryTextHex,GDTheme.secondaryBgHex),(GDTheme.dangerTextHex,GDTheme.dangerBgHex),(GDTheme.warnTextHex,GDTheme.warnBgHex),
+        ]
+        for (fg,bg) in pairs {XCTAssertGreaterThanOrEqual(GDTheme.contrast(fg,bg),4.5,String(format:"%06X on %06X",fg,bg))}
+        XCTAssertLessThan(GDTheme.contrast(GDTheme.dangerBgHex,GDTheme.surfaceHex),1.5)
+        XCTAssertGreaterThanOrEqual(GDTheme.touch,44)
+    }
+
     func testWorkspaceBusyDeletingLockAndGrace() {
         XCTAssertFalse(WorkspacePrice.enabled)
         XCTAssertFalse(EncryptedWorkspace.ENCRYPTED_WORKSPACE_ENABLED)
@@ -1090,13 +1164,15 @@ final class AccountLogicTests: XCTestCase {
         let demoted=hosted["demoted"] as? [String:Any]
         let through=(demoted?["paidThroughMs"] as? NSNumber)?.int64Value ?? 0
         let graceEnd=(demoted?["graceEndsAt"] as? NSNumber)?.int64Value ?? 0
-        XCTAssertEqual(graceEnd,through+WorkspacePolicy.graceMs)
-        XCTAssertTrue(WorkspacePolicy.isPaymentDue(paidThroughMs:through,nowMs:through,lapsed:false))
-        XCTAssertTrue(WorkspacePolicy.isPaymentDue(paidThroughMs:through,nowMs:graceEnd-1,lapsed:false))
-        XCTAssertFalse(WorkspacePolicy.isPaymentDue(paidThroughMs:through,nowMs:graceEnd,lapsed:false))
-        XCTAssertFalse(WorkspacePolicy.isPaymentDue(paidThroughMs:through,nowMs:through-1,lapsed:false))
-        XCTAssertFalse(WorkspacePolicy.isPaymentDue(paidThroughMs:through,nowMs:through,lapsed:true))
-        XCTAssertFalse(WorkspacePolicy.isPaymentDue(paidThroughMs:nil,nowMs:through,lapsed:false))
+        // #5 is still blocked; this fixture may be regenerated. Use graceEndsAt as sent.
+        XCTAssertGreaterThan(graceEnd,through)
+        XCTAssertTrue(WorkspacePolicy.isPaymentDue(graceEndsAtMs:graceEnd,nowMs:through,lapsed:false))
+        XCTAssertTrue(WorkspacePolicy.isPaymentDue(graceEndsAtMs:graceEnd,nowMs:graceEnd-1,lapsed:false))
+        XCTAssertFalse(WorkspacePolicy.isPaymentDue(graceEndsAtMs:graceEnd,nowMs:graceEnd,lapsed:false))
+        XCTAssertFalse(WorkspacePolicy.isPaymentDue(graceEndsAtMs:graceEnd,nowMs:through,lapsed:true))
+        XCTAssertFalse(WorkspacePolicy.isPaymentDue(graceEndsAtMs:nil,nowMs:through,lapsed:false))
+        XCTAssertTrue(WorkspacePolicy.isPaymentDue(graceEndsAtMs:graceEnd+86_400_000*10,nowMs:graceEnd+1,lapsed:false))
+        XCTAssertEqual(WorkspacePolicy.paymentDueText(graceEndsAtMs:graceEnd),"Payment due. Pay by Nov 20, 2023 to keep using this workspace.")
         XCTAssertEqual(WorkspacePolicy.paymentDue,"Payment due")
         XCTAssertEqual(BackendFixtures.responseStatus(area:"workspaces",name:"byo-in-grace"),201)
         XCTAssertTrue(BackendFixtures.requestPath(area:"workspaces",name:"byo-in-grace").contains("11111111-1111-4111-8111-000000000021"))

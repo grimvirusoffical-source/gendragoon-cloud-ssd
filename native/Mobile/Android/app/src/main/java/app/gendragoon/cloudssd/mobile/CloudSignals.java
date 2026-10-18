@@ -181,14 +181,14 @@ final class WorkspacePrice {
 
 /**
  * A 409 {@code workspace_busy} keeps the workspace. A {@code deleting} row shows "Deleting..."
- * and disables its actions. An unpaid BYO workspace locks only itself. The 3-day grace period
- * is a non-blocking "Payment due" banner with a Pay button.
+ * and disables its actions. An unpaid BYO workspace locks only itself. During grace the server
+ * sends {@code graceEndsAt}; the client shows a non-blocking "Payment due" banner with that date
+ * and a Pay button, and never assumes a grace length.
  */
 final class WorkspacePolicy {
     static final String BUSY="busy, try again";
     static final String DELETING="Deleting...";
     static final String PAYMENT_DUE="Payment due";
-    static final long GRACE_MS=3L*24L*60L*60L*1000L;
     private WorkspacePolicy(){}
     static boolean keepsWorkspace(int status,String error){return status==409&&"workspace_busy".equals(error);}
     static String deleteNotice(int status,String error){return keepsWorkspace(status,error)?BUSY:null;}
@@ -210,11 +210,16 @@ final class WorkspacePolicy {
         if(!"lapsed".equals(lock.reasonText()))return true;
         return locksThisWorkspace(selectedId,kind,isFree,lock.unpaidIds);
     }
-    /** {@code paidThroughMs <= now < paidThroughMs + 3 days}, and the workspace is not already lapsed. */
-    static boolean paymentDue(Long paidThroughMs,long nowMs,boolean lapsed){
-        if(lapsed||paidThroughMs==null)return false;
-        long end=paidThroughMs+GRACE_MS;
-        return nowMs>=paidThroughMs&&nowMs<end;
+    /** Due while {@code now < graceEndsAt} from the server, and the workspace is not already lapsed. */
+    static boolean paymentDue(Long graceEndsAtMs,long nowMs,boolean lapsed){
+        if(lapsed||graceEndsAtMs==null||graceEndsAtMs<=0)return false;
+        return nowMs<graceEndsAtMs;
+    }
+    /** Banner copy. The date is the server {@code graceEndsAt}, formatted in UTC. */
+    static String paymentDueText(long graceEndsAtMs){
+        String date=java.time.format.DateTimeFormatter.ofPattern("MMM d, yyyy",java.util.Locale.US)
+                .withZone(java.time.ZoneOffset.UTC).format(java.time.Instant.ofEpochMilli(graceEndsAtMs));
+        return PAYMENT_DUE+". Pay by "+date+" to keep using this workspace.";
     }
 }
 
