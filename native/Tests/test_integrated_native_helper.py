@@ -37,6 +37,8 @@ class NativeHelperTests(unittest.TestCase):
         production = production[production.index("enum GDRuntime {"):
                                 production.index("@MainActor private final class GDNativeUploadSignal:")]
         account = (NATIVE / "Sources/GDAccountContract.swift").read_text()
+        # GDAccountContract's support messages name GDSupportContact.current.
+        account += (NATIVE / "Sources/GDSupportContact.swift").read_text()
         source = cls.root / "HelperRegression.swift"
         source.write_text("import Foundation\nimport Darwin\n" + account + production + HARNESS)
         compiled = subprocess.run(["/usr/bin/xcrun", "swiftc", "-parse-as-library", str(source),

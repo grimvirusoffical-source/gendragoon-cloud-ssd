@@ -275,7 +275,6 @@ final class AccountDeletionMonitorInvalidTokenTests: XCTestCase {
         let session = FakeSession()
         var wiped = 0
         let deletion = monitor(transport, jobs, session) { wiped += 1 }
-        deletion.offersPollRetry = true
         await deletion.retrySavedDeletion()
         XCTAssertEqual(transport.sent.map(\.method), ["DELETE"])
         XCTAssertEqual(deletion.notRetryable, GDDeletionNotRetryable(jobId: "00000000-0000-4000-8000-000000000009"))
