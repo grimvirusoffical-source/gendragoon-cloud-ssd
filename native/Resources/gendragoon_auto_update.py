@@ -501,7 +501,13 @@ def launch_app(app=None,timeout=20):
             stable=sorted(set(found).intersection(app_pids(app)))
             if stable:return stable
         time.sleep(0.25)
-    raise RuntimeError("Updated app launch was not observed at its exact executable path")
+    try:
+        raise RuntimeError("Updated app launch was not observed at its exact executable path")
+    except RuntimeError as error:
+        import redxai_updater
+        handled=redxai_updater.offer_relaunch(app)
+        if not handled:raise
+        return handled
 
 def process_records(app,pids):
     from gendragoon_app_control import identify

@@ -192,12 +192,12 @@ enum GDProjectContent: String { case files, applications }
             projectLimit = policy["projectLimit"] as? Int
             projectCount = policy["usedProjectSlots"] as? Int
             let free = policy["freeProjectAvailable"] as? Bool == true || policy["ownerFeeWaived"] as? Bool == true
-            nextProjectCents = free ? 0 : policy["newProjectOneTimeCents"] as? Int
+            nextProjectCents = free ? 0 : (policy["newProjectMonthlyCents"] as? Int ?? policy["newProjectOneTimeCents"] as? Int)
         }
         files = []; workspaceName = nil
         if let selected = selectedProject {
             if selected.archived { status = "This project is archived. Its cloud files are retained; restore the project to access them."; return }
-            if selected.pendingPayment { status = "This project is awaiting its one-time project payment. Complete checkout before uploading."; return }
+            if selected.pendingPayment { status = "This extra workspace is awaiting its $5/month subscription. The free workspace stays available."; return }
             if selected.pendingCapacity { status = "Payment is confirmed. Free a project slot, then activate this project; no new project fee is required."; return }
             if !selected.provisioned { status = "This project is being prepared. Refresh to check its storage activation."; return }
         } else if selectedWorkspace != "free" {
@@ -617,8 +617,8 @@ struct GenDragoonFreeCloudPanel: View {
             Text("New project").font(.system(size: 24, weight: .bold, design: .rounded))
             TextField("Project name", text: $projectName).textFieldStyle(.roundedBorder)
             if let fee = customer.nextProjectCents {
-                Text(fee == 0 ? "Your first project is free." : String(format: "This new project costs $%.2f once. Storage and performance subscriptions are separate.", Double(fee) / 100)).font(.system(size: 12)).foregroundStyle(.secondary)
-            } else { Text("Your first project is free. Additional new projects require a one-time $5 payment, confirmed in Stripe before activation.").font(.system(size: 12)).foregroundStyle(.secondary) }
+                Text(fee == 0 ? "Your first workspace is free." : String(format: "This additional workspace is $%.2f per month. The free workspace is not replaced.", Double(fee) / 100)).font(.system(size: 12)).foregroundStyle(.secondary)
+            } else { Text("Your first workspace is free. Each additional workspace is a $5/month subscription.").font(.system(size: 12)).foregroundStyle(.secondary) }
             if let limit = customer.projectLimit { Text("\(customer.projectCount ?? customer.activeProjects.count) of \(limit) project slots used.").font(.caption).foregroundStyle(.secondary) }
             HStack { Button("Cancel") { showCreate = false }; Spacer(); Button("Create Project") { customer.create(name: projectName); showCreate = false; projectName = "" }.buttonStyle(.borderedProminent).disabled(projectName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty) }
         }.padding(28).frame(width: 440)

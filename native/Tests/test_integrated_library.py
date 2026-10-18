@@ -207,6 +207,24 @@ class LibraryTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError,"Restored content"):library.clear_cache(result["key"],"project-one","bucket-one")
         self.assertEqual(cache.read_bytes(),b"local user changes")
 
+    def test_inherited_maintenance_fd_is_not_locked_again(self):
+        import fcntl
+        lock=self.support/"AutoUpdates/update.lock"
+        lock.parent.mkdir(parents=True,exist_ok=True)
+        descriptor=os.open(lock,os.O_CREAT|os.O_RDWR,0o600)
+        try:
+            fcntl.flock(descriptor,fcntl.LOCK_EX|fcntl.LOCK_NB)
+            def refuse(*args,**kwargs):
+                raise AssertionError("inherited maintenance fd must not be locked again")
+            with patch.object(library.fcntl,"flock",refuse):
+                with library.maintenance_lock(descriptor):
+                    pass
+            with self.assertRaises(RuntimeError):
+                with library.maintenance_lock():
+                    pass
+        finally:
+            os.close(descriptor)
+
     def test_maintenance_lease_serializes_direct_and_inherited_operations(self):
         with library.maintenance_lock():
             with self.assertRaises(RuntimeError):

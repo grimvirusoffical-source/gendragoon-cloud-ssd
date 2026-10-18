@@ -47,7 +47,11 @@ class ConnectionTests(unittest.TestCase):
         for item in reversed(self.patches):item.stop()
         self.temporary.cleanup()
 
-    def google(self,gcloud,url):
+    def google(self,gcloud,url,body=None):
+        if "userinfo" in url:return {"email":"owner@example.com"}
+        if "getIamPolicy" in url:
+            self.assertEqual(body,{})
+            return {"bindings":[{"role":"roles/owner","members":["user:owner@example.com"]}]}
         if "cloudresourcemanager" in url:return {"projectId":"project-one","projectNumber":"123456","lifecycleState":"ACTIVE"}
         return {"name":"bucket-one","projectNumber":self.bucket_project}
 
@@ -73,7 +77,7 @@ class ConnectionTests(unittest.TestCase):
         self.assertEqual(state["destination"],{"project":"project-one","bucket":"bucket-one","remote":"gendragoon","prefix":"GenDragoon-App-Library"})
         self.assertEqual(self.mock_reply.call_args.kwargs["workspace"],state)
         self.assertEqual(self.mock_reply.call_args.kwargs["context"],state["destination"])
-        self.assertEqual(self.mock_api.call_count,2)
+        self.assertEqual(self.mock_api.call_count,4)
         self.assertIn(b"[existing]",self.config.read_bytes())
         self.assertIn(b"env_auth = true",self.config.read_bytes())
         self.assertEqual(self.config.stat().st_mode&0o777,0o600)
@@ -174,6 +178,18 @@ class ConnectionTests(unittest.TestCase):
         creation=[call.args[0] for call in self.mock_command.call_args_list if "config" in call.args[0]]
         self.assertEqual(len(creation),1)
         self.assertIn("create",creation[0]);self.assertIn("google cloud storage",creation[0])
+
+    def test_bucket_outside_an_owned_project_is_rejected(self):
+        before=self.selected()
+        def foreign(gcloud,url,body=None):
+            if "userinfo" in url:return {"email":"owner@example.com"}
+            if "getIamPolicy" in url:return {"bindings":[{"role":"roles/viewer","members":["user:owner@example.com"]}]}
+            if "cloudresourcemanager" in url:return {"projectId":"project-one","projectNumber":"123456","lifecycleState":"ACTIVE"}
+            return {"name":"bucket-one","projectNumber":"123456"}
+        with patch.object(connect,"google_json",side_effect=foreign):
+            with self.assertRaisesRegex(RuntimeError,"not owned"):connect.configure("project-one","bucket-one")
+        self.assertEqual(self.selected(),before);self.assertEqual(self.config.read_bytes(),self.original)
+        self.mock_command.assert_not_called()
 
     def test_custom_native_install_uses_adjacent_bundle_rclone(self):
         helper=Path("/Applications/GenDragoon Cloud SSD.app/Contents/Resources/gendragoon_connect.py")

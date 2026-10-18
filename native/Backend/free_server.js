@@ -13,6 +13,7 @@ const {TransferGovernor}=require("./free_performance");
 const {installedBilling}=require("./billing_gateway");
 const {createProjectService,ProjectError}=require("./projects");
 const {effectiveStorageQuota,effectiveWorkers}=require("./billing_v2");
+const {reconcileAccount}=require("./workspace_subscriptions");
 const apiKeys=require("./api_keys");
 const required=["CUSTOMER_BUCKET","STORAGE_PROJECT_ID"];
 for(const key of required)if(!process.env[key])throw Error("Missing deployment environment variable: "+key);
@@ -94,6 +95,14 @@ function safeName(input){
 async function currentWorkspace(req,res){
  const doc=await req.workspaceRef.get();
  if(!doc.exists){res.status(404).json({error:"Create free workspace first"});return null}
+ const hash=accountKey(req.user.uid);
+ const [listed,free]=await Promise.all([
+  db.collection("gd_accounts").doc(hash).collection("workspaces").limit(201).get(),
+  db.collection("tenants").doc(hash).collection("workspaces").doc("free").get()]);
+ const rows=listed.docs.map(item=>({id:item.id,...item.data()}));
+ if(free.exists)rows.push({id:"free",...free.data()});
+ const report=reconcileAccount(rows);
+ if(report.blocked){res.status(423).json({error:"Remove or merge the workspaces that are not covered by an active subscription before continuing.",code:"WORKSPACE_RECONCILIATION_REQUIRED",reconciliation:report});return null}
  const w=doc.data();
  if(w.accountKey!==accountKey(req.user.uid)||w.kind!=="free"){res.status(403).json({error:"Workspace access denied"});return null}
  if(effectiveStorageQuota(w)<=0){res.status(403).json({error:"This project is not active. Restore or activate it in Projects."});return null}

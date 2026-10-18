@@ -125,7 +125,7 @@ private struct GDDraftWorkspace: Identifiable, Codable {
     private var workspaceStorageCents: Int {
         newWorkspaceMode == "bundle" ? Int((quotedStorage.monthly*100).rounded()) : Int((storagePrice(quotedStorage)*100).rounded())
     }
-    private var workspaceChargeCents: Int { (workspaceStorageCents + 500) * (annual ? 10:1) }
+    private var workspaceChargeCents: Int { workspaceStorageCents * (annual ? 10:1) + 500 }
     private func saveWorkspaceDraft() {
         let name = newWorkspaceName.trimmingCharacters(in:.whitespacesAndNewlines)
         guard name.count >= 3 && name.count <= 64 && !name.contains("/") && !name.contains("\\") else {
@@ -424,12 +424,12 @@ private struct GDDraftWorkspace: Identifiable, Codable {
                     Text("Private workspace management fee")
                         .font(.system(size:12)).foregroundStyle(gdSecondary)
                     Spacer()
-                    Text(annual ? "$50.00" : "$5.00").font(.system(size:13,weight:.semibold))
+                    Text("$5.00/month").font(.system(size:13,weight:.semibold))
                 }
                 HStack {
                     Text("Total for this workspace").font(.system(size:17,weight:.bold))
                     Spacer()
-                    Text(gdMoney(Double(workspaceChargeCents)/100)+(annual ? "/year":"/month"))
+                    Text(annual ? gdMoney(Double(workspaceStorageCents*10)/100)+"/year storage + $5/month workspace" : gdMoney(Double(workspaceChargeCents)/100)+"/month")
                         .font(.system(size:21,weight:.heavy)).foregroundStyle(gdPurple)
                 }
                 GDPrimary(title:"Save workspace draft",icon:"plus.circle.fill") {saveWorkspaceDraft()}

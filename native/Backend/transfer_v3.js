@@ -3,6 +3,7 @@
 // Existing v1/v2 APIs and file records remain compatible. Never trusts client tier claims.
 const express=require("express"),crypto=require("node:crypto");
 const {effectiveWorkers,effectiveStorageQuota}=require("./billing_v2");
+const {reconcileAccount}=require("./workspace_subscriptions");
 const {scopeFromWorkspace,safeName}=require("./paid_storage");
 const {sendObject}=require("./range_download");
 const {nativeProfile}=require("./performance");
@@ -67,9 +68,22 @@ function registerTransferV3({app,db,bucket,firebaseAuth,accountKey,FieldValue,ap
    req.user={uid:verified.uid};req.authKind="api_key";next();
   }catch(_){res.status(503).json({error:"Authentication unavailable"});}
  }
+ async function accountWorkspaces(hash){
+  const [listed,free]=await Promise.all([
+   db.collection("gd_accounts").doc(hash).collection("workspaces").limit(201).get(),
+   db.collection("tenants").doc(hash).collection("workspaces").doc("free").get()]);
+  const rows=listed.docs.map(doc=>({id:doc.id,...doc.data()}));
+  if(free.exists&&!rows.some(row=>row.id==="free"))rows.push({id:"free",...free.data()});
+  return rows;
+ }
  async function context(req){
   const id=req.params.workspaceId,hash=accountKey(req.user.uid);
   if(id!=="free"&&!UUID.test(id))throw problem(400,"Invalid workspace");
+  const report=reconcileAccount(await accountWorkspaces(hash));
+  if(report.blocked){
+   const error=problem(423,"Remove or merge "+report.excess+" extra workspace"+(report.excess===1?"":"s")+" that "+(report.excess===1?"is":"are")+" not covered by an active subscription. Keep the free workspace plus "+report.paidCount+" paid subscription"+(report.paidCount===1?"":"s")+" ("+report.allowed+" total).");
+   error.code="WORKSPACE_RECONCILIATION_REQUIRED";error.reconciliation=report;throw error;
+  }
   const ref=id==="free"?db.collection("tenants").doc(hash).collection("workspaces").doc("free"):
    db.collection("gd_accounts").doc(hash).collection("workspaces").doc(id);
   const snap=await ref.get();if(!snap.exists)throw problem(404,"Workspace not found");
@@ -98,7 +112,8 @@ function registerTransferV3({app,db,bucket,firebaseAuth,accountKey,FieldValue,ap
    if(res.headersSent)return res.destroy();
    const status=error.status||(/Too many/.test(error.message)?429:503);
    if(status===429||status===503)res.set("Retry-After","2");
-   res.status(status).json({error:error.status?error.message:"Transfer unavailable; retry safely"});
+   res.status(status).json({error:error.status?error.message:"Transfer unavailable; retry safely",
+    ...(error.code?{code:error.code}:{}),...(error.reconciliation?{reconciliation:error.reconciliation}:{})});
   }
  });}
  const stamp=()=>FieldValue.serverTimestamp();

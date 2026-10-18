@@ -469,5 +469,22 @@ project=a.project,bucket=a.bucket,remote=a.remote,folder=a.folder,source=str(s),
         self.assertFalse(any(path.name == "__pycache__" for path in bundle.rglob("*")))
 
 
+    def test_category_folders_are_idempotent_and_editable(self):
+        self.assertEqual(workspace.category_key("photo.JPG"), "pictures")
+        self.assertEqual(workspace.category_key("clip.mov"), "videos")
+        self.assertEqual(workspace.category_key("song.flac"), "audio")
+        self.assertEqual(workspace.category_key("notes.pdf"), "documents")
+        self.assertEqual(workspace.category_key("Demo.app", "app"), "apps")
+        self.assertEqual(workspace.category_key("source.dmg"), "apps")
+        self.assertEqual(workspace.category_key("archive.zip"), "other")
+        self.assertEqual(workspace.categorized_prefix("apps/custom", "Applications"), "apps/custom/Applications")
+        self.assertEqual(workspace.categorized_prefix("apps/custom/Applications", "Applications"), "apps/custom/Applications")
+        self.assertEqual(workspace.categorized_prefix("library", "Music/Audio"), "library/Music/Audio")
+        saved = workspace.save_categories({"audio": "Music/Audio", "other": "Other"}, self.home)
+        self.assertEqual(saved["audio"], "Music/Audio")
+        self.assertEqual(workspace.load_categories(self.home)["pictures"], "Pictures")
+        with self.assertRaises(workspace.WorkspaceError):
+            workspace.save_categories({"other": "../secrets"}, self.home)
+
 if __name__ == "__main__":
     unittest.main()

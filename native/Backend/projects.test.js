@@ -40,15 +40,22 @@ test("parallel creation reserves at most10 slots and grants exactly one lifetime
  assert.equal(list.records.filter(w=>w.data.projectFeeStatus==="pending").length,9);
  assert.equal(f.calls.length,0);assert.equal(list.policy.freeProjectAvailable,false);
 });
-test("the upper cap requires both active qualifying entitlements on the same project",()=>{
+test("medium or highest storage or performance raises the cap to 20",()=>{
  const storage={...base,storageTier:"2TB",storageActive:true,storageMode:"standard"};
- assert.equal(qualifiesForHigherLimit(storage),false);
- assert.equal(qualifiesForHigherLimit({...storage,performanceActive:true,performanceTier:"boost"}),false);
- assert.equal(qualifiesForHigherLimit({...storage,performanceActive:true,performanceTier:"turbo"}),true);
+ assert.equal(qualifiesForHigherLimit(storage),true);
+ assert.equal(qualifiesForHigherLimit({...storage,performanceActive:true,performanceTier:"boost"}),true);
+ assert.equal(qualifiesForHigherLimit({...storage,storageTier:"100GB",performanceActive:true,performanceTier:"boost"}),false);
+ assert.equal(qualifiesForHigherLimit({...storage,storageTier:"100GB",storageActive:false,performanceActive:true,performanceTier:"turbo"}),true);
  assert.equal(qualifiesForHigherLimit({...storage,storageMode:"bundle"}),true);
- for(const patch of [{projectStatus:"archived"},{provisioned:false},{storageActive:false},{storageTier:"1TB"},{projectFeeStatus:"pending"}])
-   assert.equal(qualifiesForHigherLimit({...storage,storageMode:"bundle",...patch}),false);
- assert.equal(policyFor({},[storage,{...base,storageTier:"1TB",storageActive:true,performanceActive:true,performanceTier:"max"}]).projectLimit,10);
+ assert.equal(qualifiesForHigherLimit({...base,storageTier:"1TB",storageActive:true}),true);
+ assert.equal(qualifiesForHigherLimit({...base,storageTier:"6TB",storageActive:true}),true);
+ assert.equal(qualifiesForHigherLimit({...base,storageActive:false,performanceActive:true,performanceTier:"ultra"}),true);
+ for(const patch of [{projectStatus:"archived"},{provisioned:false},{storageActive:false,performanceActive:false},{storageTier:"100GB",performanceActive:false},{projectFeeStatus:"pending"}])
+   assert.equal(qualifiesForHigherLimit({...storage,storageMode:"bundle",performanceActive:false,...patch}),false);
+ assert.equal(policyFor({},[{...base,storageTier:"500GB",storageActive:true,performanceActive:true,performanceTier:"lite"}]).projectLimit,10);
+ assert.equal(policyFor({},[storage,{...base,storageTier:"1TB",storageActive:true,performanceActive:true,performanceTier:"max"}]).projectLimit,20);
+ assert.equal(policyFor({},[storage]).feeIsMonthlySubscription,true);
+ assert.equal(policyFor({},[storage]).newProjectMonthlyCents,500);
 });
 test("qualified accounts atomically reserve at most20 projects and owner waiver does not bypass the cap",async()=>{
  const f=fixture({ownerBenefits:true});f.put(idFor(1),{storageActive:true,storageTier:"2TB",storageMode:"bundle"});

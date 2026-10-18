@@ -1,0 +1,12 @@
+{
+  "apps": [
+    {
+      "bundleId": "app.gendragoon.cloudssd",
+      "appName": "GenDragoon Cloud SSD",
+      "repo": "grimvirusoffical-source/gendragoon-cloud-ssd",
+      "zipPrefix": "GenDragoon-Cloud-SSD-Mac-",
+      "installPath": "~/Applications/GenDragoon Cloud SSD.app",
+      "channel": "stable"
+    }
+  ]
+}

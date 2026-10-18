@@ -37,7 +37,7 @@ struct GDServerBillingCatalog: Decodable {
     struct BYO: Decodable { let monthlyCents: Int; let yearlyCents: Int }
     struct Ads: Decodable { let oneTimeCents: Int }
     struct Projects: Decodable {
-        let firstFree: Bool; let additionalOneTimeCents: Int; let defaultLimit: Int; let qualifiedLimit: Int
+        let firstFree: Bool; let additionalOneTimeCents: Int; let additionalMonthlyCents: Int?; let defaultLimit: Int; let qualifiedLimit: Int
         let qualificationLabel: String; let paymentAvailable: Bool
     }
     let catalogVersion: Int?
@@ -388,7 +388,7 @@ struct GenDragoonStripePurchases: View {
             }
             if let catalog = billing.catalog { purchaseContent(catalog) }
             if focus != "ads", let policy = billing.catalog?.projects {
-                Text("One project is free. Each new project after that costs \(money(policy.additionalOneTimeCents)) once and starts with 2 GB basic storage. Up to \(policy.defaultLimit) projects, or \(policy.qualifiedLimit) with \(policy.qualificationLabel.lowercased()).").font(.system(size: 11)).foregroundStyle(.secondary)
+                Text("The base workspace is free. Each additional workspace is \(money(policy.additionalMonthlyCents ?? 500))/month. If those subscriptions lapse, you keep the free workspace plus every workspace that is still paid. Up to \(policy.defaultLimit) workspaces, or \(policy.qualifiedLimit) with \(policy.qualificationLabel.lowercased()).").font(.system(size: 11)).foregroundStyle(.secondary)
                 Text("Existing subscriptions keep their current billing terms. Use Manage Billing to change or cancel an active subscription.").font(.system(size: 11)).foregroundStyle(.secondary)
             }
             if billing.busy { ProgressView() }

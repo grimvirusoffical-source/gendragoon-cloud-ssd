@@ -3,8 +3,9 @@
 // a Google Cloud project, a bucket, a file record, or an object.
 const crypto=require("node:crypto");
 const {STORAGE,PERFORMANCE,validateWorkspaceName}=require("./catalog");
-const PROJECT_FEE_CENTS=500,DEFAULT_PROJECT_LIMIT=10,QUALIFIED_PROJECT_LIMIT=20;
-const QUALIFYING_STORAGE_GB=2000,QUALIFYING_WORKERS=8,BASIC_QUOTA_BYTES=2_000_000_000;
+const subscriptions=require("./workspace_subscriptions");
+const PROJECT_FEE_CENTS=subscriptions.MONTHLY_CENTS,DEFAULT_PROJECT_LIMIT=subscriptions.DEFAULT_LIMIT,QUALIFIED_PROJECT_LIMIT=subscriptions.QUALIFIED_LIMIT;
+const QUALIFYING_STORAGE_GB=1000,QUALIFYING_WORKERS=8,BASIC_QUOTA_BYTES=2_000_000_000;
 const UUID=/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
 const INTENT=/^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i;
 class ProjectError extends Error {
@@ -32,23 +33,21 @@ function effectiveStorageQuota(w){
  return activatedBasicProject(w)?BASIC_QUOTA_BYTES:0;
 }
 function qualifiesForHigherLimit(w){
- if(projectStatus(w)!=="active"||w.storageActive!==true||w.provisioned!==true||
-    !Object.hasOwn(STORAGE,w.storageTier||"")||STORAGE[w.storageTier].gb<QUALIFYING_STORAGE_GB)return false;
+ if(projectStatus(w)!=="active"||w.provisioned!==true)return false;
  if(w.projectBillingVersion===2&&!activatedBasicProject(w))return false;
- const extra=w.performanceActive===true&&Object.hasOwn(PERFORMANCE,w.performanceTier||"")?PERFORMANCE[w.performanceTier].workers:0;
- const bundled=w.storageMode==="bundle"?Math.min(24,Math.max(2,Math.floor(STORAGE[w.storageTier].gb/250))):0;
- return Math.max(extra,bundled)>=QUALIFYING_WORKERS;
+ return subscriptions.tierQualifies(w);
 }
 function policyFor(account,projects,{ownerBenefits=false,paymentAvailable=false}={}){
  const current=projects.filter(w=>projectStatus(w)!=="archived");
  const qualified=current.some(qualifiesForHigherLimit);
  const freeClaimed=account.freeProjectClaimed===true||projects.length>0;
  return {firstProjectFree:true,freeProjectClaimed:freeClaimed,freeProjectAvailable:!freeClaimed,
-   newProjectOneTimeCents:PROJECT_FEE_CENTS,currency:"usd",feeIsOneTime:true,
+   newProjectMonthlyCents:PROJECT_FEE_CENTS,newProjectOneTimeCents:0,currency:"usd",feeIsOneTime:false,feeIsMonthlySubscription:true,
    defaultLimit:DEFAULT_PROJECT_LIMIT,qualifiedLimit:QUALIFIED_PROJECT_LIMIT,
-   qualifyingStorageTier:"2TB",qualifyingStorageGB:QUALIFYING_STORAGE_GB,
+   qualifyingStorageTier:"1TB",qualifyingStorageGB:QUALIFYING_STORAGE_GB,
    qualifyingPerformanceTier:"turbo",qualifyingWorkers:QUALIFYING_WORKERS,
-   qualificationLabel:"2 TB or more storage AND Turbo (8 workers) or higher on the same active project; equivalent bundles qualify",
+   qualifyingStorageTiers:[...subscriptions.QUALIFYING_STORAGE],qualifyingPerformanceTiers:[...subscriptions.QUALIFYING_PERFORMANCE],
+   qualificationLabel:subscriptions.qualificationLabel(),
    qualifiesForHigherLimit:qualified,projectLimit:qualified?QUALIFIED_PROJECT_LIMIT:DEFAULT_PROJECT_LIMIT,
    usedProjectSlots:current.length,activeProjects:current.filter(w=>projectStatus(w)==="active").length,
    pendingProjects:current.filter(w=>projectStatus(w)!=="active").length,
@@ -83,7 +82,13 @@ function createProjectService({db,stamp,hash,stripe,env={},prices={},ensureCusto
  }
  function owned(data,owner,id){return !!data&&(id==="free"?data.accountKey===owner:data.accountHash===owner);}
  function configuredPrice(){return env.STRIPE_PROJECT_CREATION_PRICE_ID||prices["one_time|project_creation"]||null;}
- function paymentAvailable(){return env.STRIPE_CHECKOUT_ENABLED==="true"&&env.STRIPE_PROJECT_CHECKOUT_READY==="true"&&/^price_[A-Za-z0-9]+$/.test(configuredPrice()||"");}
+ function subscriptionPrice(){return prices["workspace|month"]||env.STRIPE_WORKSPACE_MONTH_PRICE_ID||null;}
+ function paymentAvailable(){
+   const enabled=env.STRIPE_CHECKOUT_ENABLED==="true";
+   const monthly=/^price_[A-Za-z0-9]+$/.test(subscriptionPrice()||"");
+   const legacy=env.STRIPE_PROJECT_CHECKOUT_READY==="true"&&/^price_[A-Za-z0-9]+$/.test(configuredPrice()||"");
+   return enabled&&(monthly||legacy);
+ }
  async function snapshot(owner,tx=null){
    const read=ref=>tx?tx.get(ref):ref.get();
    const [account,docs,legacy]=await Promise.all([read(accountRef(owner)),read(collection(owner).limit(201)),read(legacyRef(owner))]);
@@ -97,7 +102,10 @@ function createProjectService({db,stamp,hash,stripe,env={},prices={},ensureCusto
    tx.set(accountRef(owner),{freeProjectClaimed:state.account.freeProjectClaimed===true||state.records.length>0,
      projectPolicyVersion:2,projectRevision:(state.account.projectRevision||0)+1,projectUpdatedAt:stamp(),...extra},{merge:true});
  }
- async function inventory(req){const state=await snapshot(hash(req.user.uid));return {...state,policy:policy(state,req)};}
+ function reconciliationFor(state,now=Date.now()){
+   return subscriptions.reconcileAccount(state.records.map(w=>({id:w.id,...w.data})),now);
+ }
+ async function inventory(req){const state=await snapshot(hash(req.user.uid));return {...state,policy:policy(state,req),reconciliation:reconciliationFor(state)};}
  async function get(req,id){
    const owner=hash(req.user.uid),ref=refFor(owner,id),snap=await ref.get();
    if(!snap.exists)throw new ProjectError(404,"Project not found","PROJECT_NOT_FOUND");
@@ -117,10 +125,10 @@ function createProjectService({db,stamp,hash,stripe,env={},prices={},ensureCusto
        if(selection&&Object.keys(intended).some(key=>previous.data.creationSelection?.[key]!==intended[key]))throw new ProjectError(409,"This creation intent belongs to another plan selection","INTENT_CONFLICT");
        return {project:previous,policy:p,resumed:true};
      }
-     if(p.usedProjectSlots>=p.projectLimit)throw new ProjectError(409,"Project limit reached ("+p.projectLimit+"). Archive a project or qualify with 2 TB storage and Turbo performance.","PROJECT_LIMIT_REACHED");
-     if(legacyFree&&!p.freeProjectAvailable)throw new ProjectError(409,"The lifetime free project has already been claimed. Create an additional project for $5 once.","FREE_PROJECT_ALREADY_CLAIMED");
+     if(p.usedProjectSlots>=p.projectLimit)throw new ProjectError(409,"Project limit reached ("+p.projectLimit+"). Archive a project, or qualify for 20 with a medium or highest storage or performance tier.","PROJECT_LIMIT_REACHED");
+     if(legacyFree&&!p.freeProjectAvailable)throw new ProjectError(409,"The lifetime free project has already been claimed. Each extra workspace is its own $5/month subscription.","FREE_PROJECT_ALREADY_CLAIMED");
      const feeStatus=req.ownerBenefits===true?"owner":p.freeProjectAvailable?"free":"pending";
-     if(feeStatus==="pending"&&!p.paymentAvailable)throw new ProjectError(503,"The $5 one-time project activation price is not configured. Your existing projects remain available.","PROJECT_PAYMENT_UNAVAILABLE");
+     if(feeStatus==="pending"&&!p.paymentAvailable)throw new ProjectError(503,"The $5/month workspace subscription price is not configured. Your existing projects remain available.","PROJECT_PAYMENT_UNAVAILABLE");
      const data={name,kind:legacyFree?"free":"paid",accountHash:owner,...(legacyFree?{accountKey:owner}:{}),
        projectBillingVersion:2,projectStatus:feeStatus==="pending"?"pending_payment":"active",projectFeeStatus:feeStatus,
        projectFeeCents:feeStatus==="pending"?PROJECT_FEE_CENTS:0,storageBillingVersion:2,
@@ -321,8 +329,105 @@ function createProjectService({db,stamp,hash,stripe,env={},prices={},ensureCusto
      return true;
    });
  }
- return {inventory,get,create,setSelection,checkout,archive,restore,withLease,reconcilePayment,revokePayment,
-   paymentAvailable,refFor,legacyRef,policy,hasContinuingBilling};
+ async function verifiedWorkspacePrice(){
+   const id=subscriptionPrice();
+   if(!/^price_[A-Za-z0-9]+$/.test(id||"")||env.STRIPE_CHECKOUT_ENABLED!=="true")
+     throw new ProjectError(503,"The $5/month workspace subscription price is not configured","PROJECT_PAYMENT_UNAVAILABLE");
+   const price=await stripe.prices.retrieve(id,{expand:["product"]});
+   const recurring=price.recurring||{};
+   if(price.id!==id||price.active!==true||price.type!=="recurring"||recurring.interval!=="month"||recurring.interval_count!==1||
+     price.currency!=="usd"||price.unit_amount!==PROJECT_FEE_CENTS||price.billing_scheme!=="per_unit"||
+     price.product?.deleted||price.product?.active!==true||(env.STRIPE_ENVIRONMENT&&price.livemode!==(env.STRIPE_ENVIRONMENT==="live")))
+     throw new ProjectError(503,"Workspace subscription requires an active monthly USD $5 Price","PROJECT_PRICE_MISMATCH");
+   return id;
+ }
+ async function checkoutSubscription(req,id){
+   return withLease(req,id,async w=>{
+     if(w.data.projectBillingVersion!==2)throw new ProjectError(409,"This existing project uses legacy billing","LEGACY_PROJECT");
+     if(["free","owner"].includes(w.data.projectFeeStatus)||subscriptions.isPaidWorkspace(w.data))
+       return {workspaceId:id,alreadyActivated:true,monthlyCents:PROJECT_FEE_CENTS,message:"This workspace subscription is already active."};
+     const price=await verifiedWorkspacePrice(),customer=await ensureCustomer(req),origin=new URL(env.PUBLIC_URL);
+     if(origin.protocol!=="https:")throw new ProjectError(503,"HTTPS Checkout return address required");
+     const priorId=w.data.projectCheckoutSessionId;
+     if(priorId){
+       const prior=await stripe.checkout.sessions.retrieve(priorId);
+       if(prior.status==="open"&&prior.url&&prior.mode==="subscription")
+         return {url:prior.url,workspaceId:id,monthlyCents:PROJECT_FEE_CENTS,resumed:true};
+     }
+     const metadata={kind:"workspace_month",accountHash:hash(req.user.uid),workspaceId:id};
+     const session=await stripe.checkout.sessions.create({mode:"subscription",customer,client_reference_id:id,
+       line_items:[{price,quantity:1}],metadata,subscription_data:{metadata},
+       success_url:origin.origin+"/billing/success?session_id={CHECKOUT_SESSION_ID}",cancel_url:origin.origin+"/billing/cancel",
+       custom_text:{submit:{message:"$5/month for this extra workspace and its bucket. The subscription lapses at the end of the paid period unless it stays active."}}
+     },{idempotencyKey:"gd-workspace-month-"+hash(req.user.uid)+"-"+id+"-"+(priorId||"first")});
+     await w.ref.update({projectCheckoutSessionId:session.id,projectPriceId:price,projectStatus:"pending_payment",
+       projectFeeStatus:"pending",projectPaymentFailed:false,projectPaymentRevoked:false,updatedAt:stamp()});
+     return {url:session.url,workspaceId:id,monthlyCents:PROJECT_FEE_CENTS};
+   });
+ }
+ async function reconcileWorkspaceSubscription(sub){
+   const m=sub?.metadata||{};
+   if(m.kind!=="workspace_month")return false;
+   const owner=m.accountHash,id=m.workspaceId;
+   if(!/^[a-f0-9]{64}$/.test(owner||"")||!safeProjectId(id))return false;
+   const ref=refFor(owner,id),[a,w]=await Promise.all([accountRef(owner).get(),ref.get()]);
+   if(!a.exists||!w.exists||!owned(w.data(),owner,id)||a.data().stripeCustomerId!==(typeof sub.customer==="string"?sub.customer:sub.customer?.id))return false;
+   const priceId=subscriptionPrice(),items=sub.items?.data||[];
+   const matches=!!priceId&&items.length===1&&items[0].price?.id===priceId&&items[0].quantity===1;
+   const end=typeof sub.current_period_end==="number"?sub.current_period_end*1000:0;
+   const active=matches&&["active","trialing"].includes(sub.status)&&end>Date.now();
+   await ref.update({workspaceSubscriptionId:sub.id,workspaceSubscriptionStatus:matches?sub.status:"incomplete",
+     workspaceCurrentPeriodEnd:end,projectFeeStatus:active?"paid":(w.data().projectFeeStatus==="owner"?"owner":"lapsed"),
+     projectFeeCents:PROJECT_FEE_CENTS,projectPaidAt:active?stamp():w.data().projectPaidAt||null,
+     projectStatus:projectStatus(w.data())==="archived"?"archived":(active||w.data().projectFeeStatus==="owner"?"active":w.data().projectStatus||"pending_payment"),
+     updatedAt:stamp()});
+   return true;
+ }
+ function removableOrThrow(report,sourceId){
+   if(!report.blocked)throw new ProjectError(409,"Your workspaces already match your active subscriptions.","RECONCILIATION_CLEAR");
+   if(!report.removableIds.includes(sourceId))throw new ProjectError(409,"Only a workspace without an active subscription can be removed or merged. Paid workspaces stay.","PAID_WORKSPACE_KEPT");
+ }
+ async function removeUnpaid(req,id,{confirmName}={}){
+   const owner=hash(req.user.uid);
+   return db.runTransaction(async tx=>{
+     const state=await snapshot(owner,tx),report=reconciliationFor(state),current=state.records.find(w=>w.id===id);
+     if(!current)throw new ProjectError(404,"Project not found","PROJECT_NOT_FOUND");
+     removableOrThrow(report,id);
+     if(confirmName!==current.data.name)throw new ProjectError(400,"Enter the exact project name to confirm removing it","CONFIRM_NAME_REQUIRED");
+     if(projectStatus(current.data)!=="archived")tx.update(current.ref,{projectStatus:"archived",statusBeforeArchive:projectStatus(current.data),
+       archivedAt:stamp(),dataRetained:true,removedForReconciliation:true,updatedAt:stamp()});
+     touch(tx,owner,state,{freeProjectClaimed:true});
+     const next=reconciliationFor({records:state.records.map(w=>w.id===id?{...w,data:{...w.data,projectStatus:"archived"}}:w)});
+     return {workspaceId:id,removed:true,dataRetained:true,reconciliation:next,
+       message:"Removed from the active workspaces. Paid subscriptions were left in place."};
+   });
+ }
+ async function mergeUnpaid(req,{sourceId,targetId,confirmName}={},mover=async()=>{}){
+   if(!safeProjectId(sourceId)||!safeProjectId(targetId)||sourceId===targetId)throw new ProjectError(400,"Choose two different workspaces","INVALID_MERGE");
+   const owner=hash(req.user.uid),state=await snapshot(owner),report=reconciliationFor(state);
+   const source=state.records.find(w=>w.id===sourceId),target=state.records.find(w=>w.id===targetId);
+   if(!source||!target)throw new ProjectError(404,"Project not found","PROJECT_NOT_FOUND");
+   removableOrThrow(report,sourceId);
+   if(projectStatus(target.data)==="archived")throw new ProjectError(409,"Choose a workspace that is still open","PROJECT_ARCHIVED");
+   if(confirmName!==source.data.name)throw new ProjectError(400,"Enter the exact project name to confirm merging","CONFIRM_NAME_REQUIRED");
+   const [sourceFiles,targetFiles]=await Promise.all([source.ref.collection("files").get(),target.ref.collection("files").get()]);
+   const plan=subscriptions.mergeFilePlan(sourceFiles.docs.map(doc=>({id:doc.id,name:doc.data().name,data:doc.data()})),
+     targetFiles.docs.map(doc=>({id:doc.id,name:doc.data().name})));
+   const moved=[];
+   for(const file of plan){
+     const data={...file.data,mergedFrom:sourceId};
+     await target.ref.collection("files").doc(file.toId).set(data);
+     await mover({sourceId,targetId,fromId:file.fromId,toId:file.toId,data});
+     moved.push({fromId:file.fromId,toId:file.toId,name:file.name});
+   }
+   await source.ref.update({projectStatus:"archived",statusBeforeArchive:projectStatus(source.data),archivedAt:stamp(),
+     dataRetained:true,mergedInto:targetId,updatedAt:stamp()});
+   const next=reconciliationFor(await snapshot(owner));
+   return {merged:true,sourceId,targetId,files:moved,reconciliation:next,
+     message:"Files moved into the workspace you kept. The unpaid workspace no longer counts."};
+ }
+ return {inventory,get,create,setSelection,checkout,checkoutSubscription,archive,restore,withLease,reconcilePayment,revokePayment,
+   reconcileWorkspaceSubscription,removeUnpaid,mergeUnpaid,paymentAvailable,refFor,legacyRef,policy,hasContinuingBilling,reconciliationFor};
 }
 module.exports={createProjectService,ProjectError,projectStatus,activatedBasicProject,effectiveStorageQuota,
  qualifiesForHigherLimit,policyFor,validateSelection,safeProjectId,hasContinuingBilling,

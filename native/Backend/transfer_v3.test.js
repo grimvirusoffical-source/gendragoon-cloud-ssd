@@ -105,6 +105,21 @@ test("ownership, anonymous rejection, API key scopes and server-only tier enforc
   const config=await(await f.call("/config?workers=24&tier=max")).json();assert.equal(config.transfer.workers,1);assert.equal(config.transfer.artificialBandwidthCapMbps,null);
  }finally{await f.close();}
 });
+test("eight workspaces with five paid subscriptions block transfer until three unpaid workspaces are gone",async()=>{
+ const f=fixture("standard");try{
+  const future=Date.now()+86_400_000,owner=f.wsPath.split("/")[1];
+  f.docs.set(f.wsPath,{...f.docs.get(f.wsPath),workspaceSubscriptionStatus:"active",workspaceCurrentPeriodEnd:future});
+  for(let n=0;n<4;n++)f.docs.set("gd_accounts/"+owner+"/workspaces/12345678-1234-4000-8000-"+String(n+1).padStart(12,"0"),
+    {kind:"paid",accountHash:owner,projectStatus:"active",provisioned:true,workspaceSubscriptionStatus:"active",workspaceCurrentPeriodEnd:future});
+  for(let n=0;n<3;n++)f.docs.set("gd_accounts/"+owner+"/workspaces/12345678-1234-4000-8000-"+String(n+10).padStart(12,"0"),
+    {kind:"paid",accountHash:owner,projectStatus:"active",provisioned:true,projectFeeStatus:"lapsed"});
+  const blocked=await f.call("/config");assert.equal(blocked.status,423);
+  const body=await blocked.json();
+  assert.equal(body.code,"WORKSPACE_RECONCILIATION_REQUIRED");
+  assert.equal(body.reconciliation.openCount,8);assert.equal(body.reconciliation.paidCount,5);
+  assert.equal(body.reconciliation.freeAllowance,1);assert.equal(body.reconciliation.allowed,6);assert.equal(body.reconciliation.excess,2);
+ }finally{await f.close();}
+});
 test("unpaid and cancelled paid workspaces do not gain transfer access",async()=>{
  const f=fixture("max");try{f.docs.set(f.wsPath,{...f.docs.get(f.wsPath),storageActive:false});assert.equal((await f.call("/config")).status,403);}finally{await f.close();}
 });

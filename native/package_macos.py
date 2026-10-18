@@ -20,7 +20,8 @@ ROOT=Path(__file__).resolve().parent
 REQUIRED_RESOURCES=("gendragoon_update_restart.py", "gendragoon_auto_update.py",
     "gendragoon_app_control.py", "gendragoon_app_launch.py", "gendragoon_library.py",
     "gendragoon_upload_workspace.py", "gendragoon_performance.py",
-    "gendragoon_performance_profiles.json", "gendragoon_project_files.py")
+    "gendragoon_performance_profiles.json", "gendragoon_project_files.py",
+    "redxai_updater.py", "grim-apps-manifest.json")
 
 def require_runtime_resources(app):
     resources=app/"Contents/Resources"

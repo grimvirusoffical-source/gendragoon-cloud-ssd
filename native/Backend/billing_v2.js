@@ -3,6 +3,7 @@ const crypto=require("node:crypto");
 const {STORAGE,PERFORMANCE,validateWorkspaceName}=require("./catalog");
 const {GPU,GPU_READY,gpuQuote,tripleBundleQuote}=require("./gpu_catalog");
 const {createProjectService,ProjectError,projectStatus,activatedBasicProject,effectiveStorageQuota,safeProjectId,hasContinuingBilling}=require("./projects");
+const {isPaidWorkspace,qualificationLabel}=require("./workspace_subscriptions");
 const FREE_GB=2,FREE_WORKERS=1,REMOVE_ADS_CENTS=499;
 const VALID_INTERVALS=new Set(["month","year"]);
 const ACTIVE_STATUSES=new Set(["active","trialing"]);
@@ -76,6 +77,9 @@ function registerBillingV2({app,db,stripe,admin,auth,agreed,hash,prices,env=proc
    provisioned:w.data.provisioned===true||(w.data.kind==="free"&&w.data.provisioned!==false),
    projectStatus:projectStatus(w.data),projectBillingVersion:w.data.projectBillingVersion||1,
    projectFeeStatus:w.data.projectFeeStatus||"legacy",projectFeeCents:w.data.projectFeeCents||0,
+   workspaceSubscriptionStatus:w.data.workspaceSubscriptionStatus||null,
+   workspaceCurrentPeriodEnd:w.data.workspaceCurrentPeriodEnd||null,
+   subscriptionPaid:isPaidWorkspace(w.data),
    intendedSelection:w.data.intendedSelection||{},dataRetained:w.data.dataRetained===true,
    hasContinuingBilling:hasContinuingBilling(w.data),transferEligible:effectiveStorageQuota(w.data)>0};
  }
@@ -112,10 +116,11 @@ function registerBillingV2({app,db,stripe,admin,auth,agreed,hash,prices,env=proc
  app.get("/v2/pricing",(_req,res)=>res.json({
    currency:"usd",catalogVersion:2,
    free:{storageGB:FREE_GB,workers:FREE_WORKERS,monthlyCents:0},
-   workspaceFeeMonthlyCents:0,legacyWorkspaceFeeMonthlyCents:500,
-   projects:{firstFree:true,additionalOneTimeCents:500,defaultLimit:10,qualifiedLimit:20,
-     qualifyingStorageTier:"2TB",qualifyingPerformanceTier:"turbo",qualifyingWorkers:8,
-     qualificationLabel:"2 TB storage AND Turbo (8 workers) or higher on the same active project; equivalent bundles qualify",
+   workspaceFeeMonthlyCents:500,legacyWorkspaceFeeMonthlyCents:500,
+   projects:{firstFree:true,additionalMonthlyCents:500,additionalOneTimeCents:0,feeIsMonthlySubscription:true,
+     defaultLimit:10,qualifiedLimit:20,
+     qualifyingStorageTier:"1TB",qualifyingPerformanceTier:"turbo",qualifyingWorkers:8,
+     qualificationLabel:qualificationLabel(),
      paymentAvailable:projects.paymentAvailable(),archiveRetainsData:true},
    byo:{monthlyCents:1000,yearlyCents:10000,providerFeesExtra:true,manualSetupRequired:true},
    purchasesEnabled:env.STRIPE_CHECKOUT_ENABLED==="true",
@@ -146,23 +151,36 @@ function registerBillingV2({app,db,stripe,admin,auth,agreed,hash,prices,env=proc
  });
  app.get("/v2/projects",auth,agreed,async(req,res)=>{
    try{const result=await projects.inventory(req);res.json({ownerBenefits:req.ownerBenefits===true,policy:result.policy,
+     reconciliation:result.reconciliation,
      projects:result.records.filter(w=>req.query.includeArchived==="true"||projectStatus(w.data)!=="archived").map(publicWorkspace)});}
    catch(error){projectError(res,error);}
+ });
+ app.get("/v2/projects/reconciliation",auth,agreed,async(req,res)=>{
+   try{const result=await projects.inventory(req);res.json(result.reconciliation);}catch(error){projectError(res,error);}
  });
  app.post("/v2/projects",auth,agreed,async(req,res)=>{
    try{
      const result=await projects.create(req,{name:req.body?.name,intentId:req.body?.intentId});
      let payment={};
-     if(result.project.data.projectFeeStatus==="pending")payment=await projects.checkout(req,result.project.id);
+     if(result.project.data.projectFeeStatus==="pending")payment=await projects.checkoutSubscription(req,result.project.id);
+     const listed=await projects.inventory(req);
      res.status(result.resumed?200:201).json({project:publicWorkspace(result.project),workspaceId:result.project.id,
-       policy:result.policy,resumed:result.resumed,oneTimeCents:result.project.data.projectFeeStatus==="pending"?500:0,...payment});
+       policy:listed.policy,reconciliation:listed.reconciliation,resumed:result.resumed,oneTimeCents:0,
+       monthlyCents:result.project.data.projectFeeStatus==="pending"?500:0,...payment});
    }catch(error){projectError(res,error);}
  });
  app.get("/v2/projects/:id",auth,agreed,async(req,res)=>{
    try{res.json(publicWorkspace(await projects.get(req,req.params.id)));}catch(error){projectError(res,error);}
  });
  app.post("/v2/projects/:id/checkout",auth,agreed,async(req,res)=>{
-   try{res.json(await projects.checkout(req,req.params.id));}catch(error){projectError(res,error);}
+   try{res.json(await projects.checkoutSubscription(req,req.params.id));}catch(error){projectError(res,error);}
+ });
+ app.post("/v2/projects/:id/remove-unpaid",auth,agreed,async(req,res)=>{
+   try{res.json(await projects.removeUnpaid(req,req.params.id,{confirmName:req.body?.confirmName}));}catch(error){projectError(res,error);}
+ });
+ app.post("/v2/projects/:id/merge",auth,agreed,async(req,res)=>{
+   try{res.json(await projects.mergeUnpaid(req,{sourceId:req.params.id,targetId:req.body?.targetId,confirmName:req.body?.confirmName}));}
+   catch(error){projectError(res,error);}
  });
  app.put("/v2/projects/:id/selection",auth,agreed,async(req,res)=>{
    try{res.json({workspaceId:req.params.id,intendedSelection:await projects.setSelection(req,req.params.id,req.body)});}catch(error){projectError(res,error);}
@@ -267,6 +285,12 @@ function registerBillingV2({app,db,stripe,admin,auth,agreed,hash,prices,env=proc
      if(!["s3","gcs","r2","b2","sftp","webdav","google-drive","onedrive","other"].includes(provider)||
        label.length<3||label.length>100||req.body?.connectionTested!==true)
        return res.status(400).json({error:"Complete manual setup and local provider test first"});
+     if(req.body?.bucket!==undefined){
+       const bucketName=String(req.body.bucket);
+       const ownedBucket=w.data.gcsBucket||w.data.bucket;
+       if(!ownedBucket||ownedBucket!==bucketName)
+         return res.status(403).json({error:"That bucket is not connected to a workspace owned by this account"});
+     }
      // Customer-managed credentials never reach GenDragoon's billing server.
      await w.ref.update({manualProviderConfigured:true,providerType:provider,
        providerLabel:label,updatedAt:stamp()});

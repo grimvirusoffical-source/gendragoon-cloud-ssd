@@ -24,6 +24,15 @@ INDEX=SUPPORT/"app-library.json"
 DEFAULT_ROOT="gen-dragoon-ssd"
 ARCHIVE_DIR="GenDragoon-App-Library"
 STREAM_MIN_BYTES=512*1024**2
+def note_progress(message, completed=0, total=0):
+    """Best-effort progress for the upload workspace. Never changes run()'s signature."""
+    try:
+        root=SUPPORT/"UploadWorkspace";root.mkdir(parents=True,exist_ok=True,mode=0o700)
+        path=root/"upload-progress.json";temporary=path.with_suffix(".json.tmp")
+        temporary.write_text(json.dumps({"message":str(message)[:240],"completed":int(completed),"total":int(total),"updatedAt":time.time()}))
+        os.replace(temporary,path)
+    except OSError:
+        return
 def reply(**v): print(json.dumps(dict(ok=True,**v)),flush=True)
 def fail(e): print(json.dumps(dict(ok=False,message=str(e)[-650:])),flush=True);sys.exit(1)
 def run(cmd,timeout=1800):
@@ -122,8 +131,12 @@ def maintenance_lock(inherited=None):
         if not path.exists():raise ValueError("Inherited maintenance lock does not match the managed lock")
         info=os.fstat(descriptor);expected=path.lstat()
         if not stat.S_ISREG(info.st_mode) or info.st_uid!=os.getuid() or info.st_nlink!=1 or info.st_mode&0o077 or (info.st_dev,info.st_ino)!=(expected.st_dev,expected.st_ino):raise ValueError("Unsafe inherited maintenance lock")
-        try:fcntl.flock(descriptor,fcntl.LOCK_EX|fcntl.LOCK_NB);locked=True
-        except BlockingIOError:raise RuntimeError("An upload, update, restart or cloud configuration is already active") from None
+        # macOS flock is per-process. The workspace parent already holds this
+        # descriptor, so locking it again fails every file, folder, and app upload
+        # before rclone runs. Verify the inherited descriptor and keep the parent's lease.
+        if own:
+            try:fcntl.flock(descriptor,fcntl.LOCK_EX|fcntl.LOCK_NB);locked=True
+            except BlockingIOError:raise RuntimeError("An upload, update, restart or cloud configuration is already active") from None
         yield
     finally:
         # Never unlock an inherited open-file description: the parent workspace
@@ -532,7 +545,9 @@ def _upload(source,remote,folder,offload=False,project=None,bucket=None):
         # upload cannot overwrite the only backup of an offloaded original.
         fname=key+"-"+original_hash+"-"+uuid.uuid4().hex+extension
         dest=cloud(remote,folder,fname)
+        note_progress("Uploading "+src.name,0,total_bytes)
         run([RCLONE,"--config",CONFIG,"copyto",archive,dest,"--retries","3"],timeout=2400)
+        note_progress("Verifying "+src.name,total_bytes,total_bytes)
         # Re-download and compare full bytes before offering an offload.
         verified=Path(tmp)/("verified-"+fname)
         run([RCLONE,"--config",CONFIG,"copyto",dest,verified,"--retries","3"],timeout=2400)

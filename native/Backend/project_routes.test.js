@@ -8,10 +8,12 @@ const idFor=n=>"abcdef12-1234-4000-8000-"+String(n).padStart(12,"0");
 const hookSecret="whsec_disposableFixtureOnly123";
 async function fixture(t){
  const db=memoryFirestore([["gd_accounts/"+owner,{stripeCustomerId:"cus_own"}]]),sessions=new Map(),intents=new Map(),subs=new Map(),calls=[],markers=[];
- const configured={"one_time|project_creation":"price_project","storage|standard|2TB|month":"price_2tb","performance|turbo|month":"price_turbo"};
- const amounts={price_project:500,price_2tb:7200,price_turbo:900};
+ const configured={"one_time|project_creation":"price_project","workspace|month":"price_workspace","storage|standard|2TB|month":"price_2tb","performance|turbo|month":"price_turbo"};
+ const amounts={price_project:500,price_workspace:500,price_2tb:7200,price_turbo:900};
  const verifier=new Stripe("sk_test_dummyABC123",{apiVersion:STRIPE_API_VERSION});
- const stripe={webhooks:verifier.webhooks,prices:{retrieve:async id=>({id,active:true,type:"one_time",recurring:null,unit_amount:500,currency:"usd",livemode:false,billing_scheme:"per_unit",product:{active:true}})},
+ const stripe={webhooks:verifier.webhooks,prices:{retrieve:async id=>id==="price_workspace"?
+   {id,active:true,type:"recurring",recurring:{interval:"month",interval_count:1},unit_amount:500,currency:"usd",livemode:false,billing_scheme:"per_unit",product:{active:true}}:
+   {id,active:true,type:"one_time",recurring:null,unit_amount:500,currency:"usd",livemode:false,billing_scheme:"per_unit",product:{active:true}}},
    customers:{create:async()=>({id:"cus_own"})},checkout:{sessions:{
      create:async(args,options)=>{const id="cs_local"+(calls.length+1);calls.push({args,options});
        const session={...args,id,status:"open",payment_status:"unpaid",currency:"usd",amount_total:args.line_items.reduce((n,x)=>n+amounts[x.price]*x.quantity,0),url:"https://checkout.stripe.com/c/pay/"+id};sessions.set(id,session);return structuredClone(session);},
@@ -56,14 +58,15 @@ test("project APIs require a signed-in account; a scoped file API key cannot adm
    assert.equal((await f.request("/v2/projects",{name:"Injected",intentId:idFor(1)},token)).status,401);
  }
  const first=await f.request("/v2/projects",{name:"First project",intentId:idFor(1)});
- assert.equal(first.status,201);assert.equal(first.body.oneTimeCents,0);assert.equal(first.body.project.quotaGB,2);assert.equal(first.body.project.transferEligible,true);
+ assert.equal(first.status,201);assert.equal(first.body.oneTimeCents,0);assert.equal(first.body.monthlyCents,0);assert.equal(first.body.project.quotaGB,2);assert.equal(first.body.project.transferEligible,true);
  assert.equal((await f.request("/v2/projects/"+idFor(1),undefined,"test-b")).status,404);
  assert.equal((await f.request("/v2/projects/"+idFor(1)+"/archive",{confirmName:"First project"},"test-b")).status,404);
 });
-test("new-project API ignores forged owner/amount fields and creates only the configured500-cent Checkout",async t=>{
- const f=await fixture(t),second=await f.two();assert.equal(second.status,201);assert.equal(second.body.oneTimeCents,500);
+test("new-project API ignores forged owner/amount fields and creates only the configured $5/month subscription",async t=>{
+ const f=await fixture(t),second=await f.two();assert.equal(second.status,201);assert.equal(second.body.monthlyCents,500);assert.equal(second.body.oneTimeCents,0);
  assert.equal(second.body.project.projectStatus,"pending_payment");assert.equal(second.body.policy.usedProjectSlots,2);
- assert.deepEqual(f.calls[0].args.line_items,[{price:"price_project",quantity:1}]);assert.equal(f.calls[0].args.mode,"payment");
+ assert.deepEqual(f.calls[0].args.line_items,[{price:"price_workspace",quantity:1}]);assert.equal(f.calls[0].args.mode,"subscription");
+ assert.equal(f.calls[0].args.subscription_data.metadata.kind,"workspace_month");
  assert.equal(f.record(idFor(2)).provisioned,false);assert.equal(f.record(idFor(2)).storageActive,false);
 });
 test("the bundled mobile draft request cannot create projects or collect an activation fee, even when live-shaped pricing is ready",async t=>{
@@ -87,30 +90,48 @@ test("a legacy storage or BYO request cannot switch an inactive project's checko
  const explicit=await f.request("/v2/projects/"+idFor(2)+"/checkout",{});assert.equal(explicit.status,200);assert.equal(explicit.body.resumed,true);
  assert.equal(f.calls.length,1);assert.match(explicit.body.url,/checkout\.stripe\.com/);
 });
-test("signed asynchronous payment success activates once; older raw webhook snapshots are re-fetched and replay-safe",async t=>{
- const f=await fixture(t);await f.two();const id=f.record(idFor(2)).projectCheckoutSessionId;
- f.sessions.get(id).status="complete";
- const unpaid={id,metadata:{kind:"project_creation",accountHash:owner,workspaceId:idFor(2)}};
- assert.equal((await f.webhook("checkout.session.completed",unpaid)).status,200);assert.equal(f.record(idFor(2)).provisioned,false);
- const paid=f.pay();const eventId="evt_replayed123";
- assert.equal((await f.webhook("checkout.session.async_payment_succeeded",unpaid,eventId)).status,200);
- assert.equal(f.record(idFor(2)).projectFeeStatus,"paid");assert.equal(effectiveStorageQuota(f.record(idFor(2))),2e9);
- const replay=await f.webhook("checkout.session.async_payment_succeeded",unpaid,eventId);assert.equal(replay.body.replayed,true);
- await f.webhook("checkout.session.async_payment_failed",paid);assert.equal(f.record(idFor(2)).projectFeeStatus,"paid");
+test("an active workspace subscription is paid until the period ends, and a replay does not create a second one",async t=>{
+ const f=await fixture(t);await f.two();
+ const end=Math.floor(Date.now()/1000)+86_400;
+ const sub={id:"sub_workspace1",customer:"cus_own",status:"active",current_period_end:end,
+   metadata:{kind:"workspace_month",accountHash:owner,workspaceId:idFor(2)},
+   items:{data:[{price:{id:"price_workspace"},quantity:1}]}};
+ f.subs.set(sub.id,sub);
+ const eventId="evt_replayed123";
+ assert.equal((await f.webhook("customer.subscription.created",{id:sub.id},eventId)).status,200);
+ assert.equal(f.record(idFor(2)).projectFeeStatus,"paid");assert.equal(f.record(idFor(2)).workspaceSubscriptionStatus,"active");
+ assert.equal(effectiveStorageQuota(f.record(idFor(2))),2e9);
+ const replay=await f.webhook("customer.subscription.created",{id:sub.id},eventId);assert.equal(replay.body.replayed,true);
+ sub.status="canceled";sub.current_period_end=Math.floor(Date.now()/1000)-10;
+ assert.equal((await f.webhook("customer.subscription.deleted",{id:sub.id})).status,200);
+ assert.equal(f.record(idFor(2)).projectFeeStatus,"lapsed");assert.equal(f.record(idFor(2)).workspaceSubscriptionStatus,"canceled");
 });
 test("altered webhook bodies are rejected before any project entitlement changes",async t=>{
  const f=await fixture(t);await f.two();const paid=f.pay();
  assert.equal((await f.webhook("checkout.session.completed",paid,"evt_tampered123",true)).status,400);
  assert.equal(f.record(idFor(2)).projectFeeStatus,"pending");assert.equal(f.db.rows.has("project_payments/"+paid.payment_intent),false);
 });
-test("a refund before the successful Checkout webhook prevents fulfillment and permits data-preserving archive",async t=>{
- const f=await fixture(t);await f.two();const paid=f.pay(),charge=f.intents.get(paid.payment_intent).latest_charge;
- charge.refunded=true;charge.amount_refunded=500;
- assert.equal((await f.webhook("charge.refunded",charge)).status,200);
- assert.equal(f.record(idFor(2)).projectFeeStatus,"revoked");assert.equal(f.record(idFor(2)).provisioned,false);
- charge.refunded=false;charge.amount_refunded=0; // Simulates a later stale paid snapshot; revocation ledger still wins.
- assert.equal((await f.webhook("checkout.session.completed",paid)).status,200);assert.equal(f.record(idFor(2)).projectFeeStatus,"revoked");
- assert.equal((await f.request("/v2/projects/"+idFor(2)+"/archive",{confirmName:"Second project"})).status,200);
+test("a lapsed extra workspace can be removed without touching a workspace that is still paid",async t=>{
+ const f=await fixture(t);await f.two();
+ const kept=f.record(idFor(1));
+ kept.workspaceSubscriptionStatus="active";kept.workspaceCurrentPeriodEnd=Date.now()+86_400_000;
+ const extra="abcdef12-1234-4000-8000-"+String(3).padStart(12,"0");
+ f.db.rows.set(f.path(extra),{name:"Third project",kind:"paid",accountHash:owner,projectStatus:"active",projectBillingVersion:2,projectFeeStatus:"lapsed",provisioned:true,workspaceSubscriptionStatus:"canceled",workspaceCurrentPeriodEnd:Date.now()-1000});
+ const end=Math.floor(Date.now()/1000)-86_400;
+ const sub={id:"sub_workspace1",customer:"cus_own",status:"canceled",current_period_end:end,
+   metadata:{kind:"workspace_month",accountHash:owner,workspaceId:idFor(2)},
+   items:{data:[{price:{id:"price_workspace"},quantity:1}]}};
+ f.subs.set(sub.id,sub);
+ assert.equal((await f.webhook("customer.subscription.updated",{id:sub.id})).status,200);
+ assert.equal(f.record(idFor(2)).projectFeeStatus,"lapsed");
+ const blocked=await f.request("/v2/projects/reconciliation");
+ assert.equal(blocked.body.blocked,true);assert.equal(blocked.body.paidCount,1);assert.equal(blocked.body.freeAllowance,1);
+ assert.equal(blocked.body.excess,1);assert.equal(blocked.body.allowed,2);
+ assert.deepEqual(blocked.body.removableIds.slice().sort(),[idFor(2),extra].sort());
+ assert.equal((await f.request("/v2/projects/"+idFor(1)+"/remove-unpaid",{confirmName:"First project"})).status,409);
+ const removed=await f.request("/v2/projects/"+idFor(2)+"/remove-unpaid",{confirmName:"Second project"});
+ assert.equal(removed.status,200);assert.equal(removed.body.reconciliation.blocked,false);
+ assert.equal(f.record(idFor(2)).projectStatus,"archived");assert.equal(f.record(idFor(1)).projectStatus,"active");
 });
 test("legacy free project storage activation uses the chosen tier and no recurring project fee, then falls back to basic quota on cancellation",async t=>{
  const f=await fixture(t);

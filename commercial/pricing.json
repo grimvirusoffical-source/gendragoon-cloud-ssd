@@ -14,7 +14,11 @@
     "monthlyCents": 500,
     "yearlyCents": 5000,
     "requiredForManagedStorage": true,
-    "storageSubscriptionIncludesFee": true
+    "storageSubscriptionIncludesFee": true,
+    "baseWorkspaceFree": true,
+    "additionalWorkspaceMonthlyCents": 500,
+    "lapseKeepsFreePlusPaid": true,
+    "note": "The base workspace is free. Each additional workspace is its own $5/month subscription. A lapse keeps that free workspace plus every workspace whose subscription is still active. Existing billing rows are not migrated by this catalog."
   },
   "storage": [
     {

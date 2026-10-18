@@ -25,12 +25,28 @@ import re
 import stat
 import subprocess
 import sys
+import threading
 import time
 import uuid
 
 _performance_input = None
 
 DEFAULT_PREFIX = "GenDragoon-App-Library"
+DEFAULT_CATEGORIES = {
+    "pictures": "Pictures",
+    "videos": "Videos",
+    "audio": "Music/Audio",
+    "documents": "Documents",
+    "apps": "Applications",
+    "other": "Other",
+}
+CATEGORY_EXTENSIONS = {
+    "pictures": {"jpg", "jpeg", "png", "gif", "webp", "heic", "tif", "tiff", "bmp"},
+    "videos": {"mp4", "mov", "mkv", "avi", "webm", "m4v"},
+    "audio": {"mp3", "m4a", "aac", "wav", "flac", "aiff", "ogg"},
+    "documents": {"pdf", "doc", "docx", "txt", "rtf", "pages", "numbers", "key", "ppt", "pptx", "xls", "xlsx", "csv", "md"},
+    "apps": {"app", "dmg", "pkg"},
+}
 MAX_STATE_BYTES = 3 * 1024 * 1024
 MAX_RESPONSE_BYTES = 4 * 1024 * 1024
 MAX_SOURCES = 1000
@@ -51,6 +67,71 @@ class WorkspaceError(RuntimeError):
 
 def support(home=None):
     return (Path.home() if home is None else Path(home)) / "Library/Application Support/GenDragoon Cloud SSD"
+
+
+def category_file(home=None):
+    return support(home) / "upload-categories.json"
+
+
+def load_categories(home=None):
+    path = category_file(home)
+    loaded = dict(DEFAULT_CATEGORIES)
+    try:
+        raw = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError, UnicodeError):
+        return loaded
+    if not isinstance(raw, dict):
+        return loaded
+    for key, value in raw.items():
+        if key in DEFAULT_CATEGORIES and valid_category_folder(value):
+            loaded[key] = value
+    return loaded
+
+
+def valid_category_folder(value):
+    if not isinstance(value, str) or not value or len(value) > 80 or value.startswith("/") or "\\" in value:
+        return False
+    return all(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9 ._-]{0,40}", part) for part in value.split("/"))
+
+
+def save_categories(mapping, home=None):
+    if not isinstance(mapping, dict):
+        raise WorkspaceError("invalid_categories", "Category mapping must be an object")
+    current = load_categories(home)
+    for key, value in mapping.items():
+        if key not in DEFAULT_CATEGORIES or not valid_category_folder(value):
+            raise WorkspaceError("invalid_categories", "Choose a folder name for each file type")
+        current[key] = value
+    path = category_file(home)
+    ensure_directory(path.parent, Path.home() if home is None else Path(home))
+    temporary = path.with_suffix(".json.tmp")
+    temporary.write_text(json.dumps(current, indent=2, sort_keys=True))
+    temporary.chmod(0o600)
+    os.replace(temporary, path)
+    return current
+
+
+def category_key(name, kind=None):
+    if kind == "app" or str(name).lower().endswith(".app"):
+        return "apps"
+    extension = Path(str(name)).suffix.lower().lstrip(".")
+    for key, extensions in CATEGORY_EXTENSIONS.items():
+        if extension in extensions:
+            return key
+    return "other"
+
+
+def categorized_prefix(prefix, folder):
+    parts = [part for part in str(prefix or "").split("/") if part]
+    category = [part for part in str(folder or "").split("/") if part]
+    if category and parts[-len(category):] == category:
+        return "/".join(parts)
+    return "/".join([*parts, *category])
+
+
+def upload_destination(destination, source, home=None):
+    folder = load_categories(home)[category_key(source.get("name"), source.get("kind"))]
+    return {**destination, "prefix": categorized_prefix(destination.get("prefix") or "", folder)}
 
 
 def ensure_directory(path, home, private=False):
@@ -467,14 +548,23 @@ def child_result(command, maintenance_fd=None):
         options["input"] = credential.decode("utf8")
     try:
         result = subprocess.run(command, **options)
-        if result.returncode != 0 or len(result.stdout.encode()) > MAX_RESPONSE_BYTES:
-            raise ValueError("helper did not complete")
-        value = strict_json(result.stdout)
-        if not isinstance(value, dict) or value.get("ok") is not True:
-            raise ValueError("helper did not return success")
-        return value
-    except (OSError, UnicodeError, ValueError) as exc:
+    except (OSError, UnicodeError) as exc:
         raise WorkspaceError("helper_failed", "The cloud helper did not return a verified result; the selection and job were retained") from exc
+    value = None
+    if result.stdout:
+        try:
+            value = strict_json(result.stdout)
+        except (ValueError, UnicodeError):
+            value = None
+    if (result.returncode != 0 or len(result.stdout.encode()) > MAX_RESPONSE_BYTES
+            or not isinstance(value, dict) or value.get("ok") is not True):
+        detail = ""
+        if isinstance(value, dict):
+            detail = str(value.get("message") or value.get("error") or "")
+        if not detail and result.stderr:
+            detail = result.stderr.strip().splitlines()[-1][:300]
+        raise WorkspaceError("helper_failed", detail or "The cloud helper did not return a verified result; the selection and job were retained")
+    return value
 
 
 def select_destination_cli(project, bucket, remote, prefix, expected_revision, home=None):
@@ -498,7 +588,8 @@ def library_key(destination, source):
     return hashlib.sha256(value.encode()).hexdigest()[:18]
 
 
-def validate_upload_result(result, destination, source, offload):
+def validate_upload_result(result, destination, source, offload, home=None):
+    destination = upload_destination(destination, source, home)
     folder = destination["bucket"] + ("/" + destination["prefix"] if destination["prefix"] else "")
     expected = {"key": library_key(destination, source), "project": destination["project"],
                 "bucket": destination["bucket"], "remote": destination["remote"], "folder": folder,
@@ -578,7 +669,7 @@ def run_next(home=None):
                     current["items"][index].update(state="running", message="Checking source and uploading")
                 job_mutation(job["id"], starting, home)
                 unchanged(source)
-                destination = job["destination"]
+                destination = upload_destination(job["destination"], source, home)
                 folder = destination["bucket"] + ("/" + destination["prefix"] if destination["prefix"] else "")
                 command = [sys.executable, "-B", str(helper_path("gendragoon_library.py")), "upload",
                            "--source", source["path"], "--remote", destination["remote"], "--folder", folder,
@@ -586,8 +677,38 @@ def run_next(home=None):
                            "--maintenance-fd", str(maintenance_fd)]
                 if job["offload"]:
                     command.append("--offload")
-                outcome = child_result(command, maintenance_fd)
-                validate_upload_result(outcome, destination, source, job["offload"])
+                progress = support(home) / "UploadWorkspace" / "upload-progress.json"
+                stop = threading.Event()
+                def watch_progress():
+                    last = None
+                    while not stop.wait(0.35):
+                        try:
+                            raw = progress.read_text()
+                        except OSError:
+                            continue
+                        if raw == last:
+                            continue
+                        last = raw
+                        try:
+                            payload = json.loads(raw)
+                        except json.JSONDecodeError:
+                            continue
+                        message = str(payload.get("message") or "Uploading")[:240]
+                        def apply(current, state, message=message):
+                            item = current["items"][index]
+                            if item["state"] == "running":
+                                item["message"] = message
+                        try:
+                            job_mutation(job["id"], apply, home)
+                        except WorkspaceError:
+                            return
+                watcher = threading.Thread(target=watch_progress, daemon=True)
+                watcher.start()
+                try:
+                    outcome = child_result(command, maintenance_fd)
+                finally:
+                    stop.set()
+                validate_upload_result(outcome, job["destination"], source, job["offload"], home)
                 def succeeded(current, state):
                     current["items"][index].update(state="succeeded", key=outcome["key"],
                                                    offloaded=outcome["offloaded"], message="Verified upload complete")
@@ -612,7 +733,21 @@ def run_next(home=None):
             raise error
 
 
-def tree_node(path, identifier=None):
+def backed_up_sources(home=None):
+    path = support(home) / "app-library.json"
+    try:
+        data = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError, UnicodeError):
+        return set()
+    found = set()
+    if isinstance(data, dict):
+        for item in data.values():
+            if isinstance(item, dict) and item.get("verified") is True and isinstance(item.get("source"), str):
+                found.add(item["source"])
+    return found
+
+
+def tree_node(path, identifier=None, backed=None):
     metadata = path.lstat()
     symlink = stat.S_ISLNK(metadata.st_mode)
     directory = stat.S_ISDIR(metadata.st_mode)
@@ -620,23 +755,25 @@ def tree_node(path, identifier=None):
     return {"id": identifier or hashlib.sha256(os.fsencode(str(path))).hexdigest()[:24],
             "path": str(path), "name": path.name, "kind": kind,
             "has_children": directory and kind != "app", "selectable": directory or stat.S_ISREG(metadata.st_mode),
-            "symlink": symlink}
+            "symlink": symlink, "backed_up": str(path) in (backed or set())}
 
 
 def tree(path=None, home=None):
     state = read_state(home)
+    backed = backed_up_sources(home)
     actual_home = Path.home() if home is None else Path(home)
     quick = []
     for entry in (Path("/Applications"), actual_home / "Applications"):
         if entry.exists() and not entry.is_symlink():
-            quick.append(tree_node(entry))
+            quick.append(tree_node(entry, backed=backed))
         else:
             quick.append({"id": hashlib.sha256(os.fsencode(str(entry))).hexdigest()[:24], "path": str(entry),
                           "name": str(entry), "kind": "folder", "has_children": False, "selectable": False,
                           "symlink": entry.is_symlink()})
     if path is None:
         children = [{key: value for key, value in source.items() if key in {"id", "path", "name", "kind"}}
-                    | {"has_children": source["kind"] == "folder", "selectable": True, "symlink": False}
+                    | {"has_children": source["kind"] == "folder", "selectable": True, "symlink": False,
+                       "backed_up": source["path"] in backed}
                     for source in state["sources"]]
         root = {"path": None, "name": "Selected sources", "kind": "folder", "atomic": False,
                 "children": children, "truncated": False}
@@ -652,7 +789,7 @@ def tree(path=None, home=None):
                     if len(children) >= MAX_TREE_ENTRIES:
                         truncated = True
                         break
-                    children.append(tree_node(Path(entry.path)))
+                    children.append(tree_node(Path(entry.path), backed=backed))
             children.sort(key=lambda value: (value["kind"] == "file", value["name"].casefold()))
         root = {"path": str(target), "name": target.name, "kind": node["kind"], "atomic": node["kind"] == "app",
                 "children": children, "truncated": truncated}
@@ -674,7 +811,7 @@ def emit(response):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="action", required=True)
-    for name in ("state", "jobs", "run-next"):
+    for name in ("state", "jobs", "run-next", "categories"):
         command = sub.add_parser(name)
         if name == "run-next":
             command.add_argument("--performance-stdin", action="store_true")
@@ -692,6 +829,8 @@ def main(argv=None):
     clear = sub.add_parser("clear-sources")
     queue = sub.add_parser("enqueue")
     queue.add_argument("--offload", choices=("true", "false"), required=True)
+    update_categories = sub.add_parser("set-categories")
+    update_categories.add_argument("--json", required=True)
     for command in (destination, add, remove, clear, queue):
         command.add_argument("--expected-revision", type=int, required=True)
     args = parser.parse_args(argv)
@@ -717,6 +856,12 @@ def main(argv=None):
             state = clear_sources(args.expected_revision)
         elif args.action == "enqueue":
             state, extra["job_id"] = enqueue(args.expected_revision, args.offload == "true")
+        elif args.action == "categories":
+            state = observed_state()
+            extra["categories"] = load_categories()
+        elif args.action == "set-categories":
+            extra["categories"] = save_categories(strict_json(args.json))
+            state = observed_state()
         else:
             state, extra["job_id"] = run_next()
         emit({"ok": True, "state": state, **extra})
