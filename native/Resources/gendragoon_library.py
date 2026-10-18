@@ -353,15 +353,15 @@ def snapshot(source):
                 raise ValueError(f"{relative}: absolute symlinks cannot be restored safely")
             try:path.resolve(strict=False).relative_to(boundary)
             except (ValueError,RuntimeError):
-                raise ValueError(f"{relative}: symlink escapes the bundle or loops") from None
+                raise ValueError(f"{relative}: escaping or looping symlink cannot be restored safely") from None
             entry.update(type="symlink",target=target,executable=0)
         elif stat.S_ISREG(kind):
             descriptor=os.open(path,os.O_RDONLY|os.O_NOFOLLOW)
             with os.fdopen(descriptor,"rb") as stream:
-                if _fingerprint(os.fstat(stream.fileno()))!=guards[relative]:raise RuntimeError(f"{relative}: source changed while reading; original retained")
+                if _fingerprint(os.fstat(stream.fileno()))!=guards[relative]:raise RuntimeError(f"Source changed while reading {relative}; original retained")
                 digest=hashlib.sha256();size=0
                 for block in iter(lambda:stream.read(1024*1024),b""):digest.update(block);size+=len(block)
-                if _fingerprint(os.fstat(stream.fileno()))!=guards[relative]:raise RuntimeError(f"{relative}: source changed while reading; original retained")
+                if _fingerprint(os.fstat(stream.fileno()))!=guards[relative]:raise RuntimeError(f"Source changed while reading {relative}; original retained")
             entry.update(type="file",size=size,sha256=digest.hexdigest())
             note_progress(f"Reading {relative}", size, size)
         elif stat.S_ISDIR(kind):
@@ -375,6 +375,12 @@ def snapshot(source):
     return {"manifest":sorted(records,key=lambda x:x["path"]),"guard":guards}
 def unchanged(source,baseline):
     if snapshot(source)!=baseline:raise RuntimeError("Source changed since the verified archive; original retained")
+def flat_file_mode(manifest):
+    """A flat (non-zip) backup carries no permissions. Reapply the recorded mode
+    so the restored file matches the source; older manifests only kept the
+    executable bits."""
+    root=manifest[0]
+    return (root["mode"]&0o777) if "mode" in root else 0o600|root["executable"]
 def verify_restored(path,manifest):
     verified=snapshot(path);actual=verified["manifest"]
     # Older library manifests predate xattr recording. Do not fabricate it for
@@ -564,7 +570,7 @@ def _upload(source,remote,folder,offload=False,project=None,bucket=None):
             if not (testdir/src.name).exists():raise RuntimeError("Restored archive is missing its item; original retained")
             verify_restored(testdir/src.name,baseline["manifest"])
         else:
-            os.chmod(verified,0o600|baseline["manifest"][0]["executable"])
+            os.chmod(verified,flat_file_mode(baseline["manifest"]))
             verify_restored(verified,baseline["manifest"])
         unchanged(src,baseline)
     entry={"name":src.name,"kind":typ,"format":"archive","archiveLayout":"zip-root" if zipped else "flat","remote":remote,"folder":folder,"file":fname,"sha256":original_hash,"source":str(src),"offloaded":False,"verified":True,"verifiedAt":time.time(),"manifest":baseline["manifest"],"sizeBytes":total_bytes,**(context or {})}
@@ -649,7 +655,7 @@ def stage_item(key,open_after=False,project=None,bucket=None,remote="gendragoon"
                 if sha(archive)!=data.get("sha256"):raise RuntimeError("Downloaded cloud archive failed SHA-256 verification")
                 if kind=="file" and data.get("archiveLayout")!="zip-root":
                     p=archive
-                    if data.get("manifest"):os.chmod(p,0o600|data["manifest"][0]["executable"])
+                    if data.get("manifest"):os.chmod(p,flat_file_mode(data["manifest"]))
                 else:
                     validate_archive(archive,name)
                     run(["/usr/bin/ditto","-x","-k",archive,temp],timeout=900)

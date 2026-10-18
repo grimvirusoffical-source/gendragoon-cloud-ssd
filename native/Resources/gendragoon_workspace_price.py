@@ -3,6 +3,8 @@
 Free wins, then Included, then the formatted server monthly price.
 A 423 locks only the workspace the request addressed.
 """
+import argparse
+import sys
 
 
 def cents(value):
@@ -154,3 +156,14 @@ def deletion_blocked(status, body):
     if activity == "checkout":
         return "Finish or cancel checkout first."
     return None
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description="Workspace price labels and lock scope. Library only; the app imports it.")
+    parser.parse_args(argv)
+    print("Workspace prices: Free, then Included, then the server monthly price.")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
