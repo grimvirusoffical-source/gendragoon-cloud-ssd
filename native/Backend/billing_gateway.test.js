@@ -52,13 +52,14 @@ test("all performance plans support month/year and workers are verifiably enforc
   assert.equal(m,Math.min(v.workers,36));
  }
 });
-test("BYO service is $10 monthly / $100 annual and requires manually configured credentials",()=>{
- assert.equal(byoQuote("month").totalCents,1000);
- assert.equal(byoQuote("year").totalCents,10000);
+test("BYO service is $5 monthly / $50 annual and requires a verified challenge",()=>{
+ assert.equal(byoQuote("month").totalCents,500);
+ assert.equal(byoQuote("year").totalCents,5000);
  assert.deepEqual(priceKeysBYO(byoQuote("year")),["byo|year"]);
  assert.equal(effectiveWorkers({kind:"byo",byoActive:true,manualProviderConfigured:false}),0);
- assert.equal(effectiveWorkers({kind:"byo",byoActive:true,manualProviderConfigured:true}),1);
- assert.equal(effectiveWorkers({kind:"byo",byoActive:false,manualProviderConfigured:true}),0);
+ assert.equal(effectiveWorkers({kind:"byo",byoActive:true,manualProviderConfigured:true,byoChallengeVerified:false}),0);
+ assert.equal(effectiveWorkers({kind:"byo",byoActive:true,manualProviderConfigured:true,byoChallengeVerified:true}),1);
+ assert.equal(effectiveWorkers({kind:"byo",byoActive:false,manualProviderConfigured:true,byoChallengeVerified:true}),0);
 });
 test("mismatched Stripe price IDs and injected extra quantity never grant entitlements",()=>{
  const sub={items:{data:[{price:{id:"price_storage"},quantity:2},{price:{id:"price_fee"},quantity:1}]}};

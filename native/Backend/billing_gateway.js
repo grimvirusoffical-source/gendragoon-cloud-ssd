@@ -149,15 +149,19 @@ function installedBilling({app,db,bucket,admin,firebaseAuth,firebaseAuthWithoutT
    const previous=await evt.get();
    if(previous.exists&&previous.data().processed===true)return res.json({received:true,replayed:true});
    const object=event.data?.object||{};
+   async function applySubscription(latest,eventType,source){
+    if(latest?.metadata?.kind==="workspace_fee")return billing.projects.reconcileWorkspaceFee(latest,{eventType,invoice:String(eventType).startsWith("invoice.")?source:null});
+    if(await billing.reconcileSubscription(latest))await provisionIfPaid(latest);
+   }
    if(event.type.startsWith("customer.subscription.")){
     const latest=await stripe.subscriptions.retrieve(object.id);
-    if(await billing.reconcileSubscription(latest))await provisionIfPaid(latest);
+    await applySubscription(latest,event.type,object);
    } else if(event.type.startsWith("invoice.")){
     const id=typeof object.subscription==="string"?object.subscription:
       object.subscription?.id||object.parent?.subscription_details?.subscription;
     if(id){
       const latest=await stripe.subscriptions.retrieve(id);
-      if(await billing.reconcileSubscription(latest))await provisionIfPaid(latest);
+      await applySubscription(latest,event.type,object);
     }
    } else if(event.type.startsWith("checkout.session.")){
     if(object.metadata?.kind==="project_creation"){
@@ -170,7 +174,7 @@ function installedBilling({app,db,bucket,admin,firebaseAuth,firebaseAuthWithoutT
       const id=typeof object.subscription==="string"?object.subscription:object.subscription.id;
       if(id){
       const latest=await stripe.subscriptions.retrieve(id);
-      if(await billing.reconcileSubscription(latest))await provisionIfPaid(latest);
+      await applySubscription(latest,event.type,object);
     }
     }
    } else if(event.type==="charge.refunded"||event.type==="charge.dispute.created"){
