@@ -126,7 +126,7 @@ final class SupportRequestMonitorTests: XCTestCase {
     }
 
     func testEmptyStatusTokenSendsNothingAndShowsTheFallback() async throws {
-        for token in ["", "   ", "\n"] {
+        for token in ["", "   ", "\n", "\t", " \t\r\n "] {
             let saved = GDSavedDeletionJob(jobId: jobId, statusToken: token, ownerUID: "uid-owner")
             let transport = await check([(202, ["status": "received", "requestId": "never"])], saved: saved)
             XCTAssertEqual(transport.sent.count, 0)
@@ -194,6 +194,34 @@ final class SupportRequestMonitorTests: XCTestCase {
             let transport = await check([(409, body), (200, ["jobId": jobId, "status": "done"])], saved: savedJob)
             XCTAssertEqual(transport.sent, [post], "no refresh")
         }
+    }
+
+    private func assertRetryAfter(_ json: [String: Any], _ expected: Int, file: StaticString = #filePath, line: UInt = #line) async {
+        let transport = await check([(429, json)], saved: savedJob, expect: .rateLimited(retryAfterSec: expected), file: file, line: line)
+        XCTAssertEqual(transport.sent, [post], file: file, line: line)
+    }
+
+    func testRateLimitRetryAfterIsClampedLikeCore() async throws {
+        await assertRetryAfter(["error": "rate_limited", "retryAfterSec": -5], 60)
+        await assertRetryAfter(["error": "rate_limited", "retryAfterSec": 0], 60)
+        await assertRetryAfter(["error": "rate_limited"], 60)
+        await assertRetryAfter(["error": "rate_limited", "retryAfterSec": 120], 120)
+        await assertRetryAfter(["error": "rate_limited", "retryAfterSec": 86400], 86400)
+        await assertRetryAfter(["error": "rate_limited", "retryAfterSec": 999999], 86400)
+    }
+
+    func testRateLimitRetryAfterRejectsNonNumbers() async throws {
+        await assertRetryAfter(["error": "rate_limited", "retryAfterSec": "120"], 60)
+        await assertRetryAfter(["error": "rate_limited", "retryAfterSec": true], 60)
+        await assertRetryAfter(["error": "rate_limited", "retryAfterSec": Double.infinity], 60)
+        await assertRetryAfter(["error": "rate_limited", "retryAfterSec": Double.nan], 60)
+        await assertRetryAfter(["error": "rate_limited", "retryAfterSec": 0.5], 1)
+    }
+
+    func testAnyTooManyRequestsIsAlreadySentWithoutTheRateLimitedCode() async throws {
+        await assertRetryAfter([:], 60)
+        await assertRetryAfter(["error": "too_many_requests", "retryAfterSec": 300], 300)
+        await assertRetryAfter(["code": "slow_down"], 60)
     }
 
     func testOtherClientErrorsShowTheFallback() async throws {

@@ -341,15 +341,29 @@ extension GDAccountContract {
            let requestId = json["requestId"] as? String, !requestId.isEmpty {
             return .received(requestId: requestId)
         }
-        if status == 429, GDServerCode.read(json) == "rate_limited" {
-            let retry = (json["retryAfterSec"] as? Int) ?? (json["retryAfterSec"] as? NSNumber)?.intValue ?? 0
-            return .rateLimited(retryAfterSec: max(0, retry))
+        if status == 429 {
+            // Core's `already_sent`: any 429, whatever its code.
+            return .rateLimited(retryAfterSec: supportRetryAfterSec(json["retryAfterSec"]))
         }
         if status == 409, isSupportNotNeeded(json) {
             // Only a candidate: the monitor confirms it with one status refresh.
             return .notNeeded
         }
         return .emailFallback
+    }
+
+    static let supportRetryAfterDefaultSec = 60
+    static let supportRetryAfterMaxSec = 86400
+
+    /// Core's clamp: a missing, non-numeric (including a JSON boolean), non-finite or <= 0
+    /// value is 60 seconds; anything else is clamped to 1...86400.
+    static func supportRetryAfterSec(_ value: Any?) -> Int {
+        guard let number = value as? NSNumber, CFGetTypeID(number) != CFBooleanGetTypeID() else {
+            return supportRetryAfterDefaultSec
+        }
+        let seconds = number.doubleValue
+        guard seconds.isFinite, seconds > 0 else { return supportRetryAfterDefaultSec }
+        return Int(min(Double(supportRetryAfterMaxSec), max(1, seconds)))
     }
 
     /// Core's rule: the body's `error` is exactly `support_not_needed`.
