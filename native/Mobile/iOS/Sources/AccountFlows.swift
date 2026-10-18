@@ -234,12 +234,13 @@ struct CloudDeletionTransport:DeletionTransport {
                     Text("Duplicates are kept as name (from <source>).").font(.footnote).foregroundStyle(.secondary)
                     if resolved.workspaces.isEmpty && resolved.detailText.isEmpty { Text("The server did not include a workspace list.").foregroundStyle(.secondary) }
                     ForEach(resolved.workspaces){item in
+                        let rowDeleting=cloud.deletingIDs.contains(item.workspaceID ?? "")
                         VStack(alignment:.leading,spacing:10){
-                            Text(item.label).font(.headline)
+                            Text(rowDeleting ? WorkspacePolicy.deleting : item.label).font(.headline)
                             HStack{
                                 if !resolved.requiresPayment {
-                                    Button(WorkspaceLock.actionDelete,role:.destructive){pendingDelete=item}.disabled(item.workspaceID==nil || cloud.busy)
-                                    mergeControl(item)
+                                    Button(WorkspaceLock.actionDelete,role:.destructive){pendingDelete=item}.disabled(item.workspaceID==nil || cloud.busy || rowDeleting)
+                                    mergeControl(item).disabled(cloud.busy || rowDeleting)
                                 }
                                 Button(WorkspaceLock.actionDownload){Task{await list(item)}}.disabled(item.workspaceID==nil || cloud.busy || !CloudSignals.allowsTransfer(method:"GET",locked:true))
                             }
@@ -287,6 +288,7 @@ struct CloudDeletionTransport:DeletionTransport {
     private func remove(_ item:WorkspaceLock.Item) async {
         guard let id=item.workspaceID else {return}
         do { try await cloud.deleteHostedWorkspace(id);try await cloud.reloadLibrary() }
+        catch let error as GDTransferError where WorkspacePolicy.keepsWorkspace(status:error.status,error:error.message) { notice=WorkspacePolicy.busy }
         catch let locked as WorkspaceLocked { cloud.workspaceLock=locked.lock }
         catch { notice=error.localizedDescription }
     }

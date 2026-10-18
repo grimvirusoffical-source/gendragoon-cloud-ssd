@@ -119,20 +119,23 @@ private struct MobileLibrary:View {
         HStack(spacing:13){Image(systemName:icon(file.name)).font(.system(size:22,weight:.medium)).foregroundStyle(violet).frame(width:44,height:51).background(violet.opacity(0.10),in:RoundedRectangle(cornerRadius:12))
             VStack(alignment:.leading,spacing:7){Text(file.name).font(.subheadline.weight(.semibold)).lineLimit(2);Text(size(file.sizeBytes)).font(.caption2).foregroundStyle(.secondary)}
             Spacer(minLength:4)
-            Menu{Button{cloud.restore(file)}label:{Label("Restore and share",systemImage:"arrow.down.to.line")};Button(role:.destructive){removing=file}label:{Label("Delete cloud copy",systemImage:"trash")}}label:{Image(systemName:"ellipsis").frame(width:42,height:44)}.disabled(cloud.busy).accessibilityLabel("Actions for "+file.name)
+            Menu{Button{cloud.restore(file)}label:{Label("Restore and share",systemImage:"arrow.down.to.line")};Button(role:.destructive){removing=file}label:{Label("Delete cloud copy",systemImage:"trash")}}label:{Image(systemName:"ellipsis").frame(width:42,height:44)}.disabled(cloud.busy || !cloud.actionsEnabled).accessibilityLabel("Actions for "+file.name)
         }.padding(14).background(panel,in:RoundedRectangle(cornerRadius:15))
     }
     var body:some View{NavigationStack{
         ScrollView{VStack(alignment:.leading,spacing:20){
             HStack{VStack(alignment:.leading,spacing:7){Text("YOUR DIGITAL SPACE").font(.system(size:9,weight:.bold,design:.monospaced)).tracking(2).foregroundStyle(violet);Text("My cloud").font(.largeTitle.weight(.bold)).tracking(-1);Text("Everything you need. Nothing in your way.").font(.caption).foregroundStyle(.secondary)};Spacer();Image(systemName:"cloud.fill").font(.system(size:37)).foregroundStyle(violet).padding(15).background(violet.opacity(0.12),in:RoundedRectangle(cornerRadius:21))}
             Picker("Workspace",selection:$cloud.selected){Text(cloud.freePickerLabel).tag("free");ForEach(cloud.choices){Text($0.pickerLabel).tag($0.id)}}.pickerStyle(.menu).frame(maxWidth:.infinity,alignment:.leading).padding(8).background(panel,in:RoundedRectangle(cornerRadius:11)).disabled(cloud.busy)
+            if cloud.paymentDueBanner {
+                HStack{Text(WorkspacePolicy.paymentDue).font(.headline);Spacer();Button("Pay"){cloud.status=WorkspacePolicy.paymentDue}.accessibilityIdentifier("payment-due")}.padding(14).background(panel,in:RoundedRectangle(cornerRadius:12))
+            }
             if let c=cloud.config{
                 HStack(spacing:12){metric("Used / total",size(c.usedBytes)+" / "+size(c.quotaBytes));metric("Parallel transfers",String((cloud.dataSaver||cloud.constrainedNetwork) ? 1:min(4,c.transfer.workers)))}
                 ProgressView(value:min(1,Double(c.usedBytes+c.reservedBytes)/Double(max(1,c.quotaBytes)))).tint(violet)
                 VStack(alignment:.leading,spacing:12){
                     Text("Applications, files & folders").font(.headline)
                     Text("Store app packages for their compatible devices. iPhone and iPad restore and share files; desktop and Android apps cannot run here.").font(.caption).foregroundStyle(.secondary)
-                    HStack{Button{importFolders=false;importing=true}label:{Label("Files / apps",systemImage:"square.stack.3d.up")};Button{importFolders=true;importing=true}label:{Label("Complete folder",systemImage:"folder.badge.plus")}}.buttonStyle(.borderedProminent).controlSize(.large).disabled(cloud.busy)
+                    HStack{Button{importFolders=false;importing=true}label:{Label("Files / apps",systemImage:"square.stack.3d.up")};Button{importFolders=true;importing=true}label:{Label("Complete folder",systemImage:"folder.badge.plus")}}.buttonStyle(.borderedProminent).controlSize(.large).disabled(cloud.busy || !cloud.actionsEnabled || cloud.selectedLocked)
                     Toggle("Remove selected originals after verified upload and restore check",isOn:$cloud.removeOriginals).font(.caption).disabled(cloud.busy)
                     if cloud.removeOriginals{Text("Applies only to the files or folder you select. Provider deletion may be permanent. A full cloud read-back is required.").font(.caption2).foregroundStyle(.secondary)}
                 }.padding(16).background(panel,in:RoundedRectangle(cornerRadius:15))

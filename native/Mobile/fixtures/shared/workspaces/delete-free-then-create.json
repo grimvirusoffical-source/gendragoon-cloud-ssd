@@ -27,7 +27,7 @@
         "freeProjectClaimed": true,
         "freeWorkspaceId": "11111111-1111-4111-8111-000000000005",
         "freeWorkspaces": 1,
-        "grandfatheredProjects": 1,
+        "grandfatheredProjects": 0,
         "locked": false,
         "newProjectOneTimeCents": 500,
         "overBy": 0,
@@ -52,7 +52,7 @@
         "byoActive": false,
         "byoChallengeVerified": false,
         "dataRetained": false,
-        "grandfathered": true,
+        "grandfathered": false,
         "hasContinuingBilling": false,
         "id": "11111111-1111-4111-8111-000000000005",
         "intendedSelection": {},
@@ -80,7 +80,7 @@
         "transferEligible": true,
         "usedBytes": 0,
         "workers": 1,
-        "workspaceFeeModel": "one_time"
+        "workspaceFeeModel": null
       },
       "resumed": false,
       "workspaceId": "11111111-1111-4111-8111-000000000005"

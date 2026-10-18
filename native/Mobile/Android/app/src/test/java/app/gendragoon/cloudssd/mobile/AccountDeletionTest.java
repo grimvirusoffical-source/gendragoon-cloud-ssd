@@ -960,9 +960,9 @@ public final class AccountDeletionTest {
         assertTrue(SupportContact.mailto(flow.jobId).startsWith("mailto:SUPPORT_CONTACT_PLACEHOLDER@invalid"));
     }
 
-    /** Riley PR #5 at 568f223. `grandfathered-plus-new` is not in that commit. */
+    /** Riley PR #5 at 4c3dd13, including `grandfathered-plus-new`. Labels come from the server fields. */
     @Test public void workspacePriceUsesRileyFixturesAndNeverCounts(){
-        assertEquals("568f223",BackendFixtures.WORKSPACE_PRICE_SHA);
+        assertEquals("4c3dd13",BackendFixtures.WORKSPACE_PRICE_SHA);
         assertFalse(WorkspacePrice.ENABLED);
         String freeFirst=BackendFixtures.pricedWorkspaces("free-first").get(0);
         assertEquals("Free Hosted",WorkspacePrice.pickerText(freeFirst));
@@ -979,7 +979,13 @@ public final class AccountDeletionTest {
         assertEquals("Second Workspace · Free",WorkspacePrice.pickerText(mixed.get(1),true));
         assertEquals("Only BYO · $5/mo",WorkspacePrice.pickerText(BackendFixtures.pricedWorkspaces("list-byo-only").get(0),true));
         assertEquals("Included",WorkspacePrice.priceLabel(false,true,0));
-        assertEquals("Legacy · Included",WorkspacePrice.pickerText("Legacy",false,true,0,true));
+        List<String> aged=BackendFixtures.pricedWorkspaces("grandfathered-plus-new");
+        assertEquals(2,aged.size());
+        assertEquals("One-time paid",WorkspacePrice.pickerText(aged.get(0)));
+        assertEquals("New Hosted",WorkspacePrice.pickerText(aged.get(1)));
+        assertEquals("One-time paid · Included",WorkspacePrice.pickerText(aged.get(0),true));
+        assertEquals("New Hosted · Free",WorkspacePrice.pickerText(aged.get(1),true));
+        assertEquals("Free",WorkspacePrice.priceLabel(true,true,0));
         assertNull(WorkspacePrice.formatCents(0));
         assertNull(WorkspacePrice.formatCents(null));
         assertEquals("Zero",WorkspacePrice.pickerText("Zero",false,false,0,true));
@@ -995,6 +1001,51 @@ public final class AccountDeletionTest {
         assertEquals(CloudSignals.Destination.LOCK_SCREEN,route.destination);
         assertEquals("lapsed",route.lock.reasonText());
         assertTrue(route.lock.requiresPayment());
+    }
+
+    /**
+     * Provisional until PR #5 lands its fix. The busy, deleting, per-workspace lock, and grace
+     * cases are synthetic because those fixtures are not in 4c3dd13.
+     */
+    @Test public void provisionalWorkspaceBusyDeletingLockAndGrace(){
+        assertTrue(WorkspacePolicy.keepsWorkspace(409,"workspace_busy"));
+        assertEquals("busy, try again",WorkspacePolicy.deleteNotice(409,"workspace_busy"));
+        assertFalse(WorkspacePolicy.keepsWorkspace(200,"workspace_busy"));
+        assertFalse(WorkspacePolicy.keepsWorkspace(409,"conflict"));
+        assertNull(WorkspacePolicy.deleteNotice(200,"ok"));
+
+        assertEquals("Deleting...",WorkspacePolicy.rowTitle("Paid · Included","deleting"));
+        assertFalse(WorkspacePolicy.actionsEnabled("deleting"));
+        assertEquals("Paid · Included",WorkspacePolicy.rowTitle("Paid · Included","active"));
+        assertTrue(WorkspacePolicy.actionsEnabled("active"));
+        assertTrue(WorkspacePolicy.actionsEnabled(null));
+
+        List<String> unpaid=List.of("byo-1","hosted-2");
+        assertTrue(WorkspacePolicy.locksThisWorkspace("byo-1","byo",false,unpaid));
+        assertTrue(WorkspacePolicy.locksThisWorkspace("hosted-2","paid",false,unpaid));
+        assertFalse(WorkspacePolicy.locksThisWorkspace("free","free",true,unpaid));
+        assertFalse(WorkspacePolicy.locksThisWorkspace("free","paid",false,unpaid));
+        assertFalse(WorkspacePolicy.locksThisWorkspace("paid-ok","free",false,unpaid));
+        assertFalse(WorkspacePolicy.locksThisWorkspace("paid-ok","paid",true,unpaid));
+        assertFalse(WorkspacePolicy.locksThisWorkspace("paid-ok","paid",false,unpaid));
+
+        WorkspaceLock lapsed=new WorkspaceLock(List.of(),"{\"error\":\"workspace_lock\",\"reason\":\"lapsed\"}",0,unpaid);
+        assertFalse(WorkspacePolicy.blocksLibrary("free","free",true,lapsed));
+        assertFalse(WorkspacePolicy.blocksLibrary("paid-ok","paid",false,lapsed));
+        assertTrue(WorkspacePolicy.blocksLibrary("byo-1","byo",false,lapsed));
+        assertTrue(WorkspacePolicy.blocksLibrary("hosted-2","paid",false,lapsed));
+        WorkspaceLock cap=new WorkspaceLock(List.of(),"{\"error\":\"workspace_lock\",\"reason\":\"over_cap\"}",1,List.of());
+        assertTrue(WorkspacePolicy.blocksLibrary("free","free",true,cap));
+        assertTrue(WorkspacePolicy.blocksLibrary("paid-ok","paid",false,cap));
+
+        long through=1_700_000_000_000L;
+        assertTrue(WorkspacePolicy.paymentDue(through,through,false));
+        assertTrue(WorkspacePolicy.paymentDue(through,through+WorkspacePolicy.GRACE_MS-1,false));
+        assertFalse(WorkspacePolicy.paymentDue(through,through+WorkspacePolicy.GRACE_MS,false));
+        assertFalse(WorkspacePolicy.paymentDue(through,through-1,false));
+        assertFalse(WorkspacePolicy.paymentDue(through,through,true));
+        assertFalse(WorkspacePolicy.paymentDue(null,through,false));
+        assertEquals("Payment due",WorkspacePolicy.PAYMENT_DUE);
     }
 
     private static FileReplacement.Manifest manifest(){

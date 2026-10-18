@@ -168,6 +168,45 @@ final class WorkspacePrice {
     }
 }
 
+/**
+ * Provisional until PR #5 lands its fix. A 409 {@code workspace_busy} keeps the workspace.
+ * A {@code deleting} row shows "Deleting..." and disables its actions. An unpaid BYO or hosted
+ * workspace locks only itself. The 3-day grace period is a non-blocking "Payment due" banner.
+ */
+final class WorkspacePolicy {
+    static final String BUSY="busy, try again";
+    static final String DELETING="Deleting...";
+    static final String PAYMENT_DUE="Payment due";
+    static final long GRACE_MS=3L*24L*60L*60L*1000L;
+    private WorkspacePolicy(){}
+    static boolean keepsWorkspace(int status,String error){return status==409&&"workspace_busy".equals(error);}
+    static String deleteNotice(int status,String error){return keepsWorkspace(status,error)?BUSY:null;}
+    static boolean isDeleting(String projectStatus){return "deleting".equals(projectStatus);}
+    static String rowTitle(String pricedLabel,String projectStatus){
+        if(isDeleting(projectStatus))return DELETING;
+        return pricedLabel==null||pricedLabel.isEmpty()?"Workspace":pricedLabel;
+    }
+    static boolean actionsEnabled(String projectStatus){return !isDeleting(projectStatus);}
+    /** Free and current paid workspaces stay open. Only an id in {@code unpaidIds} is locked. */
+    static boolean locksThisWorkspace(String id,String kind,Boolean isFree,List<String> unpaidIds){
+        if(id==null||id.isEmpty())return false;
+        if("free".equals(id)||"free".equals(kind)||Boolean.TRUE.equals(isFree))return false;
+        return unpaidIds!=null&&unpaidIds.contains(id);
+    }
+    /** A lapsed 423 takes over the library only when the open workspace is the unpaid one. */
+    static boolean blocksLibrary(String selectedId,String kind,Boolean isFree,WorkspaceLock lock){
+        if(lock==null)return false;
+        if(!"lapsed".equals(lock.reasonText()))return true;
+        return locksThisWorkspace(selectedId,kind,isFree,lock.unpaidIds);
+    }
+    /** {@code paidThroughMs <= now < paidThroughMs + 3 days}, and the workspace is not already lapsed. */
+    static boolean paymentDue(Long paidThroughMs,long nowMs,boolean lapsed){
+        if(lapsed||paidThroughMs==null)return false;
+        long end=paidThroughMs+GRACE_MS;
+        return nowMs>=paidThroughMs&&nowMs<end;
+    }
+}
+
 final class WorkspaceLocked extends Exception {
     final WorkspaceLock lock;
     final String raw;

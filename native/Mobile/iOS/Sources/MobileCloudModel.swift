@@ -3,8 +3,8 @@ import SwiftUI
 import Network
 
 struct MobileWorkspace:Decodable,Identifiable,Sendable {
-    let id:String;let name:String;let kind:String;let storageActive:Bool;let provisioned:Bool;let isFree:Bool?;let grandfathered:Bool?;let monthlyPriceCents:Int?
-    var pickerLabel:String { WorkspacePrice.pickerText(name:name,isFree:isFree,grandfathered:grandfathered==true,cents:monthlyPriceCents) }
+    let id:String;let name:String;let kind:String;let storageActive:Bool;let provisioned:Bool;let isFree:Bool?;let grandfathered:Bool?;let monthlyPriceCents:Int?;let projectStatus:String?;let lapsed:Bool?;let paidThroughMs:Int64?
+    var pickerLabel:String { WorkspacePolicy.rowTitle(WorkspacePrice.pickerText(name:name,isFree:isFree,grandfathered:grandfathered==true,cents:monthlyPriceCents),projectStatus:projectStatus) }
 }
 struct MobileExport:Identifiable {let id=UUID();let url:URL}
 @MainActor final class MobileCloudModel:ObservableObject {
@@ -27,6 +27,11 @@ struct MobileExport:Identifiable {let id=UUID();let url:URL}
     @Published var detail=""
     @Published var export:MobileExport?
     @Published var workspaceLock:WorkspaceLock?
+    /// Non-blocking grace banner. An unpaid workspace does not set this.
+    @Published var paymentDueBanner=false
+    @Published var actionsEnabled=true
+    @Published var selectedLocked=false
+    @Published var deletingIDs:Set<String>=[]
     private var task:Task<Void,Never>?
     private var client:GDTransferClient?
     private var owner=""
@@ -56,7 +61,8 @@ struct MobileExport:Identifiable {let id=UUID();let url:URL}
     }
     private func load() async throws {
         guard let client else{return}
-        struct Response:Decodable{let workspaces:[MobileWorkspace];let ownerBenefits:Bool?}
+        struct PolicyBody:Decodable{let unpaidWorkspaceIds:[String]?}
+        struct Response:Decodable{let workspaces:[MobileWorkspace];let ownerBenefits:Bool?;let policy:PolicyBody?}
         let response=try JSONDecoder().decode(Response.self,from:await client.json("v2/workspaces"))
         ownerBenefits=response.ownerBenefits == true
         if let free=response.workspaces.first(where:{$0.id=="free"}) {freePickerLabel=free.pickerLabel}
@@ -65,8 +71,19 @@ struct MobileExport:Identifiable {let id=UUID();let url:URL}
         if ownerBenefits && !didChooseOwnerWorkspace {if let ownerSpace=choices.first(where:{$0.name=="Owner • All features"}){selected=ownerSpace.id};didChooseOwnerWorkspace=true}
         if selected != "free" && !choices.contains(where:{$0.id==selected}){selected="free"}
         UserDefaults.standard.set(selected,forKey:selectionKey)
+        let unpaid=response.policy?.unpaidWorkspaceIds ?? []
+        let open=response.workspaces.first{$0.id==selected}
+        actionsEnabled=WorkspacePolicy.actionsEnabled(open?.projectStatus)
+        selectedLocked=WorkspacePolicy.locksThisWorkspace(id:selected,kind:open?.kind,isFree:open?.isFree,unpaidIds:unpaid)
+        paymentDueBanner=WorkspacePolicy.isPaymentDue(paidThroughMs:open?.paidThroughMs,nowMs:Int64(Date().timeIntervalSince1970*1000),lapsed:open?.lapsed==true)
+        deletingIDs=Set(response.workspaces.filter{WorkspacePolicy.isDeleting($0.projectStatus)}.map(\.id))
         do{let nextConfig=try await client.configuration(workspace:selected);let nextFiles=try await client.list(workspace:selected);config=nextConfig;files=nextFiles;status="Your files are ready."}
         catch let e as GDTransferError where e.status==404 && selected=="free"{config=nil;files=[];status="Create your free 2 GB workspace to begin."}
+        catch let locked as WorkspaceLocked {
+            let open=response.workspaces.first{$0.id==selected}
+            if WorkspacePolicy.blocksLibrary(selectedId:selected,kind:open?.kind,isFree:open?.isFree,lock:locked.lock){config=nil;files=[];throw locked}
+            status="This workspace stays available."
+        }
         catch{config=nil;files=[];throw error}
     }
     func refresh(){guard !busy else{return};busy=true;task=Task{defer{busy=false};do{try await load()}catch{report(error)}}}
@@ -77,7 +94,7 @@ struct MobileExport:Identifiable {let id=UUID();let url:URL}
     }catch{report(error)}}}
     private func progress(_ p:GDTransferProgress){fraction=p.fraction;detail=p.phase+(p.bytesPerSecond>0 ? String(format:" · %.1f MB/s",p.bytesPerSecond/1e6):"");if let eta=p.secondsRemaining{detail+=String(format:" · ~%.0fs",eta)}}
     func upload(_ urls:[URL]){
-        guard CloudSignals.allowsTransfer(method:"PUT",locked:workspaceLock != nil) else{return}
+        guard CloudSignals.allowsTransfer(method:"PUT",locked:workspaceLock != nil || selectedLocked || !actionsEnabled) else{return}
         guard !busy,let client,let config,!urls.isEmpty else{return};busy=true;transferring=true;fraction=0
         let workspace=selected,constrained=dataSaver||constrainedNetwork,remove=removeOriginals,limit=config.maxFileBytes
         task=Task{defer{busy=false;transferring=false;removeOriginals=false};do{

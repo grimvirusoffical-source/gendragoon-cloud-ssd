@@ -110,6 +110,43 @@ enum WorkspacePrice {
     }
 }
 
+/// Provisional until PR #5 lands its fix. A 409 `workspace_busy` keeps the workspace.
+/// A `deleting` row shows "Deleting..." and disables its actions. An unpaid BYO or hosted
+/// workspace locks only itself. The 3-day grace period is a non-blocking "Payment due" banner.
+enum WorkspacePolicy {
+    static let busy="busy, try again"
+    static let deleting="Deleting..."
+    static let paymentDue="Payment due"
+    static let graceMs:Int64=3*24*60*60*1000
+    static func keepsWorkspace(status:Int,error:String?)->Bool { status==409 && error=="workspace_busy" }
+    static func deleteNotice(status:Int,error:String?)->String? { keepsWorkspace(status:status,error:error) ? busy : nil }
+    static func isDeleting(_ projectStatus:String?)->Bool { projectStatus=="deleting" }
+    static func rowTitle(_ pricedLabel:String?,projectStatus:String?)->String {
+        if isDeleting(projectStatus) {return deleting}
+        guard let pricedLabel,!pricedLabel.isEmpty else {return "Workspace"}
+        return pricedLabel
+    }
+    static func actionsEnabled(_ projectStatus:String?)->Bool { !isDeleting(projectStatus) }
+    /// Free and current paid workspaces stay open. Only an id in `unpaidIds` is locked.
+    static func locksThisWorkspace(id:String?,kind:String?,isFree:Bool?,unpaidIds:[String])->Bool {
+        guard let id,!id.isEmpty else {return false}
+        if id=="free" || kind=="free" || isFree==true {return false}
+        return unpaidIds.contains(id)
+    }
+    /// A lapsed 423 takes over the library only when the open workspace is the unpaid one.
+    static func blocksLibrary(selectedId:String?,kind:String?,isFree:Bool?,lock:WorkspaceLock?)->Bool {
+        guard let lock else {return false}
+        if lock.reasonText != "lapsed" {return true}
+        return locksThisWorkspace(id:selectedId,kind:kind,isFree:isFree,unpaidIds:lock.unpaidIds)
+    }
+    /// `paidThroughMs <= now < paidThroughMs + 3 days`, and the workspace is not already lapsed.
+    static func isPaymentDue(paidThroughMs:Int64?,nowMs:Int64,lapsed:Bool)->Bool {
+        guard !lapsed,let paidThroughMs else {return false}
+        let end=paidThroughMs+graceMs
+        return nowMs>=paidThroughMs && nowMs<end
+    }
+}
+
 struct WorkspaceLock:Identifiable,Equatable,Sendable {
     struct Item:Identifiable,Equatable,Sendable {
         var workspaceID:String?
