@@ -76,6 +76,7 @@ class RestartWorkerTests(unittest.TestCase):
     def test_private_snapshot_contains_only_fixed_bundled_sources_and_rejects_tampering(self):
         directory, receipt = self.snapshot()
         self.assertEqual(set(receipt["sources"]), set(worker.DEPENDENCIES))
+        self.assertIn("redxai_updater.py", receipt["sources"], "install_worker applies updates through Red-XAI")
         self.assertEqual(worker.verify_snapshot(directory), receipt)
         self.assertEqual(directory.stat().st_mode & 0o077, 0)
         (directory / "gendragoon_library.py").write_text("changed")
@@ -226,7 +227,10 @@ class RestartWorkerTests(unittest.TestCase):
     def test_packaging_requires_restart_and_profile_resources(self):
         spec=importlib.util.spec_from_file_location("fixture_package",RESOURCE.parent/"package_macos.py")
         package=importlib.util.module_from_spec(spec);spec.loader.exec_module(package)
-        (self.resources/"gendragoon_project_files.py").write_text("fixture required project browser")
+        for name in package.REQUIRED_RESOURCES:
+            path = self.resources / name
+            if not path.is_file():
+                path.write_text("fixture required " + name)
         package.require_runtime_resources(self.app)
         (self.resources/"gendragoon_update_restart.py").unlink()
         with self.assertRaisesRegex(RuntimeError,"gendragoon_update_restart.py"):
@@ -400,6 +404,15 @@ def command(args,timeout=80):
         (directory/'fixture-observed.json').write_text(json.dumps({'workerPID':os.getpid(),'sessionID':os.getsid(0),'launchedPID':process.pid,'librarySource':w.launcher.lib.__file__}))
     return ''
 w.auto.subprocess_ok=command
+# The production health window is 60s. This adapter advances that clock so the
+# real confirm_relaunch_health loop finishes while the fixture process is alive.
+_health_clock={"t":0.0}
+def _health_now():
+    return _health_clock["t"]
+def _health_sleep(seconds):
+    _health_clock["t"]+=float(seconds)
+w.auto._health_now=_health_now
+w.auto._health_sleep=_health_sleep
 sys.exit(w.main(sys.argv[4:]))
 '''
 
@@ -416,6 +429,10 @@ class PreviewChannelTests(unittest.TestCase):
         with mock.patch.object(auto,"request_json",side_effect=fetch),mock.patch.object(auto,"installed_version",return_value="0.18.0"), \
              mock.patch.object(auto,"build_of",return_value=23):
             with mock.patch.object(auto,"CHANNEL","stable"):self.assertIsNone(auto.latest())
+            package["automaticUpdateEligible"]=True
+            with mock.patch.object(auto,"CHANNEL","stable"):
+                self.assertIsNone(auto.latest())
+            package["automaticUpdateEligible"]=False
             with mock.patch.object(auto,"CHANNEL","preview"):
                 result=auto.latest()
                 self.assertEqual(result["version"],base);self.assertEqual(result["releaseTag"],tag)

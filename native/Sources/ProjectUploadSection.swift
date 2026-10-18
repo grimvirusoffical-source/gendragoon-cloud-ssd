@@ -33,17 +33,23 @@ public struct UploadCloudBucket: Identifiable, Hashable, Sendable {
 /// The host retains this model across sidebar navigation. Every destination
 /// badge, application tree and queue observes the same persisted workspace.
 @MainActor
+enum GDLibraryBrowserMode { case upload, backup }
+
 struct ProjectUploadSection: View {
     private let externalBusy: Bool
     private let onRefreshCloudChoices: @MainActor () async -> Void
     private let content: GDProjectContent?
+    private let mode: GDLibraryBrowserMode
     @ObservedObject private var workspace: UploadWorkspaceModel
+    @State private var selectedNodeID: String?
 
     init(workspace: UploadWorkspaceModel, externalBusy: Bool, content: GDProjectContent? = nil,
+         mode: GDLibraryBrowserMode = .upload,
          onRefreshCloudChoices: @escaping @MainActor () async -> Void) {
         self.workspace = workspace
         self.externalBusy = externalBusy
         self.content = content
+        self.mode = mode
         self.onRefreshCloudChoices = onRefreshCloudChoices
     }
 
@@ -65,7 +71,7 @@ struct ProjectUploadSection: View {
     }
 
     private var destinationPicker: some View {
-        GroupBox("Google Cloud destination") {
+        GroupBox("Cloud destination") {
             VStack(alignment: .leading, spacing: 8) {
                 Picker("Project / bucket", selection: Binding(
                     get: { workspace.snapshot?.destination },
@@ -92,7 +98,7 @@ struct ProjectUploadSection: View {
                     Text("The saved destination is unavailable in the current authorized cloud choices. It stays selected; refresh access or choose another destination before uploading.")
                         .font(.caption).foregroundStyle(.red)
                 } else if workspace.projects.isEmpty && !workspace.destinationAvailable {
-                    Text("No authorized cloud destinations are available. Connect Google Cloud and refresh its projects and buckets.")
+                    Text("No destination is selected. Hosted files use your signed-in workspace. A bucket you connect is S3-compatible, including Google Cloud with S3/HMAC keys. SFTP, Azure, and WebDAV are coming soon.")
                         .font(.caption).foregroundStyle(.secondary)
                 }
                 Button("Refresh cloud projects and upload state") {
@@ -105,10 +111,14 @@ struct ProjectUploadSection: View {
     }
 
     private var sourcePicker: some View {
-        GroupBox(content == .applications ? "Select applications" : content == .files ? "Select files and complete folders" : "Applications, files, and folders") {
+        GroupBox(mode == .backup ? "Choose an item to back up" : content == .applications ? "Select applications" : content == .files ? "Select files and complete folders" : "Applications, files, and folders") {
             VStack(alignment: .leading, spacing: 10) {
                 HStack {
-                    if content != .files { Button("Add Applications…", systemImage: "app.badge") {
+                    if mode == .backup {
+                        Text("Refresh the directory and select an item. A secure backup is offered only when that item does not already have one.")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                    if mode != .backup && content != .files { Button("Add Applications…", systemImage: "app.badge") {
                         workspace.chooseSources(startingAt: URL(fileURLWithPath: "/Applications", isDirectory: true),
                                                 externalBusy: externalBusy, content: .applications)
                     }.buttonStyle(.borderedProminent)
@@ -116,7 +126,7 @@ struct ProjectUploadSection: View {
                         workspace.chooseSources(startingAt: FileManager.default.homeDirectoryForCurrentUser
                             .appendingPathComponent("Applications", isDirectory: true), externalBusy: externalBusy, content: .applications)
                     } }
-                    if content != .applications { Button("Add Files or Folders…", systemImage: "plus") {
+                    if mode != .backup && content != .applications { Button("Add Files or Folders…", systemImage: "plus") {
                         workspace.chooseSources(startingAt: nil, externalBusy: externalBusy, content: .files)
                     }.buttonStyle(.borderedProminent) }
                 }.disabled(workspace.controlsLocked(externalBusy: externalBusy))
@@ -172,6 +182,7 @@ struct ProjectUploadSection: View {
                                 HStack {
                                     Image(systemName: uploadIcon(node.kind))
                                     Text(node.name)
+                                        .onTapGesture { selectedNodeID = node.id }
                                     if node.kind == "app" { Text("Application").font(.caption).foregroundStyle(.secondary) }
                                     if node.symlink { Text("Link").font(.caption).foregroundStyle(.secondary) }
                                     Spacer()
@@ -179,9 +190,23 @@ struct ProjectUploadSection: View {
                                         Button("Browse") { Task { await workspace.browse(path: node.path) } }
                                             .disabled(workspace.isTreeLoading)
                                     }
-                                    Button("Add") { workspace.addTreeNode(node, externalBusy: externalBusy) }
+                                    if mode == .backup {
+                                        if node.backedUp == true {
+                                            Text("Backed up").font(.caption).foregroundStyle(.secondary)
+                                        } else if selectedNodeID == node.id {
+                                            Button("Make secure backup") {
+                                                workspace.addTreeNode(node, externalBusy: externalBusy)
+                                                workspace.enqueueAndStart(externalBusy: externalBusy)
+                                            }
+                                            .buttonStyle(.borderedProminent).tint(.purple)
+                                            .disabled(!node.selectable || workspace.controlsLocked(externalBusy: externalBusy))
+                                            .accessibilityLabel("Make secure backup of \(node.name)")
+                                        }
+                                    } else {
+                                        Button("Add") { workspace.addTreeNode(node, externalBusy: externalBusy) }
                                         .disabled(!node.selectable || workspace.controlsLocked(externalBusy: externalBusy))
                                         .disabled(content == .applications && node.kind != "app")
+                                    }
                                 }
                             }
                         }
@@ -208,15 +233,15 @@ struct ProjectUploadSection: View {
                         }
                     }.frame(maxHeight: 180)
                 }
-                Toggle("Move originals to Trash after a verified cloud backup and restore check", isOn: $workspace.offload)
-                    .disabled(workspace.controlsLocked(externalBusy: externalBusy))
-                Text("Leave unchecked to keep originals on this computer. Verification failures keep originals in place.")
+                Text("Originals stay on this computer. Verification failures keep originals in place.")
                     .font(.caption).foregroundStyle(.secondary)
                 HStack {
+                    if mode != .backup {
                     Button("Upload selected items", systemImage: "icloud.and.arrow.up") {
                         workspace.enqueueAndStart(externalBusy: externalBusy)
                     }.disabled(workspace.controlsLocked(externalBusy: externalBusy)
                                || workspace.snapshot?.sources.isEmpty != false || !workspace.destinationAvailable)
+                    }
                     if workspace.hasQueuedJobs {
                         Button("Start queued uploads") { workspace.startQueuedUploads(externalBusy: externalBusy) }
                             .disabled(workspace.controlsLocked(externalBusy: externalBusy))
@@ -341,9 +366,11 @@ struct UploadTreeNode: Decodable, Identifiable, Sendable {
     let hasChildren: Bool
     let selectable: Bool
     let symlink: Bool
+    let backedUp: Bool?
     enum CodingKeys: String, CodingKey {
         case id, path, name, kind, selectable, symlink
         case hasChildren = "has_children"
+        case backedUp = "backed_up"
     }
 }
 struct UploadTree: Decodable, Sendable {

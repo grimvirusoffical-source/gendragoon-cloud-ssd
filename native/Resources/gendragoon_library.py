@@ -24,6 +24,15 @@ INDEX=SUPPORT/"app-library.json"
 DEFAULT_ROOT="gen-dragoon-ssd"
 ARCHIVE_DIR="GenDragoon-App-Library"
 STREAM_MIN_BYTES=512*1024**2
+def note_progress(message, completed=0, total=0):
+    """Best-effort progress for the upload workspace. Never changes run()'s signature."""
+    try:
+        root=SUPPORT/"UploadWorkspace";root.mkdir(parents=True,exist_ok=True,mode=0o700)
+        path=root/"upload-progress.json";temporary=path.with_suffix(".json.tmp")
+        temporary.write_text(json.dumps({"message":str(message)[:240],"completed":int(completed),"total":int(total),"updatedAt":time.time()}))
+        os.replace(temporary,path)
+    except OSError:
+        return
 def reply(**v): print(json.dumps(dict(ok=True,**v)),flush=True)
 def fail(e): print(json.dumps(dict(ok=False,message=str(e)[-650:])),flush=True);sys.exit(1)
 def run(cmd,timeout=1800):
@@ -122,8 +131,12 @@ def maintenance_lock(inherited=None):
         if not path.exists():raise ValueError("Inherited maintenance lock does not match the managed lock")
         info=os.fstat(descriptor);expected=path.lstat()
         if not stat.S_ISREG(info.st_mode) or info.st_uid!=os.getuid() or info.st_nlink!=1 or info.st_mode&0o077 or (info.st_dev,info.st_ino)!=(expected.st_dev,expected.st_ino):raise ValueError("Unsafe inherited maintenance lock")
-        try:fcntl.flock(descriptor,fcntl.LOCK_EX|fcntl.LOCK_NB);locked=True
-        except BlockingIOError:raise RuntimeError("An upload, update, restart or cloud configuration is already active") from None
+        # macOS flock is per-process. The workspace parent already holds this
+        # descriptor, so locking it again fails every file, folder, and app upload
+        # before rclone runs. Verify the inherited descriptor and keep the parent's lease.
+        if own:
+            try:fcntl.flock(descriptor,fcntl.LOCK_EX|fcntl.LOCK_NB);locked=True
+            except BlockingIOError:raise RuntimeError("An upload, update, restart or cloud configuration is already active") from None
         yield
     finally:
         # Never unlock an inherited open-file description: the parent workspace
@@ -327,7 +340,7 @@ def snapshot(source):
     records=[];guards={}
     def visit(path,relative):
         before=path.lstat();kind=stat.S_IFMT(before.st_mode)
-        entry={"path":relative,"executable":before.st_mode&0o111}
+        entry={"path":relative,"executable":before.st_mode&0o111,"mode":stat.S_IMODE(before.st_mode)}
         if sys.platform=="darwin" and not stat.S_ISLNK(kind):
             # Resource forks and extended attributes may contain user data.
             # Metadata read failures abort verification and retain the original.
@@ -335,36 +348,48 @@ def snapshot(source):
         guards[relative]=_fingerprint(before)
         if stat.S_ISLNK(kind):
             target=os.readlink(path)
+            # Keep the link text. Never follow it into a nested app, framework, or outside the bundle.
+            if os.path.isabs(target):
+                raise ValueError(f"{relative}: absolute symlinks cannot be restored safely")
             try:path.resolve(strict=False).relative_to(boundary)
-            except (ValueError,RuntimeError):raise ValueError("Source contains an escaping or looping symlink") from None
-            if os.path.isabs(target):raise ValueError("Absolute source symlinks cannot be restored safely")
+            except (ValueError,RuntimeError):
+                raise ValueError(f"{relative}: escaping or looping symlink cannot be restored safely") from None
             entry.update(type="symlink",target=target,executable=0)
         elif stat.S_ISREG(kind):
             descriptor=os.open(path,os.O_RDONLY|os.O_NOFOLLOW)
             with os.fdopen(descriptor,"rb") as stream:
-                if _fingerprint(os.fstat(stream.fileno()))!=guards[relative]:raise RuntimeError("Source changed while reading; original retained")
+                if _fingerprint(os.fstat(stream.fileno()))!=guards[relative]:raise RuntimeError(f"Source changed while reading {relative}; original retained")
                 digest=hashlib.sha256();size=0
                 for block in iter(lambda:stream.read(1024*1024),b""):digest.update(block);size+=len(block)
-                if _fingerprint(os.fstat(stream.fileno()))!=guards[relative]:raise RuntimeError("Source changed while reading; original retained")
+                if _fingerprint(os.fstat(stream.fileno()))!=guards[relative]:raise RuntimeError(f"Source changed while reading {relative}; original retained")
             entry.update(type="file",size=size,sha256=digest.hexdigest())
+            note_progress(f"Reading {relative}", size, size)
         elif stat.S_ISDIR(kind):
             entry.update(type="directory")
             for child in sorted(path.iterdir(),key=lambda x:x.name):
                 check_name(child.name);visit(child,child.name if relative=="." else relative+"/"+child.name)
-        else:raise ValueError("Special devices, sockets and pipes cannot be uploaded")
+        else:raise ValueError(f"{relative}: special devices, sockets and pipes cannot be uploaded")
         if _fingerprint(path.lstat())!=guards[relative]:raise RuntimeError("Source changed while reading; original retained")
         records.append(entry)
     visit(source,".")
     return {"manifest":sorted(records,key=lambda x:x["path"]),"guard":guards}
 def unchanged(source,baseline):
     if snapshot(source)!=baseline:raise RuntimeError("Source changed since the verified archive; original retained")
+def flat_file_mode(manifest):
+    """A flat (non-zip) backup carries no permissions. Reapply the recorded mode
+    so the restored file matches the source; older manifests only kept the
+    executable bits."""
+    root=manifest[0]
+    return (root["mode"]&0o777) if "mode" in root else 0o600|root["executable"]
 def verify_restored(path,manifest):
     verified=snapshot(path);actual=verified["manifest"]
     # Older library manifests predate xattr recording. Do not fabricate it for
     # those backups, but enforce it whenever the original included metadata.
     expected={x["path"]:x for x in manifest}
     for entry in actual:
-        if "xattrs" not in expected.get(entry["path"],{}):entry.pop("xattrs",None)
+        recorded=expected.get(entry["path"],{})
+        if "xattrs" not in recorded:entry.pop("xattrs",None)
+        if "mode" not in recorded:entry.pop("mode",None)
     if actual!=manifest:raise RuntimeError("Restored content or metadata differs from the source; original retained")
     return verified
 def require_space(extra,root=None):
@@ -532,7 +557,9 @@ def _upload(source,remote,folder,offload=False,project=None,bucket=None):
         # upload cannot overwrite the only backup of an offloaded original.
         fname=key+"-"+original_hash+"-"+uuid.uuid4().hex+extension
         dest=cloud(remote,folder,fname)
+        note_progress("Uploading "+src.name,0,total_bytes)
         run([RCLONE,"--config",CONFIG,"copyto",archive,dest,"--retries","3"],timeout=2400)
+        note_progress("Verifying "+src.name,total_bytes,total_bytes)
         # Re-download and compare full bytes before offering an offload.
         verified=Path(tmp)/("verified-"+fname)
         run([RCLONE,"--config",CONFIG,"copyto",dest,verified,"--retries","3"],timeout=2400)
@@ -543,7 +570,7 @@ def _upload(source,remote,folder,offload=False,project=None,bucket=None):
             if not (testdir/src.name).exists():raise RuntimeError("Restored archive is missing its item; original retained")
             verify_restored(testdir/src.name,baseline["manifest"])
         else:
-            os.chmod(verified,0o600|baseline["manifest"][0]["executable"])
+            os.chmod(verified,flat_file_mode(baseline["manifest"]))
             verify_restored(verified,baseline["manifest"])
         unchanged(src,baseline)
     entry={"name":src.name,"kind":typ,"format":"archive","archiveLayout":"zip-root" if zipped else "flat","remote":remote,"folder":folder,"file":fname,"sha256":original_hash,"source":str(src),"offloaded":False,"verified":True,"verifiedAt":time.time(),"manifest":baseline["manifest"],"sizeBytes":total_bytes,**(context or {})}
@@ -551,15 +578,15 @@ def _upload(source,remote,folder,offload=False,project=None,bucket=None):
     # Only metadata-compatible apps receive this optional streaming layout;
     # every app retains its fully verified metadata-preserving archive.
     if typ=="app" and context and total_bytes>=STREAM_MIN_BYTES:
+        # A raw rclone/NFS copy of an .app keeps only a couple of files, deletes
+        # the emptied directories, and fails exclusive creates. The verified
+        # archive is the upload. Nothing in this branch mounts or copies a tree.
         reason=stream_metadata_reason(baseline["manifest"])
-        if reason:entry["streamIneligibleReason"]=reason
-        else:
-            raw_path=folder+"/Streamable/"+key+"-"+original_hash+"/"+src.name
-            target=cloud(remote,raw_path)
-            run([RCLONE,"--config",CONFIG,"copy",src,target,"--links","--create-empty-src-dirs","--immutable"],timeout=7200)
-            run([RCLONE,"--config",CONFIG,"check",src,target,"--links","--download"],timeout=7200)
-            unchanged(src,baseline)
-            entry["streamPath"]=raw_path;entry["streamVerified"]=True
+        if not reason:
+            reason=("App bundles are uploaded as one verified archive. "
+                    "A raw cloud folder is not used, because it drops symlinks and empty directories "
+                    "and cannot create files in exclusive mode.")
+        entry["streamIneligibleReason"]=reason
     if previous:
         entry["previousVersions"]=[*previous.get("previousVersions",[]),{k:v for k,v in previous.items() if k!="previousVersions"}]
     store_revision(key,entry,previous)
@@ -628,7 +655,7 @@ def stage_item(key,open_after=False,project=None,bucket=None,remote="gendragoon"
                 if sha(archive)!=data.get("sha256"):raise RuntimeError("Downloaded cloud archive failed SHA-256 verification")
                 if kind=="file" and data.get("archiveLayout")!="zip-root":
                     p=archive
-                    if data.get("manifest"):os.chmod(p,0o600|data["manifest"][0]["executable"])
+                    if data.get("manifest"):os.chmod(p,flat_file_mode(data["manifest"]))
                 else:
                     validate_archive(archive,name)
                     run(["/usr/bin/ditto","-x","-k",archive,temp],timeout=900)

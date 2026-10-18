@@ -30,7 +30,14 @@ def stage_runtime(destination):
         raise RuntimeError("Runtime start command does not match free_server.js")
     for source in (BASE / "mobile").rglob("*"):
         relative = source.relative_to(BASE / "mobile")
-        if source.is_symlink() or any(part.startswith(".") for part in relative.parts):
+        if any(part.startswith(".") for part in relative.parts):
+            continue
+        if source.is_symlink():
+            resolved = source.resolve()
+            if resolved.is_file() and source.name == "extension-map.json":
+                target = destination / "mobile" / relative
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(resolved, target)
             continue
         if source.is_file():
             target = destination / "mobile" / relative

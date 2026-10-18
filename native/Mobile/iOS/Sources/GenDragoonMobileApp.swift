@@ -78,9 +78,10 @@ private struct MobileLibrary:View {
     private func size(_ n:Int64)->String{ByteCountFormatter.string(fromByteCount:n,countStyle:.file)}
     private func icon(_ name:String)->String{
         switch (name as NSString).pathExtension.lowercased(){
-        case "wav","mp3","m4a","flac","aiff","ogg":return "waveform"
-        case "jpg","jpeg","png","gif","heic","webp":return "photo"
-        case "zip","7z","dmg","ipa","apk","aab","gz":return "archivebox"
+        case "wav","mp3","m4a","flac","aiff","aif","ogg","opus","aac":return "waveform"
+        case "jpg","jpeg","png","gif","heic","heif","webp","tif","tiff","bmp","svg","raw":return "photo"
+        case "mp4","mov","m4v","mkv","avi","webm","mpeg","mpg","3gp":return "play.rectangle"
+        case "zip","7z","dmg","pkg","ipa","apk","aab","gz","tar","rar","app":return "archivebox"
         default:return "doc.text"
         }
     }

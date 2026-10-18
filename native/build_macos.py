@@ -42,6 +42,26 @@ def remove_python_caches(app):
             if name in folders:
                 folders.remove(name)
 
+def stage_companion(resources, output):
+    """Compile Red-XAI Updater into the GenDragoon bundle before the parent is signed."""
+    swift = ROOT/"RedXAI"/"main.swift"
+    if not swift.is_file():
+        raise RuntimeError("Red-XAI Updater source is missing")
+    dest = resources/"Red-XAI Updater.app"
+    macos = dest/"Contents/MacOS"
+    bundled = dest/"Contents/Resources"
+    macos.mkdir(parents=True)
+    bundled.mkdir()
+    plistlib.dump({"CFBundleIdentifier":"app.gendragoon.redxai.updater","CFBundleName":"Red-XAI Updater",
+        "CFBundleExecutable":"Red-XAI Updater","CFBundlePackageType":"APPL","CFBundleShortVersionString":VERSION,
+        "CFBundleVersion":BUILD,"LSMinimumSystemVersion":"14.0","LSUIElement":True}, (dest/"Contents/Info.plist").open("wb"))
+    shutil.copy2(ROOT/"Resources/grim-apps-manifest.json", bundled/"grim-apps-manifest.json")
+    shutil.copy2(ROOT/"Resources/redxai_updater.py", bundled/"redxai_updater.py")
+    binary = macos/"Red-XAI Updater"
+    run(["/usr/bin/xcrun","swiftc","-parse-as-library","-O","-target","arm64-apple-macosx14.0",
+         "-framework","AppKit","-o",binary,swift], timeout=300)
+    run(["/usr/bin/codesign","--force","--options","runtime","--timestamp","--sign",IDENTITY,dest])
+
 def build(base,output):
     if sys.platform!="darwin":raise RuntimeError("Build this target on macOS with Xcode")
     with (base/"Contents/Info.plist").open("rb") as source:info=plistlib.load(source)
@@ -68,6 +88,7 @@ def build(base,output):
     require_runtime_resources(app)
     for retired in ("gendragoon_updates.py","release-repo.json"):
         (resources/retired).unlink(missing_ok=True)
+    stage_companion(resources, output)
     binary=app/"Contents/MacOS/GenDragoon Cloud SSD"
     swift=sorted((ROOT/"Sources").glob("*.swift"))
     run(["/usr/bin/xcrun","swiftc","-parse-as-library","-O","-target","arm64-apple-macosx14.0",

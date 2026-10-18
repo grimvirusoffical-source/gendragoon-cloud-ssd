@@ -1,5 +1,6 @@
 import {attachBilling} from './billing.mjs';
 import {BrowserCloud,CloudError,workers} from './transfer-client.mjs';
+import extensionMap from './extension-map.json' with { type: 'json' };
 const $=id=>document.getElementById(id),say=message=>{$('status').textContent=message;};
 const TERM='terms-2026-10-14-v1';let auth,api,user,config,sdk,busy=false,ownedBlob=null,generation=0,allFiles=[],activeFilter="all";
 const billing=attachBilling({getAPI:()=>api,say});
@@ -45,10 +46,9 @@ async function refresh(){
 }
 function category(file){
  const ext=file.name.split('.').pop().toLowerCase();
- if(['mp3','wav','flac','aac','m4a','ogg','aiff'].includes(ext))return 'audio';
- if(['png','jpg','jpeg','webp','gif','heic','svg'].includes(ext))return 'image';
- if(['zip','7z','tar','gz','rar','dmg','ipa','apk','aab'].includes(ext))return 'archive';
- if(['pdf','txt','md','doc','docx','xls','xlsx','csv','json','rtf','pages'].includes(ext))return 'document';
+ for(const name of ['videos','audio','pictures','documents','apps','archives']){
+  if((extensionMap.extensions[name]||[]).includes(ext))return name;
+ }
  return 'other';
 }
 function render(files){allFiles=files;drawFiles();}
@@ -59,7 +59,7 @@ function drawFiles(){
  $('files-list').replaceChildren();
  if(!files.length){const empty=document.createElement('p');empty.className='small';empty.textContent=allFiles.length?'No matching files. Try another search or filter.':'No cloud files yet.';$('files-list').append(empty);}
  for(const file of files){
-  const row=document.createElement('div');row.className='file';const badge=document.createElement('div');badge.className='file-icon '+category(file);badge.textContent=({audio:'♫',image:'▧',document:'≡',archive:'▣',other:'◇'})[category(file)];badge.setAttribute('aria-hidden','true');const info=document.createElement('div');info.className='file-info';
+  const row=document.createElement('div');row.className='file';const badge=document.createElement('div');badge.className='file-icon '+category(file);badge.textContent=({videos:'▶',audio:'♫',pictures:'▧',documents:'≡',apps:'▣',archives:'▣',other:'◇'})[category(file)];badge.setAttribute('aria-hidden','true');const info=document.createElement('div');info.className='file-info';
   const name=document.createElement('p');name.className='filename';name.textContent=file.name;const size=document.createElement('p');size.className='file-size';size.textContent=gb(file.sizeBytes);info.append(name,size);
   const actions=document.createElement('div');actions.className='file-actions';
   const restore=document.createElement('button');restore.className='secondary';restore.textContent='Restore';restore.addEventListener('click',()=>download(file).catch(showError));

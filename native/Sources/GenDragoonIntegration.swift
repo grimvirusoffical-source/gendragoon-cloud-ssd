@@ -35,9 +35,14 @@ private struct GDNewKey:Decodable {let id:String;let apiKey:String;let expiresAt
         r.httpBody=payload
         let (data,response)=try await URLSession.shared.data(for:r)
         guard let code=(response as? HTTPURLResponse)?.statusCode,(200...299).contains(code) else{
-            let e=((try? JSONSerialization.jsonObject(with:data)) as? [String:Any])?["error"] as? String
-            throw NSError(domain:"GenDragoon",code:(response as? HTTPURLResponse)?.statusCode ?? 0,
-                userInfo:[NSLocalizedDescriptionKey:e ?? "Server rejected the request."])
+            let object=((try? JSONSerialization.jsonObject(with:data)) as? [String:Any]) ?? [:]
+            let status=(response as? HTTPURLResponse)?.statusCode ?? 0
+            if status == 423, GDServerCode.read(object) == "workspace_lock" {
+                await MainActor.run { GDWorkspaceLock.shared.present(json: object) }
+            }
+            let e=GDServerCode.read(object)
+            throw NSError(domain:"GenDragoon",code:status,
+                userInfo:[NSLocalizedDescriptionKey:e.isEmpty ? "Server rejected the request." : e])
         }
         return data
     }

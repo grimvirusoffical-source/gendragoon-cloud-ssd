@@ -1,6 +1,7 @@
 import Foundation
 import CryptoKit
 import Darwin
+import Security
 
 struct GDTransferProfile:Decodable,Sendable {
     let workers:Int
@@ -55,6 +56,7 @@ struct GDTransferProgress:Sendable {
 struct GDTransferError:LocalizedError,Sendable {
     let message:String
     let status:Int
+    var code:String = ""
     var errorDescription:String? {message}
 }
 private struct GDTransferJob:Decodable,Sendable {
@@ -105,7 +107,7 @@ actor GDTransferClient {
                 guard attributes[.type] as? FileAttributeType == .typeDirectory,
                       (attributes[.ownerAccountID] as? NSNumber)?.uint32Value==getuid(),
                       ((attributes[.posixPermissions] as? NSNumber)?.intValue ?? 0)&0o022==0 else {
-                    throw GDTransferError(message:"The local transfer cache has unsafe permissions. Choose Reset App before starting a transfer.",status:0)
+                    throw GDTransferError(message:"The local transfer cache has unsafe permissions. Sign out and back in before starting a transfer.",status:0)
                 }
             }
         }
@@ -135,9 +137,29 @@ actor GDTransferClient {
                 for(key,value) in headers {request.setValue(value,forHTTPHeaderField:key)}
                 let(body,response)=try await session.data(for:request)
                 guard let http=response as? HTTPURLResponse else {throw GDTransferError(message:"No cloud response.",status:0)}
+                let object = (try? JSONSerialization.jsonObject(with: body)) as? [String: Any] ?? [:]
+                let reason = GDServerCode.read(object)
+                if http.statusCode == 423, reason == "workspace_lock" {
+                    let workspaceID = GDWorkspacePriceLabel.workspaceID(in: path)
+                    let lockReason = (object["reason"] as? String) ?? ""
+                    Task { @MainActor in GDWorkspaceLock.shared.present(json: object, workspaceID: workspaceID) }
+                    var message = GDWorkspacePriceLabel.transferLockMessage(reason: lockReason, scopedWorkspace: workspaceID != nil)
+                    if let ends = GDWorkspacePriceLabel.graceEnd(object), let countdown = GDWorkspacePriceLabel.graceCountdown(until: ends, now: Date()) {
+                        message += " " + countdown
+                    }
+                    throw GDTransferError(message: message, status: 423)
+                }
                 if (200...299).contains(http.statusCode){return(body,http)}
-                let reason=((try? JSONSerialization.jsonObject(with:body)) as? [String:Any])?["error"] as? String
-                let failure=GDTransferError(message:reason ?? "Cloud request failed (HTTP \(http.statusCode)).",status:http.statusCode)
+                if let explained = GDStorageContract.byoMessage(code: reason, status: http.statusCode) {
+                    throw GDTransferError(message: explained, status: http.statusCode)
+                }
+                if let explained = GDStorageContract.explainProjectWrite(status: http.statusCode, json: object) {
+                    throw GDTransferError(message: explained, status: http.statusCode)
+                }
+                if http.statusCode == 400, reason == "manifest_generation_required" {
+                    throw GDTransferError(message: "The manifest upload was missing its generation. This is a client bug, and the file was not replaced.", status: 400, code: reason)
+                }
+                let failure=GDTransferError(message:reason.isEmpty ? "Cloud request failed (HTTP \(http.statusCode))." : reason,status:http.statusCode)
                 if ![401,408,429,500,502,503,504].contains(http.statusCode){throw failure}
                 last=failure
             } catch let error as GDTransferError {
@@ -298,6 +320,265 @@ actor GDTransferClient {
         else {uploadedStates[saved.id]=state}
         await progress(GDTransferProgress(completed:size,total:size,bytesPerSecond:0,phase:"Saved and verified"))
         return saved
+    }
+    /// Each encrypted chunk is its own object. The file-name list is the `manifest`
+    /// object, uploaded with the generation from the download. The local file stays
+    /// until that manifest put succeeds and the chunks open again.
+    func hostedRoundTrip(source:URL,workspace:String,metadata:GDCloudUploadMetadata,progress:@escaping Progress) async throws -> (item:GDCloudItem,file:URL) {
+        let (size, _) = try Self.attributes(source)
+        guard size >= 0, size <= 5 * 1024 * 1024 * 1024 else { throw GDTransferError(message:"\(metadata.originalName): File exceeds this workspace's file limit.",status:0) }
+        let key: SymmetricKey
+        do { key = try GDHostedVault.key() }
+        catch let error as GDHostedVaultError {
+            let text: String
+            switch error { case .message(let message): text = message }
+            throw GDTransferError(message: text, status: 0)
+        }
+        let chunkBytes = 1024 * 1024
+        let fileID = UUID().uuidString.lowercased()
+        let displayName = metadata.originalName
+        var uploadedChunkIDs: [String] = []
+        var manifestCommitted = false
+        do {
+        let sealedVersion = UInt32(max(0, UserDefaults.standard.integer(forKey: GDSealedManifest.versionKey(workspace: workspace))))
+        let input = try FileHandle(forReadingFrom: source)
+        defer { try? input.close() }
+        var crc: UInt32 = 0xffffffff
+        var previous: Data?
+        var index: UInt32 = 0
+        var total = 0
+        var chunkIDs: [String] = []
+        var batch: [(id: String, sealed: Data)] = []
+        func flush() async throws {
+            guard !batch.isEmpty else { return }
+            let session = try await storageSession(workspace: workspace, body: GDStorageContract.uploadBody(objectIDs: batch.map(\.id)))
+            for item in batch {
+                uploadedChunkIDs.append(item.id)
+                guard let signed = session.urls.first(where: { $0.object == item.id }) else {
+                    throw GDTransferError(message:"\(displayName): Storage did not return a URL for every chunk.",status:0)
+                }
+                _ = try await Self.signedTransfer(url: signed.url, method: signed.method, body: item.sealed)
+            }
+            batch.removeAll(keepingCapacity: true)
+        }
+        func enqueue(_ plain: Data, final: Bool) async throws {
+            let identifier = try Self.opaqueObjectID()
+            let sealed = try GDSealedManifest.sealChunk(plaintext: plain, key: key, fileID: fileID, objectID: identifier, index: index, manifestVersion: sealedVersion, isFinal: final)
+            chunkIDs.append(identifier)
+            batch.append((identifier, sealed))
+            index += 1
+            if batch.count == 32 { try await flush() }
+        }
+        await progress(GDTransferProgress(completed: 0, total: size, bytesPerSecond: 0, phase: "Uploading \(displayName)"))
+        while true {
+            try Task.checkCancellation()
+            let chunk = try input.read(upToCount: chunkBytes) ?? Data()
+            if chunk.isEmpty { break }
+            if let previous {
+                try await enqueue(previous, final: false)
+            }
+            crc = GDCRC32C.value(chunk, seed: crc)
+            total += chunk.count
+            previous = chunk
+            await progress(GDTransferProgress(completed: Int64(total), total: size, bytesPerSecond: 0, phase: "Uploading \(displayName)"))
+        }
+        if let previous {
+            try await enqueue(previous, final: true)
+        } else {
+            try await enqueue(Data(), final: true)
+        }
+        try await flush()
+        guard total == Int(size), chunkIDs.count > 0 else {
+            throw GDTransferError(message:"\(displayName): The source file changed. Upload stopped without deleting it.",status:0)
+        }
+        let fileEntry = GDManifestFile(id: fileID, name: displayName, chunkCount: chunkIDs.count, totalSize: total, chunks: chunkIDs, sealedVersion: Int(sealedVersion))
+        let lastSeen = UserDefaults.standard.integer(forKey: GDSealedManifest.versionKey(workspace: workspace))
+        let committed = try await commitManifest(workspace: workspace, file: fileEntry, key: key, lastSeen: lastSeen)
+        manifestCommitted = true
+        if let stored = committed.files.first(where: { $0.id == fileID }), !stored.previousChunks.isEmpty {
+            let session = try await storageSession(workspace: workspace, body: GDStorageContract.deleteBody(objectIDs: stored.previousChunks))
+            for identifier in stored.previousChunks {
+                guard let signed = session.urls.first(where: { $0.object == identifier }) else {
+                    throw GDTransferError(message: "The previous copy is still stored. The original on this Mac was kept.", status: 0)
+                }
+                _ = try await Self.signedTransfer(url: signed.url, method: signed.method, body: nil)
+            }
+        }
+        await progress(GDTransferProgress(completed: size, total: size, bytesPerSecond: 0, phase: "Downloading \(displayName)"))
+        let restored = try await restoreChunks(ids: chunkIDs, workspace: workspace, key: key, totalSize: total, fileID: fileID, manifestVersion: sealedVersion)
+        var final = (crc ^ 0xffffffff).bigEndian
+        let checksum = withUnsafeBytes(of: &final) { Data($0).base64EncodedString() }
+        let item = GDCloudItem(id: UUID().uuidString.lowercased(), name: GDSealedManifest.objectID, sizeBytes: size, generation: nil,
+            crc32c: checksum, kind: metadata.kind, originalName: metadata.originalName,
+            archiveFormat: metadata.archiveFormat, manifestSHA256: metadata.manifestSHA256, logicalBytes: metadata.logicalBytes)
+        await progress(GDTransferProgress(completed: size, total: size, bytesPerSecond: 0, phase: "Saved and verified"))
+        return (item, restored)
+        } catch {
+            if !manifestCommitted {
+                await discardUploadedChunks(uploadedChunkIDs, workspace: workspace)
+            }
+            let text = (error as? GDTransferError)?.message ?? error.localizedDescription
+            if text.contains(displayName) { throw error }
+            let status = (error as? GDTransferError)?.status ?? 0
+            throw GDTransferError(message: "\(displayName): \(text)", status: status)
+        }
+    }
+    /// Deletes chunk objects from an upload that never committed its manifest.
+    private func discardUploadedChunks(_ ids: [String], workspace: String) async {
+        guard !ids.isEmpty else { return }
+        do {
+            let session = try await storageSession(workspace: workspace, body: GDStorageContract.deleteBody(objectIDs: ids))
+            for identifier in ids {
+                guard let signed = session.urls.first(where: { $0.object == identifier }) else { continue }
+                _ = try await Self.signedTransfer(url: signed.url, method: signed.method, body: nil)
+            }
+        } catch {
+            return
+        }
+    }
+    private func storageSession(workspace: String, body: [String: Any]) async throws -> GDStorageSession {
+        let payload = try JSONSerialization.data(withJSONObject: body)
+        let data = try await send("v2/workspaces/\(workspace)/storage-urls", method: "POST", data: payload).0
+        guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            throw GDTransferError(message:"Storage session was empty.",status:0)
+        }
+        do {
+            return try GDStorageContract.parseSession(workspace: workspace, json: json)
+        } catch let error as GDStorageContractError {
+            throw GDTransferError(message: error.text, status: 0)
+        }
+    }
+    private func commitManifest(workspace: String, file: GDManifestFile, key: SymmetricKey, lastSeen: Int) async throws -> GDSealedManifestDocument {
+        let local = GDSealedManifestDocument(version: lastSeen, files: [file])
+        for _ in 0..<4 {
+            let download = try await storageSession(workspace: workspace, body: GDStorageContract.downloadBody(objectIDs: [GDSealedManifest.objectID]))
+            guard let source = download.urls.first(where: { $0.object == GDSealedManifest.objectID }) else {
+                throw GDTransferError(message:"Storage did not return a manifest URL.",status:0)
+            }
+            let fetched = try await Self.signedExchange(url: source.url, method: source.method, body: nil)
+            let headerGeneration = GDSealedManifest.generation(objectStatus: fetched.status, headers: fetched.headers)
+            let generationValue: String
+            if let signedGeneration = source.generation {
+                generationValue = signedGeneration
+            } else if let value = GDSealedManifest.generationValue(headerGeneration) {
+                generationValue = value
+            } else {
+                throw GDTransferError(message:"The manifest download did not include a generation. This Mac will not upload without it.",status:0)
+            }
+            let remote: GDSealedManifestDocument
+            if fetched.status == 404 {
+                remote = GDSealedManifestDocument(version: 0, files: [])
+            } else if (200...299).contains(fetched.status) {
+                do { remote = try GDSealedManifest.open(sealed: fetched.data, key: key) }
+                catch { throw GDTransferError(message:"The stored file list could not be opened.",status:0) }
+            } else {
+                throw GDTransferError(message:"The manifest could not be read. The stored file was left in place.",status:fetched.status)
+            }
+            let merged: GDSealedManifestDocument
+            do { merged = try GDSealedManifest.merge(local: local, remote: remote, lastSeen: lastSeen) }
+            catch let error as GDStorageContractError { throw GDTransferError(message: error.text, status: 0) }
+            let sealed = try GDSealedManifest.seal(document: merged, key: key)
+            let payload = try JSONSerialization.data(withJSONObject: GDSealedManifest.uploadBody(generation: generationValue))
+            let uploadData: Data
+            do {
+                uploadData = try await send("v2/workspaces/\(workspace)/storage-urls", method: "POST", data: payload).0
+            } catch let error as GDTransferError {
+                switch GDSealedManifest.interpretUpload(status: error.status, json: ["error": error.code.isEmpty ? error.message : error.code]) {
+                case .retryMerge: continue
+                case .clientBug:
+                    throw GDTransferError(message:"The manifest upload was missing its generation. This is a client bug, and the file was not replaced.",status:400)
+                case .committed, .failed: throw error
+                }
+            }
+            guard let uploadJSON = try JSONSerialization.jsonObject(with: uploadData) as? [String: Any] else {
+                throw GDTransferError(message:"Storage session was empty.",status:0)
+            }
+            let session: GDStorageSession
+            do { session = try GDStorageContract.parseSession(workspace: workspace, json: uploadJSON) }
+            catch let error as GDStorageContractError { throw GDTransferError(message: error.text, status: 0) }
+            guard let target = session.urls.first(where: { $0.object == GDSealedManifest.objectID }) else {
+                throw GDTransferError(message:"Storage did not return a manifest upload URL.",status:0)
+            }
+            let put = try await Self.signedExchange(url: target.url, method: target.method, body: sealed, generationMatch: generationValue)
+            switch GDSealedManifest.interpretUpload(status: put.status, json: [:]) {
+            case .committed:
+                UserDefaults.standard.set(merged.version, forKey: GDSealedManifest.versionKey(workspace: workspace))
+                return merged
+            case .retryMerge:
+                continue
+            case .clientBug:
+                throw GDTransferError(message:"The manifest upload was missing its generation. This is a client bug, and the file was not replaced.",status:400)
+            case .failed:
+                throw GDTransferError(message:"The sealed manifest was not stored.",status:put.status)
+            }
+        }
+        throw GDTransferError(message:"The manifest changed while it was being saved. The original file is still on this Mac.",status:412)
+    }
+    private func restoreChunks(ids: [String], workspace: String, key: SymmetricKey, totalSize: Int, fileID: String, manifestVersion: UInt32) async throws -> URL {
+        let restored = root.appendingPathComponent("hosted-"+UUID().uuidString.lowercased()+".part")
+        FileManager.default.createFile(atPath: restored.path, contents: nil, attributes: [.posixPermissions: 0o600])
+        let output = try FileHandle(forWritingTo: restored)
+        defer { try? output.close() }
+        var written = 0
+        var offset = 0
+        while offset < ids.count {
+            let end = min(offset + 32, ids.count)
+            let slice = Array(ids[offset..<end])
+            let session = try await storageSession(workspace: workspace, body: GDStorageContract.downloadBody(objectIDs: slice))
+            for (delta, identifier) in slice.enumerated() {
+                guard let signed = session.urls.first(where: { $0.object == identifier }) else {
+                    throw GDTransferError(message:"Storage did not return a URL for every chunk.",status:0)
+                }
+                let sealed = try await Self.signedTransfer(url: signed.url, method: signed.method, body: nil)
+                let position = offset + delta
+                let plain: Data
+                do {
+                    plain = try GDSealedManifest.openChunk(sealed: sealed, key: key, fileID: fileID, objectID: identifier, index: UInt32(position), manifestVersion: manifestVersion, isFinal: position == ids.count - 1)
+                } catch {
+                    throw GDTransferError(message:"The downloaded file failed its integrity check.",status:0)
+                }
+                try output.write(contentsOf: plain)
+                written += plain.count
+            }
+            offset = end
+        }
+        guard written == totalSize else {
+            throw GDTransferError(message:"The downloaded file failed its integrity check.",status:0)
+        }
+        return restored
+    }
+    private static func opaqueObjectID() throws -> String {
+        var bytes = [UInt8](repeating: 0, count: 16)
+        guard SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes) == errSecSuccess else {
+            throw GDTransferError(message:"The file could not be sealed on this Mac.",status:0)
+        }
+        return bytes.map { String(format: "%02x", $0) }.joined()
+    }
+    private static func signedExchange(url: URL, method: String, body: Data?, generationMatch: String? = nil) async throws -> (status: Int, data: Data, headers: [String: String]) {
+        var request = URLRequest(url: url)
+        request.httpMethod = method
+        request.httpBody = body
+        request.timeoutInterval = 300
+        if body != nil {
+            request.setValue("application/octet-stream", forHTTPHeaderField: "Content-Type")
+        }
+        if let generationMatch {
+            request.setValue(generationMatch, forHTTPHeaderField: "x-goog-if-generation-match")
+        }
+        let (data, response) = try await URLSession.shared.data(for: request)
+        let http = response as? HTTPURLResponse
+        var headers: [String: String] = [:]
+        for (key, value) in http?.allHeaderFields ?? [:] {
+            if let key = key as? String, let value = value as? String { headers[key.lowercased()] = value }
+        }
+        return (http?.statusCode ?? 0, data, headers)
+    }
+    private static func signedTransfer(url: URL, method: String, body: Data?) async throws -> Data {
+        let exchanged = try await signedExchange(url: url, method: method, body: body)
+        guard (200...299).contains(exchanged.status) else {
+            throw GDTransferError(message:"The signed storage URL was refused (HTTP \(exchanged.status)).",status:exchanged.status)
+        }
+        return exchanged.data
     }
     func acknowledgeUpload(fileID:String) {
         if let state=uploadedStates.removeValue(forKey:fileID) {try? FileManager.default.removeItem(at:state)}

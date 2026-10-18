@@ -31,7 +31,7 @@ DEPENDENCIES = (
     "gendragoon_update_restart.py", "gendragoon_auto_update.py",
     "gendragoon_app_control.py", "gendragoon_app_launch.py", "gendragoon_library.py",
     "gendragoon_upload_workspace.py", "gendragoon_performance.py",
-    "gendragoon_performance_profiles.json",
+    "gendragoon_performance_profiles.json", "redxai_updater.py",
 )
 MAX_SOURCE = 2 * 1024**2
 MAX_RECEIPT = 128 * 1024
@@ -52,7 +52,9 @@ def load_runtime(directory):
     auto = importlib.import_module("gendragoon_auto_update")
     control = importlib.import_module("gendragoon_app_control")
     launcher = importlib.import_module("gendragoon_app_launch")
-    for module in (auto, control, launcher, launcher.lib, launcher.lib.performance):
+    # install_worker applies the update through Red-XAI; it must come from this snapshot too.
+    redxai = importlib.import_module("redxai_updater")
+    for module in (auto, control, launcher, launcher.lib, launcher.lib.performance, redxai):
         if Path(module.__file__).absolute().parent != directory.absolute():
             raise RuntimeError("Update worker dependency escaped its verified snapshot")
 

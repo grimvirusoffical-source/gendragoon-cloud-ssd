@@ -3,7 +3,7 @@ import AppKit
 import Foundation
 
 @MainActor final class GDLoginSession: ObservableObject {
-    enum Stage {case login, waiting, verifying, terms, ready, error}
+    enum Stage: Equatable {case login, waiting, verifying, terms, ready, error}
     static let termsVersion = "terms-2026-10-14-v1"
     @Published var stage:Stage = .login
     @Published var status = "Google login is required to use GenDragoon."
@@ -17,9 +17,13 @@ import Foundation
     private var transferRenewal:Task<String,Error>?
     private var transferRenewalID:UUID?
     private var lastVerified = Date.distantPast
+    private var authTime: TimeInterval?
+    var authTimeSeconds: TimeInterval? { authTime }
     private var renewTimer:Timer?
     private var activationObserver:NSObjectProtocol?
     @Published private(set) var userID = ""
+    /// Captured before logout so a new sign-in can be compared with the account already on this Mac.
+    private var accountUIDBeforeSignIn = ""
     var firebaseIDToken: String { idToken }
     private var bridge:Process?
     private var pipe:Pipe?
@@ -43,6 +47,7 @@ import Foundation
             status="The Google sign-in helper requires Node.js on this Mac. Sign-in remains locked until it is available."
             stage = .error;return
         }
+        accountUIDBeforeSignIn = userID
         logout(preserveStatus:true)
         stage = .waiting
         status="Opening your browser for secure Google sign-in…"
@@ -111,9 +116,17 @@ import Foundation
                 providers.contains(where:{$0["providerId"] as? String=="google.com"}) else {
                 self.stage = .login;self.status="Firebase rejected the account. Sign in using Google, not email/password.";return
             }
+            switch GDAccountContract.adoptSignIn(incomingUID: uid, savedOwnerUID: GDAccountDeletionMonitor.loadJob()?.ownerUID, currentUID: accountUIDBeforeSignIn) {
+            case .reject(let message):
+                self.stage = .login
+                self.status = message
+                return
+            case .adopt:
+                break
+            }
             self.userID=uid
             self.email=(user["email"] as? String) ?? "Google user"
-            self.idToken=token
+            self.adoptIDToken(token)
             self.lastVerified=Date()
             self.configureTokenRenewal()
             self.status="Google account verified. Checking Terms acceptance…"
@@ -163,12 +176,25 @@ import Foundation
                 let renewal=payload["refresh_token"] as? String,!renewal.isEmpty else {
                 throw GDTransferError(message:"Google session expired or changed. Sign in again; transfer progress is retained.",status:401)
             }
-            self.idToken=fresh;self.refreshToken=renewal;self.lastVerified=Date()
+            self.adoptIDToken(fresh);self.refreshToken=renewal;self.lastVerified=Date()
             return fresh
         }
         transferRenewal=task;transferRenewalID=identifier
         defer{if transferRenewalID==identifier{transferRenewal=nil;transferRenewalID=nil}}
         return try await task.value
+    }
+    func signedInWithin(seconds: TimeInterval) -> Bool {
+        guard stage == .ready, !idToken.isEmpty, let authTime else { return false }
+        return Date().timeIntervalSince1970 - authTime < seconds
+    }
+    private func adoptIDToken(_ token: String) {
+        idToken = token
+        authTime = GDAccountContract.authTime(jwt: token)
+    }
+    func requireFreshSignIn(message: String) {
+        logout(preserveStatus: true)
+        status = message
+        stage = .login
     }
     func verifiedBearerToken() -> String? {
         guard stage == .ready, !idToken.isEmpty, !userID.isEmpty else { return nil }
@@ -211,7 +237,14 @@ import Foundation
                 var request=URLRequest(url:base.appendingPathComponent("v2/account/entitlements"))
                 request.setValue("Bearer "+token,forHTTPHeaderField:"Authorization");request.timeoutInterval=30
                 let(data,response)=try await URLSession.shared.data(for:request)
-                guard self.userID==owner,(response as? HTTPURLResponse)?.statusCode==200,
+                let http = response as? HTTPURLResponse
+                if http?.statusCode == 423,
+                   let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+                   GDServerCode.read(object) == "workspace_lock" {
+                    GDWorkspaceLock.shared.present(json: object)
+                    return
+                }
+                guard self.userID==owner,http?.statusCode==200,
                     let result=(try? JSONSerialization.jsonObject(with:data)) as? [String:Any],
                     let adFree=result["adFree"] as? Bool else {self.adStatusKnown=false;return}
                 self.isAdFree=adFree;self.adStatusKnown=true
@@ -258,7 +291,7 @@ import Foundation
         renewTimer?.invalidate();renewTimer=nil
         if let observer=activationObserver {NotificationCenter.default.removeObserver(observer);activationObserver=nil}
         transferRenewal?.cancel();transferRenewal=nil;transferRenewalID=nil
-        idToken="";refreshToken="";lastVerified = .distantPast
+        idToken="";refreshToken="";lastVerified = .distantPast;authTime=nil
         userID="";email="";busy=false;isAdFree=false;adStatusKnown=false;stage = .login
         if !preserveStatus {status="Signed out. Google login is required to use GenDragoon."}
     }
@@ -300,6 +333,12 @@ struct GenDragoonStartupRoot:View {
         }
         .frame(minWidth:780,minHeight:660)
         .preferredColorScheme(.dark)
-        .onAppear { GDUpdateCoordinator.shared.start() }
+        .onAppear {
+            GDUpdateCoordinator.shared.start()
+            GDAccountDeletionMonitor.shared.resumeOnLaunch(login: session)
+        }
+        .onChange(of: session.stage) { _, stage in
+            if stage == .ready { GDAccountDeletionMonitor.shared.sessionBecameReady(session) }
+        }
     }
 }

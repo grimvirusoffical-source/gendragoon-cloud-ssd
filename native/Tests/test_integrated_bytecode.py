@@ -44,6 +44,8 @@ class SignedResourceBytecodeTests(unittest.TestCase):
         self.resources.mkdir(parents=True)
         for source in (NATIVE / "Resources").glob("*.py"):
             shutil.copy2(source, self.resources / source.name)
+        for source in (NATIVE / "Resources").glob("*.json"):
+            shutil.copy2(source, self.resources / source.name)
         # Explicitly remove inherited suppression so each real interpreter must
         # rely on the entrypoint under test; never alter the process HOME.
         self.environment = os.environ.copy()

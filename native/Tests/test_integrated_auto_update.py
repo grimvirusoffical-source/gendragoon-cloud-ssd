@@ -115,11 +115,21 @@ class AutoUpdateTests(unittest.TestCase):
 
     @contextmanager
     def mac(self, command=None):
+        clock = {"now": 0.0}
+
+        def health_now():
+            return clock["now"]
+
+        def health_sleep(seconds):
+            clock["now"] += float(seconds)
+
         with mock.patch.object(updater, "subprocess_ok", side_effect=command or self.commands), \
                 mock.patch.object(updater.platform, "machine", return_value="arm64"), \
                 mock.patch.object(updater.platform, "mac_ver", return_value=("14.5", (), "")), \
                 mock.patch.object(updater, "app_pids", side_effect=lambda app=None: self.running.copy()), \
                 mock.patch.object(updater.time, "sleep"), \
+                mock.patch.object(updater, "_health_now", health_now), \
+                mock.patch.object(updater, "_health_sleep", health_sleep), \
                 mock.patch.object(updater, "sufficient_space"):
             yield
 
@@ -268,10 +278,20 @@ class AutoUpdateTests(unittest.TestCase):
         self.assertEqual((old_backup / "keep").read_text(), "pre-existing backup")
         self.assertEqual(data.read_text(), "keep this")
         self.assertEqual(status["launchStatus"], "exact_executable_observed")
-        self.assertEqual(status["functionalReadiness"], "not_tested")
+        self.assertEqual(status["functionalReadiness"], "healthy")
         self.assertEqual(status["launchedProcesses"], [{"pid":4200,"uid":os.getuid(),
                          "executable":str(self.app/"Contents/MacOS/GenDragoon Cloud SSD"),"started":"fixture-start"}])
         self.assertTrue(any(command == ["/usr/bin/open", "-n", str(self.app)] for command in self.calls))
+
+    def test_failed_health_check_rolls_back_previous_app(self):
+        self.stage()
+        with self.mac(), mock.patch.object(updater, "confirm_relaunch_health",
+                                            side_effect=RuntimeError("Updated app failed its health check")):
+            self.assertEqual(updater.install_worker(relaunch=True)["event"], "rolled_back")
+        self.assert_original()
+        status = json.loads(self.status.read_text())
+        self.assertEqual(status["state"], "rolled_back")
+        self.assertIn("health check", status["error"])
 
     def test_launch_failure_rolls_back_previous_app(self):
         self.stage()
@@ -506,6 +526,114 @@ class AutoUpdateTests(unittest.TestCase):
                 mock.patch.object(updater, "sufficient_space"), \
                 self.assertRaisesRegex(RuntimeError, "Download size mismatch"):
             updater.download("https://example.invalid/update.zip", self.root / "download", 1024, 0, 10, True)
+
+    # The real install path (schedule-restart -> worker -> install_worker) swaps
+    # and relaunches through Red-XAI's apply_and_report and acts on its exit code.
+    def redxai(self):
+        sys.path.insert(0, str(SCRIPT.parent))
+        self.addCleanup(sys.path.remove, str(SCRIPT.parent))
+        import redxai_updater
+        return redxai_updater
+
+    def test_install_worker_applies_through_redxai_and_relaunches_the_new_app(self):
+        redxai = self.redxai()
+        self.stage()
+        with self.mac(), mock.patch.object(redxai, "apply_and_report", wraps=redxai.apply_and_report) as applied:
+            self.assertEqual(updater.install_worker(relaunch=True)["event"], "installed")
+        applied.assert_called_once()
+        entry = applied.call_args.args[0]
+        self.assertEqual(entry["installPath"], str(self.app))
+        self.assertEqual(entry["bundleId"], updater.BUNDLE_ID)
+        self.assertEqual((self.app / "Contents/marker").read_text(), "new-good")
+        self.assertIn(["/usr/bin/open", "-n", str(self.app)], self.calls)
+        self.assertEqual(json.loads(self.status.read_text())["launchStatus"], "exact_executable_observed")
+
+    def test_install_worker_uses_redxai_exit_code_one_as_rolled_back(self):
+        redxai = self.redxai()
+        self.stage()
+        with self.mac(), mock.patch.object(redxai, "apply_and_report", return_value=1) as applied:
+            self.assertEqual(updater.install_worker(relaunch=True)["event"], "rolled_back")
+        applied.assert_called_once()
+        self.assertEqual(json.loads(self.status.read_text())["state"], "rolled_back")
+
+    def test_install_worker_uses_redxai_exit_code_two_as_attention(self):
+        redxai = self.redxai()
+        self.stage()
+        with self.mac(), mock.patch.object(redxai, "apply_and_report", return_value=2), \
+                self.assertRaisesRegex(RuntimeError, "rollback needs attention"):
+            updater.install_worker(relaunch=True, request_id="e" * 32)
+        self.assertEqual(json.loads(self.status.read_text())["state"], "attention")
+
+    def test_failed_new_launch_relaunches_the_old_app_through_redxai(self):
+        redxai = self.redxai()
+        self.stage()
+        opened = []
+        def fail_new_launch(arguments, timeout=80):
+            if arguments[0] == "/usr/bin/open":
+                opened.append((self.app / "Contents/marker").read_text())
+                if opened[-1] == "new-good":
+                    raise RuntimeError("fixture open failed")
+            return self.commands(arguments, timeout)
+        with self.mac(fail_new_launch), mock.patch.object(redxai, "apply_and_report", wraps=redxai.apply_and_report) as applied:
+            self.assertEqual(updater.install_worker(relaunch=True)["event"], "rolled_back")
+        applied.assert_called_once()
+        self.assertEqual(opened, ["new-good", "original-good"], "the old app is relaunched")
+        self.assert_original()
+
+    # Failure injection: an interrupted or truncated download never stages,
+    # extracts, installs or relaunches, and leaves the installed app untouched.
+    def test_download_truncated_below_declared_length_fails_cleanly(self):
+        response = io.BytesIO(b"partial")
+        response.headers = {"Content-Length": "4096"}
+        with mock.patch.object(updater, "open_https", return_value=response), \
+                mock.patch.object(updater, "sufficient_space"), \
+                self.assertRaisesRegex(RuntimeError, "Download size mismatch"):
+            updater.download("https://example.invalid/update.zip", self.root / "download", 8192, 0, 10, True)
+
+    def test_interrupted_download_fails_without_staging_or_installing(self):
+        filename = updater.ZIP_PREFIX + "v0.16.2.zip"
+        release = {"version": "v0.16.2", "filename": filename,
+                   "assets": {filename: "https://example.invalid/release.zip",
+                              "sha256.txt": "https://example.invalid/sha256.txt"}}
+        def interrupted(url, path, *args):
+            if path.name == "sha256.txt":
+                path.write_text("0" * 64 + "  " + filename + "\n")
+                return
+            path.write_bytes(b"first half of the archive")
+            raise ConnectionResetError("connection reset mid-download")
+        with self.mac(), mock.patch.object(updater, "latest", return_value=release), \
+                mock.patch.object(updater, "download", side_effect=interrupted), \
+                self.assertRaises(ConnectionResetError):
+            updater.prepare(quiet=True)
+        self.assert_original()
+        self.assertFalse(self.staged.exists())
+        self.assertFalse(list(self.update_root.glob("gd-fetch-*")), "the partial download is removed")
+        self.assertFalse(any(command[0] == "/usr/bin/ditto" for command in self.calls))
+
+    def test_mismatched_release_build_is_rejected_before_staging(self):
+        source = self.root / "release-source" / updater.APP_NAME
+        write_bundle(source)
+        archive = self.root / "release-fixture.zip"
+        with zipfile.ZipFile(archive, "w") as package:
+            for path in source.rglob("*"):
+                if path.is_file():
+                    package.write(path, str(path.relative_to(source.parent)))
+        filename = updater.ZIP_PREFIX + "v0.16.2.zip"
+        checksum = hashlib.sha256(archive.read_bytes()).hexdigest()
+        release = {"version": "v0.16.2", "filename": filename, "build": 999999,
+                   "assets": {filename: "https://example.invalid/release.zip",
+                              "sha256.txt": "https://example.invalid/sha256.txt"}}
+        def download_fixture(url, path, *args):
+            if path.name == "sha256.txt":
+                path.write_text(checksum + "  " + filename + "\n")
+            else:
+                shutil.copyfile(archive, path)
+        with self.mac(), mock.patch.object(updater, "latest", return_value=release), \
+                mock.patch.object(updater, "download", side_effect=download_fixture), \
+                self.assertRaisesRegex(RuntimeError, "build does not match"):
+            updater.prepare(quiet=True)
+        self.assert_original()
+        self.assertFalse(self.staged.exists())
 
     def test_zip_traversal_and_symlinks_are_rejected(self):
         for name, mode in (("../outside", 0o100644), (updater.APP_NAME + "/link", 0o120777)):

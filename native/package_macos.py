@@ -20,7 +20,10 @@ ROOT=Path(__file__).resolve().parent
 REQUIRED_RESOURCES=("gendragoon_update_restart.py", "gendragoon_auto_update.py",
     "gendragoon_app_control.py", "gendragoon_app_launch.py", "gendragoon_library.py",
     "gendragoon_upload_workspace.py", "gendragoon_performance.py",
-    "gendragoon_performance_profiles.json", "gendragoon_project_files.py")
+    "gendragoon_performance_profiles.json", "gendragoon_project_files.py",
+    "gendragoon_aes.py", "gendragoon_account.py", "gendragoon_hosted_storage.py",
+    "gendragoon_byo_connect.py", "extension-map.json",
+    "redxai_updater.py", "grim-apps-manifest.json")
 
 def require_runtime_resources(app):
     resources=app/"Contents/Resources"
@@ -40,6 +43,16 @@ def reject_python_caches(app):
                 relative=(Path(directory)/name).relative_to(app)
                 raise RuntimeError("Python cache artifact in app bundle: "+str(relative)+". Rebuild before signing and notarizing.")
 
+def require_release_support_contact():
+    """A distributable build must not ship the placeholder support contact.
+    Runs native/Tests/check_support_contact_release.py unchanged; --candidate is exempt."""
+    import importlib.util
+    script=ROOT/"Tests/check_support_contact_release.py"
+    spec=importlib.util.spec_from_file_location("gd_support_contact_release",script)
+    check=importlib.util.module_from_spec(spec);spec.loader.exec_module(check)
+    if check.main()!=0:
+        raise RuntimeError("Release packaging requires the real support contact; GDSupportContact.current is still a placeholder")
+
 def package(app,output,candidate=False):
     if sys.platform!="darwin":raise RuntimeError("Package on macOS to preserve bundle metadata")
     reject_python_caches(app)
@@ -54,6 +67,7 @@ def package(app,output,candidate=False):
     staple=subprocess.run(["/usr/bin/xcrun","stapler","validate",str(app)],capture_output=True)
     if (gate.returncode or staple.returncode) and not candidate:
         raise RuntimeError("Release packaging requires a trusted Developer ID signature, accepted Gatekeeper assessment and a stapled Apple notarization ticket")
+    if not candidate:require_release_support_contact()
     with (app/"Contents/Info.plist").open("rb") as handle:info=plistlib.load(handle)
     if info.get("CFBundleIdentifier")!="app.gendragoon.cloudssd":raise RuntimeError("Bundle ID mismatch")
     version=info["CFBundleShortVersionString"];build=info["CFBundleVersion"]

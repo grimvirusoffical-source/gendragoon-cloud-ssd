@@ -25,25 +25,21 @@ private struct GDTier: Identifiable {
     let id: String
     let capacity: String
     let gigabytes: Int
-    let monthly: Double
     let workers: Int
     let category: String
-    var yearly: Double { (monthly * 10 * 100).rounded() / 100 }
-    var monthlyEffectiveAnnual: Double { yearly / 12 }
 }
 private let gdTiers: [GDTier] = [
-    .init(id:"100GB",capacity:"100 GB",gigabytes:100,monthly:7.99,workers:2,category:"Starter"),
-    .init(id:"200GB",capacity:"200 GB",gigabytes:200,monthly:11.99,workers:2,category:"Essential"),
-    .init(id:"300GB",capacity:"300 GB",gigabytes:300,monthly:15.99,workers:2,category:"Plus"),
-    .init(id:"500GB",capacity:"500 GB",gigabytes:500,monthly:24.99,workers:2,category:"Creator"),
-    .init(id:"1TB",capacity:"1 TB",gigabytes:1000,monthly:44.99,workers:4,category:"Popular"),
-    .init(id:"2TB",capacity:"2 TB",gigabytes:2000,monthly:89.99,workers:8,category:"Power"),
-    .init(id:"3TB",capacity:"3 TB",gigabytes:3000,monthly:129.99,workers:12,category:"Pro"),
-    .init(id:"4TB",capacity:"4 TB",gigabytes:4000,monthly:169.99,workers:16,category:"Ultra"),
-    .init(id:"5TB",capacity:"5 TB",gigabytes:5000,monthly:209.99,workers:20,category:"Studio"),
-    .init(id:"6TB",capacity:"6 TB",gigabytes:6000,monthly:249.99,workers:24,category:"Ultimate")
+    .init(id:"100GB",capacity:"100 GB",gigabytes:100,workers:2,category:"Starter"),
+    .init(id:"200GB",capacity:"200 GB",gigabytes:200,workers:2,category:"Essential"),
+    .init(id:"300GB",capacity:"300 GB",gigabytes:300,workers:2,category:"Plus"),
+    .init(id:"500GB",capacity:"500 GB",gigabytes:500,workers:2,category:"Creator"),
+    .init(id:"1TB",capacity:"1 TB",gigabytes:1000,workers:4,category:"Popular"),
+    .init(id:"2TB",capacity:"2 TB",gigabytes:2000,workers:8,category:"Power"),
+    .init(id:"3TB",capacity:"3 TB",gigabytes:3000,workers:12,category:"Pro"),
+    .init(id:"4TB",capacity:"4 TB",gigabytes:4000,workers:16,category:"Ultra"),
+    .init(id:"5TB",capacity:"5 TB",gigabytes:5000,workers:20,category:"Studio"),
+    .init(id:"6TB",capacity:"6 TB",gigabytes:6000,workers:24,category:"Ultimate")
 ]
-private func gdMoney(_ value: Double) -> String { String(format:"$%.2f", value) }
 private let gdPurple = Color(red:0.61,green:0.42,blue:0.98)
 private let gdSecondary = Color.white.opacity(0.62)
 private let gdSurface = Color.white.opacity(0.055)
@@ -122,10 +118,6 @@ private struct GDDraftWorkspace: Identifiable, Codable {
         return records
     }
     private var quotedStorage: GDTier { gdTiers.first(where:{$0.id==newWorkspacePlan}) ?? gdTiers[0] }
-    private var workspaceStorageCents: Int {
-        newWorkspaceMode == "bundle" ? Int((quotedStorage.monthly*100).rounded()) : Int((storagePrice(quotedStorage)*100).rounded())
-    }
-    private var workspaceChargeCents: Int { (workspaceStorageCents + 500) * (annual ? 10:1) }
     private func saveWorkspaceDraft() {
         let name = newWorkspaceName.trimmingCharacters(in:.whitespacesAndNewlines)
         guard name.count >= 3 && name.count <= 64 && !name.contains("/") && !name.contains("\\") else {
@@ -134,7 +126,7 @@ private struct GDDraftWorkspace: Identifiable, Codable {
         }
         var records=savedDrafts
         guard records.count < 100 else { workspaceStatus = "Limit of 100 local drafts reached."; return }
-        records.append(.init(id:UUID().uuidString.lowercased(),name:name,planID:newWorkspacePlan,planMode:newWorkspaceMode,yearly:annual,totalCents:workspaceChargeCents))
+        records.append(.init(id:UUID().uuidString.lowercased(),name:name,planID:newWorkspacePlan,planMode:newWorkspaceMode,yearly:annual,totalCents:0))
         if let data=try? JSONEncoder().encode(records), let json=String(data:data,encoding:.utf8) {
             UserDefaults.standard.set(json,forKey:workspaceDraftsKey)
             workspaceDraftsRevision += 1
@@ -144,9 +136,9 @@ private struct GDDraftWorkspace: Identifiable, Codable {
     }
     private var chosen:GDTier? { gdTiers.first(where:{$0.id == selectedTier}) }
     private var chosenLabel:String {
-        if storageMode == "byo" { return annual ? "$100.00/year · Bring Your Own Cloud" : "$10.00/month · Bring Your Own Cloud" }
+        if storageMode == "byo" { return "Your S3-compatible bucket · server monthly price" }
         guard let t=chosen else {return "Choose a plan"}
-        return "\(t.capacity) · \(gdMoney(annual ? t.yearly : t.monthly))/\(annual ? "year" : "month")"
+        return "\(t.capacity) · server catalog price"
     }
     var body:some View {
         HStack(spacing:0) {
@@ -294,30 +286,22 @@ private struct GDDraftWorkspace: Identifiable, Codable {
         VStack(alignment:.leading,spacing:20) {
             GDHeading(kicker:"STORAGE + PERFORMANCE",title:"Choose your cloud plan.",subtitle:"Select a server-listed tier, retain your choice, and review the exact amount in secure checkout.")
             GenDragoonStripePurchases(focus:"bundle")
-            GDPanel {
-                Label("Your own cloud provider",systemImage:"server.rack").font(.headline)
-                Text("Use a separately configured SFTP, S3-compatible or other supported provider. Your provider bills its storage and network usage separately.")
-                    .font(.caption).foregroundStyle(gdSecondary)
-            }
-            GenDragoonStripePurchases(focus:"byo")
         }
     }
     private var storagePage: some View {
         VStack(alignment:.leading,spacing:20) {
-            GDHeading(kicker:"STORAGE",title:"Choose the space you need.",subtitle:"Your selected capacity and billing period stay selected while you review available plans.")
+            GDHeading(kicker:"STORAGE",title:"Choose the space you need.",subtitle:"Your selected capacity and billing period stay selected while you review available plans. Connecting your own bucket on an Included workspace ends Included access.")
             GenDragoonStripePurchases(focus:"standard")
+            GenDragoonStripePurchases(focus:"byo")
         }
-    }
-    private func storagePrice(_ tier:GDTier)->Double {
-        ((tier.monthly * 0.8 * 100).rounded(.up))/100
     }
     private var performancePage: some View {
         VStack(alignment:.leading,spacing:20) {
-            GDHeading(kicker:"PERFORMANCE",title:"Tune your transfer workload.",subtitle:"Select an active storage workspace and choose its transfer-worker plan. Actual speed depends on the network, provider and workload.")
+            GDHeading(kicker:"PERFORMANCE",title:"Tune your transfer workload.",subtitle:"The free performance tier is included with every hosted or bring-your-own workspace. Paid transfer-worker plans cost extra. Actual speed depends on the network, provider and workload.")
             GenDragoonStripePurchases(focus:"performance")
         }
     }
-    private func performanceRow(name:String,price:Int,workers:Int,symbol:String)->some View {
+    private func performanceRow(name:String,_ price:Int,workers:Int,symbol:String)->some View {
         HStack(spacing:16) {
             Image(systemName:symbol).font(.system(size:23)).foregroundStyle(gdPurple)
                 .frame(width:43,height:43).background(gdPurple.opacity(0.14),in:RoundedRectangle(cornerRadius:11))
@@ -327,7 +311,7 @@ private struct GDDraftWorkspace: Identifiable, Codable {
             }
             Spacer()
             VStack(alignment:.trailing,spacing:4) {
-                Text("$\(annual ? price*10 : price)" + (annual ? "/year" : "/month"))
+                Text("Server catalog price")
                     .font(.system(size:17,weight:.bold))
                 Text("Coming with billing").font(.system(size:10)).foregroundStyle(.orange)
             }
@@ -345,13 +329,10 @@ private struct GDDraftWorkspace: Identifiable, Codable {
                     if chosen {Image(systemName:"checkmark.circle.fill").foregroundStyle(.green)}
                 }
                 Text(tier.capacity).font(.system(size:24,weight:.heavy,design:.rounded))
-                HStack(alignment:.firstTextBaseline,spacing:2) {
-                    Text(gdMoney(annual ? tier.yearly : tier.monthly))
-                        .font(.system(size:21,weight:.bold))
-                    Text(annual ? "/year" : "/month").font(.system(size:10))
-                        .foregroundStyle(gdSecondary)
-                }
-                if annual {Text("≈ \(gdMoney(tier.monthlyEffectiveAnnual))/month").font(.system(size:11)).foregroundStyle(gdSecondary)}
+                Text("Server catalog price")
+                    .font(.system(size:21,weight:.bold))
+                Text(annual ? "Yearly billing" : "Monthly billing").font(.system(size:10))
+                    .foregroundStyle(gdSecondary)
                 Divider().overlay(.white.opacity(0.1))
                 Label("Private \(tier.capacity) storage",systemImage:"checkmark")
                 Label("\(tier.workers) transfer workers¹",systemImage:"arrow.up.arrow.down")
@@ -370,7 +351,7 @@ private struct GDDraftWorkspace: Identifiable, Codable {
     }
     private var workspacesPage: some View {
         VStack(alignment:.leading,spacing:20) {
-            GDHeading(kicker:"PROJECT WORKSPACES",title:"A separate cloud for every project.",subtitle:"Each managed workspace has its own $5/month management fee and a required storage plan. Billing and access are independent from your other workspaces.")
+            GDHeading(kicker:"PROJECT WORKSPACES",title:"A separate cloud for every project.",subtitle:"The first hosted workspace is free. Each additional hosted workspace, and each S3-compatible bucket you connect, uses the monthly price returned by the server. Connecting a bucket on an Included workspace ends Included access. SFTP, Azure, and WebDAV are coming soon. Performance features cost extra unless you stay on the free performance tier.")
             if loginSession.isOwner { GDPanel {
                 HStack {
                     Image(systemName:"externaldrive.fill.badge.checkmark")
@@ -417,19 +398,20 @@ private struct GDDraftWorkspace: Identifiable, Codable {
                     Text("Required \(quotedStorage.capacity) storage plan")
                         .font(.system(size:12)).foregroundStyle(gdSecondary)
                     Spacer()
-                    Text(gdMoney(Double(workspaceStorageCents)/100 * (annual ? 10:1)))
+                    Text("Server catalog price")
                         .font(.system(size:13,weight:.semibold))
                 }
                 HStack {
                     Text("Private workspace management fee")
                         .font(.system(size:12)).foregroundStyle(gdSecondary)
                     Spacer()
-                    Text(annual ? "$50.00" : "$5.00").font(.system(size:13,weight:.semibold))
+                    Text("Server monthly price")
+                        .font(.system(size:13,weight:.semibold))
                 }
                 HStack {
                     Text("Total for this workspace").font(.system(size:17,weight:.bold))
                     Spacer()
-                    Text(gdMoney(Double(workspaceChargeCents)/100)+(annual ? "/year":"/month"))
+                    Text("Shown when the server returns it")
                         .font(.system(size:21,weight:.heavy)).foregroundStyle(gdPurple)
                 }
                 GDPrimary(title:"Save workspace draft",icon:"plus.circle.fill") {saveWorkspaceDraft()}
@@ -453,7 +435,7 @@ private struct GDDraftWorkspace: Identifiable, Codable {
                                     .font(.system(size:11)).foregroundStyle(gdSecondary)
                             }
                             Spacer()
-                            Text(gdMoney(Double(draft.totalCents)/100)+(draft.yearly ? "/yr":"/mo"))
+                            Text("Server price at checkout")
                                 .font(.system(size:13,weight:.semibold))
                             Text("DRAFT").font(.system(size:10,weight:.bold)).foregroundStyle(.orange)
                         }
@@ -505,18 +487,16 @@ private struct GDDraftWorkspace: Identifiable, Codable {
             GDPanel {
                 Label("Remove Ads · one-time purchase",systemImage:"megaphone.slash.fill")
                     .font(.system(size:16,weight:.bold))
-                Text("$4.99 once · Remove top and sidebar sponsored placements from your Google account permanently.")
+                Text("Remove top and sidebar sponsored placements from your Google account. The one-time price is the amount in the server catalog.")
                     .font(.system(size:12)).foregroundStyle(gdSecondary)
                 Text(loginSession.isAdFree ? "Ad-free entitlement active" : "Use the checkout panel to activate ad-free access.")
                     .font(.system(size:12)).foregroundStyle(loginSession.isAdFree ? .green : .orange)
             }
             GenDragoonStripePurchases(focus:"ads")
             GenDragoonAutomaticUpdateStatus()
-            GDPanel {
-                AccountResetSection(isBusy: native.maintenanceBusy,
-                    acquireExclusiveOperation: { native.acquireReset() },
-                    releaseExclusiveOperation: { native.releaseReset() })
-            }
+            GDPanel { GDSortMapEditor() }
+            GDPanel { GDPassphraseSection() }
+            GDPanel { GDAccountDeletionSection() }
             GenDragoonAPIKeysPanel()
         }
     }

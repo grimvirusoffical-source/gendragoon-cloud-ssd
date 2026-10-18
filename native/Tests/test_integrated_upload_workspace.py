@@ -138,7 +138,7 @@ class UploadWorkspaceTests(unittest.TestCase):
         command = child.call_args.args[0]
         self.assertEqual(command[command.index("--source") + 1], str(original))
         self.assertEqual(command[command.index("--project") + 1], FIRST["project"])
-        self.assertEqual(command[command.index("--folder") + 1], "bucket-one/apps/custom")
+        self.assertEqual(command[command.index("--folder") + 1], "bucket-one/apps/custom/Applications")
         self.assertNotIn("gen-dragoon-ssd", command)
 
     def test_source_change_before_enqueue_is_rejected_without_job(self):
@@ -172,11 +172,38 @@ class UploadWorkspaceTests(unittest.TestCase):
         child = folder / "nested/child.data"
         child.write_bytes(b"before")
         self.prepare([folder])
-        child.write_bytes(b"after!")
+        # Different size on purpose: this case stays visible from metadata alone.
+        # Same-size edits with a restored mtime are covered by the test below.
+        child.write_bytes(b"after, a different size")
         with self.fake_library() as helper, self.assertRaises(workspace.WorkspaceError):
             workspace.run_next(self.home)
         helper.assert_not_called()
         self.assertTrue(child.exists())
+
+    def test_same_size_edit_with_restored_mtime_is_detected(self):
+        """Deterministic: same-size rewrite, mtime restored with os.utime, and
+        ctime pinned so filesystem timestamp granularity cannot hide or reveal it."""
+        folder = self.sources / "Deterministic"
+        folder.mkdir(parents=True)
+        child = folder / "child.data"
+        child.write_bytes(b"before")
+        original = child.stat()
+        real_lstat = Path.lstat
+
+        def pinned_lstat(item, *args, **kwargs):
+            info = real_lstat(item, *args, **kwargs)
+            fields = {name: getattr(info, name) for name in dir(info) if name.startswith("st_")}
+            if Path(item) == child:
+                fields["st_ctime_ns"] = original.st_ctime_ns
+            return type("PinnedStat", (), fields)()
+
+        with mock.patch.object(Path, "lstat", pinned_lstat):
+            before = workspace.fingerprint(folder)
+            child.write_bytes(b"after!")
+            self.assertEqual(child.stat().st_size, original.st_size)
+            os.utime(child, ns=(original.st_atime_ns, original.st_mtime_ns))
+            after = workspace.fingerprint(folder)
+        self.assertNotEqual(before, after)
 
     def test_same_name_roots_fail_before_any_job_or_offload(self):
         first = self.source("A/report.txt")
@@ -411,6 +438,7 @@ except w.WorkspaceError as e:print(json.dumps({'ok':False,'error':e.code}))
         bundle.mkdir()
         copied = bundle / SCRIPT.name
         shutil.copyfile(SCRIPT, copied)
+        shutil.copyfile(SCRIPT.with_name("extension-map.json"), bundle / "extension-map.json")
         (bundle / "gendragoon_connect.py").write_text('''
 import argparse,json,sys
 import gendragoon_upload_workspace as w
@@ -468,6 +496,47 @@ project=a.project,bucket=a.bucket,remote=a.remote,folder=a.folder,source=str(s),
             {path.relative_to(bundle): path.read_bytes() for path in bundle.rglob("*") if path.is_file()})
         self.assertFalse(any(path.name == "__pycache__" for path in bundle.rglob("*")))
 
+
+    def test_category_folders_are_idempotent_and_editable(self):
+        self.assertEqual(workspace.category_key("photo.JPG"), "pictures")
+        self.assertEqual(workspace.category_key("clip.mov"), "videos")
+        self.assertEqual(workspace.category_key("song.flac"), "audio")
+        self.assertEqual(workspace.category_key("notes.pdf"), "documents")
+        self.assertEqual(workspace.category_key("Demo.app", "app"), "apps")
+        self.assertEqual(workspace.category_key("source.dmg"), "apps")
+        self.assertEqual(workspace.category_key("archive.zip"), "other")
+        # These seven extensions were classified differently across the Mac app,
+        # drive cleanup, and mobile web. They now come from one map.
+        shared = {
+            "photo.heif": "pictures", "icon.svg": "pictures", "scan.bmp": "pictures",
+            "shot.raw": "pictures", "clip.mpeg": "videos", "clip.mpg": "videos",
+            "voice.opus": "audio",
+        }
+        for name, key in shared.items():
+            self.assertEqual(workspace.category_key(name), key, name)
+        payload = json.loads((Path(__file__).resolve().parents[1] / "Resources/extension-map.json").read_text())
+        macos = Path(__file__).resolve().parents[2] / "macos/Resources/gendragoon_drive_cleanup.py"
+        native_cleanup = Path(__file__).resolve().parents[1] / "Resources/gendragoon_drive_cleanup.py"
+        for copy in (macos, native_cleanup):
+            text = copy.read_text()
+            self.assertIn("extension-map.json", text)
+        swift = (Path(__file__).resolve().parents[1] / "Sources/GDExtensionMap.swift").read_text()
+        ios = (Path(__file__).resolve().parents[1] / "Mobile/iOS/Sources/GenDragoonMobileApp.swift").read_text()
+        mobile = (Path(__file__).resolve().parents[1] / "Backend/mobile/mobile.mjs").read_text()
+        self.assertIn("extension-map.json", mobile)
+        self.assertIn("videos", mobile)
+        for ext in ("heif", "svg", "bmp", "raw", "mpeg", "mpg", "opus"):
+            self.assertIn(ext, payload["extensions"]["pictures"] + payload["extensions"]["videos"] + payload["extensions"]["audio"])
+            self.assertIn(f'"{ext}"', swift)
+            self.assertIn(f'"{ext}"', ios)
+        self.assertEqual(workspace.categorized_prefix("apps/custom", "Applications"), "apps/custom/Applications")
+        self.assertEqual(workspace.categorized_prefix("apps/custom/Applications", "Applications"), "apps/custom/Applications")
+        self.assertEqual(workspace.categorized_prefix("library", "Music/Audio"), "library/Music/Audio")
+        saved = workspace.save_categories({"audio": "Music/Audio", "other": "Other"}, self.home)
+        self.assertEqual(saved["audio"], "Music/Audio")
+        self.assertEqual(workspace.load_categories(self.home)["pictures"], "Pictures")
+        with self.assertRaises(workspace.WorkspaceError):
+            workspace.save_categories({"other": "../secrets"}, self.home)
 
 if __name__ == "__main__":
     unittest.main()

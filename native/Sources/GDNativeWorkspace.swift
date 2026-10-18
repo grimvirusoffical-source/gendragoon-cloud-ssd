@@ -97,7 +97,8 @@ enum GDNativeHelper {
                 throw GDNativeFailure(message: "The helper returned an invalid response. Check the operation status before retrying.")
             }
             guard process.terminationStatus == 0, result["ok"] as? Bool == true else {
-                throw GDNativeFailure(message: (result["message"] as? String) ?? (result["error"] as? String) ?? "The operation could not finish.")
+                let serverCode = GDServerCode.read(result)
+                throw GDNativeFailure(message: (result["message"] as? String) ?? (serverCode.isEmpty ? nil : serverCode) ?? "The operation could not finish.")
             }
             return result
         }.value
@@ -211,10 +212,6 @@ enum GDNativeHelper {
     @ObservedObject var native: GDNativeWorkspace
     var content: GDProjectContent = .applications
     @ObservedObject private var activity = GDUpdateActivity.shared
-    @State private var candidateProject = ""
-    @State private var candidateBucket = ""
-    @State private var candidateRemote = "gendragoon"
-    @State private var candidatePrefix = "GenDragoon-App-Library"
     @State private var showCleanup = false
     @State private var showConnection = false
     @State private var showUpload = false
@@ -227,7 +224,7 @@ enum GDNativeHelper {
         VStack(alignment: .leading, spacing: 20) {
             HStack(alignment: .top) {
                 VStack(alignment: .leading, spacing: 6) {
-                    Text("CONNECTED GOOGLE CLOUD").font(.system(size: 9, weight: .bold, design: .monospaced)).tracking(2).foregroundStyle(.purple)
+                    Text("CLOUD LIBRARY").font(.system(size: 9, weight: .bold, design: .monospaced)).tracking(2).foregroundStyle(.purple)
                     Label(content == .applications ? "Managed Mac applications" : "Connected files & folders", systemImage: content == .applications ? "app.badge.fill" : "folder.fill")
                         .font(.system(size: 24, weight: .bold, design: .rounded))
                     Text(native.destinationLabel).font(.caption.monospaced()).foregroundStyle(.secondary).textSelection(.enabled)
@@ -238,34 +235,15 @@ enum GDNativeHelper {
                 Button { showCleanup.toggle() } label: { Label("Cleanup Drive", systemImage: "folder.badge.gearshape") }
                     .disabled(native.maintenanceBusy)
             }
-            Text("This library uses the verified Google Cloud destination shown above. Its objects remain separate from your product project's private Files index.")
+            Text("Hosted workspaces use the shared customer bucket and your signed-in account. Bring-your-own storage is an S3-compatible bucket at the monthly price returned for that workspace. SFTP, Azure, and WebDAV are coming soon.")
                 .font(.system(size: 11)).foregroundStyle(.secondary)
-            DisclosureGroup("Connection and Google Cloud destination", isExpanded: $showConnection) {
+            DisclosureGroup("Connect S3-compatible storage", isExpanded: $showConnection) {
                 VStack(alignment: .leading, spacing: 12) {
-                    HStack {
-                        Button("Connect Google Cloud") { native.connectGoogle() }
-                            .buttonStyle(.borderedProminent).tint(.purple).disabled(locked)
-                        Button("Refresh Projects & Buckets") { Task { await native.refreshCloudChoices() } }.disabled(locked)
-                        Button("Cloud Console") { cloud.openCloudConsole() }
-                    }
+                    Text("Bring-your-own Google Cloud uses S3/HMAC keys. SFTP, Azure, and WebDAV are coming soon and have no connect flow. Performance features cost extra unless you stay on the free performance tier.")
+                        .font(.caption).foregroundStyle(.secondary)
+                    Text("Hosted files use the signed-in account. A bucket you connect uses S3-compatible keys kept in the macOS Keychain. This screen does not ask for a Google Cloud project, a Cloud Console link, or a destination to verify.")
+                        .font(.caption).foregroundStyle(.secondary)
                     Text(cloud.accountStatus).font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
-                    DisclosureGroup("Connect a specific project and bucket") {
-                        VStack(alignment: .leading, spacing: 8) {
-                            Text("Enter the Google Cloud project ID that owns the bucket. The current destination changes only after access is verified.")
-                                .font(.caption).foregroundStyle(.secondary)
-                            HStack {
-                                TextField("Google Cloud project ID", text: $candidateProject)
-                                TextField("Bucket name", text: $candidateBucket)
-                            }.textFieldStyle(.roundedBorder)
-                            HStack {
-                                TextField("Remote name", text: $candidateRemote)
-                                TextField("Upload folder", text: $candidatePrefix)
-                            }.textFieldStyle(.roundedBorder)
-                            Button("Verify & Use This Destination") {
-                                native.verify(project: candidateProject, bucket: candidateBucket, remote: candidateRemote, prefix: candidatePrefix)
-                            }.disabled(locked || candidateProject.isEmpty || candidateBucket.isEmpty)
-                        }.padding(.top, 8)
-                    }
                 }.frame(maxWidth: .infinity, alignment: .leading).padding(8)
             }
             if showUpload || native.upload.hasRunningJob || native.upload.hasQueuedJobs {
@@ -286,8 +264,6 @@ enum GDNativeHelper {
                     HStack {
                         Label(cloud.mounted ? "Mounted in Finder" : "Drive disconnected", systemImage: "externaldrive.fill")
                         Spacer()
-                        Button("Mount SSD") { cloud.mountDrive() }
-                            .disabled(cloud.mounted || cloud.busy || native.selectedDestination == nil || !GDUpdateActivity.shared.canStart(excluding: cloud))
                         Button("Open Finder") { cloud.openMount() }.disabled(!cloud.mounted)
                         Button("Unmount") { cloud.unmountDrive() }.disabled(!cloud.mounted || cloud.busy || !GDUpdateActivity.shared.canStart(excluding: cloud))
                     }
@@ -296,8 +272,6 @@ enum GDNativeHelper {
                         Picker("Cache allowance", selection: Binding(get: { cloud.cacheGB }, set: { cloud.cacheGB = $0 })) {
                             ForEach([10, 30, 60, 100], id: \.self) { Text("\($0) GB").tag($0) }
                         }.frame(width: 240).disabled(cloud.mounted || native.maintenanceBusy)
-                        Button("Open Cache") { cloud.openCache() }
-                        Button("View Mount Log") { cloud.openLog() }
                     }
                     Text(cloud.status).font(.caption).foregroundStyle(.secondary)
                     if !cloud.lastError.isEmpty { Text(GDNativeMessage.safe(cloud.lastError)).font(.caption).foregroundStyle(.orange) }
@@ -305,7 +279,7 @@ enum GDNativeHelper {
                         .font(.caption).foregroundStyle(.secondary)
                 }.frame(maxWidth: .infinity, alignment: .leading).padding(8)
             }
-            if content == .applications { GDManualProviderSection(library: native.manualLibrary) }
+            GDManualProviderSection(library: native.manualLibrary)
         }
         .padding(24).background(.white.opacity(0.035), in: RoundedRectangle(cornerRadius: 21))
         .overlay(RoundedRectangle(cornerRadius: 21).stroke(dropTarget ? Color.purple : .white.opacity(0.08), lineWidth: dropTarget ? 2 : 1))
@@ -315,16 +289,7 @@ enum GDNativeHelper {
             showUpload = true
             return true
         } isTargeted: { dropTarget = $0 }
-        .task {
-            candidateProject = cloud.projectID
-            candidateBucket = cloud.bucket
-            candidateRemote = cloud.remote
-            await native.start()
-            if let selected = native.selectedDestination {
-                candidateProject = selected.project; candidateBucket = selected.bucket
-                candidateRemote = selected.remote; candidatePrefix = selected.prefix
-            }
-        }
+        .task { await native.start() }
     }
 }
 
@@ -341,11 +306,12 @@ enum GDNativeHelper {
     private func kind(_ item: StoredApp) -> String { item.kind ?? "app" }
     private func category(_ item: StoredApp) -> String {
         if kind(item) == "folder" { return "folders" }
-        let ext = (item.name as NSString).pathExtension.lowercased()
-        if ["mp4", "mov", "m4v", "mkv", "avi", "webm", "mpeg", "mpg"].contains(ext) { return "videos" }
-        if ["mp3", "wav", "aiff", "flac", "aac", "m4a", "ogg"].contains(ext) { return "audio" }
-        if ["png", "jpg", "jpeg", "webp", "heic", "gif", "tif", "tiff", "svg"].contains(ext) { return "pictures" }
-        return "files"
+        switch GDExtensionMap.kind(item.name) {
+        case "videos": return "videos"
+        case "audio": return "audio"
+        case "pictures": return "pictures"
+        default: return "files"
+        }
     }
     private var items: [StoredApp] {
         library.apps.filter { item in
@@ -447,12 +413,11 @@ enum GDNativeHelper {
     @ObservedObject var library: LibraryModel
     @ObservedObject private var activity = GDUpdateActivity.shared
     var body: some View {
-        DisclosureGroup("Other cloud providers · manual configuration") {
+        DisclosureGroup("Bring your own S3-compatible bucket") {
             VStack(alignment: .leading, spacing: 10) {
-                Text("Configure SFTP, S3-compatible storage, Google Drive, WebDAV or another rclone provider on this Mac. This separate provider library does not change your Google Cloud destination.")
+                Text("Connect Amazon S3, Cloudflare R2, Backblaze B2, Wasabi, MinIO, or Google Cloud with S3/HMAC keys. The workspace fee is the monthly price returned for that workspace. SFTP, Azure, and WebDAV are shown as coming soon and have no connect flow. Performance features cost extra unless you stay on the free performance tier.")
                     .font(.caption).foregroundStyle(.secondary)
                 HStack {
-                    Button("Open Provider Configuration") { library.openProviderSetup() }
                     Button("Refresh Providers") { library.refresh() }
                 }
                 Picker("Provider", selection: $library.remote) {
@@ -460,10 +425,8 @@ enum GDNativeHelper {
                     ForEach(library.remotes, id: \.self) { Text($0).tag($0) }
                 }
                 TextField("Provider bucket / folder", text: $library.folder).textFieldStyle(.roundedBorder)
-                Toggle("Move original to Trash after verified upload and restore", isOn: $library.offloadOriginal).font(.caption)
                 HStack {
                     Button("Add Applications / Files / Folders") { library.chooseApp() }.disabled(library.remote.isEmpty || library.folder.isEmpty)
-                    Button("Scan Provider") { library.scanCloud() }.disabled(library.remote.isEmpty || library.folder.isEmpty)
                 }
                 ForEach(library.apps) { item in
                     HStack {

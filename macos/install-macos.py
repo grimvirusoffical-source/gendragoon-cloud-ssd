@@ -534,6 +534,15 @@ def install(archive, directory, reinstall=False, restart=False, mount_paths=()):
                 os.replace(staged, app)
                 installed = True
                 verify_app(app)
+                companion = app / "Contents/Resources/Red-XAI Updater.app"
+                placed = app.parent / "Red-XAI Updater.app"
+                if companion.is_dir() and not companion.is_symlink():
+                    if placed.exists() or placed.is_symlink():
+                        if placed.is_symlink() or not placed.is_dir():
+                            placed.unlink()
+                        else:
+                            shutil.rmtree(placed)
+                    shutil.copytree(companion, placed, symlinks=False)
                 if restart:
                     launched = launch_app(app)
             except Exception as failure:

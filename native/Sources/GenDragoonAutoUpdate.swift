@@ -345,7 +345,7 @@ struct GenDragoonAutomaticUpdateStatus:View {
                         .font(.system(size:12,weight:.bold,design:.monospaced))
                     Spacer()
                     if showETA {Text(etaLabel).font(.system(size:11,weight:.medium,design:.monospaced))}
-                    else if update.phase == "ready" {Text("Restarts when idle").font(.system(size:11))}
+                    else if update.phase == "ready" {Text("Installs when idle").font(.system(size:11))}
                 }
                 .foregroundStyle(.cyan)
                 if update.bytesTotal>0 && update.phase == "downloading" {

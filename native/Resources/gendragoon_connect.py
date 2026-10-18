@@ -3,6 +3,12 @@
 
 Uses official CLIs for delegated OAuth. Does not ask for passwords or export keys.
 JSON responses contain status only, never tokens or account secrets.
+
+A Google Cloud Owner-role check applies only when this Mac attaches a
+bring-your-own Google Cloud bucket. Hosted workspaces live in the shared
+customer bucket and are authorized by the signed-in account on the service.
+Other clouds and VPS destinations use the local provider connection and never
+call this Owner-role check.
 """
 
 # Bundled helpers are signed resources: imports must never create or update caches.
@@ -205,10 +211,14 @@ def gcloud_token(gcloud):
     return token
 
 
-def google_json(gcloud, url):
+def google_json(gcloud, url, body=None):
     # Bearer token is never persisted by this tool, displayed, or logged.
-    req = urllib.request.Request(url, headers={"Authorization": "Bearer " + gcloud_token(gcloud),
+    data = None if body is None else json.dumps(body).encode()
+    req = urllib.request.Request(url, data=data, method="GET" if body is None else "POST",
+                                 headers={"Authorization": "Bearer " + gcloud_token(gcloud),
                                                "Accept": "application/json", "User-Agent": AGENT})
+    if data is not None:
+        req.add_header("Content-Type", "application/json")
     try:
         class SameOrigin(urllib.request.HTTPRedirectHandler):
             def redirect_request(self,request,response,code,message,headers,new_url):
@@ -240,21 +250,35 @@ def connect_google():
     reply(message="Google Cloud authorized through Opera. Choose a project and bucket below.")
 
 
+def signed_in_email(gcloud):
+    info = google_json(gcloud, "https://www.googleapis.com/oauth2/v1/userinfo")
+    email = str(info.get("email") or "")
+    if not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", email):
+        raise RuntimeError("Google account ownership could not be verified. Reconnect Google Cloud.")
+    return email
+
+
 def projects():
     gcloud = find_executable("gcloud")
     if not gcloud:
         raise RuntimeError("Click Connect Google Cloud to install tools and authorize first.")
+    signed_in_email(gcloud)
     data = []
     url = "https://cloudresourcemanager.googleapis.com/v1/projects?pageSize=100"
     for _ in range(10):
         obj = google_json(gcloud, url)
-        data += [{"id": str(p.get("projectId", "")), "name": str(p.get("name", ""))}
-                 for p in obj.get("projects", []) if p.get("projectId") and p.get("lifecycleState") == "ACTIVE"]
+        owned = []
+        for project in obj.get("projects", []):
+            project_id = str(project.get("projectId", ""))
+            if not project_id or project.get("lifecycleState") != "ACTIVE":
+                continue
+            owned.append({"id": project_id, "name": str(project.get("name", ""))})
+        data += owned
         token = obj.get("nextPageToken")
         if not token:
             break
         url = "https://cloudresourcemanager.googleapis.com/v1/projects?pageSize=100&pageToken=" + urllib.parse.quote(token)
-    reply(message=f"Found {len(data)} accessible Google Cloud projects.", projects=data)
+    reply(message=f"Found {len(data)} Google Cloud projects you own. This list is only for a bring-your-own Google Cloud destination.", projects=data)
 
 
 def valid_project(name):

@@ -2,10 +2,16 @@ name: Native integration validation
 
 on:
   push:
-    branches: [codex/native-integration-20261017]
+    branches: [codex/native-integration-20261017, 'release/**']
+    tags: ['v*']
   pull_request:
     paths: ['native/**', 'macos/**', '.github/workflows/native-validation.yml']
   workflow_dispatch:
+    inputs:
+      release:
+        description: Treat this run as a release build (the placeholder support contact fails it)
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -99,6 +105,17 @@ jobs:
       - name: Exercise actual Swift helper completion, failure, timeout and caller cancellation
         run: python3 -B -m unittest native.Tests.test_integrated_native_helper -v
 
+  macos-xctest:
+    runs-on: macos-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - name: Compile the Mac client
+        run: xcrun swiftc -parse-as-library -target arm64-apple-macosx14.0 -framework SwiftUI -framework AppKit -o "$RUNNER_TEMP/GenDragoon" native/Sources/*.swift
+      - name: Run contract XCTest
+        working-directory: native
+        run: swift test
+
   android:
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -120,6 +137,45 @@ jobs:
           path: native/Mobile/Android/app/build/outputs/apk/debug/*.apk
           if-no-files-found: error
           retention-days: 7
+
+  # Release-only gate. Release tags (v*), release/** branches, PRs into release/**
+  # and a manual run with release=true fail while the support contact is a
+  # placeholder. Ordinary PR and push CI runs the same check and reports the
+  # placeholder as a warning. Production packaging (package_macos.py without
+  # --candidate) runs the same check and refuses to write a distributable.
+  release-support-contact:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      GD_RELEASE_BUILD: ${{ github.ref_type == 'tag' || startsWith(github.ref, 'refs/heads/release/') || startsWith(github.base_ref, 'release/') || inputs.release == true }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Fail a release while the support contact is a placeholder
+        if: env.GD_RELEASE_BUILD == 'true'
+        run: python3 native/Tests/check_support_contact_release.py
+      - name: Warn (not fail) on ordinary CI while the support contact is a placeholder
+        if: env.GD_RELEASE_BUILD != 'true'
+        run: |
+          set +e
+          output="$(python3 native/Tests/check_support_contact_release.py 2>&1)"
+          status=$?
+          set -e
+          if [ "$status" -eq 0 ]; then
+            echo "Support contact is release-ready." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          case "$output" in
+            "release check failed:"*) ;;
+            *) echo "$output"; exit "$status" ;;
+          esac
+          echo "::warning file=native/Sources/GDSupportContact.swift,title=Support contact placeholder::${output}. Release tags, release/** branches and production packaging fail until the real address is set."
+          {
+            echo "### Support contact is still a placeholder"
+            echo
+            echo "\`${output}\`"
+            echo
+            echo "This is a warning on PR and push CI. Release tags (v*), release/** branches, PRs into release/**, a manual run with release=true, and production packaging fail until the real support contact is set."
+          } >> "$GITHUB_STEP_SUMMARY"
 
   ios:
     runs-on: macos-latest

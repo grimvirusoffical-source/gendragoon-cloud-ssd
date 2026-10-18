@@ -47,7 +47,11 @@ class ConnectionTests(unittest.TestCase):
         for item in reversed(self.patches):item.stop()
         self.temporary.cleanup()
 
-    def google(self,gcloud,url):
+    def google(self,gcloud,url,body=None):
+        if "userinfo" in url:return {"email":"owner@example.com"}
+        if "getIamPolicy" in url:
+            self.assertEqual(body,{})
+            return {"bindings":[{"role":"roles/owner","members":["user:owner@example.com"]}]}
         if "cloudresourcemanager" in url:return {"projectId":"project-one","projectNumber":"123456","lifecycleState":"ACTIVE"}
         return {"name":"bucket-one","projectNumber":self.bucket_project}
 
@@ -174,6 +178,36 @@ class ConnectionTests(unittest.TestCase):
         creation=[call.args[0] for call in self.mock_command.call_args_list if "config" in call.args[0]]
         self.assertEqual(len(creation),1)
         self.assertIn("create",creation[0]);self.assertIn("google cloud storage",creation[0])
+
+    def test_bucket_in_the_selected_project_does_not_require_an_owner_role(self):
+        def foreign(gcloud,url,body=None):
+            if "userinfo" in url:return {"email":"owner@example.com"}
+            if "getIamPolicy" in url:return {"bindings":[{"role":"roles/viewer","members":["user:owner@example.com"]}]}
+            if "cloudresourcemanager" in url:return {"projectId":"project-one","projectNumber":"123456","lifecycleState":"ACTIVE"}
+            return {"name":"bucket-one","projectNumber":"123456"}
+        with patch.object(connect,"google_json",side_effect=foreign):
+            connect.configure("project-one","bucket-one")
+        self.assertEqual(self.selected()["destination"]["bucket"], "bucket-one")
+
+    def test_project_list_keeps_only_owned_google_cloud_destinations(self):
+        def listing(gcloud, url, body=None):
+            if "userinfo" in url:
+                return {"email": "owner@example.com"}
+            if "projects?" in url:
+                return {"projects": [
+                    {"projectId": "owned-proj", "name": "Owned", "lifecycleState": "ACTIVE"},
+                    {"projectId": "shared-proj", "name": "Readable", "lifecycleState": "ACTIVE"},
+                ]}
+            if "owned-proj" in url and "getIamPolicy" in url:
+                return {"bindings": [{"role": "roles/owner", "members": ["user:owner@example.com"]}]}
+            if "getIamPolicy" in url:
+                return {"bindings": [{"role": "roles/viewer", "members": ["user:owner@example.com"]}]}
+            return {}
+        with patch.object(connect, "google_json", side_effect=listing):
+            connect.projects()
+        payload = self.mock_reply.call_args.kwargs
+        self.assertEqual([item["id"] for item in payload["projects"]], ["owned-proj", "shared-proj"])
+        self.assertIn("bring-your-own Google Cloud", payload["message"])
 
     def test_custom_native_install_uses_adjacent_bundle_rclone(self):
         helper=Path("/Applications/GenDragoon Cloud SSD.app/Contents/Resources/gendragoon_connect.py")

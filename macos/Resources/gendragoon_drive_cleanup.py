@@ -30,9 +30,25 @@ MAX_ENTRIES = 100_000
 CATEGORIES = {("Applications",), ("Media", "Videos"), ("Media", "Audio"),
               ("Media", "Pictures"), ("Files",), ("Folders",)}
 RESERVED = {"applications", "media", "files", "folders"}
-VIDEO = {".mp4", ".mov", ".mkv", ".avi", ".webm", ".m4v", ".mpeg", ".mpg"}
-AUDIO = {".mp3", ".m4a", ".aac", ".flac", ".wav", ".aiff", ".ogg", ".opus"}
-PICTURE = {".jpg", ".jpeg", ".png", ".gif", ".heic", ".heif", ".webp", ".tif", ".tiff", ".svg", ".bmp", ".raw"}
+def shared_extension_map():
+    here = Path(__file__).resolve()
+    for path in (
+        here.with_name("extension-map.json"),
+        here.parents[1] / "Resources" / "extension-map.json",
+        here.parents[2] / "native" / "Resources" / "extension-map.json",
+    ):
+        if path.is_file():
+            return json.loads(path.read_text())
+    raise RuntimeError("The shared extension map is missing")
+
+
+def _dotted(category):
+    return {"." + name for name in shared_extension_map()["extensions"][category]}
+
+
+VIDEO = _dotted("videos")
+AUDIO = _dotted("audio")
+PICTURE = _dotted("pictures")
 TEMPORARY_SUFFIXES = (".part", ".partial", ".download", ".crdownload", ".tmp", ".lock")
 MESSAGES = {
     "unsafe_root": "Choose a normal local folder you own, away from system, cloud, cache, and app-support locations.",
