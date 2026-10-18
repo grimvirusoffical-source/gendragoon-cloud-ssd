@@ -226,21 +226,46 @@ struct GDSavedDeletionJob: Equatable {
         await begin(confirmation: "DELETE")
     }
 
-    /// POST .../support-request. A 401 `unauthorized` (missing Authorization) matches a 404:
-    /// show the support email and never open sign-in.
+    /// POST .../support-request for the saved deletion job.
     func requestSupport() async {
-        guard let saved = jobs.load() else {
-            statusText = GDAccountContract.supportRequestMessage(.emailFallback)
-            return
+        await requestSupport(jobId: jobs.load()?.jobId ?? "")
+    }
+
+    /// POST .../support-request. A 401 `unauthorized` (missing Authorization) matches a 404:
+    /// show the support email and never open sign-in. A missing or blank status token, a blank
+    /// job id, or a job id that is not the saved job sends nothing. A 409 other than
+    /// `support_not_needed` gets one status refresh. This never signs in, signs out, throws,
+    /// or clears the saved job.
+    @discardableResult
+    func requestSupport(jobId: String) async -> GDSupportRequestResult {
+        let result = await supportRequestResult(jobId: jobId)
+        statusText = GDAccountContract.supportRequestMessage(result)
+        return result
+    }
+
+    private func supportRequestResult(jobId: String) async -> GDSupportRequestResult {
+        guard let saved = jobs.load(),
+              GDAccountContract.supportRequestAllowed(requestedJobId: jobId, savedJobId: saved.jobId,
+                                                      statusToken: saved.statusToken) else {
+            return .emailFallback
         }
-        let path = GDAccountContract.supportRequestPath(jobId: saved.jobId)
+        let response: (status: Int, json: [String: Any])
         do {
-            let response = try await transport.send(method: "POST", path: path,
-                                                     authorization: "Bearer " + saved.statusToken, body: nil)
-            let result = GDAccountContract.interpretSupportRequest(status: response.status, json: response.json)
-            statusText = GDAccountContract.supportRequestMessage(result)
+            response = try await transport.send(method: "POST", path: GDAccountContract.supportRequestPath(jobId: saved.jobId),
+                                                authorization: "Bearer " + saved.statusToken, body: nil)
         } catch {
-            statusText = GDAccountContract.supportRequestMessage(.emailFallback)
+            return .emailFallback
+        }
+        guard GDAccountContract.supportRequestNeedsRefresh(status: response.status, json: response.json) else {
+            return GDAccountContract.interpretSupportRequest(status: response.status, json: response.json)
+        }
+        let refresh = GDAccountContract.pollRequest(jobId: saved.jobId, statusToken: saved.statusToken)
+        do {
+            let refreshed = try await transport.send(method: refresh.method, path: refresh.path,
+                                                     authorization: refresh.authorization, body: nil)
+            return GDAccountContract.interpretSupportRefresh(status: refreshed.status, json: refreshed.json, jobId: saved.jobId)
+        } catch {
+            return .emailFallback
         }
     }
 

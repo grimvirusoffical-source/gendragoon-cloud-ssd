@@ -345,10 +345,34 @@ extension GDAccountContract {
             let retry = (json["retryAfterSec"] as? Int) ?? (json["retryAfterSec"] as? NSNumber)?.intValue ?? 0
             return .rateLimited(retryAfterSec: max(0, retry))
         }
-        if status == 409, GDServerCode.read(json) == "support_not_needed" {
+        if status == 409, supportNotNeededCodes.contains(GDServerCode.read(json)) {
             return .notNeeded
         }
         return .emailFallback
+    }
+
+    /// The server answers `support_not_needed` when the job is not `failed`.
+    static let supportNotNeededCodes: Set<String> = ["support_not_needed", "not_needed"]
+
+    /// A support request needs the saved job's status token and an exact job id match.
+    /// Anything else sends nothing and shows the email fallback.
+    static func supportRequestAllowed(requestedJobId: String, savedJobId: String, statusToken: String) -> Bool {
+        let blank = { (value: String) in value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+        return !blank(requestedJobId) && !blank(savedJobId) && !blank(statusToken) && requestedJobId == savedJobId
+    }
+
+    /// A 409 that is not `support_not_needed` gets one status refresh before falling back.
+    static func supportRequestNeedsRefresh(status: Int, json: [String: Any]) -> Bool {
+        status == 409 && !supportNotNeededCodes.contains(GDServerCode.read(json))
+    }
+
+    /// The refresh is the normal status GET. Support is only needed for a `failed` job,
+    /// so a 200 for the same job in `queued`, `running` or `done` means not needed.
+    /// Every other answer, including any error, is the email fallback.
+    static func interpretSupportRefresh(status: Int, json: [String: Any], jobId: String) -> GDSupportRequestResult {
+        guard status == 200, (json["jobId"] as? String) == jobId,
+              let state = json["status"] as? String else { return .emailFallback }
+        return ["queued", "running", "done"].contains(state) ? .notNeeded : .emailFallback
     }
 
     /// Support-request failures never open sign-in. A missing Authorization header is a 401 `unauthorized`.
