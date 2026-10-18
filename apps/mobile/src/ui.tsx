@@ -1,4 +1,4 @@
-import type { ReactNode } from "react";
+import { useId, type ReactNode } from "react";
 import {
   ActivityIndicator,
   Pressable,
@@ -97,11 +97,18 @@ export function Button(props: {
 
 export type BannerTone = "warn" | "info" | "danger";
 
-export function Banner(props: { children: ReactNode; testID?: string; tone?: BannerTone; action?: ReactNode }) {
+/**
+ * `alert` is for real errors the user has to act on now and is announced
+ * assertively. Every other banner (payment due, grace, info) is a polite live
+ * region so it does not interrupt. A danger banner is always an alert.
+ */
+export function Banner(props: { children: ReactNode; testID?: string; tone?: BannerTone; action?: ReactNode; alert?: boolean }) {
   const tone = props.tone ?? "warn";
+  const urgent = props.alert === true || tone === "danger";
   return (
     <View
-      accessibilityRole="alert"
+      accessibilityRole={urgent ? "alert" : undefined}
+      accessibilityLiveRegion={urgent ? "assertive" : "polite"}
       style={[styles.banner, tone === "info" ? styles.bannerInfo : tone === "danger" ? styles.bannerDanger : styles.bannerWarn]}
       testID={props.testID}
     >
@@ -120,12 +127,15 @@ export function Field(props: {
   helperTestID?: string;
 } & Pick<TextInputProps, "value" | "onChangeText" | "secureTextEntry" | "placeholder" | "autoCapitalize" | "autoComplete" | "textContentType">) {
   const hint = props.error ?? props.helper;
+  const generatedId = useId();
+  const labelId = props.testID ? `${props.testID}-label` : `field-${generatedId}-label`;
   return (
     <View style={styles.field}>
-      <Text style={styles.label} nativeID={props.testID ? `${props.testID}-label` : undefined}>{props.label}</Text>
+      <Text style={styles.label} nativeID={labelId}>{props.label}</Text>
       <TextInput
         accessibilityLabel={props.label}
-        accessibilityHint={hint}
+        accessibilityLabelledBy={labelId}
+        accessibilityHint={hint ?? undefined}
         placeholder={props.placeholder ?? props.label}
         placeholderTextColor={colors.muted}
         secureTextEntry={props.secureTextEntry}
@@ -137,6 +147,16 @@ export function Field(props: {
         onChangeText={props.onChangeText}
         testID={props.testID}
       />
+      {props.error ? (
+        <Text
+          testID={props.testID ? `${props.testID}-error` : undefined}
+          accessibilityRole="alert"
+          accessibilityLiveRegion="assertive"
+          style={styles.fieldError}
+        >
+          {props.error}
+        </Text>
+      ) : null}
       {props.helper ? <Text testID={props.helperTestID} style={styles.helper}>{props.helper}</Text> : null}
     </View>
   );
@@ -240,6 +260,7 @@ const styles = StyleSheet.create({
     backgroundColor: colors.input,
   },
   inputError: { borderColor: colors.dangerBorder },
+  fieldError: { color: colors.dangerText, fontSize: typeScale.helpSize },
   card: {
     backgroundColor: colors.surface,
     borderColor: colors.cardBorder,

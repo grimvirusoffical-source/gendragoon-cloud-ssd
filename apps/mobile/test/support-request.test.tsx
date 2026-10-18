@@ -328,7 +328,7 @@ describe("deletion support request", () => {
     openURL.mockRestore();
   });
 
-  it("409 refreshes deletion status and 429 shows the already-sent message", async () => {
+  it("409 refreshes deletion status (failed mails support) and 429 shows the already-sent message", async () => {
     const openURL = jest.spyOn(Linking, "openURL").mockResolvedValue(undefined as never);
     const secrets = new MemorySecretStore();
     await secrets.set("account-deletion:status-token", new TextEncoder().encode(TOKEN));
@@ -368,9 +368,12 @@ describe("deletion support request", () => {
       />,
     );
     fireEvent.press(refresh.getByTestId("contact-support"));
-    await waitFor(() => expect(refresh.getByTestId("deletion-retry")).toBeTruthy());
+    // Avery's ruling: a 409 whose refresh comes back failed still needs a human,
+    // so the screen mails support instead of switching to Retry.
+    await waitFor(() => expect(openURL).toHaveBeenCalledWith(supportContactTarget(SUPPORT_CONTACT.value, refreshJob)));
     expect(statusCalls).toBe(1);
-    expect(openURL).not.toHaveBeenCalled();
+    expect(refresh.queryByTestId("support-deletion-running")).toBeNull();
+    openURL.mockClear();
 
     await secrets.set("account-deletion:job-id", new TextEncoder().encode(jobId));
     const already = await render(

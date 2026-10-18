@@ -21,17 +21,19 @@ export const colors = {
   /** Text roles. `muted` is lifted from the shared value to clear AA on raised cards. */
   text: "#f6f3fb",
   muted: "#b3adc4",
-  /** Brand purple. White label on `primary` is 4.9:1. */
+  /** Brand purple. White label on `primary` is 5.15:1. */
   primary: "#6d4aff",
   primaryPressed: "#5a3ae0",
   primaryText: "#ffffff",
   /** Secondary: tinted purple outline. */
   secondaryBg: "rgba(124, 92, 255, 0.14)",
-  secondaryBorder: "#5b4a99",
+  /** 4.9:1 on `surface`, 5.4:1 on `bg` (WCAG 1.4.11 needs 3:1). */
+  secondaryBorder: "#8c76ee",
   secondaryText: "#ddd4ff",
   /** Lighter destructive: soft rose tint and outline, not a solid red slab. */
   dangerBg: "rgba(255, 109, 143, 0.10)",
-  dangerBorder: "#7a3a52",
+  /** Lighter rose outline: 4.0:1 on `surface`, 4.4:1 on `bg`. */
+  dangerBorder: "#b0607f",
   dangerText: "#ffc2d1",
   /** Warning banner (payment due / grace). */
   warnBg: "rgba(255, 176, 32, 0.10)",
@@ -41,6 +43,7 @@ export const colors = {
   infoBg: "rgba(124, 92, 255, 0.12)",
   infoBorder: "#4a3d80",
   infoText: "#e4dcff",
+  /** Focus ring and selected-choice outline: brighter than every resting outline. */
   focus: "#a58bff",
 } as const;
 
