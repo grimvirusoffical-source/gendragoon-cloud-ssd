@@ -40,5 +40,13 @@
         "storage-urls"
       ]
     }
+  ],
+  "files": [
+    {
+      "file": "fixtures/account-deletion/support-unauthorized.json",
+      "branch": "fix/account-deletion",
+      "pullRequest": 6,
+      "commit": "048641275e717e00b4031cf76ccca57cc2e1dc35"
+    }
   ]
 }

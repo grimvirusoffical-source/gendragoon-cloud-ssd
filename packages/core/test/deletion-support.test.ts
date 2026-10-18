@@ -247,6 +247,19 @@ describe("requestDeletionSupport(jobId, { client, secureStore })", () => {
     }
   });
 
+  it("401 support-unauthorized (no auth header, cloud-ssd 0486412) -> fallback SUPPORT_CONTACT, no throw, never sign-in", async () => {
+    const f = fx("support-unauthorized");
+    expect(f.request.headers).toEqual({});
+    expect(f.response).toEqual({ status: 401, body: { error: "unauthorized" } });
+    const jobId = jobOf("support-unauthorized");
+    const t = setup(jobId, { support: [reply("support-unauthorized")] });
+    const deps = await t.deps();
+    const result = await requestDeletionSupport()(jobId, deps);
+    expect(result).toEqual({ kind: "fallback", contact: SUPPORT_CONTACT });
+    await expectNoSignInAndJobKept(t, deps.secureStore, jobId);
+    expect(t.srv.calls).toHaveLength(1);
+  });
+
   it("a network error, 500 or 503 (DERIVED) -> fallback SUPPORT_CONTACT", async () => {
     const jobId = jobOf("support-received");
     for (const r of ["network", { status: 500, body: { error: "internal" } }, { status: 503 }] as Reply[]) {
@@ -270,12 +283,12 @@ describe("requestDeletionSupport(jobId, { client, secureStore })", () => {
 });
 
 /**
- * Gaps found reviewing bcc1c39 (client.ts:299-334, account.ts:433-447). Each case
- * does its setup and checks it, then calls the real export. On bcc1c39 each one
- * fails because the call throws, or because a request is sent. Remove a marker
- * when its fix lands.
+ * Morgan's support-gap findings from reviewing bcc1c39 (client.ts:299-334,
+ * account.ts:433-447): a failed status refresh after 409, other 4xx responses,
+ * and a saved job id that does not match. Each case does its setup and checks
+ * it, then calls the real export. All are fixed as of 03ce526.
  */
-describe("requestDeletionSupport gaps on bcc1c39 (it.fails until fixed)", () => {
+describe("requestDeletionSupport gaps on bcc1c39", () => {
   const fail = (r: SupportResult | { threw: string }) => r;
   const call = (fn: CoreSupport, jobId: string, deps: Parameters<CoreSupport>[1]) =>
     fn(jobId, deps).then(fail, (e: unknown) => fail({ threw: `${(e as Error)?.name}: ${(e as Error)?.message}` }));
@@ -288,7 +301,7 @@ describe("requestDeletionSupport gaps on bcc1c39 (it.fails until fixed)", () => 
     ["network error", "network"],
   ];
   for (const [label, refresh] of refreshFailures) {
-    it.fails(`409 support_not_needed, then the status refresh fails with ${label} -> fallback SUPPORT_CONTACT, no throw, no sign-in (client.ts:328-330)`, async () => {
+    it(`409 support_not_needed, then the status refresh fails with ${label} -> fallback SUPPORT_CONTACT, no throw, no sign-in (client.ts:328-330)`, async () => {
       const jobId = jobOf("support-not-needed");
       const t = setup(jobId, { support: [reply("support-not-needed")], status: [refresh] });
       const deps = await t.deps();
@@ -312,7 +325,7 @@ describe("requestDeletionSupport gaps on bcc1c39 (it.fails until fixed)", () => 
     ["422 (DERIVED)", { status: 422, body: { error: "unprocessable" } }],
   ];
   for (const [label, r] of otherClientErrors) {
-    it.fails(`support request ${label} -> fallback SUPPORT_CONTACT, no throw (client.ts:333)`, async () => {
+    it(`support request ${label} -> fallback SUPPORT_CONTACT, no throw (client.ts:333)`, async () => {
       const jobId = jobOf("support-received");
       const t = setup(jobId, { support: [r] });
       const deps = await t.deps();
@@ -324,7 +337,7 @@ describe("requestDeletionSupport gaps on bcc1c39 (it.fails until fixed)", () => 
     });
   }
 
-  it.fails("saved job id differs from the jobId argument -> fallback SUPPORT_CONTACT and NO request to any route (account.ts:444-446)", async () => {
+  it("saved job id differs from the jobId argument -> fallback SUPPORT_CONTACT and NO request to any route (account.ts:444-446)", async () => {
     const savedJobId = jobOf("support-received");
     const otherJobId = jobOf("support-not-needed");
     expect(otherJobId).not.toBe(savedJobId);
@@ -335,5 +348,81 @@ describe("requestDeletionSupport gaps on bcc1c39 (it.fails until fixed)", () => 
     expect(t.srv.calls).toEqual([]);
     expect(result).toEqual({ kind: "fallback", contact: SUPPORT_CONTACT });
     await expectNoSignInAndJobKept(t, deps.secureStore, savedJobId);
+  });
+});
+
+/**
+ * Unexpected statuses and unreadable bodies on the support request. The
+ * contract is that requestDeletionSupport never throws: each of these gives
+ * the email fallback after exactly one request, with no sign-in signal and the
+ * saved job and status token left alone. All DERIVED: no fixture for them.
+ */
+describe("requestDeletionSupport never throws on an unexpected status or body error", () => {
+  const settle = (fn: CoreSupport, jobId: string, deps: Parameters<CoreSupport>[1]) =>
+    fn(jobId, deps).then(
+      (r): SupportResult | { threw: string } => r,
+      (e: unknown) => ({ threw: `${(e as Error)?.name}: ${(e as Error)?.message}` }),
+    );
+
+  /** Records the call through the scripted server, then answers with `respond()` instead. */
+  async function withRawResponse(jobId: string, respond: () => Response) {
+    const t = setup(jobId, { support: [{ status: 500 }] });
+    let firebaseCalls = 0;
+    const client = new GenDragoonClient({
+      baseUrl: BASE,
+      getToken: () => { firebaseCalls += 1; throw new Error("signed out"); },
+      fetch: async (input, init) => {
+        await t.srv.fetchImpl(input, init);
+        return respond();
+      },
+    });
+    const deps = { ...(await t.deps()), client };
+    return { t, deps, firebaseCalls: () => firebaseCalls };
+  }
+
+  const unexpected: Array<[string, Reply]> = [
+    ["200 with a received-shaped body", { status: 200, body: { status: "received", requestId: "req-200" } }],
+    ["204 with no body", { status: 204 }],
+    ["302 redirect", { status: 302, body: { error: "moved" } }],
+  ];
+  for (const [label, r] of unexpected) {
+    it(`support request ${label} -> fallback SUPPORT_CONTACT, no throw, one request`, async () => {
+      const jobId = jobOf("support-received");
+      const t = setup(jobId, { support: [r] });
+      const deps = await t.deps();
+      expect(await read(deps.secureStore, TOKEN_KEY)).toBe(STATUS_TOKEN);
+      const result = await settle(requestDeletionSupport(), jobId, deps);
+      expect(result).toEqual({ kind: "fallback", contact: SUPPORT_CONTACT });
+      expect(t.srv.calls).toHaveLength(1);
+      expect(t.srv.calls[0]!.method).toBe("POST");
+      await expectNoSignInAndJobKept(t, deps.secureStore, jobId);
+    });
+  }
+
+  it("202 with a malformed JSON body -> fallback SUPPORT_CONTACT, no throw, one request", async () => {
+    const jobId = jobOf("support-received");
+    const { t, deps, firebaseCalls } = await withRawResponse(
+      jobId,
+      () => new Response("{\"status\":\"received\",\"requestId\":", { status: 202, headers: { "content-type": "application/json" } }),
+    );
+    const result = await settle(requestDeletionSupport(), jobId, deps);
+    expect(result).toEqual({ kind: "fallback", contact: SUPPORT_CONTACT });
+    expect(t.srv.calls).toHaveLength(1);
+    expect(firebaseCalls()).toBe(0);
+    await expectNoSignInAndJobKept(t, deps.secureStore, jobId);
+  });
+
+  it("a 202 whose body read rejects -> fallback SUPPORT_CONTACT, no throw, one request", async () => {
+    const jobId = jobOf("support-received");
+    const { t, deps, firebaseCalls } = await withRawResponse(jobId, () => {
+      const response = new Response(null, { status: 202 });
+      Object.defineProperty(response, "text", { value: () => Promise.reject(new TypeError("body stream already read")) });
+      return response;
+    });
+    const result = await settle(requestDeletionSupport(), jobId, deps);
+    expect(result).toEqual({ kind: "fallback", contact: SUPPORT_CONTACT });
+    expect(t.srv.calls).toHaveLength(1);
+    expect(firebaseCalls()).toBe(0);
+    await expectNoSignInAndJobKept(t, deps.secureStore, jobId);
   });
 });
