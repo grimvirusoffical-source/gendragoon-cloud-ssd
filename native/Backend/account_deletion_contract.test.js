@@ -117,7 +117,7 @@ function assertErrorShape(errors){
   assert.ok(e.json&&typeof e.json==="object",`${e.status} ${e.path}: body is not JSON: ${e.text}`);
   assert.equal(typeof e.json.error,"string",`${e.status} ${e.path}: missing error`);
   assert.equal("code" in e.json,false,`${e.status} ${e.path}: must not send a code field`);
-  const allowed=e.status===410?["error","jobId","statusToken"]:["error"];
+  const allowed=e.status===410?["error","jobId","statusToken"]:e.status===409?["error","jobId"]:["error"];
   for(const key of Object.keys(e.json))assert.ok(allowed.includes(key),`${e.status} ${e.path}: unexpected key ${key}`);
  }
 }
@@ -613,5 +613,140 @@ test("poll reclaims an expired lease and finishes from the last checkpoint witho
   assert.equal(count(log,e=>e.kind==="cancel"),1,"completed Stripe batch was repeated after the poll takeover: "+JSON.stringify(log));
   assert.equal(count(log,e=>e.kind==="bucket"&&e.prefix.startsWith("tenants/")),1,"tenants batch exactly once");
   assert.equal(h.users.has("u-poll"),false);
+ }finally{h.close();}
+});
+
+test("retry after failed: same job, queued 202, token set grows, finished steps are not repeated",async()=>{
+ const log=[];
+ let failCustomer=true;
+ const stripe={subscriptions:{
+  list:async q=>({has_more:false,data:[{id:"sub_retry",status:"active",customer:q.customer}]}),
+  cancel:async id=>{log.push({kind:"cancel",id});return {};},
+ }};
+ const bucket={deleteFiles:async({prefix})=>{
+  log.push({kind:"bucket",prefix});
+  if(failCustomer&&prefix.startsWith("customer/"))throw Object.assign(Error("bucket down"),{code:"bucket_down"});
+ }};
+ const h=harness({uids:["u-retry"],stripe,bucket});
+ seedCustomer(h,"u-retry");
+ await h.listen();
+ try{
+  const first=(await h.del("u-retry")).json;
+  const failed=await h.pollUntil(first.jobId,first.statusToken,"failed");
+  assert.equal(failed.last.json.status,"failed");
+  assert.equal(failed.last.json.retryable,true);
+  assert.equal(count(log,e=>e.kind==="cancel"),1);
+  const again=await h.del("u-retry");
+  assert.equal(again.status,202,again.text);
+  assert.deepEqual(Object.keys(again.json).sort(),["jobId","status","statusToken"]);
+  assert.equal(again.json.status,"queued");
+  assert.equal(again.json.jobId,first.jobId);
+  assert.notEqual(again.json.statusToken,first.statusToken);
+  await settle(80);
+  const stored=h.db.rows.get("deletion_jobs/"+first.jobId);
+  assert.equal(stored.steps.stripe,true,"stripe completion marker stays on the job");
+  assert.equal(stored.statusTokens.length,2);
+  assert.ok(stored.statusTokens.some(item=>item.hash===tokenHash(again.json.statusToken)));
+  assert.equal(count(log,e=>e.kind==="cancel"),1,"completed Stripe cancel was not repeated");
+  assert.ok(count(log,e=>e.kind==="bucket"&&e.prefix.startsWith("customer/"))>=2,"the failed prefix is tried again");
+  failCustomer=false;
+  const third=await h.del("u-retry");
+  assert.equal(third.json.jobId,first.jobId);
+  const done=await h.pollUntil(first.jobId,third.json.statusToken);
+  assert.equal(done.last.json.status,"done");
+  assert.equal(count(log,e=>e.kind==="cancel"),1);
+ }finally{h.close();}
+});
+
+test("retry after failed: the sixth status token drops the oldest hash",async()=>{
+ const stripe={subscriptions:{
+  list:async()=>({has_more:false,data:[{id:"sub_cap",status:"active",customer:"cus_lease"}]}),
+  cancel:async()=>{throw Object.assign(Error("down"),{code:"stripe_cancel_failed"});},
+ }};
+ const h=harness({uids:["u-tok"],stripe,bucket:{deleteFiles:async()=>{}}});
+ seedCustomer(h,"u-tok");
+ await h.listen();
+ try{
+  const first=(await h.del("u-tok")).json;
+  const hashes=[tokenHash(first.statusToken)];
+  assert.equal((await h.pollUntil(first.jobId,first.statusToken,"failed")).last.json.status,"failed");
+  for(let n=0;n<5;n++){
+   const next=await h.del("u-tok");
+   assert.equal(next.status,202,next.text);
+   assert.equal(next.json.status,"queued");
+   assert.equal(next.json.jobId,first.jobId);
+   hashes.push(tokenHash(next.json.statusToken));
+   assert.equal((await h.pollUntil(first.jobId,next.json.statusToken,"failed")).last.json.status,"failed");
+  }
+  const stored=h.db.rows.get("deletion_jobs/"+first.jobId);
+  assert.equal(stored.statusTokens.length,5);
+  assert.equal(stored.statusTokens.some(item=>item.hash===hashes[0]),false,"oldest hash was dropped");
+  for(const hash of hashes.slice(1))assert.ok(stored.statusTokens.some(item=>item.hash===hash));
+ }finally{h.close();}
+});
+
+test("failed job with retryable false is 409 and issues no status token",async()=>{
+ const h=harness({uids:["u-lock"]});
+ const owner=hash("u-lock");
+ const jobId="11111111-1111-4111-8111-000000000099";
+ const kept={hash:"cd".repeat(32),expiresAtMs:NOW+60_000};
+ const record={jobId,accountHash:owner,uid:"u-lock",status:"failed",retryable:false,failure:"blocked",
+  steps:{stripe:true},statusTokens:[kept],canceledIds:[],subscriptionIds:[],customerId:null};
+ h.db.rows.set("account_deletions/"+owner,record);
+ h.db.rows.set("deletion_jobs/"+jobId,structuredClone(record));
+ await h.listen();
+ try{
+  const denied=await h.del("u-lock");
+  assert.equal(denied.status,409,denied.text);
+  assert.deepEqual(denied.json,{error:"deletion_not_retryable",jobId});
+  const stored=h.db.rows.get("deletion_jobs/"+jobId);
+  assert.equal(stored.status,"failed");
+  assert.deepEqual(stored.statusTokens,[kept]);
+ }finally{h.close();}
+});
+
+test("two concurrent retries of a failed job keep one job and one runner",async()=>{
+ const log=[];
+ let mode="fail";
+ let release=()=>{};
+ const gate=new Promise(resolve=>{release=resolve;});
+ const stripeFor=name=>({subscriptions:{
+  list:async q=>({has_more:false,data:[{id:"sub_both",status:"active",customer:q.customer}]}),
+  cancel:async()=>{
+   log.push({by:name,kind:"cancel"});
+   if(mode==="fail")throw Object.assign(Error("down"),{code:"stripe_cancel_failed"});
+   if(mode==="hang")await gate;
+  },
+ },});
+ const bucket={deleteFiles:async({prefix})=>{log.push({kind:"bucket",prefix});}};
+ const h=harness({uids:["u-both"],stripe:stripeFor("A"),bucket});
+ seedCustomer(h,"u-both");
+ await h.listen();
+ try{
+  const first=(await h.del("u-both")).json;
+  assert.equal((await h.pollUntil(first.jobId,first.statusToken,"failed")).last.json.status,"failed");
+  assert.equal(count(log,e=>e.kind==="cancel"),1);
+  h.setNow(NOW+LEASE_MS+1);
+  mode="hang";
+  const other=await h.instance(stripeFor("B"),bucket);
+  const [left,right]=await Promise.all([h.del("u-both"),h.del("u-both",{base:other})]);
+  assert.equal(left.status,202,left.text);
+  assert.equal(right.status,202,right.text);
+  assert.equal(left.json.jobId,first.jobId);
+  assert.equal(right.json.jobId,first.jobId);
+  const statuses=[left.json.status,right.json.status];
+  assert.ok(statuses.includes("queued"),"the retry that observed failed returns queued: "+statuses.join(","));
+  assert.ok(statuses.every(status=>status==="queued"||status==="deleting"),statuses.join(","));
+  assert.notEqual(left.json.statusToken,right.json.statusToken);
+  await settle(80);
+  assert.equal(count(log,e=>e.kind==="cancel"),2,"one retry runner, not two");
+  const jobs=[...h.db.rows.keys()].filter(key=>key.startsWith("deletion_jobs/"));
+  assert.deepEqual(jobs,["deletion_jobs/"+first.jobId]);
+  mode="ok";
+  release();
+  const token=left.json.statusToken;
+  const done=await h.pollUntil(first.jobId,token);
+  assert.equal(done.last.json.status,"done",done.last.text);
+  assert.equal(count(log,e=>e.kind==="cancel"),2);
  }finally{h.close();}
 });

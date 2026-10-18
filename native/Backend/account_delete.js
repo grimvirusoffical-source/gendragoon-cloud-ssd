@@ -196,7 +196,7 @@ function createAccountDeletion({db,stripe,bucket,auth,byoProviders,hash,now}){
     job.lease={owner:instanceId,expiresAtMs:at+LEASE_MS};
     job.statusTokens=tokens;
     // Stay queued until the runner renews the lease. That renewal is what
-    // clients observe as running. A failed job retried by DELETE starts running.
+    // clients observe as running, including a failed job that DELETE just requeued.
     if(job.status!=="done"&&job.status!=="queued")job.status="running";
     writeBoth(tx,job);
     claimed=true;
@@ -434,7 +434,18 @@ function createAccountDeletion({db,stripe,bucket,auth,byoProviders,hash,now}){
    if(typeof req.body!=="object"||Array.isArray(req.body)||req.body.confirm!=="DELETE")
     throw refusal(400,"confirm_required");
   }
-  if(existing&&(existing.status==="queued"||existing.status==="running"||existing.status==="failed")){
+  if(existing?.status==="failed"&&existing.retryable!==true){
+   throw refusal(409,"deletion_not_retryable",{jobId:existing.jobId});
+  }
+  if(existing?.status==="failed"){
+   existing.uid=existing.uid||uid;
+   existing.status="queued";
+   existing.failure=null;
+   const {statusToken,claimed}=await issueStatusToken(existing,{claim:true});
+   if(claimed)schedule(existing);
+   return {status:202,jobId:existing.jobId,statusToken,httpStatus:"queued"};
+  }
+  if(existing&&(existing.status==="queued"||existing.status==="running")){
    existing.uid=existing.uid||uid;
    const {statusToken,claimed}=await issueStatusToken(existing,{claim:true});
    if(claimed)schedule(existing);
@@ -497,14 +508,14 @@ function registerAccountDeletion({app,firebaseAuth,...deps}){
   try{
    const result=await svc.deleteAccount(req);
    res.setHeader("Cache-Control","private, no-store");
-   const body={status:"deleting",jobId:result.jobId};
+   const body={status:result.httpStatus==="queued"?"queued":"deleting",jobId:result.jobId};
    if(typeof result.statusToken==="string")body.statusToken=result.statusToken;
    res.status(202).json(body);
   }catch(error){
    const status=Number.isInteger(error?.status)?error.status:500;
    const code=error?.code||"account_deletion_failed";
    const body={error:status===401&&code!=="reauth_required"?"invalid_token":code};
-   if(status===410&&typeof error?.jobId==="string")body.jobId=error.jobId;
+   if((status===410||status===409)&&typeof error?.jobId==="string")body.jobId=error.jobId;
    if(status===410&&typeof error?.statusToken==="string")body.statusToken=error.statusToken;
    if(status>=500)console.error("account deletion request failed",code);
    res.setHeader("Cache-Control","private, no-store");
