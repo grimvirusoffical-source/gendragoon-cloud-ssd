@@ -1,7 +1,22 @@
 import { useState } from "react";
 import type { Settings, SortCategory } from "@gendragoon/core";
-import { SORT_CATEGORIES } from "@gendragoon/core";
+import { SORT_CATEGORIES, SUPPORT_CONTACT } from "@gendragoon/core";
 import { PassphraseSetup } from "./PassphraseSetup.js";
+
+/** Settings copy for a terminal deletion poll. `failed` with retryable false shows support and Dismiss. */
+export function deletionFailureNotice(result: { status: string; retryable?: boolean }): {
+  message: string;
+  retryable: boolean;
+  supportContact?: string;
+} | null {
+  if (result.status !== "failed") return null;
+  const retryable = result.retryable === true;
+  return {
+    message: retryable ? "Account deletion failed. You can retry it." : "Account deletion failed.",
+    retryable,
+    supportContact: retryable ? undefined : SUPPORT_CONTACT.value,
+  };
+}
 
 export function SettingsView(props: {
   settings: Settings;

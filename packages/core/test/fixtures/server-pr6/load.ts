@@ -5,7 +5,7 @@ import type { ServerFixture } from "../server/load.js";
 
 /**
  * Riley's generated account-deletion fixtures from gendragoon-cloud-ssd PR #6
- * (fix/account-deletion @ 9d0f056, see SOURCE.json). Copied verbatim from
+ * (fix/account-deletion @ fff0a84, see SOURCE.json). Copied verbatim from
  * fixtures/account-deletion/. Kept apart from ../server, which is synced from
  * the PR #5 export (da39276) and is wiped by sync-server-fixtures.mjs.
  * Move these into ../server once PR #6 merges and the sync source moves.

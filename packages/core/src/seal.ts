@@ -22,7 +22,7 @@ export interface SecretStore {
 export type SecureStore = SecretStore;
 
 export interface SealedName {
-  /** Stable file id. It stays when the object id changes. */
+  /** Stable file id. It stays when the object id changes. A re-add after delete uses a new id. */
   fileId: string;
   oid: string;
   path: string;
@@ -34,6 +34,15 @@ export interface SealedName {
   totalSize: number;
   wrappedKey: string;
   wrapIv: string;
+  /** Manifest version at which this entry was sealed. Higher wins. Absent on older manifests. */
+  writtenAtVersion?: number;
+}
+
+/** A deleted fileId. `deletedAtMs` decides prune eligibility only. Order is `deletedAtVersion`. */
+export interface ManifestTombstone {
+  fileId: string;
+  deletedAtVersion: number;
+  deletedAtMs: number;
 }
 
 export interface ChunkBinding {
@@ -44,6 +53,9 @@ export interface ChunkBinding {
 export interface LibraryManifest {
   version: number;
   files: SealedName[];
+  tombstones?: ManifestTombstone[];
+  /** Highest tombstone version already dropped. Devices behind this adopt the remote manifest. */
+  prunedThroughVersion?: number;
 }
 
 /** Reserved object id for the sealed library manifest. */
@@ -166,11 +178,14 @@ export async function openLibrary(ciphertext: Uint8Array, workspaceKey: CryptoKe
   });
   const parsed = JSON.parse(new TextDecoder().decode(encoded)) as unknown;
   if (!parsed || typeof parsed !== "object") throw new Error("Library manifest is unreadable");
-  const record = parsed as { version?: unknown; files?: unknown };
+  const record = parsed as { version?: unknown; files?: unknown; tombstones?: unknown; prunedThroughVersion?: unknown };
   if (typeof record.version !== "number" || !Number.isSafeInteger(record.version) || record.version < 1 || !Array.isArray(record.files)) {
     throw new Error("Library manifest is unreadable");
   }
-  return { version: record.version, files: record.files as SealedName[] };
+  const manifest: LibraryManifest = { version: record.version, files: record.files as SealedName[] };
+  if (Array.isArray(record.tombstones)) manifest.tombstones = record.tombstones as LibraryManifest["tombstones"];
+  if (typeof record.prunedThroughVersion === "number") manifest.prunedThroughVersion = record.prunedThroughVersion;
+  return manifest;
 }
 
 export async function* sealStream(

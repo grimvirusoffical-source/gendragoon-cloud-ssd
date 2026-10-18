@@ -12,9 +12,9 @@ import {
   SUPPORT_CONTACT,
   deleteAccountAndWipe,
   deletionAuthFailure,
+  establishWorkspaceKey,
   dismissDeletion,
   GenDragoonClient,
-  openWorkspaceKey,
   MemorySecretStore,
   performOwnershipChallenge,
   presignChallengeGet,
@@ -34,7 +34,7 @@ import {
   type TreeNode,
   type WorkspaceRecord,
 } from "@gendragoon/core";
-import { AccountSurface, AppShell, ByoSetup, FileBrowser, SettingsView, type ShellView } from "@gendragoon/ui";
+import { AccountSurface, AppShell, ByoSetup, FileBrowser, SettingsView, deletionFailureNotice, type ShellView } from "@gendragoon/ui";
 
 const secrets = new MemorySecretStore();
 
@@ -241,11 +241,9 @@ export function App() {
   }
 
   function noticeForResult(result: { status: string; retryable?: boolean }) {
-    if (result.status !== "failed") return null;
-    return {
-      message: result.retryable ? "Account deletion failed. You can retry it." : "Account deletion failed.",
-      retryable: result.retryable === true,
-    };
+    const notice = deletionFailureNotice(result);
+    if (!notice) return null;
+    return { message: notice.message, retryable: notice.retryable, support: notice.supportContact };
   }
 
   async function onDeleteAccount(reauthenticatedAt = new Date().toISOString()) {
@@ -339,15 +337,25 @@ export function App() {
 
   async function onPassphrase(passphrase: string) {
     const workspaceId = workspaces.find((workspace) => workspace.kind !== "byo")?.id ?? "paid-1";
+    const token = await window.gendragoon?.getIdToken?.();
+    const apiBase = import.meta.env.VITE_API_BASE;
+    if (!apiBase || !token) {
+      setReauthRequired(true);
+      setStatus("Sign in again");
+      return;
+    }
     try {
-      const opened = await openWorkspaceKey({
+      const client = new GenDragoonClient({ baseUrl: apiBase, getToken: async () => token });
+      const opened = await establishWorkspaceKey({
         store: secrets,
         workspaceId,
         passphrase,
-        create: true,
+        get: () => client.getKeyEnvelope(workspaceId),
+        put: (envelope) => client.putKeyEnvelope(workspaceId, envelope),
       });
-      if (!opened.envelope) return;
-      setStatus("Recovery passphrase saved on this device.");
+      setStatus(opened.adopted
+        ? "Using the workspace key already stored for this workspace."
+        : "Recovery passphrase saved on this device.");
     } catch (error) {
       setStatus(error instanceof Error ? error.message : "Could not save the recovery passphrase");
     }

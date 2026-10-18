@@ -1,8 +1,11 @@
 import { describe, expect, it } from "vitest";
 import {
+  ApiError,
   GenDragoonClient,
   MemorySecretStore,
   assertKeyEnvelope,
+  establishWorkspaceKey,
+  publishKeyEnvelope,
   base64UrlToBytes,
   bytesToBase64,
   bytesToBase64Url,
@@ -14,7 +17,7 @@ import {
 } from "../src/index.js";
 
 const PASSPHRASE = "correct horse";
-const ARGON_MIN = { opsLimit: 1, memLimit: 8192 };
+const ARGON_MIN = { opsLimit: 1, memLimit: 19 * 1024 * 1024 };
 
 function jsonResponse(status: number, body: unknown): Response {
   return new Response(JSON.stringify(body), {
@@ -40,6 +43,15 @@ describe("workspace key envelope", () => {
     const encoded = JSON.stringify(opened.envelope);
     expect(encoded).not.toContain(PASSPHRASE);
     expect(encoded).not.toContain(bytesToBase64(opened.key ?? new Uint8Array()));
+    expect(await store.get(workspaceKeyId("created"))).toBeNull();
+    if (!opened.key || !opened.envelope) throw new Error("create did not return a key");
+    await publishKeyEnvelope({
+      store,
+      workspaceId: "created",
+      key: opened.key,
+      envelope: opened.envelope,
+      put: async () => undefined,
+    });
     const again = await openWorkspaceKey({ store, workspaceId: "created" });
     expect(again.state).toBe("cached");
     expect(Buffer.from(again.key ?? new Uint8Array()).equals(Buffer.from(opened.key ?? new Uint8Array()))).toBe(true);
@@ -62,6 +74,91 @@ describe("workspace key envelope", () => {
     await expect(createKeyEnvelope(key, PASSPHRASE, { opsLimit: 2, memLimit: 1048576 * 1024 + 1024 })).rejects.toMatchObject({ status: 422, code: "envelope_invalid" });
     await expect(createKeyEnvelope(key, PASSPHRASE, { kdf: "scrypt", scrypt: { N: 1, r: 8, p: 1 } })).rejects.toMatchObject({ status: 422, code: "kdf_params_invalid" });
     await expect(createKeyEnvelope(key, PASSPHRASE, { kdf: "scrypt", scrypt: { N: 100, r: 8, p: 1 } })).rejects.toMatchObject({ status: 422, code: "kdf_params_invalid" });
+  });
+
+  it("accepts scrypt N at 2^14 and 2^20 and rejects 2^13, 49152, and 2^21 before deriving", async () => {
+    const key = await createWorkspaceKey();
+    for (const N of [2 ** 13, 49152, 2 ** 21]) {
+      await expect(createKeyEnvelope(key, PASSPHRASE, { kdf: "scrypt", scrypt: { N, r: 8, p: 1 } })).rejects.toMatchObject({
+        status: 422,
+        code: "kdf_params_invalid",
+      });
+    }
+    const low = await createKeyEnvelope(key, PASSPHRASE, { kdf: "scrypt", scrypt: { N: 2 ** 14, r: 8, p: 1 } });
+    expect(low.kdf).toEqual({ alg: "scrypt", N: 2 ** 14, r: 8, p: 1 });
+    expect(Buffer.from(await unwrapWorkspaceKey(low, PASSPHRASE)).equals(Buffer.from(key))).toBe(true);
+    const high = {
+      ...low,
+      kdf: { alg: "scrypt" as const, N: 2 ** 20, r: 8, p: 1 },
+    };
+    expect(() => assertKeyEnvelope(high)).not.toThrow();
+    const wrapped = await createKeyEnvelope(key, PASSPHRASE, { kdf: "scrypt", scrypt: { N: 2 ** 20, r: 8, p: 1 } });
+    expect(wrapped.kdf).toEqual({ alg: "scrypt", N: 2 ** 20, r: 8, p: 1 });
+    expect(Buffer.from(await unwrapWorkspaceKey(wrapped, PASSPHRASE)).equals(Buffer.from(key))).toBe(true);
+  }, 120_000);
+
+  it("rejects argon2id memoryKiB below 19456 before deriving", async () => {
+    const key = await createWorkspaceKey();
+    await expect(createKeyEnvelope(key, PASSPHRASE, { opsLimit: 1, memLimit: 19455 * 1024 })).rejects.toMatchObject({
+      status: 422,
+      code: "envelope_invalid",
+    });
+  });
+
+  it("409 adopts the server key and 412 leaves no key from the failed attempt", async () => {
+    const theirs = await createWorkspaceKey();
+    const existing = await createKeyEnvelope(theirs, PASSPHRASE, ARGON_MIN);
+    const conflict = new MemorySecretStore();
+    let duringConflict: Uint8Array | null = null;
+    const adopted = await establishWorkspaceKey({
+      store: conflict,
+      workspaceId: "ws",
+      passphrase: PASSPHRASE,
+      ...ARGON_MIN,
+      get: async () => existing,
+      put: async () => {
+        duringConflict = await conflict.get(workspaceKeyId("ws"));
+        throw new ApiError(409, "envelope_exists", "exists");
+      },
+    });
+    expect(duringConflict).toBeNull();
+    expect(adopted.adopted).toBe(true);
+    expect(await conflict.get(workspaceKeyId("ws"))).toEqual(theirs);
+
+    const mismatch = new MemorySecretStore();
+    let puts = 0;
+    await expect(establishWorkspaceKey({
+      store: mismatch,
+      workspaceId: "ws",
+      passphrase: PASSPHRASE,
+      ...ARGON_MIN,
+      get: async () => existing,
+      put: async () => {
+        puts += 1;
+        expect(await mismatch.get(workspaceKeyId("ws"))).toBeNull();
+        throw new ApiError(412, "version_mismatch", "mismatch");
+      },
+    })).rejects.toMatchObject({ status: 412 });
+    expect(puts).toBe(2);
+    expect(await mismatch.get(workspaceKeyId("ws"))).toBeNull();
+
+    const repaired = new MemorySecretStore();
+    let attempt = 0;
+    const out = await openWorkspaceKey({
+      store: repaired,
+      workspaceId: "ws",
+      passphrase: PASSPHRASE,
+      create: true,
+      ...ARGON_MIN,
+      get: async () => existing,
+      put: async () => {
+        attempt += 1;
+        if (attempt === 1) throw new ApiError(412, "version_mismatch", "mismatch");
+        return existing;
+      },
+    });
+    expect(out.key).toEqual(theirs);
+    expect(await repaired.get(workspaceKeyId("ws"))).toEqual(theirs);
   });
 
   it("encodes salt, iv, and wrappedKey as unpadded base64url and decodes standard base64", async () => {
