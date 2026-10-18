@@ -337,13 +337,14 @@ export interface AccountDeletionStatus {
 
 /**
  * POST /v2/account/deletions/:jobId/support-request.
- * The status token is the only credential. A missing session is not sign-in.
+ * The status token saved for that job is the only credential. A missing
+ * session is not sign-in. `fallback` carries the exported SUPPORT_CONTACT.
  */
 export type DeletionSupportResult =
-  | { result: "sent"; requestId: string }
-  | { result: "already_sent" }
-  | { result: "refresh_status" }
-  | { result: "use_fallback_email"; supportContact: { value: string; isPlaceholder: boolean } };
+  | { kind: "received"; requestId: string }
+  | { kind: "already_sent"; retryAfterSec?: number }
+  | { kind: "not_needed"; status: AccountDeletionStatus }
+  | { kind: "fallback"; contact: { value: string; isPlaceholder: boolean } };
 
 /** Argon2id parameters on the wire. `memoryKiB` is libsodium's byte memLimit / 1024. `iterations` is opsLimit. */
 export interface Argon2idKdf {

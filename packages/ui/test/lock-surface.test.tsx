@@ -101,16 +101,24 @@ describe("AccountSurface", () => {
           <p>Uploader</p>
         </AccountSurface>,
       );
-      expect(html).toContain("data-testid=\"lock-screen\"");
-      expect(html).toContain(`data-reason="${body.reason}"`);
-      expect(html).toContain(`data-over-by="${body.overBy}"`);
-      expect(html).toContain(`Over by ${body.overBy}.`);
-      if (body.unpaidWorkspaceIds.length === 0) {
-        expect(html).toContain("No unpaid workspaces.");
-      }
-      for (const id of body.unpaidWorkspaceIds) expect(html).toContain(id);
       expect(html).not.toContain("data-testid=\"generic-error\"");
-      expect(html).not.toContain("Uploader");
+      if (body.reason === "lapsed") {
+        expect(html).toContain("data-testid=\"workspace-lapse\"");
+        expect(html).toContain("Other workspaces stay usable.");
+        expect(html).toContain("Uploader");
+        expect(html).not.toContain("data-testid=\"lock-screen\"");
+        for (const id of body.unpaidWorkspaceIds) expect(html).toContain(id);
+      } else {
+        expect(html).toContain("data-testid=\"lock-screen\"");
+        expect(html).toContain(`data-reason="${body.reason}"`);
+        expect(html).toContain(`data-over-by="${body.overBy}"`);
+        expect(html).toContain(`Over by ${body.overBy}.`);
+        if (body.unpaidWorkspaceIds.length === 0) {
+          expect(html).toContain("No unpaid workspaces.");
+        }
+        for (const id of body.unpaidWorkspaceIds) expect(html).toContain(id);
+        expect(html).not.toContain("Uploader");
+      }
     }
   });
 

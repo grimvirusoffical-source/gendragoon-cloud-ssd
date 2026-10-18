@@ -291,34 +291,40 @@ export class GenDragoonClient {
 
   /**
    * POST /v2/account/deletions/:jobId/support-request.
-   * No body. Authorization is the status token, so this works signed out.
-   * 404, 401 unauthorized, a network error, and 5xx use the support email.
-   * None of those call onAuthFailure or start sign-in.
+   * No body. Authorization is the status token, so getToken is not called.
+   * 404, every 401, a network error, and 5xx return the email fallback.
+   * This method does not call onAuthFailure or clear a session.
+   * 409 support_not_needed refreshes GET status with the same token.
    */
-  async requestDeletionSupport(
-    jobId: string,
-    statusToken: string,
-    hooks?: { onAuthFailure?: (signal: "signed_out" | "reauth_required", error: unknown) => void },
-  ): Promise<DeletionSupportResult> {
-    void hooks;
+  async postDeletionSupport(jobId: string, statusToken: string): Promise<DeletionSupportResult> {
+    const path = `/v2/account/deletions/${encodeURIComponent(jobId)}/support-request`;
+    let status: number;
+    let body: unknown;
     try {
-      const body = await this.request<{ status?: unknown; requestId?: unknown }>(
-        "POST",
-        `/v2/account/deletions/${encodeURIComponent(jobId)}/support-request`,
-        undefined,
-        { Authorization: `Bearer ${statusToken}` },
-      );
-      const requestId = typeof body?.requestId === "string" ? body.requestId : "";
-      if (body?.status === "received" && requestId) return { result: "sent", requestId };
-      return deletionSupportFallback();
+      const response = await this.raw("POST", path, undefined, { Authorization: `Bearer ${statusToken}` });
+      const text = await response.text();
+      body = text ? safeJson(text) : null;
+      status = response.status;
     } catch (error) {
-      if (error instanceof ApiError && error.status === 429) return { result: "already_sent" };
-      if (error instanceof ApiError && error.status === 409 && error.code === "support_not_needed") {
-        return { result: "refresh_status" };
-      }
-      if (isDeletionSupportFallback(error)) return deletionSupportFallback();
+      if (error instanceof ApiError && (error.status === 0 || error.status >= 500)) return deletionSupportFallback();
       throw error;
     }
+    const record = body && typeof body === "object" ? body as Record<string, unknown> : {};
+    if (status === 202) {
+      const requestId = typeof record.requestId === "string" ? record.requestId : "";
+      if (record.status === "received" && requestId) return { kind: "received", requestId };
+      return deletionSupportFallback();
+    }
+    if (status === 429) {
+      const retryAfterSec = typeof record.retryAfterSec === "number" ? record.retryAfterSec : undefined;
+      return retryAfterSec === undefined ? { kind: "already_sent" } : { kind: "already_sent", retryAfterSec };
+    }
+    if (status === 409 && record.error === "support_not_needed") {
+      const refreshed = await this.deletionStatus(jobId, statusToken);
+      return { kind: "not_needed", status: refreshed };
+    }
+    if (status === 404 || status === 401 || status >= 500) return deletionSupportFallback();
+    throw toError(status, body);
   }
 
   /** POST /v2/workspaces/:id/byo/challenge. No body. Response is `{ nonce, expiresAtMs, ttlMs }`. */
@@ -493,13 +499,7 @@ function machineCode(errorField: string, codeField: string): string {
 }
 
 function deletionSupportFallback(): DeletionSupportResult {
-  return { result: "use_fallback_email", supportContact: SUPPORT_CONTACT };
-}
-
-/** 404, 401, transport failure, and 5xx stay on the email fallback. They are not sign-in. */
-function isDeletionSupportFallback(error: unknown): boolean {
-  if (!(error instanceof ApiError)) return false;
-  return error.status === 404 || error.status === 401 || error.status === 0 || error.status >= 500;
+  return { kind: "fallback", contact: SUPPORT_CONTACT };
 }
 
 /**

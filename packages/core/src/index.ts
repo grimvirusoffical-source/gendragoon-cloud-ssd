@@ -114,10 +114,13 @@ export {
   reduceAccount,
   isWorkspaceLockError,
   applyApiFailure,
+  isWorkspaceScopedLapse,
   viewAfterFailure,
+  workspaceAcceptsWrites,
   deleteAccountAndWipe,
   dismissAccountDeletion,
   dismissDeletion,
+  requestDeletionSupport,
   resumeAccountDeletion,
   retryDeletion,
 } from "./account.js";

@@ -3,7 +3,7 @@
  * List items and create `project` objects always include `grandfathered` and `feeWaived`.
  */
 import { describe, expect, it } from "vitest";
-import { GenDragoonClient, WorkspaceLockedError, parseWorkspacePrice, workspacePriceLabel } from "../src/index.js";
+import { GenDragoonClient, WorkspaceLockedError, accountFromAssessment, applyApiFailure, parseWorkspacePrice, workspaceAcceptsWrites, workspacePriceLabel } from "../src/index.js";
 import { listServerFixtures, loadServerFixture } from "./fixtures/server/load.js";
 
 function workspaceItems(body: unknown): Record<string, unknown>[] {
@@ -136,5 +136,54 @@ describe("workspace prices pass through the server fixtures", () => {
       overBy: 0,
       unpaidWorkspaceIds: ["11111111-1111-4111-8111-000000000001"],
     });
+    const state = applyApiFailure(accountFromAssessment({ locked: false, overCap: false, unpaidIds: [] }), error);
+    expect(workspaceAcceptsWrites(state, "11111111-1111-4111-8111-000000000001")).toBe(false);
+    expect(workspaceAcceptsWrites(state, "11111111-1111-4111-8111-000000000024")).toBe(true);
+  });
+
+  it("byo-lapsed locks only that workspace and byo-lapsed-others-open still uploads", async () => {
+    const locked = loadServerFixture("workspace-lock", "byo-lapsed");
+    const open = loadServerFixture("workspaces", "byo-lapsed-others-open");
+    const grace = loadServerFixture("workspaces", "byo-in-grace");
+    const lockedId = locked.request.path.split("/")[3] ?? "";
+    const openId = open.request.path.split("/")[3] ?? "";
+    const graceId = grace.request.path.split("/")[3] ?? "";
+    const failing = new GenDragoonClient({
+      baseUrl: "https://api.example.test",
+      getToken: () => "fixture-token",
+      fetch: async () => new Response(JSON.stringify(locked.response.body), { status: locked.response.status }),
+    });
+    const error = await failing.createUpload(lockedId, { name: "blocked.txt", sizeBytes: 4 }).catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(WorkspaceLockedError);
+    expect(error).toMatchObject({ reason: "lapsed", unpaidWorkspaceIds: [lockedId] });
+    const state = applyApiFailure(accountFromAssessment({ locked: false, overCap: false, unpaidIds: [] }), error);
+    expect(state.phase).toBe("ready");
+    expect(workspaceAcceptsWrites(state, lockedId)).toBe(false);
+    expect(workspaceAcceptsWrites(state, openId)).toBe(true);
+    expect(workspaceAcceptsWrites(state, graceId)).toBe(true);
+
+    const openClient = new GenDragoonClient({
+      baseUrl: "https://api.example.test",
+      getToken: () => "fixture-token",
+      fetch: async () => new Response(JSON.stringify(open.response.body), { status: open.response.status }),
+    });
+    await expect(openClient.createUpload(openId, { name: "sibling.txt", sizeBytes: 4 })).resolves.toEqual(open.response.body);
+    const graceClient = new GenDragoonClient({
+      baseUrl: "https://api.example.test",
+      getToken: () => "fixture-token",
+      fetch: async () => new Response(JSON.stringify(grace.response.body), { status: grace.response.status }),
+    });
+    await expect(graceClient.createUpload(graceId, { name: "open.txt", sizeBytes: 4 })).resolves.toEqual(grace.response.body);
+  });
+
+  it("make-hosted returns the server body, including the demoted checkout", async () => {
+    const fixture = loadServerFixture("workspaces", "make-hosted");
+    const id = fixture.request.path.split("/")[3] ?? "";
+    const client = new GenDragoonClient({
+      baseUrl: "https://api.example.test",
+      getToken: () => "fixture-token",
+      fetch: async () => new Response(JSON.stringify(fixture.response.body), { status: fixture.response.status }),
+    });
+    await expect(client.makeHosted(id)).resolves.toEqual(fixture.response.body);
   });
 });

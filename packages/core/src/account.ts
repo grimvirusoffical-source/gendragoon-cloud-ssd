@@ -1,5 +1,5 @@
-import { AccountDeletedError, ApiError, DeletionNotFoundError, ReauthRequiredError, WorkspaceLockedError, isInvalidToken } from "./api/errors.js";
-import type { AccountDeletionStatus } from "./api/types.js";
+import { AccountDeletedError, ApiError, DeletionNotFoundError, ReauthRequiredError, SUPPORT_CONTACT, WorkspaceLockedError, isInvalidToken } from "./api/errors.js";
+import type { AccountDeletionStatus, DeletionSupportResult } from "./api/types.js";
 import type { LockAssessment } from "./policy.js";
 import { wipeWorkspaceKeys, type SecretStore, type SecureStore } from "./seal.js";
 import { reauthIsRecent, reauthenticatedAtForDelete } from "./storage.js";
@@ -16,6 +16,11 @@ export type AccountLockReason = "clear" | "over_cap" | "unpaid" | "server_lock";
 export interface AccountState {
   phase: AccountPhase;
   reason: AccountLockReason;
+  /**
+   * Workspace ids named by a 423 `lapsed` body. Writes to every other id stay
+   * allowed. Absent when the lock is the whole account.
+   */
+  lockedWorkspaceIds?: readonly string[];
 }
 
 export type AccountEvent =
@@ -60,14 +65,35 @@ export function isWorkspaceLockError(error: unknown): error is WorkspaceLockedEr
   return error instanceof ApiError && (error.status === 423 || error.code === "workspace_lock");
 }
 
-/** Apply an API failure. Only a workspace lock changes the phase. */
+/**
+ * HTTP 423 `reason: "lapsed"` names the unpaid workspace in `unpaidWorkspaceIds`.
+ * That lock does not apply to any other workspace.
+ */
+export function isWorkspaceScopedLapse(error: unknown): error is WorkspaceLockedError {
+  return error instanceof WorkspaceLockedError && error.reason === "lapsed" && error.unpaidWorkspaceIds.length > 0;
+}
+
+/** A ready account can still write to workspaces the lapse did not name. */
+export function workspaceAcceptsWrites(state: AccountState, workspaceId: string): boolean {
+  if (state.phase !== "ready") return false;
+  return !state.lockedWorkspaceIds?.includes(workspaceId);
+}
+
+/** Apply an API failure. A lapsed 423 stays on that workspace. Other locks change the phase. */
 export function applyApiFailure(state: AccountState, error: unknown): AccountState {
   if (!isWorkspaceLockError(error)) return state;
+  if (isWorkspaceScopedLapse(error)) {
+    return { phase: "ready", reason: "unpaid", lockedWorkspaceIds: [...error.unpaidWorkspaceIds] };
+  }
   return reduceAccount(state, { type: "write_locked" });
 }
 
-/** Where the shell should go after a failed call. Lock replaces the current view. */
+/**
+ * Where the shell should go after a failed call.
+ * An account-wide lock replaces the current view. A lapsed workspace stays put.
+ */
 export function viewAfterFailure(view: string, error: unknown): string {
+  if (isWorkspaceScopedLapse(error)) return view;
   if (isWorkspaceLockError(error)) return "workspaces";
   return view;
 }
@@ -397,6 +423,27 @@ export async function dismissDeletion(store: SecureStore): Promise<void> {
 /** Same as `dismissDeletion`. */
 export async function dismissAccountDeletion(store: SecureStore): Promise<void> {
   await dismissDeletion(store);
+}
+
+/**
+ * POST /v2/account/deletions/:jobId/support-request using the status token
+ * saved for that job. Works signed out: the Firebase token is never read.
+ * Does not call `onAuthFailure` or `clearSession`, and does not clear the job.
+ */
+export async function requestDeletionSupport(
+  jobId: string,
+  deps: {
+    client: { postDeletionSupport(jobId: string, statusToken: string): Promise<DeletionSupportResult> };
+    secureStore: SecureStore;
+    onAuthFailure?: (signal: DeletionAuthSignal, error: unknown) => void;
+    clearSession?: () => void;
+  },
+): Promise<DeletionSupportResult> {
+  void deps.onAuthFailure;
+  void deps.clearSession;
+  const statusToken = decodeSecret(await deps.secureStore.get(DELETION_TOKEN_KEY));
+  if (!statusToken) return { kind: "fallback", contact: SUPPORT_CONTACT };
+  return deps.client.postDeletionSupport(jobId, statusToken);
 }
 
 function decodeSecret(value: unknown): string | null {
