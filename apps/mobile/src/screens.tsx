@@ -35,7 +35,7 @@ import {
 } from "./account/deleteAccount";
 import { SAME_ACCOUNT_MESSAGE, sessionMaySwap } from "./account/session";
 import { byoServerFlowReady } from "./byoReady";
-import { DELETION_SUPPORT_ENDPOINT_ENABLED, ENCRYPTED_WORKSPACE_ENABLED, WORKSPACE_PRICING_ENABLED } from "./flags";
+import { DELETION_SUPPORT_ENDPOINT_ENABLED, ENCRYPTED_WORKSPACE_ENABLED, WORKSPACE_PRICING_ENABLED, isTestBuild } from "./flags";
 import {
   additionalWorkspaceFeeText,
   grandfatheringEndedPrice,
@@ -100,7 +100,7 @@ export function SignInSession(props: {
   }
   return (
     <View>
-      <Text testID="session-uid">{accountUidFromIdToken(token) ?? ""}</Text>
+      {isTestBuild() ? <Text testID="session-uid">{accountUidFromIdToken(token) ?? ""}</Text> : null}
       <SignInScreen
         googleEnabled={props.googleEnabled}
         blockedMessage={error}
