@@ -7,33 +7,48 @@ import java.util.ArrayList;
 import java.util.List;
 
 /**
- * Account-deletion bodies are copied from native/Backend at 84f6fff until PR #6 publishes fixtures.
- * Lock, workspace, merge, BYO, and ownership cases are the shared fixtures at da39276
+ * Account-deletion fixtures are {@code fixtures/account-deletion} at d788ccb.
+ * Lock, workspace, merge, BYO, and ownership cases stay on the shared fixtures at da39276
  * ({@code fixtures/<area>/<case>.json}, shape {@code {request, response:{status, body}}}).
  * The repo-root {@code fixtures/} directory wins when this branch has it.
+ * A response body may be JSON or a raw string such as Express HTML.
  */
 final class BackendFixtures {
-    static final String ACCOUNT_DELETION_SHA="84f6fff";
+    static final String ACCOUNT_DELETION_SHA="d788ccb";
     static final String SHARED_FIXTURE_SHA="da39276";
 
     private BackendFixtures(){}
 
     static String body(String name){
-        String value=JsonFields.string(deletionSource(),name);
-        if(value==null||value.isEmpty())throw new IllegalStateException("Missing deletion fixture "+name);
-        return value;
+        String file=switch(name){
+            case "delete202"->"accepted";
+            case "accountDeleted410"->"account-deleted";
+            case "reauth401"->"reauth-required";
+            case "invalidToken401"->"invalid-token";
+            case "pollQueued"->"status-queued";
+            case "pollRunning"->"status-running";
+            case "pollDone"->"status-done";
+            case "pollFailed"->"status-failed";
+            case "pollNotFound"->"expired-token";
+            default->name;
+        };
+        return responseBody("account-deletion",file);
     }
 
     static int responseStatus(String area,String name){
         String file=shared(area,name);
         int response=keyAt(file,"response",0);
-        int status=keyAt(file,"status",response);
-        int end=status;
-        if(end<file.length()&&(file.charAt(end)=='-'||file.charAt(end)=='+'))end++;
-        int digits=end;
-        while(end<file.length()&&Character.isDigit(file.charAt(end)))end++;
-        if(end==digits)throw new IllegalStateException("Missing status in "+area+"/"+name);
-        return Integer.parseInt(file.substring(status,end));
+        int from=response;
+        while(from<file.length()){
+            int status=keyAt(file,"status",from);
+            int end=status;
+            if(end<file.length()&&(file.charAt(end)=='-'||file.charAt(end)=='+'))end++;
+            int digits=end;
+            while(end<file.length()&&Character.isDigit(file.charAt(end)))end++;
+            if(end>digits)return Integer.parseInt(file.substring(status,end));
+            from=end+1;
+        }
+        throw new IllegalStateException("Missing status in "+area+"/"+name);
     }
 
     static String responseBody(String area,String name){
@@ -75,16 +90,6 @@ final class BackendFixtures {
         return items;
     }
 
-    private static String deletionSource(){
-        Path found=firstExisting(
-                Path.of("fixtures","backend-http.json"),
-                Path.of("native","Mobile","fixtures","backend-http.json"),
-                Path.of("..","fixtures","backend-http.json"),
-                Path.of("..","..","fixtures","backend-http.json"));
-        try{return stripComments(read(found));}
-        catch(Exception error){throw new IllegalStateException("Could not read "+found,error);}
-    }
-
     private static String shared(String area,String name){
         String relative=area+"/"+name+".json";
         Path found=firstExisting(
@@ -106,14 +111,6 @@ final class BackendFixtures {
         return new String(Files.readAllBytes(found),StandardCharsets.UTF_8);
     }
 
-    private static String stripComments(String raw){
-        StringBuilder out=new StringBuilder();
-        for(String line:raw.split("\n",-1)){
-            if(!line.trim().startsWith("//"))out.append(line).append('\n');
-        }
-        return out.toString();
-    }
-
     private static int keyAt(String json,String key,int from){
         int at=json.indexOf("\""+key+"\"",Math.max(0,from));
         if(at<0)throw new IllegalStateException("Missing "+key);
@@ -126,6 +123,7 @@ final class BackendFixtures {
     private static String jsonValue(String json,int start){
         if(start>=json.length())throw new IllegalStateException("Missing JSON value");
         char first=json.charAt(start);
+        if(first=='"')return readJsonString(json,start);
         if(first!='{'&&first!='['){
             int end=start;
             while(end<json.length()&&",}\n\r".indexOf(json.charAt(end))<0)end++;
@@ -146,5 +144,28 @@ final class BackendFixtures {
             else if(c==close&&--depth==0)return json.substring(start,i+1);
         }
         throw new IllegalStateException("Unclosed JSON value");
+    }
+
+    /** Decodes a JSON string, including HTML error pages stored as strings. */
+    private static String readJsonString(String json,int start){
+        StringBuilder out=new StringBuilder();
+        for(int i=start+1;i<json.length();i++){
+            char c=json.charAt(i);
+            if(c=='\\'){
+                if(i+1>=json.length())break;
+                char next=json.charAt(++i);
+                if(next=='n')out.append('\n');
+                else if(next=='r')out.append('\r');
+                else if(next=='t')out.append('\t');
+                else if(next=='u'&&i+4<json.length()){
+                    out.append((char)Integer.parseInt(json.substring(i+1,i+5),16));
+                    i+=4;
+                }else out.append(next);
+                continue;
+            }
+            if(c=='"')return out.toString();
+            out.append(c);
+        }
+        throw new IllegalStateException("Unclosed JSON string");
     }
 }

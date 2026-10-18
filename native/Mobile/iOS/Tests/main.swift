@@ -19,13 +19,13 @@ final class AccountLogicTests: XCTestCase {
     }
 
     func testParsesRealStatusJson() throws {
-        XCTAssertEqual(BackendFixtures.accountDeletionSHA,"84f6fff")
+        XCTAssertEqual(BackendFixtures.accountDeletionSHA,"d788ccb")
         let created=AccountHttp.parse(status:202,data:Data(BackendFixtures.body("delete202").utf8))
         XCTAssertEqual(created.jobStatus,"deleting")
-        XCTAssertFalse((created.jobId ?? "").isEmpty)
-        XCTAssertFalse((created.statusToken ?? "").isEmpty)
+        XCTAssertTrue(AccountDeletion.validJob(created.jobId ?? ""))
+        XCTAssertTrue(AccountDeletion.validToken(created.statusToken ?? ""))
         let running=AccountHttp.parse(status:200,data:Data(BackendFixtures.body("pollRunning").utf8))
-        XCTAssertEqual(running.jobId,created.jobId)
+        XCTAssertTrue(AccountDeletion.validJob(running.jobId ?? ""))
         XCTAssertEqual(running.jobStatus,"running")
         XCTAssertEqual(running.retryable,true)
         let done=AccountHttp.parse(status:200,data:Data(BackendFixtures.body("pollDone").utf8))
@@ -333,10 +333,15 @@ final class AccountLogicTests: XCTestCase {
                 XCTAssertEqual(shown.detailText,WorkspaceLock.detailMerge)
                 XCTAssertFalse(shown.detailText.contains("did not include a workspace list"))
                 XCTAssertTrue(shown.workspaces.isEmpty)
+                XCTAssertFalse(shown.requiresPayment)
             } else if shown.reasonText=="scope_unavailable" {
                 XCTAssertEqual(shown.detailText,WorkspaceLock.detailScope)
                 XCTAssertFalse(shown.detailText.contains("did not include a workspace list"))
                 XCTAssertTrue(shown.workspaces.isEmpty)
+                XCTAssertFalse(shown.requiresPayment)
+            } else if shown.requiresPayment {
+                XCTAssertEqual(shown.detailText,WorkspaceLock.detailPay)
+                XCTAssertFalse(shown.detailText.contains("did not include a workspace list"))
             } else {
                 XCTAssertTrue(shown.detailText.isEmpty)
                 XCTAssertFalse(shown.workspaces.isEmpty)
@@ -412,11 +417,11 @@ final class AccountLogicTests: XCTestCase {
                 XCTAssertEqual(mapped.toast,friendly)
             }
         }
-        let sent=try XCTUnwrap(AccountDeletion.byoVerifyBody(presignedUrl:"https://bucket.example/object"))
-        let sentJson=try XCTUnwrap(JSONSerialization.jsonObject(with:sent) as? [String:String])
+        let verifySent=try XCTUnwrap(AccountDeletion.byoVerifyBody(presignedUrl:"https://bucket.example/object"))
+        let sentJson=try XCTUnwrap(JSONSerialization.jsonObject(with:verifySent) as? [String:String])
         XCTAssertEqual(sentJson["presignedUrl"],"https://bucket.example/object")
         XCTAssertEqual(sentJson.count,1)
-        let sentText=String(data:sent,encoding:.utf8) ?? ""
+        let sentText=String(data:verifySent,encoding:.utf8) ?? ""
         XCTAssertFalse(sentText.contains("readBack"))
         XCTAssertFalse(sentText.contains("proofUrl"))
         XCTAssertEqual(AccountDeletion.byoVerifyPath(workspaceID:"11111111-1111-4111-8111-000000000001"),"v2/workspaces/11111111-1111-4111-8111-000000000001/byo/verify")
@@ -446,6 +451,172 @@ final class AccountLogicTests: XCTestCase {
         XCTAssertTrue(LocalWipePlan.lockPauseDeletes().isEmpty)
     }
 
+    func testTransportRunsFixtureFlowWithoutWipingEarly() async {
+        var flow=ready()
+        let accepted=AccountHttp.parse(status:BackendFixtures.responseStatus(area:"account-deletion",name:"accepted"),data:BackendFixtures.responseBodyData(area:"account-deletion",name:"accepted"))
+        let running=AccountHttp.parse(status:BackendFixtures.responseStatus(area:"account-deletion",name:"status-running"),data:BackendFixtures.responseBodyData(area:"account-deletion",name:"status-running"))
+        let done=AccountHttp.parse(status:BackendFixtures.responseStatus(area:"account-deletion",name:"status-done"),data:BackendFixtures.responseBodyData(area:"account-deletion",name:"status-done"))
+        let script=ScriptedDeletionTransport()
+        script.respond(accepted);script.respond(running);script.respond(done)
+        let attempts=flow.deleteAttempts
+        await flow.deleteThrough(script,authorization:"Bearer firebase-token")
+        XCTAssertEqual(flow.step,.polling)
+        XCTAssertEqual(script.calls.first?.0,"DELETE")
+        XCTAssertEqual(script.calls.first?.1,"v2/account")
+        XCTAssertTrue(script.authorizations.first?.hasPrefix("Bearer ") ?? false)
+        XCTAssertFalse(flow.requestsWipe())
+        await flow.pollThrough(script)
+        XCTAssertEqual(flow.step,.polling)
+        XCTAssertTrue(script.calls[1].1.hasPrefix("/v2/account/deletions/"))
+        XCTAssertEqual(script.authorizations[1],"Bearer "+(flow.statusToken ?? ""))
+        await flow.pollThrough(script)
+        XCTAssertEqual(flow.step,.done)
+        XCTAssertTrue(flow.requestsWipe())
+        XCTAssertEqual(flow.deleteAttempts,attempts+1)
+
+        var gone=ready()
+        let deleted=AccountHttp.parse(status:BackendFixtures.responseStatus(area:"account-deletion",name:"account-deleted"),data:BackendFixtures.responseBodyData(area:"account-deletion",name:"account-deleted"))
+        let again=ScriptedDeletionTransport()
+        again.respond(deleted)
+        await gone.deleteThrough(again,authorization:"Bearer firebase-token")
+        XCTAssertEqual(gone.step,.polling)
+        XCTAssertFalse(gone.requestsWipe())
+        XCTAssertFalse(gone.allowsDelete())
+    }
+
+    func testSingularPathHtmlAndOtherNonJsonDoNotThrow() async {
+        XCTAssertTrue(BackendFixtures.requestPath(area:"account-deletion",name:"singular-path").contains("/v2/account/deletion/"))
+        let html=AccountHttp.parse(status:BackendFixtures.responseStatus(area:"account-deletion",name:"singular-path"),data:BackendFixtures.responseBodyData(area:"account-deletion",name:"singular-path"))
+        XCTAssertEqual(html.status,404)
+        XCTAssertTrue(html.raw.contains("Cannot GET"))
+        XCTAssertNil(html.error)
+        XCTAssertNil(html.jobId)
+        var polling=AccountDeletion.resume(DeletionReceipt.of(jobId:"job_html",statusToken:token))
+        let script=ScriptedDeletionTransport()
+        script.respond(html)
+        await polling.pollThrough(script)
+        XCTAssertEqual(polling.step,.failed)
+        XCTAssertTrue(polling.offersRetry())
+        XCTAssertTrue(polling.canDismiss())
+        XCTAssertEqual(polling.jobId,"job_html")
+        XCTAssertEqual(polling.statusToken,token)
+        XCTAssertFalse(polling.dropReceipt)
+        XCTAssertFalse(polling.requestsWipe())
+
+        var generic=AccountDeletion.resume(DeletionReceipt.of(jobId:"job_html",statusToken:token))
+        let other=AccountHttp.parse(status:503,data:Data("<html>unavailable</html>".utf8))
+        XCTAssertNil(other.error)
+        let genericScript=ScriptedDeletionTransport()
+        genericScript.respond(other)
+        await generic.pollThrough(genericScript)
+        XCTAssertTrue(generic.offersRetry())
+        XCTAssertFalse(generic.plainError)
+        XCTAssertEqual(generic.jobId,"job_html")
+        XCTAssertEqual(generic.statusToken,token)
+        XCTAssertFalse(generic.requestsWipe())
+
+        var missing=ready()
+        let plain=ScriptedDeletionTransport()
+        plain.respond(AccountHttp(status:404,raw:html.raw,error:nil,jobId:nil,jobStatus:nil,retryable:nil,statusToken:nil))
+        await missing.deleteThrough(plain,authorization:"Bearer firebase-token")
+        XCTAssertTrue(missing.plainError)
+        XCTAssertFalse(missing.offersRetry())
+        XCTAssertFalse(missing.requestsWipe())
+        XCTAssertNil(missing.jobId)
+    }
+
+    func testPollUnauthorizedKeepsTheJobUntilFixturesLand() async {
+        var invalid=AccountDeletion.resume(DeletionReceipt.of(jobId:"job_poll",statusToken:token))
+        let denied=ScriptedDeletionTransport()
+        denied.respond(AccountHttp.parse(status:401,data:Data("{\"error\":\"invalid_token\"}".utf8)))
+        await invalid.pollThrough(denied)
+        XCTAssertEqual(invalid.step,.polling)
+        XCTAssertTrue(invalid.clearSession)
+        XCTAssertEqual(invalid.jobId,"job_poll")
+        XCTAssertEqual(invalid.statusToken,token)
+        XCTAssertFalse(invalid.dropReceipt)
+        XCTAssertFalse(invalid.requestsWipe())
+        XCTAssertFalse(invalid.allowsDelete())
+
+        var reauth=AccountDeletion.resume(DeletionReceipt.of(jobId:"job_poll",statusToken:token))
+        let blank=ScriptedDeletionTransport()
+        blank.respond(AccountHttp.parse(status:401,data:Data("{}".utf8)))
+        await reauth.pollThrough(blank)
+        XCTAssertEqual(reauth.step,.reauth)
+        XCTAssertFalse(reauth.clearSession)
+        XCTAssertEqual(reauth.jobId,"job_poll")
+        XCTAssertEqual(reauth.statusToken,token)
+        XCTAssertFalse(reauth.requestsWipe())
+        XCTAssertFalse(reauth.allowsDelete())
+    }
+
+    func testPollNetworkErrorRetriesWithoutSendingDelete() async {
+        var flow=ready()
+        flow.onDeleteHttp(status:202,jobId:"job_net",errorCode:nil,statusToken:token)
+        let attempts=flow.deleteAttempts
+        let offline=ScriptedDeletionTransport()
+        offline.fail(ReplacementFailure.offline)
+        await flow.pollThrough(offline)
+        XCTAssertEqual(flow.step,.failed)
+        XCTAssertTrue(flow.offersRetry())
+        XCTAssertEqual(flow.jobId,"job_net")
+        XCTAssertEqual(flow.statusToken,token)
+        XCTAssertFalse(flow.requestsWipe())
+        flow.retry()
+        XCTAssertEqual(flow.step,.polling)
+        XCTAssertEqual(flow.deleteAttempts,attempts)
+        let again=ScriptedDeletionTransport()
+        again.respond(AccountHttp.parse(status:200,data:Data("{\"jobId\":\"job_net\",\"status\":\"running\",\"retryable\":true}".utf8)))
+        await flow.pollThrough(again)
+        XCTAssertEqual(again.calls.first?.0,"GET")
+        XCTAssertEqual(again.calls.first?.1,"/v2/account/deletions/job_net")
+        XCTAssertEqual(again.authorizations.first,"Bearer "+token)
+        XCTAssertEqual(flow.step,.polling)
+    }
+
+    func testErrorCodeIgnoresMessageText() {
+        let disguised=AccountHttp.parse(status:400,data:Data("{\"error\":\"other\",\"message\":\"manifest_generation_required\"}".utf8))
+        XCTAssertEqual(disguised.error,"other")
+        let fallback=AccountHttp.parse(status:400,data:Data("{\"message\":\"try manifest_generation_required\",\"code\":\"manifest_generation_required\"}".utf8))
+        XCTAssertEqual(fallback.error,"manifest_generation_required")
+    }
+
+    func testFileReplacementFailureLeavesTheOldCopyReadable() throws {
+        var upload=FileReplacement.Manifest(objectId:"old-object",generation:3)
+        let uploadStore=MemoryReplacement()
+        uploadStore.failUpload=true
+        XCTAssertThrowsError(try FileReplacement.replace(uploadStore,manifest:&upload,newObjectId:"new-object"))
+        XCTAssertEqual(upload.objectId,"old-object")
+        XCTAssertTrue(upload.oldReadable)
+        XCTAssertFalse(upload.localTrashed)
+
+        var conflicted=FileReplacement.Manifest(objectId:"old-object",generation:3)
+        let conflictStore=MemoryReplacement()
+        conflictStore.conflict=true
+        try FileReplacement.replace(conflictStore,manifest:&conflicted,newObjectId:"new-object")
+        XCTAssertFalse(conflictStore.trashedBeforeRetry)
+        XCTAssertEqual(conflictStore.events,["upload","put","refetch","put","delete","trash"])
+        XCTAssertEqual(conflicted.objectId,"new-object")
+        XCTAssertTrue(conflicted.localTrashed)
+
+        var put=FileReplacement.Manifest(objectId:"old-object",generation:3)
+        let putStore=MemoryReplacement()
+        putStore.failPut=true
+        XCTAssertThrowsError(try FileReplacement.replace(putStore,manifest:&put,newObjectId:"new-object"))
+        XCTAssertEqual(put.objectId,"old-object")
+        XCTAssertTrue(put.oldReadable)
+        XCTAssertFalse(put.localTrashed)
+
+        var deleted=FileReplacement.Manifest(objectId:"old-object",generation:3)
+        let deleteStore=MemoryReplacement()
+        deleteStore.failDelete=true
+        try FileReplacement.replace(deleteStore,manifest:&deleted,newObjectId:"new-object")
+        XCTAssertEqual(deleted.objectId,"old-object")
+        XCTAssertTrue(deleted.oldReadable)
+        XCTAssertFalse(deleted.localTrashed)
+        XCTAssertFalse(deleteStore.events.contains("trash"))
+    }
+
     private func ready()->AccountDeletion {
         var flow=AccountDeletion()
         flow.continueFromExplain()
@@ -461,18 +632,73 @@ final class AccountLogicTests: XCTestCase {
     }
 }
 
-/// Deletion bodies stay in `native/Mobile/fixtures/backend-http.json` (84f6fff).
-/// Lock, merge, BYO, workspace, and ownership cases are `fixtures/<area>/<case>.json` at da39276.
+private final class ScriptedDeletionTransport:DeletionTransport {
+    private var results:[Result<AccountHttp,Error>]=[]
+    var calls:[(String,String)]=[]
+    var authorizations:[String]=[]
+    func respond(_ body:AccountHttp){results.append(.success(body))}
+    func fail(_ error:Error){results.append(.failure(error))}
+    func execute(method:String,path:String,body:Data?,authorization:String) async throws -> AccountHttp {
+        calls.append((method,path))
+        authorizations.append(authorization)
+        return try results.removeFirst().get()
+    }
+}
+
+private enum ReplacementFailure:Error { case upload, put, delete, offline }
+
+private final class MemoryReplacement:ReplacementStore {
+    var failUpload=false
+    var conflict=false
+    var failPut=false
+    var failDelete=false
+    var trashedBeforeRetry=true
+    var events:[String]=[]
+    func uploadChunks(objectId:String) throws {
+        events.append("upload")
+        if failUpload { throw ReplacementFailure.upload }
+    }
+    func putManifest(ifGeneration:Int64,objectId:String) throws -> Int64 {
+        events.append("put")
+        if conflict {
+            conflict=false
+            trashedBeforeRetry=events.contains("trash")
+            throw FileReplacement.Conflict(generation:9)
+        }
+        if failPut { throw ReplacementFailure.put }
+        return ifGeneration+1
+    }
+    func refetchGeneration() throws -> Int64 { events.append("refetch"); return 9 }
+    func deleteOldChunks(objectId:String) throws {
+        events.append("delete")
+        if failDelete { throw ReplacementFailure.delete }
+    }
+    func trashLocalOriginal() throws { events.append("trash") }
+}
+
+/// Account-deletion fixtures are `fixtures/account-deletion` at d788ccb.
+/// Lock, merge, BYO, workspace, and ownership cases stay at da39276.
 /// The repo-root `fixtures/` directory wins when this branch has it.
+/// A response body may be JSON or a raw string such as Express HTML.
 private enum BackendFixtures {
-    static let accountDeletionSHA="84f6fff"
+    static let accountDeletionSHA="d788ccb"
     static let sharedFixtureSHA="da39276"
 
     static func body(_ name:String)->String {
-        guard let value=deletionObject()[name] as? String, !value.isEmpty else {
-            preconditionFailure("Missing deletion fixture \(name)")
+        let file:String
+        switch name {
+        case "delete202": file="accepted"
+        case "accountDeleted410": file="account-deleted"
+        case "reauth401": file="reauth-required"
+        case "invalidToken401": file="invalid-token"
+        case "pollQueued": file="status-queued"
+        case "pollRunning": file="status-running"
+        case "pollDone": file="status-done"
+        case "pollFailed": file="status-failed"
+        case "pollNotFound": file="expired-token"
+        default: file=name
         }
-        return value
+        return responseBodyString(area:"account-deletion",name:file)
     }
 
     static func responseStatus(area:String,name:String)->Int {
@@ -484,12 +710,16 @@ private enum BackendFixtures {
     }
 
     static func responseBodyData(area:String,name:String)->Data {
-        let body=(shared(area:area,name:name)["response"] as? [String:Any])?["body"] ?? [:]
-        return (try? JSONSerialization.data(withJSONObject:body)) ?? Data()
+        let body=(shared(area:area,name:name)["response"] as? [String:Any])?["body"]
+        if body == nil || body is NSNull {return Data()}
+        if let text=body as? String {return Data(text.utf8)}
+        return (try? JSONSerialization.data(withJSONObject:body as Any)) ?? Data()
     }
 
     static func responseBodyString(area:String,name:String)->String {
-        String(data:responseBodyData(area:area,name:name),encoding:.utf8) ?? ""
+        let body=(shared(area:area,name:name)["response"] as? [String:Any])?["body"]
+        if let text=body as? String {return text}
+        return String(data:responseBodyData(area:area,name:name),encoding:.utf8) ?? ""
     }
 
     static func requestPath(area:String,name:String)->String {
@@ -512,20 +742,9 @@ private enum BackendFixtures {
         return rows.map { WorkspaceLock.Item(workspaceID:$0["id"] as? String,name:$0["name"] as? String,issue:nil) }
     }
 
-    private static func deletionObject()->[String:Any] {
-        let text=stripComments(read(deletionURL()))
-        return (try? JSONSerialization.jsonObject(with:Data(text.utf8)) as? [String:Any]) ?? [:]
-    }
-
     private static func shared(area:String,name:String)->[String:Any] {
         let data=(try? Data(contentsOf:sharedURL(area:area,name:name))) ?? Data()
         return (try? JSONSerialization.jsonObject(with:data) as? [String:Any]) ?? [:]
-    }
-
-    private static func deletionURL()->URL {
-        let root=repoFixtures().appendingPathComponent("backend-http.json")
-        if FileManager.default.fileExists(atPath:root.path) {return root}
-        return mobileFixtures().appendingPathComponent("backend-http.json")
     }
 
     private static func sharedURL(area:String,name:String)->URL {
@@ -553,13 +772,4 @@ private enum BackendFixtures {
             .appendingPathComponent("fixtures")
     }
 
-    private static func read(_ url:URL)->String {
-        (try? String(contentsOf:url,encoding:.utf8)) ?? ""
-    }
-
-    private static func stripComments(_ raw:String)->String {
-        raw.split(separator:"\n",omittingEmptySubsequences:false)
-            .filter { !$0.trimmingCharacters(in:.whitespaces).hasPrefix("//") }
-            .joined(separator:"\n")
-    }
 }

@@ -105,12 +105,16 @@ struct WorkspaceLock:Identifiable,Equatable,Sendable {
     static let actionDownload="Download files"
     static let detailMerge="A merge is already running. Wait until it finishes. Your files stay available to download."
     static let detailScope="This action is not available for the current workspace scope. Your files stay available to download."
+    static let detailPay="Pay to restore this plan. Your files stay available to download."
     var reasonText:String { CloudSignals.jsonString(raw,"reason") ?? "" }
+    /// `lapsed` and `over_cap_and_lapsed` ask the user to pay. Delete and Merge stay hidden.
+    var requiresPayment:Bool { reasonText=="lapsed" || reasonText=="over_cap_and_lapsed" }
     /// Clear copy for reasons that do not include a workspace list.
     var detailText:String {
         switch reasonText {
         case "merge_in_progress": return WorkspaceLock.detailMerge
         case "scope_unavailable": return WorkspaceLock.detailScope
+        case "lapsed","over_cap_and_lapsed": return WorkspaceLock.detailPay
         default: return ""
         }
     }

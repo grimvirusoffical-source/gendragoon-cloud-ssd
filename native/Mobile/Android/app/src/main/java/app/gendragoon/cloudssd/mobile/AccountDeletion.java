@@ -34,6 +34,11 @@ final class AccountDeletion {
     boolean refuseDelete;
     /** Clear the saved job and token without erasing the rest of the device. */
     boolean dropReceipt;
+    /** A poll {@code invalid_token} cleared the session. The saved job keeps polling. */
+    boolean clearSession;
+    /** A DELETE 404 with no saved job. Show the error without Retry. */
+    boolean plainError;
+    AccountActions.HttpBody lastBody;
 
     void continueFromExplain(){if(step==Step.EXPLAIN)step=Step.CONFIRM;}
 
@@ -95,11 +100,18 @@ final class AccountDeletion {
             return;
         }
         if(status==202&&beginPolling(jobId,statusToken))return;
+        if(status==404&&this.jobId==null&&this.statusToken==null){
+            plainError=true;
+            fail("Account deletion did not start. Nothing on this device was erased.");
+            return;
+        }
+        plainError=false;
         fail("Account deletion did not start. You can retry.");
     }
 
     void onPollHttp(int status,String jobStatus,String errorCode,Boolean retryable){
         if(step!=Step.POLLING)return;
+        plainError=false;
         if(status==423&&CloudSignals.CODE_LOCK.equals(errorCode)){wipe=false;return;}
         if(status==401){onUnauthorized(errorCode);return;}
         if(status==404){
@@ -146,7 +158,13 @@ final class AccountDeletion {
 
     private void onUnauthorized(String errorCode){
         wipe=false;
+        plainError=false;
         if("invalid_token".equals(errorCode)){
+            if(AccountActions.validJob(jobId)&&AccountActions.validToken(statusToken)){
+                clearSession=true;
+                dropReceipt=false;
+                return;
+            }
             step=Step.SIGNED_OUT;
             message="Sign in again to continue.";
             return;
@@ -190,6 +208,9 @@ final class AccountDeletion {
         step=Step.REAUTH;
     }
 
+    /** Failed responses offer Retry, except a DELETE 404 for a job that was never saved. */
+    boolean offersRetry(){return step==Step.FAILED&&!plainError;}
+
     /** True after a 404 while the saved pair is still held. */
     boolean canDismiss(){return step==Step.FAILED&&refuseDelete;}
 
@@ -219,6 +240,116 @@ final class AccountDeletion {
     }
 
     void noteWiped(){if(step==Step.DONE&&wipe){wiped=true;step=Step.WIPED;}}
+
+    /** Injected HTTP client. Production and tests share {@link #deleteThrough} and {@link #pollThrough}. */
+    interface DeletionTransport {
+        AccountActions.HttpBody execute(String method,String path,byte[] body,String authorization) throws Exception;
+    }
+
+    static final class Exchange {
+        final AccountActions.HttpBody body;
+        final boolean failed;
+        Exchange(AccountActions.HttpBody body,boolean failed){this.body=body;this.failed=failed;}
+    }
+
+    static Exchange exchange(DeletionTransport transport,String method,String path,byte[] body,String authorization){
+        try{return new Exchange(transport.execute(method,path,body,authorization),false);}
+        catch(Exception error){return new Exchange(null,true);}
+    }
+
+    void deleteThrough(DeletionTransport transport,String authorization){
+        completeDelete(exchange(transport,"DELETE","/v2/account",AccountActions.CONFIRM_BODY,authorization));
+    }
+
+    void completeDelete(Exchange exchange){
+        if(!allowsDelete())return;
+        noteDeleteSent();
+        if(exchange==null||exchange.failed||exchange.body==null){
+            plainError=false;
+            lastBody=null;
+            fail("Account deletion did not start. You can retry.");
+            return;
+        }
+        lastBody=exchange.body;
+        onDeleteHttp(exchange.body.status,exchange.body.jobId,exchange.body.error,exchange.body.statusToken);
+    }
+
+    void pollThrough(DeletionTransport transport){
+        if(step!=Step.POLLING)return;
+        AccountActions.PollCall call=AccountActions.pollCall(statusPath,statusToken);
+        if(call==null){
+            plainError=false;
+            fail("Could not read deletion status. You can retry.");
+            return;
+        }
+        completePoll(exchange(transport,"GET",call.path,null,call.authorization));
+    }
+
+    void completePoll(Exchange exchange){
+        if(step!=Step.POLLING)return;
+        if(exchange==null||exchange.failed||exchange.body==null){
+            plainError=false;
+            lastBody=null;
+            wipe=false;
+            fail("Could not read deletion status. You can retry.");
+            return;
+        }
+        lastBody=exchange.body;
+        onPollHttp(exchange.body.status,exchange.body.jobStatus,exchange.body.error,exchange.body.retryable);
+    }
+}
+
+/**
+ * Replaces a file only in this order: upload the new chunks, PUT the manifest with ifGeneration
+ * (on 412, refetch and retry), delete the old chunks, then trash the local original.
+ * Mobile uploads are raw bytes with {@code X-Chunk-SHA256}. Chunks are not sealed.
+ */
+final class FileReplacement {
+    static final class Conflict extends Exception {
+        final long generation;
+        Conflict(long generation){this.generation=generation;}
+    }
+    interface Store {
+        void uploadChunks(String objectId) throws Exception;
+        long putManifest(long ifGeneration,String objectId) throws Exception;
+        long refetchGeneration() throws Exception;
+        void deleteOldChunks(String objectId) throws Exception;
+        void trashLocalOriginal() throws Exception;
+    }
+    static final class Manifest {
+        String objectId;
+        long generation;
+        boolean oldReadable=true;
+        boolean localTrashed;
+    }
+    private FileReplacement(){}
+    static void replace(Store store,Manifest manifest,String newObjectId) throws Exception {
+        String oldId=manifest.objectId;
+        store.uploadChunks(newObjectId);
+        long generation=manifest.generation;
+        boolean committed=false;
+        for(int attempt=0;attempt<2&&!committed;attempt++){
+            try{
+                long next=store.putManifest(generation,newObjectId);
+                manifest.objectId=newObjectId;
+                manifest.generation=next;
+                committed=true;
+            }catch(Conflict conflict){
+                generation=store.refetchGeneration();
+            }
+        }
+        if(!committed)return;
+        try{
+            store.deleteOldChunks(oldId);
+            manifest.oldReadable=false;
+        }catch(Exception error){
+            manifest.objectId=oldId;
+            manifest.oldReadable=true;
+            return;
+        }
+        store.trashLocalOriginal();
+        manifest.localTrashed=true;
+    }
 }
 
 /** Documented client helpers that do not open a connection. */

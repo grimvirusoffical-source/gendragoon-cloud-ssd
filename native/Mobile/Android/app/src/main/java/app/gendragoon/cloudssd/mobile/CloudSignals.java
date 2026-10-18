@@ -187,12 +187,19 @@ final class WorkspaceLock {
     static final String ACTION_DOWNLOAD="Download files";
     static final String DETAIL_MERGE="A merge is already running. Wait until it finishes. Your files stay available to download.";
     static final String DETAIL_SCOPE="This action is not available for the current workspace scope. Your files stay available to download.";
+    static final String DETAIL_PAY="Pay to restore this plan. Your files stay available to download.";
     String reasonText(){String reason=JsonFields.string(raw,"reason");return reason==null?"":reason;}
+    /** {@code lapsed} and {@code over_cap_and_lapsed} ask the user to pay. Delete and Merge stay hidden. */
+    boolean requiresPayment(){
+        String reason=reasonText();
+        return "lapsed".equals(reason)||"over_cap_and_lapsed".equals(reason);
+    }
     /** Clear copy for reasons that do not include a workspace list. */
     String detailText(){
         String reason=reasonText();
         if("merge_in_progress".equals(reason))return DETAIL_MERGE;
         if("scope_unavailable".equals(reason))return DETAIL_SCOPE;
+        if(requiresPayment())return DETAIL_PAY;
         return "";
     }
     String overByText(){return "Over by "+overBy;}

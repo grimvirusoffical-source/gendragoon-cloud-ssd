@@ -189,6 +189,12 @@ private enum SessionVault {
         }catch{status=error.localizedDescription}}
     }
     func signOut(){renewal?.cancel();renewal=nil;generation=UUID();bearer="";refresh="";uid="";email="";expires = .distantPast;resumedDeletion=nil;SessionVault.clear();GIDSignIn.sharedInstance.signOut();stage = .login;status="Signed out."}
+    /// Drops the Firebase session only. A deletion job keeps its receipt and keeps polling.
+    func clearSessionKeepingDeletion(){
+        renewal?.cancel();renewal=nil;generation=UUID();bearer="";refresh="";uid="";email="";expires = .distantPast
+        SessionVault.clear();GIDSignIn.sharedInstance.signOut()
+        status="Signed out. Account deletion is still finishing."
+    }
     func saveByo(endpoint:String,bucket:String,access:String,secret:String) throws {
         guard ByoFeature.serverFlowEnabled else {
             throw GDTransferError(message:"Bring-your-own storage is not available.",status:0)

@@ -246,8 +246,10 @@ public final class MainActivity extends AppCompatActivity {
         for(WorkspaceLock.Item item:activeLock.workspaces){
             LinearLayout panel=inside(card(content));panel.addView(text(item.label(),16,true));space(panel,8);
             LinearLayout actions=new LinearLayout(this);
-            MaterialButton remove=button(WorkspaceLock.ACTION_DELETE,()->confirmDeleteWorkspace(item));remove.setEnabled(item.id!=null&&!workBusy);remove.setBackgroundTintList(ColorStateList.valueOf(Color.rgb(120,32,48)));remove.setTextColor(Color.WHITE);actions.addView(remove);
-            MaterialButton merge=button(WorkspaceLock.ACTION_MERGE,()->chooseMerge(item));merge.setEnabled(item.id!=null&&!workBusy);merge.setBackgroundTintList(ColorStateList.valueOf(surface));merge.setTextColor(accent);actions.addView(merge);
+            if(!activeLock.requiresPayment()){
+                MaterialButton remove=button(WorkspaceLock.ACTION_DELETE,()->confirmDeleteWorkspace(item));remove.setEnabled(item.id!=null&&!workBusy);remove.setBackgroundTintList(ColorStateList.valueOf(Color.rgb(120,32,48)));remove.setTextColor(Color.WHITE);actions.addView(remove);
+                MaterialButton merge=button(WorkspaceLock.ACTION_MERGE,()->chooseMerge(item));merge.setEnabled(item.id!=null&&!workBusy);merge.setBackgroundTintList(ColorStateList.valueOf(surface));merge.setTextColor(accent);actions.addView(merge);
+            }
             MaterialButton download=button(WorkspaceLock.ACTION_DOWNLOAD,()->listWorkspaceFiles(item));download.setEnabled(item.id!=null&&!workBusy&&CloudSignals.allowsTransfer("GET",true));actions.addView(download);
             panel.addView(actions);
             if(item.id!=null&&item.id.equals(lockFilesFor)){
@@ -311,7 +313,7 @@ public final class MainActivity extends AppCompatActivity {
             }
             case FAILED -> {
                 content.addView(text(deletion.message==null?"Account deletion did not finish. You can retry.":deletion.message,15,false));
-                space(content,12);content.addView(button("Retry",()->{deletion.retry();if(deletion.step==AccountDeletion.Step.POLLING){advanceDeletion();return;}deletionSignInStarted=false;showDeleteAccount();}));
+                if(deletion.offersRetry()){space(content,12);content.addView(button("Retry",()->{deletion.retry();if(deletion.step==AccountDeletion.Step.POLLING){advanceDeletion();return;}deletionSignInStarted=false;showDeleteAccount();}));}
                 if(deletion.canDismiss()){space(content,8);content.addView(button("Dismiss",this::dismissDeletionError));}
                 else{space(content,8);content.addView(button("Cancel",this::cancelDeletion));}
             }
@@ -369,13 +371,18 @@ public final class MainActivity extends AppCompatActivity {
         });
     }
     private void sendDelete(String jwt,int epoch){
-        if(deletion==null||!deletion.allowsDelete())return;deletion.noteDeleteSent();String owner=uid;
-        io.execute(()->{try{AccountActions.HttpBody body=new CloudApi(owner).deleteAccountCall(jwt);runOnUiThread(()->applyDelete(body,epoch));}catch(Exception error){runOnUiThread(()->{if(epoch!=deletionEpoch||deletion==null)return;deletion.fail(error.getMessage());showDeleteAccount();});}});
+        if(deletion==null||!deletion.allowsDelete())return;String owner=uid;
+        io.execute(()->{
+            AccountDeletion.Exchange exchange=AccountDeletion.exchange((method,path,payload,authorization)->new CloudApi(owner).deleteAccountCall(jwt),"DELETE","/v2/account",AccountActions.CONFIRM_BODY,"Bearer "+jwt);
+            runOnUiThread(()->applyDelete(exchange,epoch));
+        });
     }
-    private void applyDelete(AccountActions.HttpBody body,int epoch){
+    private void applyDelete(AccountDeletion.Exchange exchange,int epoch){
         if(epoch!=deletionEpoch||deletion==null)return;
-        if(body.status==423&&CloudSignals.CODE_LOCK.equals(body.error)){noteLockDuringDeletion(WorkspaceLock.decode(body.raw));return;}
-        deletion.onDeleteHttp(body.status,body.jobId,body.error,body.statusToken);persistReceipt();advanceDeletion();
+        deletion.completeDelete(exchange);
+        AccountActions.HttpBody body=deletion.lastBody;
+        if(body!=null&&body.status==423&&CloudSignals.CODE_LOCK.equals(body.error)){noteLockDuringDeletion(WorkspaceLock.decode(body.raw));return;}
+        persistReceipt();advanceDeletion();
     }
     private void persistReceipt(){
         if(deletion==null)return;
@@ -422,6 +429,7 @@ public final class MainActivity extends AppCompatActivity {
     private void advanceDeletion(){
         if(deletion==null)return;
         if(deletion.dropReceipt&&!deletion.requestsWipe())DeletionReceiptVault.clear(this);
+        if(deletion.clearSession){deletion.clearSession=false;holdAuthNavigation=true;auth.signOut();}
         if(deletion.step==AccountDeletion.Step.SIGNED_OUT){leaveDeletionSignedOut();return;}
         if(deletion.step==AccountDeletion.Step.POLLING){
             if(deletion.exhausted()){deletion.fail("Account deletion is still running. You can retry.");showDeleteAccount();return;}
@@ -433,11 +441,14 @@ public final class MainActivity extends AppCompatActivity {
     private void pollOnce(int epoch){
         if(epoch!=deletionEpoch||deletion==null||deletion.step!=AccountDeletion.Step.POLLING)return;
         String path=deletion.statusPath,token=deletion.statusToken,owner=uid;
-        try{AccountActions.HttpBody body=new CloudApi(owner).pollDeletion(path,token);runOnUiThread(()->{
+        AccountDeletion.Exchange exchange=AccountDeletion.exchange((method,route,payload,authorization)->new CloudApi(owner).pollDeletion(path,token),"GET",path,null,"Bearer "+token);
+        runOnUiThread(()->{
             if(epoch!=deletionEpoch||deletion==null||deletion.step!=AccountDeletion.Step.POLLING)return;
-            if(body.status==423&&CloudSignals.CODE_LOCK.equals(body.error)){activeLock=WorkspaceLock.decode(body.raw).named(knownSpaces);deletion.onPollHttp(body.status,body.jobStatus,body.error,body.retryable);advanceDeletion();return;}
-            deletion.onPollHttp(body.status,body.jobStatus,body.error,body.retryable);advanceDeletion();
-        });}catch(Exception error){runOnUiThread(()->{if(epoch!=deletionEpoch||deletion==null)return;deletion.fail(error.getMessage());showDeleteAccount();});}
+            deletion.completePoll(exchange);
+            AccountActions.HttpBody body=deletion.lastBody;
+            if(body!=null&&body.status==423&&CloudSignals.CODE_LOCK.equals(body.error))activeLock=WorkspaceLock.decode(body.raw).named(knownSpaces);
+            advanceDeletion();
+        });
     }
     private void leaveDeletionSignedOut(){holdAuthNavigation=false;deletionEpoch++;deletionAuthBusy=false;wiping=false;deletion=null;activeLock=null;auth.signOut();}
     private void finishDeletionLocally(){

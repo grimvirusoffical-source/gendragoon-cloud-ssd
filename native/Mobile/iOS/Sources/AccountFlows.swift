@@ -11,6 +11,15 @@ struct AccountDeletedScreen:View {
     }
 }
 
+struct CloudDeletionTransport:DeletionTransport {
+    let cloud:MobileCloudModel
+    func execute(method:String,path:String,body:Data?,authorization:String) async throws -> AccountHttp {
+        let token=authorization.hasPrefix("Bearer ") ? String(authorization.dropFirst("Bearer ".count)) : authorization
+        if method=="DELETE" { return try await cloud.deleteAccount(freshToken:token) }
+        return try await cloud.pollDeletion(path,statusToken:token)
+    }
+}
+
 @MainActor final class AccountDeletionModel:ObservableObject {
     @Published private(set) var flow=AccountDeletion()
     func continueFromExplain(){flow.continueFromExplain()}
@@ -29,6 +38,15 @@ struct AccountDeletedScreen:View {
     func preview(_ step:AccountDeletion.Step){var next=AccountDeletion();next.step=step;flow=next}
     func askForSignIn(_ text:String){flow.askForSignIn(text)}
     func dismissError(){flow.dismissError();syncReceipt()}
+    func deleteThrough(_ transport:any DeletionTransport,authorization:String) async {
+        await flow.deleteThrough(transport,authorization:authorization)
+        syncReceipt()
+    }
+    func pollThrough(_ transport:any DeletionTransport) async {
+        await flow.pollThrough(transport)
+        syncReceipt()
+    }
+    func acknowledgeClearedSession(){flow.clearSession=false}
     @discardableResult func rejectDifferentAccount(expectedUid:String,actualUid:String,expectedEmail:String,actualEmail:String?)->Bool {
         let rejected=flow.rejectDifferentAccount(expectedUid:expectedUid,actualUid:actualUid,expectedEmail:expectedEmail,actualEmail:actualEmail)
         return rejected
@@ -79,8 +97,9 @@ struct AccountDeletedScreen:View {
                         else { Text(model.flow.message ?? "Local data could not be removed."); Button("Retry"){Task{await wipe()}} }
                     case .failed:
                         Text(model.flow.message ?? "Account deletion did not finish. You can retry.")
-                        Button("Retry"){model.retry()}
+                        if model.flow.offersRetry() { Button("Retry"){model.retry()} }
                         if model.flow.canDismiss() { Button("Dismiss"){model.dismissError();dismiss()} }
+                        else { Button("Cancel"){dismiss()} }
                     case .signedOut:
                         Text(model.flow.message ?? "Sign in again to continue.")
                         Button("Return to sign-in"){session.signOut();dismiss()}.buttonStyle(.borderedProminent)
@@ -105,11 +124,8 @@ struct AccountDeletedScreen:View {
             let auth=CloudSignals.authTime(token) ?? .distantPast
             guard model.acceptFreshSignIn(authTime:auth,now:Date()) else {return}
             if model.flow.step == .polling || !model.flow.allowsDelete() {return}
-            model.noteDeleteSent()
-            let http=try await cloud.deleteAccount(freshToken:token)
-            if http.status==423 && http.error==CloudSignals.lockCode { cloud.workspaceLock=WorkspaceLock.decode(http.raw);dismiss();return }
-            model.onDeleteHttp(http)
-            if http.status==423 && http.error==CloudSignals.lockCode {
+            await model.deleteThrough(CloudDeletionTransport(cloud:cloud),authorization:"Bearer "+token)
+            if let http=model.flow.lastHttp,http.status==423 && http.error==CloudSignals.lockCode {
                 cloud.noteLock(WorkspaceLock.decode(http.raw))
                 if model.flow.step != .polling {dismiss()}
             }
@@ -120,20 +136,20 @@ struct AccountDeletedScreen:View {
         }catch{model.fail(error.localizedDescription)}
     }
     private func poll() async {
+        let transport=CloudDeletionTransport(cloud:cloud)
         while model.flow.step == .polling {
             if model.exhausted(){model.fail("Account deletion is still running. You can retry.");return}
             let delay=model.nextPollDelayMillis()
             try? await Task.sleep(nanoseconds:UInt64(delay)*1_000_000)
             if Task.isCancelled || model.flow.step != .polling {return}
-            do {
-                let http=try await cloud.pollDeletion(model.flow.statusPath ?? "",statusToken:model.flow.statusToken ?? "")
-                if http.status==423 && http.error==CloudSignals.lockCode {
-                    cloud.noteLock(WorkspaceLock.decode(http.raw))
-                    model.onPollHttp(http)
-                    continue
-                }
-                model.onPollHttp(http)
-            }catch{model.fail(error.localizedDescription);return}
+            await model.pollThrough(transport)
+            if model.flow.clearSession {
+                session.clearSessionKeepingDeletion()
+                model.acknowledgeClearedSession()
+            }
+            if model.flow.step == .polling,let http=model.flow.lastHttp,http.status==423 && http.error==CloudSignals.lockCode {
+                cloud.noteLock(WorkspaceLock.decode(http.raw))
+            }
         }
     }
     private func wipe() async {
@@ -170,8 +186,10 @@ struct AccountDeletedScreen:View {
                         VStack(alignment:.leading,spacing:10){
                             Text(item.label).font(.headline)
                             HStack{
-                                Button(WorkspaceLock.actionDelete,role:.destructive){pendingDelete=item}.disabled(item.workspaceID==nil || cloud.busy)
-                                mergeControl(item)
+                                if !resolved.requiresPayment {
+                                    Button(WorkspaceLock.actionDelete,role:.destructive){pendingDelete=item}.disabled(item.workspaceID==nil || cloud.busy)
+                                    mergeControl(item)
+                                }
                                 Button(WorkspaceLock.actionDownload){Task{await list(item)}}.disabled(item.workspaceID==nil || cloud.busy || !CloudSignals.allowsTransfer(method:"GET",locked:true))
                             }
                             if listing==item.workspaceID {

@@ -2,7 +2,9 @@ package app.gendragoon.cloudssd.mobile;
 
 import org.junit.Test;
 
+import java.io.IOException;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.Base64;
 import java.util.List;
 
@@ -43,9 +45,11 @@ public final class AccountDeletionTest {
     @Test public void parsesRealStatusJson(){
         AccountActions.HttpBody created=AccountActions.parse(202,BackendFixtures.body("delete202"));
         assertEquals("deleting",created.jobStatus);
-        assertEquals(BackendFixtures.ACCOUNT_DELETION_SHA,"84f6fff");
+        assertEquals(BackendFixtures.ACCOUNT_DELETION_SHA,"d788ccb");
+        assertTrue(AccountActions.validJob(created.jobId));
+        assertTrue(AccountActions.validToken(created.statusToken));
         AccountActions.HttpBody running=AccountActions.parse(200,BackendFixtures.body("pollRunning"));
-        assertEquals(created.jobId,running.jobId);
+        assertTrue(AccountActions.validJob(running.jobId));
         assertEquals("running",running.jobStatus);
         assertEquals(Boolean.TRUE,running.retryable);
         AccountActions.HttpBody done=AccountActions.parse(200,BackendFixtures.body("pollDone"));
@@ -396,10 +400,15 @@ public final class AccountDeletionTest {
                 assertEquals(WorkspaceLock.DETAIL_MERGE,shown.detailText());
                 assertFalse(shown.detailText().contains("did not include a workspace list"));
                 assertTrue(shown.workspaces.isEmpty());
+                assertFalse(shown.requiresPayment());
             }else if("scope_unavailable".equals(shown.reasonText())){
                 assertEquals(WorkspaceLock.DETAIL_SCOPE,shown.detailText());
                 assertFalse(shown.detailText().contains("did not include a workspace list"));
                 assertTrue(shown.workspaces.isEmpty());
+                assertFalse(shown.requiresPayment());
+            }else if(shown.requiresPayment()){
+                assertEquals(WorkspaceLock.DETAIL_PAY,shown.detailText());
+                assertFalse(shown.detailText().contains("did not include a workspace list"));
             }else{
                 assertTrue(shown.detailText().isEmpty());
                 assertFalse(shown.workspaces.isEmpty());
@@ -498,6 +507,196 @@ public final class AccountDeletionTest {
         assertEquals(AccountDeletion.DIFFERENT_ACCOUNT,flow.message);
         assertFalse(flow.requestsWipe());
         assertFalse(flow.allowsDelete());
+    }
+
+    @Test public void transportRunsFixtureFlowWithoutWipingEarly() throws Exception {
+        AccountDeletion flow=ready();
+        Script script=new Script().respond(fixture("accepted")).respond(fixture("status-running")).respond(fixture("status-done"));
+        int attempts=flow.deleteAttempts;
+        flow.deleteThrough(script,"Bearer firebase-token");
+        assertEquals(AccountDeletion.Step.POLLING,flow.step);
+        assertEquals("DELETE /v2/account",script.calls.get(0));
+        assertTrue(script.authorizations.get(0).startsWith("Bearer "));
+        assertFalse(flow.requestsWipe());
+        flow.pollThrough(script);
+        assertEquals(AccountDeletion.Step.POLLING,flow.step);
+        assertTrue(script.calls.get(1).startsWith("GET /v2/account/deletions/"));
+        assertEquals("Bearer "+flow.statusToken,script.authorizations.get(1));
+        flow.pollThrough(script);
+        assertEquals(AccountDeletion.Step.DONE,flow.step);
+        assertTrue(flow.requestsWipe());
+        assertEquals(attempts+1,flow.deleteAttempts);
+
+        AccountDeletion gone=ready();
+        gone.deleteThrough(new Script().respond(fixture("account-deleted")),"Bearer firebase-token");
+        assertEquals(AccountDeletion.Step.POLLING,gone.step);
+        assertFalse(gone.requestsWipe());
+        assertFalse(gone.allowsDelete());
+    }
+
+    @Test public void singularPathHtmlAndOtherNonJsonDoNotThrow() throws Exception {
+        assertTrue(BackendFixtures.requestPath("account-deletion","singular-path").contains("/v2/account/deletion/"));
+        AccountActions.HttpBody html=fixture("singular-path");
+        assertEquals(404,html.status);
+        assertTrue(html.raw.contains("Cannot GET"));
+        assertNull(html.error);
+        assertNull(html.jobId);
+        AccountDeletion polling=AccountDeletion.resume(DeletionReceipt.of("job_html",TOKEN));
+        polling.pollThrough(new Script().respond(html));
+        assertEquals(AccountDeletion.Step.FAILED,polling.step);
+        assertTrue(polling.offersRetry());
+        assertTrue(polling.canDismiss());
+        assertEquals("job_html",polling.jobId);
+        assertEquals(TOKEN,polling.statusToken);
+        assertFalse(polling.dropReceipt);
+        assertFalse(polling.requestsWipe());
+
+        AccountDeletion generic=AccountDeletion.resume(DeletionReceipt.of("job_html",TOKEN));
+        AccountActions.HttpBody other=AccountActions.parse(503,"<html>unavailable</html>");
+        assertNull(other.error);
+        generic.pollThrough(new Script().respond(other));
+        assertTrue(generic.offersRetry());
+        assertFalse(generic.plainError);
+        assertEquals("job_html",generic.jobId);
+        assertEquals(TOKEN,generic.statusToken);
+        assertFalse(generic.requestsWipe());
+
+        AccountDeletion missing=ready();
+        missing.deleteThrough(new Script().respond(new AccountActions.HttpBody(404,html.raw,null,null,null,null,null)),"Bearer firebase-token");
+        assertTrue(missing.plainError);
+        assertFalse(missing.offersRetry());
+        assertFalse(missing.requestsWipe());
+        assertNull(missing.jobId);
+    }
+
+    @Test public void pollUnauthorizedKeepsTheJobUntilFixturesLand() throws Exception {
+        AccountDeletion invalid=AccountDeletion.resume(DeletionReceipt.of("job_poll",TOKEN));
+        invalid.pollThrough(new Script().respond(AccountActions.parse(401,"{\"error\":\"invalid_token\"}")));
+        assertEquals(AccountDeletion.Step.POLLING,invalid.step);
+        assertTrue(invalid.clearSession);
+        assertEquals("job_poll",invalid.jobId);
+        assertEquals(TOKEN,invalid.statusToken);
+        assertFalse(invalid.dropReceipt);
+        assertFalse(invalid.requestsWipe());
+        assertFalse(invalid.allowsDelete());
+
+        AccountDeletion reauth=AccountDeletion.resume(DeletionReceipt.of("job_poll",TOKEN));
+        reauth.pollThrough(new Script().respond(AccountActions.parse(401,"{}")));
+        assertEquals(AccountDeletion.Step.REAUTH,reauth.step);
+        assertFalse(reauth.clearSession);
+        assertEquals("job_poll",reauth.jobId);
+        assertEquals(TOKEN,reauth.statusToken);
+        assertFalse(reauth.requestsWipe());
+        assertFalse(reauth.allowsDelete());
+    }
+
+    @Test public void pollNetworkErrorRetriesWithoutSendingDelete() throws Exception {
+        AccountDeletion flow=ready();
+        flow.onDeleteHttp(202,"job_net",null,TOKEN);
+        int attempts=flow.deleteAttempts;
+        flow.pollThrough(new Script().fail(new IOException("offline")));
+        assertEquals(AccountDeletion.Step.FAILED,flow.step);
+        assertTrue(flow.offersRetry());
+        assertEquals("job_net",flow.jobId);
+        assertEquals(TOKEN,flow.statusToken);
+        assertFalse(flow.requestsWipe());
+        flow.retry();
+        assertEquals(AccountDeletion.Step.POLLING,flow.step);
+        assertEquals(attempts,flow.deleteAttempts);
+        Script again=new Script().respond(AccountActions.parse(200,"{\"jobId\":\"job_net\",\"status\":\"running\",\"retryable\":true}"));
+        flow.pollThrough(again);
+        assertEquals("GET /v2/account/deletions/job_net",again.calls.get(0));
+        assertEquals("Bearer "+TOKEN,again.authorizations.get(0));
+        assertEquals(AccountDeletion.Step.POLLING,flow.step);
+    }
+
+    @Test public void errorCodeIgnoresMessageText(){
+        assertEquals("other",AccountActions.errorCode("{\"error\":\"other\",\"message\":\"manifest_generation_required\"}"));
+        assertEquals("manifest_generation_required",AccountActions.errorCode("{\"message\":\"try manifest_generation_required\",\"code\":\"manifest_generation_required\"}"));
+    }
+
+    @Test public void fileReplacementFailureLeavesTheOldCopyReadable() throws Exception {
+        FileReplacement.Manifest upload=manifest();
+        try{
+            FileReplacement.replace(new MemoryStore(){public void uploadChunks(String objectId) throws Exception{throw new IOException("chunk");}},upload,"new-object");
+            throw new AssertionError("upload should fail");
+        }catch(IOException expected){
+            assertEquals("chunk",expected.getMessage());
+        }
+        assertEquals("old-object",upload.objectId);
+        assertTrue(upload.oldReadable);
+        assertFalse(upload.localTrashed);
+
+        FileReplacement.Manifest conflicted=manifest();
+        boolean[] held={false,false};
+        FileReplacement.replace(new MemoryStore(){
+            int puts;
+            public long putManifest(long ifGeneration,String objectId) throws Exception {
+                puts++;
+                if(puts==1){
+                    held[0]="old-object".equals(conflicted.objectId)&&conflicted.oldReadable;
+                    held[1]=!conflicted.localTrashed;
+                    throw new FileReplacement.Conflict(9);
+                }
+                return 10;
+            }
+            public long refetchGeneration(){return 9;}
+        },conflicted,"new-object");
+        assertTrue(held[0]);
+        assertTrue(held[1]);
+        assertEquals("new-object",conflicted.objectId);
+        assertTrue(conflicted.localTrashed);
+
+        FileReplacement.Manifest put=manifest();
+        try{
+            FileReplacement.replace(new MemoryStore(){public long putManifest(long ifGeneration,String objectId) throws Exception{throw new IOException("put");}},put,"new-object");
+            throw new AssertionError("put should fail");
+        }catch(IOException expected){
+            assertEquals("put",expected.getMessage());
+        }
+        assertEquals("old-object",put.objectId);
+        assertTrue(put.oldReadable);
+        assertFalse(put.localTrashed);
+
+        FileReplacement.Manifest deleted=manifest();
+        FileReplacement.replace(new MemoryStore(){public void deleteOldChunks(String objectId) throws Exception{throw new IOException("delete");}},deleted,"new-object");
+        assertEquals("old-object",deleted.objectId);
+        assertTrue(deleted.oldReadable);
+        assertFalse(deleted.localTrashed);
+    }
+
+    private static FileReplacement.Manifest manifest(){
+        FileReplacement.Manifest manifest=new FileReplacement.Manifest();
+        manifest.objectId="old-object";
+        manifest.generation=3;
+        return manifest;
+    }
+
+    private static class MemoryStore implements FileReplacement.Store {
+        public void uploadChunks(String objectId) throws Exception {}
+        public long putManifest(long ifGeneration,String objectId) throws Exception {return ifGeneration+1;}
+        public long refetchGeneration() throws Exception {return 4;}
+        public void deleteOldChunks(String objectId) throws Exception {}
+        public void trashLocalOriginal() throws Exception {}
+    }
+
+    private static AccountActions.HttpBody fixture(String name){
+        return AccountActions.parse(BackendFixtures.responseStatus("account-deletion",name),BackendFixtures.responseBody("account-deletion",name));
+    }
+
+    private static final class Script implements AccountDeletion.DeletionTransport {
+        private final ArrayList<Object> steps=new ArrayList<>();
+        final ArrayList<String> calls=new ArrayList<>();
+        final ArrayList<String> authorizations=new ArrayList<>();
+        Script respond(AccountActions.HttpBody body){steps.add(body);return this;}
+        Script fail(Exception error){steps.add(error);return this;}
+        @Override public AccountActions.HttpBody execute(String method,String path,byte[] body,String authorization) throws Exception {
+            calls.add(method+" "+path);
+            authorizations.add(authorization==null?"":authorization);
+            Object step=steps.remove(0);
+            if(step instanceof Exception error)throw error;
+            return (AccountActions.HttpBody)step;
+        }
     }
 
     private static AccountDeletion ready(){

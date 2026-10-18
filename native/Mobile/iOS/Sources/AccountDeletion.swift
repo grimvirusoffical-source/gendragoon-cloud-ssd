@@ -31,6 +31,11 @@ struct AccountDeletion:Equatable {
     var dropReceipt=false
     /// A 404 means this token does not match the job. Do not send DELETE again.
     var refuseDelete=false
+    /// A poll `invalid_token` cleared the session. The saved job keeps polling.
+    var clearSession=false
+    /// A DELETE 404 with no saved job. Show the error without Retry.
+    var plainError=false
+    var lastHttp:AccountHttp?
 
     mutating func continueFromExplain(){if step == .explain {step = .confirm}}
     mutating func confirmPhrase(_ phrase:String)->Bool {
@@ -83,10 +88,17 @@ struct AccountDeletion:Equatable {
             return
         }
         if status==202 && beginPolling(jobId:jobId,statusToken:statusToken) {return}
+        if status==404 && self.jobId==nil && self.statusToken==nil {
+            plainError=true
+            fail("Account deletion did not start. Nothing on this device was erased.")
+            return
+        }
+        plainError=false
         fail("Account deletion did not start. You can retry.")
     }
     mutating func onPollHttp(status:Int,jobStatus:String?,errorCode:String?,retryable:Bool?){
         guard step == .polling else {return}
+        plainError=false
         if status==423 && errorCode==CloudSignals.lockCode {wipe=false;return}
         if status==401 {onUnauthorized(errorCode);return}
         if status==404 {
@@ -120,7 +132,13 @@ struct AccountDeletion:Equatable {
     }
     private mutating func onUnauthorized(_ errorCode:String?){
         wipe=false
+        plainError=false
         if errorCode=="invalid_token" {
+            if let jobId,let statusToken,Self.validJob(jobId),Self.validToken(statusToken) {
+                clearSession=true
+                dropReceipt=false
+                return
+            }
             step = .signedOut;message="Sign in again to continue.";return
         }
         // A 401 with no code goes back to sign-in and keeps any saved job and token.
@@ -142,6 +160,8 @@ struct AccountDeletion:Equatable {
         if refuseDelete {return}
         jobId=nil;statusToken=nil;statusPath=nil;step = .reauth
     }
+    /// Failed responses offer Retry, except a DELETE 404 for a job that was never saved.
+    func offersRetry()->Bool { step == .failed && !plainError }
     /// True after a 404 while the saved pair is still held.
     func canDismiss()->Bool { step == .failed && refuseDelete }
     /// The user dismissed the 404 error. Clears the saved pair and wipes nothing.
@@ -161,6 +181,49 @@ struct AccountDeletion:Equatable {
     }
     mutating func noteWiped(){if step == .done && wipe {wiped=true;step = .wiped}}
     mutating func noteWipeFailed(_ text:String){if step == .done {message=text}}
+
+    mutating func deleteThrough(_ transport:any DeletionTransport,authorization:String) async {
+        let exchange=await Self.exchange(transport,method:"DELETE",path:"v2/account",body:Self.confirmBody,authorization:authorization)
+        completeDelete(exchange)
+    }
+    mutating func completeDelete(_ exchange:DeletionExchange) {
+        guard allowsDelete() else {return}
+        noteDeleteSent()
+        guard !exchange.failed,let body=exchange.body else {
+            plainError=false
+            lastHttp=nil
+            fail("Account deletion did not start. You can retry.")
+            return
+        }
+        lastHttp=body
+        onDeleteHttp(status:body.status,jobId:body.jobId,errorCode:body.error,statusToken:body.statusToken)
+    }
+    mutating func pollThrough(_ transport:any DeletionTransport) async {
+        guard step == .polling else {return}
+        guard let path=statusPath,let statusToken,let call=Self.pollCall(path:path,statusToken:statusToken) else {
+            plainError=false
+            fail("Could not read deletion status. You can retry.")
+            return
+        }
+        let exchange=await Self.exchange(transport,method:"GET",path:call.path,body:nil,authorization:call.authorization)
+        completePoll(exchange)
+    }
+    mutating func completePoll(_ exchange:DeletionExchange) {
+        guard step == .polling else {return}
+        guard !exchange.failed,let body=exchange.body else {
+            plainError=false
+            lastHttp=nil
+            wipe=false
+            fail("Could not read deletion status. You can retry.")
+            return
+        }
+        lastHttp=body
+        onPollHttp(status:body.status,jobStatus:body.jobStatus,errorCode:body.error,retryable:body.retryable)
+    }
+    static func exchange(_ transport:any DeletionTransport,method:String,path:String,body:Data?,authorization:String) async -> DeletionExchange {
+        do { return DeletionExchange(body:try await transport.execute(method:method,path:path,body:body,authorization:authorization),failed:false) }
+        catch { return DeletionExchange(body:nil,failed:true) }
+    }
 
     static func validJob(_ jobId:String)->Bool {
         jobId.range(of:"^[A-Za-z0-9_-]{1,80}$",options:.regularExpression) != nil && !jobId.contains("..") && !jobId.contains("/") && !jobId.contains("\\")
@@ -213,6 +276,65 @@ struct AccountDeletion:Equatable {
         let source=sourceName.isEmpty ? "workspace" : sourceName
         return "Duplicates are kept as name (from "+source+")."
     }
+}
+
+protocol DeletionTransport {
+    func execute(method:String,path:String,body:Data?,authorization:String) async throws -> AccountHttp
+}
+
+struct DeletionExchange: Equatable {
+    var body:AccountHttp?
+    var failed:Bool
+}
+
+/// Replaces a file only in this order: upload the new chunks, PUT the manifest with ifGeneration
+/// (on 412, refetch and retry), delete the old chunks, then trash the local original.
+/// Mobile uploads are raw bytes with `X-Chunk-SHA256`. Chunks are not sealed.
+enum FileReplacement {
+    struct Conflict:Error { let generation:Int64 }
+    struct Manifest {
+        var objectId:String
+        var generation:Int64
+        var oldReadable=true
+        var localTrashed=false
+    }
+    static func replace(_ store:any ReplacementStore,manifest:inout Manifest,newObjectId:String) throws {
+        let oldId=manifest.objectId
+        try store.uploadChunks(objectId:newObjectId)
+        var generation=manifest.generation
+        var committed=false
+        var attempt=0
+        while attempt<2 && !committed {
+            attempt+=1
+            do {
+                let next=try store.putManifest(ifGeneration:generation,objectId:newObjectId)
+                manifest.objectId=newObjectId
+                manifest.generation=next
+                committed=true
+            } catch is Conflict {
+                generation=try store.refetchGeneration()
+            }
+        }
+        if !committed {return}
+        do {
+            try store.deleteOldChunks(objectId:oldId)
+            manifest.oldReadable=false
+        } catch {
+            manifest.objectId=oldId
+            manifest.oldReadable=true
+            return
+        }
+        try store.trashLocalOriginal()
+        manifest.localTrashed=true
+    }
+}
+
+protocol ReplacementStore: AnyObject {
+    func uploadChunks(objectId:String) throws
+    func putManifest(ifGeneration:Int64,objectId:String) throws -> Int64
+    func refetchGeneration() throws -> Int64
+    func deleteOldChunks(objectId:String) throws
+    func trashLocalOriginal() throws
 }
 
 struct AccountHttp:Equatable,Sendable {
