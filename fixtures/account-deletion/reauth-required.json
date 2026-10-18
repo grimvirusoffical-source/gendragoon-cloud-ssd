@@ -1,0 +1,19 @@
+{
+  "request": {
+    "body": {
+      "confirm": "DELETE"
+    },
+    "headers": {
+      "authorization": "<redacted>",
+      "content-type": "application/json"
+    },
+    "method": "DELETE",
+    "path": "/v2/account"
+  },
+  "response": {
+    "body": {
+      "error": "reauth_required"
+    },
+    "status": 401
+  }
+}
