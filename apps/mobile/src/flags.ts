@@ -18,6 +18,6 @@ export const DELETION_SUPPORT_ENDPOINT_ENABLED = false;
 
 /**
  * Per-workspace labels from `isFree`, `grandfathered`, and `monthlyPriceCents`.
- * On now that cloud-ssd PR #5 fixtures at `568f223` are vendored.
+ * On now that cloud-ssd PR #5 fixtures at `4c3dd13` are vendored.
  */
 export const WORKSPACE_PRICING_ENABLED = true;

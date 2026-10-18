@@ -144,7 +144,7 @@ describe("vendored cloud-ssd fixtures", () => {
   it("records the workspace pricing SHA from gendragoon-cloud-ssd PR #5", () => {
     const fixture = loadFixture("workspaces/list.json");
     expect(fixture.sourceSha).toBe(FIXTURE_SOURCE_SHA_BY_AREA.workspaces);
-    expect(fixture.sourceSha).toBe("568f2236ffe2520758fb8f20cf22566aefc14cf3");
+    expect(fixture.sourceSha).toBe("4c3dd13587fae1ddfa907ad2b84c0886d7794ade");
     expect(FIXTURE_SOURCE_SHA).toBe("da3927627fee76103981714f9f8ffa954843b74b");
     expect(fixture.response.status).toBe(200);
     expect(fixture.request.path).toBe("/v2/workspaces");

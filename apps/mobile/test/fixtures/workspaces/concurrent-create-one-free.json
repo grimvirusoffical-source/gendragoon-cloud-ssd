@@ -1,4 +1,4 @@
-Source-SHA: 568f2236ffe2520758fb8f20cf22566aefc14cf3
+Source-SHA: 4c3dd13587fae1ddfa907ad2b84c0886d7794ade
 Source-Path: fixtures/workspaces/concurrent-create-one-free.json
 
 {
@@ -24,7 +24,7 @@ Source-Path: fixtures/workspaces/concurrent-create-one-free.json
         "freeProjectClaimed": true,
         "freeWorkspaceId": "11111111-1111-4111-8111-000000000006",
         "freeWorkspaces": 1,
-        "grandfatheredProjects": 1,
+        "grandfatheredProjects": 0,
         "locked": false,
         "newProjectOneTimeCents": 500,
         "overBy": 0,
@@ -50,7 +50,7 @@ Source-Path: fixtures/workspaces/concurrent-create-one-free.json
           "byoActive": false,
           "byoChallengeVerified": false,
           "dataRetained": false,
-          "grandfathered": true,
+          "grandfathered": false,
           "hasContinuingBilling": false,
           "id": "11111111-1111-4111-8111-000000000006",
           "intendedSelection": {},
@@ -78,7 +78,7 @@ Source-Path: fixtures/workspaces/concurrent-create-one-free.json
           "transferEligible": true,
           "usedBytes": 0,
           "workers": 1,
-          "workspaceFeeModel": "one_time"
+          "workspaceFeeModel": null
         },
         {
           "byoActive": false,

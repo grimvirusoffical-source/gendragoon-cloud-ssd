@@ -1,7 +1,6 @@
 import {
   GenDragoonClient,
   accountFromAssessment,
-  applyApiFailure,
   treeNode,
   type LockAssessment,
   type SecretStore,
@@ -32,6 +31,7 @@ import { sessionTokenAfterAuthFailure } from "./src/account/session";
 import { payToRestore } from "./src/billing";
 import { byoServerFlowReady } from "./src/byoReady";
 import { ENCRYPTED_WORKSPACE_ENABLED } from "./src/flags";
+import { accountLockCoversApp, locksThisWorkspaceOnly, noteWorkspaceLock } from "./src/workspaceState";
 import { createExpoSecureStore } from "./src/platform/secureStore";
 import { ShotFrame, webShot } from "./src/shots";
 
@@ -107,6 +107,7 @@ export function MobileRoot(props: {
   const [activeTransfers, setActiveTransfers] = useState(0);
   const [settingsPage, setSettingsPage] = useState<"home" | "sort" | "connect" | "delete">("home");
   const [tab, setTab] = useState<"Files" | "Backup" | "Workspaces" | "Settings">("Files");
+  const [openWorkspaceId, setOpenWorkspaceId] = useState(workspaces[0]?.id ?? "");
   const nodes = PREVIEW_FILES.map((path) => treeNode({
     path,
     directory: path.endsWith(".app"),
@@ -137,48 +138,62 @@ export function MobileRoot(props: {
     }).catch(() => undefined);
   }, []);
 
-  function Files() {
+  function payWorkspace(id: string) {
+    const checkout = "checkoutWorkspaceFee" in client
+      ? (workspaceId: string) => client.checkoutWorkspaceFee(workspaceId)
+      : undefined;
+    void payToRestore({
+      unpaidWorkspaceIds: [id],
+      checkoutWorkspaceFee: checkout,
+      openUrl: (url) => Linking.openURL(url),
+    }).catch(() => undefined);
+  }
+  function WorkspaceFiles(props: { mode: "upload" | "backup" }) {
+    if (openWorkspaceId && locksThisWorkspaceOnly(access, openWorkspaceId)) {
+      const open = workspaces.find((workspace) => workspace.id === openWorkspaceId);
+      return (
+        <LockScreen
+          workspaceOnly
+          workspaces={open ? [open] : []}
+          lock={{ reason: "lapsed", overBy: 0, unpaidWorkspaceIds: [openWorkspaceId] }}
+          onReview={() => setTab("Workspaces")}
+          onPay={() => payWorkspace(openWorkspaceId)}
+        />
+      );
+    }
     return (
       <FileTree
-        mode="upload"
+        mode={props.mode}
         nodes={nodes}
-        locked={account.phase === "delete_or_merge"}
+        locked={accountLockCoversApp(access)}
         selected={selected}
         onSelect={setSelected}
         onRefresh={() => undefined}
-        onUpload={() => setActiveTransfers((count) => count + 1)}
+        onUpload={props.mode === "upload" ? () => setActiveTransfers((count) => count + 1) : undefined}
+        onBackup={props.mode === "backup" ? () => setActiveTransfers((count) => count + 1) : undefined}
       />
     );
   }
+  function Files() {
+    return <WorkspaceFiles mode="upload" />;
+  }
   function Backup() {
-    return (
-      <FileTree
-        mode="backup"
-        nodes={nodes}
-        locked={account.phase === "delete_or_merge"}
-        selected={selected}
-        onSelect={setSelected}
-        onRefresh={() => undefined}
-        onBackup={() => setActiveTransfers((count) => count + 1)}
-      />
-    );
+    return <WorkspaceFiles mode="backup" />;
   }
   function Spaces() {
     return (
       <WorkspacesScreen
         workspaces={workspaces}
         unpaidIds={access.unpaidIds}
-        onPay={(id) => {
-          const checkout = "checkoutWorkspaceFee" in client
-            ? (workspaceId: string) => client.checkoutWorkspaceFee(workspaceId)
-            : undefined;
-          void payToRestore({
-            unpaidWorkspaceIds: [id],
-            checkoutWorkspaceFee: checkout,
-            openUrl: (url) => Linking.openURL(url),
-          }).catch(() => undefined);
+        onOpen={(id) => {
+          setOpenWorkspaceId(id);
+          setTab("Files");
         }}
-        onDelete={(id) => {
+        onPay={payWorkspace}
+        onDelete={async (id) => {
+          if ("deleteWorkspace" in client && typeof client.deleteWorkspace === "function") {
+            await client.deleteWorkspace(id);
+          }
           const next = workspaces.filter((workspace) => workspace.id !== id);
           setWorkspaces(next);
           if (next.length <= access.cap) {
@@ -255,7 +270,7 @@ export function MobileRoot(props: {
 
   return (
     <Stack.Navigator
-      initialRouteName={props.initialRoute ?? (account.phase === "delete_or_merge" ? "Lock" : "SignIn")}
+      initialRouteName={props.initialRoute ?? (accountLockCoversApp(access) ? "Lock" : "SignIn")}
       screenOptions={{
         headerStyle: { backgroundColor: colors.bg },
         headerTintColor: colors.text,
@@ -271,7 +286,7 @@ export function MobileRoot(props: {
             googleEnabled={Boolean(process.env.EXPO_PUBLIC_GOOGLE_WEB_CLIENT_ID)}
             onSwapped={(token) => {
               setIdToken(token);
-              if (accountFromAssessment(access).phase === "delete_or_merge") {
+              if (accountLockCoversApp(access)) {
                 navigationRef.navigate("Lock");
               } else {
                 navigationRef.navigate("Main");
@@ -327,7 +342,5 @@ export function App() {
 }
 
 export function noteLock(error: unknown, access: LockAssessment): LockAssessment {
-  const next = applyApiFailure(accountFromAssessment(access), error);
-  if (next.phase !== "delete_or_merge") return access;
-  return { ...access, locked: true, uploadsBlocked: true, normalUseBlocked: true };
+  return noteWorkspaceLock(error, access);
 }

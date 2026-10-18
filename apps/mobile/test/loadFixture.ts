@@ -13,8 +13,8 @@ export const FIXTURE_SOURCE_SHA_BY_AREA: Record<string, string> = {
   "storage-urls": "8267784a790bbe8418b3cbe36e8a4b91849b0e81",
   /** cloud-ssd PR #9 tip. Responses store salt, iv, and wrappedKey as unpadded base64url. */
   "key-envelope": "ee4f76f07bc798635002ae2c272fb47d83db7698",
-  /** cloud-ssd PR #5 tip. List and create items carry isFree and monthlyPriceCents. */
-  "workspaces": "568f2236ffe2520758fb8f20cf22566aefc14cf3",
+  /** cloud-ssd PR #5 tip. List and create items carry isFree, grandfathered, and monthlyPriceCents. */
+  "workspaces": "4c3dd13587fae1ddfa907ad2b84c0886d7794ade",
 };
 
 export interface FixtureFile<TBody> {

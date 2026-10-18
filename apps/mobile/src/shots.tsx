@@ -35,6 +35,7 @@ export const SHOTS = [
   "pricing-free-first",
   "pricing-hosted-plus-byo",
   "pricing-create-byo",
+  "pricing-grace",
 ] as const;
 
 export type ShotId = (typeof SHOTS)[number];
@@ -192,6 +193,33 @@ export function ShotFrame(props: { id: ShotId }) {
             ]}
             unpaidIds={["11111111-1111-4111-8111-000000000001"]}
             additionalMonthlyCents={500}
+            onDelete={() => undefined}
+            onMerge={() => undefined}
+            onPay={() => undefined}
+          />
+        ) : null}
+        {props.id === "pricing-grace" ? (
+          <WorkspacesScreen
+            workspaces={[
+              {
+                id: "11111111-1111-4111-8111-000000000002",
+                name: "Second Workspace",
+                kind: "paid",
+                isFree: false,
+                grandfathered: false,
+                monthlyPriceCents: 500,
+              },
+              {
+                id: "11111111-1111-4111-8111-000000000001",
+                name: "Free Hosted",
+                kind: "paid",
+                isFree: true,
+                grandfathered: false,
+                monthlyPriceCents: 0,
+              },
+            ]}
+            unpaidIds={[]}
+            gracePayByMs={{ "11111111-1111-4111-8111-000000000002": Date.UTC(2026, 9, 21) }}
             onDelete={() => undefined}
             onMerge={() => undefined}
             onPay={() => undefined}

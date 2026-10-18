@@ -38,11 +38,12 @@ import { byoServerFlowReady } from "./byoReady";
 import { DELETION_SUPPORT_ENDPOINT_ENABLED, ENCRYPTED_WORKSPACE_ENABLED, WORKSPACE_PRICING_ENABLED } from "./flags";
 import {
   additionalWorkspaceFeeText,
+  includedPricingEndsWarning,
+  serverPriceLabel,
   unpaidWorkspaceSubtitle,
-  workspacePriceLabel,
   workspaceQuoteExplanation,
-  type WorkspacePriceInput,
 } from "./pricing";
+import { WORKSPACE_BUSY_MESSAGE, graceBanner, isDeletingWorkspace, isWorkspaceBusy } from "./workspaceState";
 import { SUPPORT_REQUEST_ALREADY, SUPPORT_REQUEST_SENT, requestDeletionSupport } from "./supportRequest";
 import { supportContactTarget } from "./supportContact";
 import { Banner, Button, Screen, Title, cardStyle } from "./ui";
@@ -143,6 +144,8 @@ export function LockScreen(props: {
   workspaces: readonly WorkspaceRecord[];
   /** HTTP 423 `workspace_lock` body. Displayed as sent. */
   lock?: WorkspaceLockBody;
+  /** Lapsed and unpaid workspaces lock only this screen, not the rest of the app. */
+  workspaceOnly?: boolean;
   onReview: () => void;
   onPay?: () => void;
 }) {
@@ -152,10 +155,13 @@ export function LockScreen(props: {
   const known = new Set(rows.map((workspace) => workspace.id));
   const unmatched = unpaidIds.filter((id) => !known.has(id));
   const payFirst = props.lock?.reason === "lapsed" || props.lock?.reason === "over_cap_and_lapsed";
+  const workspaceOnly = props.workspaceOnly === true;
   return (
     <Screen testID="lock-screen">
-      <Title kicker="Workspaces">Resolve workspaces to continue</Title>
-      {summary ? (
+      <Title kicker="Workspaces">{workspaceOnly ? (rows[0]?.name ?? "This workspace") : "Resolve workspaces to continue"}</Title>
+      {workspaceOnly ? (
+        <Banner testID="lock-banner">This workspace is locked. Your other workspaces stay usable. Downloads stay available.</Banner>
+      ) : summary ? (
         <Banner testID="lock-banner">
           {`This account is ${summary.locked ? "locked" : "open"} (${summary.used} of ${summary.limit}). Downloads stay available.`}
         </Banner>
@@ -240,13 +246,13 @@ export interface ServerMergeResult {
   copied: number;
 }
 
-export type ListedWorkspace = WorkspaceRecord & WorkspacePriceInput;
+export type ListedWorkspace = WorkspaceRecord;
 
 export function NewWorkspaceScreen(props: {
   /** Server quote for a hosted workspace. Not a client-side count. */
-  quote: WorkspacePriceInput;
+  quote: unknown;
   /** Server quote for bring-your-own storage. Falls back to rule text when the amount is missing. */
-  byoQuote?: WorkspacePriceInput;
+  byoQuote?: unknown;
   onCreate: (input: { name: string; storage: "hosted" | "byo"; providerId: string | null }) => void;
   /** Overrides `WORKSPACE_PRICING_ENABLED` in tests. */
   pricingEnabled?: boolean;
@@ -259,7 +265,7 @@ export function NewWorkspaceScreen(props: {
   const [providerId, setProviderId] = useState<string | null>(props.initialProviderId ?? LAUNCH_BYO_PROVIDERS[0]?.id ?? null);
   const showPrice = props.pricingEnabled ?? WORKSPACE_PRICING_ENABLED;
   const quote = storage === "byo" ? (props.byoQuote ?? props.quote) : props.quote;
-  const label = showPrice ? workspacePriceLabel(quote) : null;
+  const label = showPrice ? serverPriceLabel(quote) : null;
   const explanation = showPrice ? workspaceQuoteExplanation(storage, quote) : null;
   const ready = name.trim().length > 0;
   return (
@@ -329,10 +335,17 @@ export function WorkspacesScreen(props: {
   mergeError?: string | null;
   mergeResult?: ServerMergeResult | null;
   mergedFiles?: readonly { id: string; name: string }[] | null;
-  onDelete: (id: string) => void;
+  onDelete: (id: string) => void | Promise<void>;
   onMerge: (sourceId: string, targetId: string) => void;
+  /** Opens this workspace. A lapsed one locks only its own screen. */
+  onOpen?: (workspaceId: string) => void;
   /** Same checkout path as the lapsed lock screen, for one unpaid workspace. */
   onPay?: (workspaceId: string) => void;
+  /**
+   * Server grace deadline per workspace id, milliseconds.
+   * Provisional until cloud-ssd PR #5 reports the pay-by field.
+   */
+  gracePayByMs?: Readonly<Record<string, number>>;
   /** Overrides `WORKSPACE_PRICING_ENABLED` in tests. */
   pricingEnabled?: boolean;
 }) {
@@ -342,32 +355,70 @@ export function WorkspacesScreen(props: {
   const [sourceId, setSourceId] = useState(rows[0]?.id ?? "");
   const [targetId, setTargetId] = useState(rows[1]?.id ?? rows[0]?.id ?? "");
   const [pendingDeleteId, setPendingDeleteId] = useState<string | null>(null);
+  const [busyMessage, setBusyMessage] = useState<string | null>(null);
+  const deletingIds = new Set(rows.filter((workspace) => isDeletingWorkspace(workspace)).map((workspace) => workspace.id));
   const localPreview = props.serverPreview || !sourceId || !targetId || sourceId === targetId
     ? []
     : planMerge([{ path: "Photos/cat.jpg" }], rows.find((row) => row.id === sourceId)?.name ?? "source", ["Photos/cat.jpg"]);
+  async function confirmDelete(id: string) {
+    try {
+      await props.onDelete(id);
+      setPendingDeleteId(null);
+      setBusyMessage(null);
+    } catch (error) {
+      if (!isWorkspaceBusy(error)) throw error;
+      setPendingDeleteId(null);
+      setBusyMessage(WORKSPACE_BUSY_MESSAGE);
+    }
+  }
   return (
     <Screen testID="workspaces-screen">
       <Title kicker="Workspaces">Your spaces</Title>
       {feeText ? <Banner testID="workspace-fee">{feeText}</Banner> : null}
+      {busyMessage ? <Banner testID="workspace-busy">{busyMessage}</Banner> : null}
       {props.capMessage ? <Banner testID="workspace-cap">{props.capMessage}</Banner> : null}
       {rows.map((workspace) => {
-        const price = workspace.unpaid
-          ? unpaidWorkspaceSubtitle(workspace.monthlyPriceCents)
-          : showPrice ? workspacePriceLabel(workspace) : null;
+        const deleting = deletingIds.has(workspace.id);
+        const graceMs = props.gracePayByMs?.[workspace.id];
+        const inGrace = typeof graceMs === "number" && Number.isFinite(graceMs);
+        const price = deleting || inGrace
+          ? null
+          : workspace.unpaid
+            ? unpaidWorkspaceSubtitle(workspace.monthlyPriceCents)
+            : showPrice ? serverPriceLabel(workspace) : null;
         const confirming = pendingDeleteId === workspace.id;
         return (
           <View key={workspace.id} style={cardStyle()}>
-            <Text testID={`workspace-name-${workspace.id}`} style={styles.category}>{workspace.name}</Text>
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel={`Open ${workspace.name}`}
+              testID={`open-${workspace.id}`}
+              onPress={() => props.onOpen?.(workspace.id)}
+            >
+              <Text testID={`workspace-name-${workspace.id}`} style={styles.category}>{workspace.name}</Text>
+            </Pressable>
+            {deleting ? <Text testID={`workspace-deleting-${workspace.id}`} style={styles.help}>Deleting...</Text> : null}
+            {inGrace ? <Banner testID={`workspace-grace-${workspace.id}`}>{graceBanner(graceMs)}</Banner> : null}
             {price ? <Text testID={`workspace-price-${workspace.id}`} style={styles.help}>{price}</Text> : null}
-            {workspace.unpaid ? (
+            {inGrace ? (
+              <Button
+                label="Pay"
+                testID={`pay-grace-${workspace.id}`}
+                accessibilityLabel={`Pay ${workspace.name}`}
+                disabled={deleting}
+                onPress={() => props.onPay?.(workspace.id)}
+              />
+            ) : null}
+            {workspace.unpaid && !inGrace ? (
               <Button
                 label="Pay to restore"
                 testID={`pay-to-restore-${workspace.id}`}
                 accessibilityLabel={`Pay to restore ${workspace.name}`}
+                disabled={deleting}
                 onPress={() => props.onPay?.(workspace.id)}
               />
             ) : null}
-            {confirming ? (
+            {confirming && !deleting ? (
               <View>
                 <Text style={styles.help}>{`Delete ${workspace.name}?`}</Text>
                 <Button
@@ -376,10 +427,7 @@ export function WorkspacesScreen(props: {
                   compact
                   testID={`confirm-delete-${workspace.id}`}
                   accessibilityLabel={`Confirm delete ${workspace.name}`}
-                  onPress={() => {
-                    setPendingDeleteId(null);
-                    props.onDelete(workspace.id);
-                  }}
+                  onPress={() => confirmDelete(workspace.id)}
                 />
                 <Button
                   label="Cancel"
@@ -397,6 +445,7 @@ export function WorkspacesScreen(props: {
                 compact
                 testID={`delete-${workspace.id}`}
                 accessibilityLabel={`Delete ${workspace.name}`}
+                disabled={deleting}
                 onPress={() => setPendingDeleteId(workspace.id)}
               />
             )}
@@ -430,6 +479,7 @@ export function WorkspacesScreen(props: {
             tone={sourceId === workspace.id ? "primary" : "ghost"}
             testID={`merge-source-${workspace.id}`}
             accessibilityLabel={`Merge source ${workspace.name}`}
+            disabled={deletingIds.has(workspace.id)}
             onPress={() => setSourceId(workspace.id)}
           />
         ))}
@@ -443,6 +493,7 @@ export function WorkspacesScreen(props: {
             tone={targetId === workspace.id ? "primary" : "ghost"}
             testID={`merge-target-${workspace.id}`}
             accessibilityLabel={`Merge target ${workspace.name}`}
+            disabled={deletingIds.has(workspace.id)}
             onPress={() => setTargetId(workspace.id)}
           />
         ))}
@@ -450,7 +501,7 @@ export function WorkspacesScreen(props: {
       <Button
         label="Merge"
         testID="merge-workspaces"
-        disabled={!sourceId || !targetId || sourceId === targetId}
+        disabled={!sourceId || !targetId || sourceId === targetId || deletingIds.has(sourceId) || deletingIds.has(targetId)}
         onPress={() => props.onMerge(sourceId, targetId)}
       />
     </Screen>
@@ -486,11 +537,18 @@ export function ConnectStorageScreen(props: {
   verified?: { verified: boolean; workspaceId: string } | null;
   error?: unknown;
   onSelectProvider?: (providerId: string) => void;
+  /**
+   * Set when this workspace is grandfathered. Registering BYO ends that
+   * pricing. Provisional until the server quote is on the register route.
+   */
+  endsIncludedPricingCents?: number | null;
 }) {
   const [selected, setSelected] = useState<string | null>(null);
+  const [acceptedLoss, setAcceptedLoss] = useState(props.endsIncludedPricingCents == null);
   const ready = byoServerFlowReady();
   const challengeKey = props.challengeNonce ? challengeObjectKey(props.challengeNonce) : null;
   const errorText = props.error ? byoErrorMessage(props.error) : null;
+  const providersOpen = ready && acceptedLoss;
   return (
     <Screen testID="connect-storage">
       <Title kicker="Settings">Connect storage</Title>
@@ -501,7 +559,17 @@ export function ConnectStorageScreen(props: {
           Bring-your-own storage is unavailable until the server can register, challenge, and verify the bucket.
         </Text>
       )}
-      {ready ? LAUNCH_BYO_PROVIDERS.map((provider) => (
+      {props.endsIncludedPricingCents != null ? (
+        <Banner testID="byo-included-warning">{includedPricingEndsWarning(props.endsIncludedPricingCents)}</Banner>
+      ) : null}
+      {props.endsIncludedPricingCents != null && !acceptedLoss ? (
+        <Button
+          label="Continue"
+          testID="byo-end-included"
+          onPress={() => setAcceptedLoss(true)}
+        />
+      ) : null}
+      {providersOpen ? LAUNCH_BYO_PROVIDERS.map((provider) => (
         <Button
           key={provider.id}
           label={provider.label}
@@ -513,7 +581,7 @@ export function ConnectStorageScreen(props: {
           }}
         />
       )) : null}
-      {ready && selected ? <Text testID="byo-selected" style={styles.help}>{selected}</Text> : null}
+      {providersOpen && selected ? <Text testID="byo-selected" style={styles.help}>{selected}</Text> : null}
       <Text style={styles.help}>Coming soon</Text>
       {COMING_SOON_BYO_PROVIDERS.map((provider) => (
         <Text key={provider.id} testID={`byo-soon-${provider.id}`} style={styles.soon}>{`${provider.label} · Coming soon`}</Text>
