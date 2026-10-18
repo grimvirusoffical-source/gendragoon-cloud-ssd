@@ -71,7 +71,7 @@ struct ProjectUploadSection: View {
     }
 
     private var destinationPicker: some View {
-        GroupBox("Google Cloud destination") {
+        GroupBox("Cloud destination") {
             VStack(alignment: .leading, spacing: 8) {
                 Picker("Project / bucket", selection: Binding(
                     get: { workspace.snapshot?.destination },
@@ -98,7 +98,7 @@ struct ProjectUploadSection: View {
                     Text("The saved destination is unavailable in the current authorized cloud choices. It stays selected; refresh access or choose another destination before uploading.")
                         .font(.caption).foregroundStyle(.red)
                 } else if workspace.projects.isEmpty && !workspace.destinationAvailable {
-                    Text("No authorized cloud destinations are available. Connect Google Cloud and refresh its projects and buckets.")
+                    Text("No destination is selected. Hosted files use your signed-in workspace. A bring-your-own Google Cloud bucket needs the Owner role; any other cloud or VPS does not.")
                         .font(.caption).foregroundStyle(.secondary)
                 }
                 Button("Refresh cloud projects and upload state") {

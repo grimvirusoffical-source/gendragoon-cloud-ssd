@@ -187,9 +187,29 @@ class ConnectionTests(unittest.TestCase):
             if "cloudresourcemanager" in url:return {"projectId":"project-one","projectNumber":"123456","lifecycleState":"ACTIVE"}
             return {"name":"bucket-one","projectNumber":"123456"}
         with patch.object(connect,"google_json",side_effect=foreign):
-            with self.assertRaisesRegex(RuntimeError,"not owned"):connect.configure("project-one","bucket-one")
+            with self.assertRaisesRegex(RuntimeError,"not owned by the signed-in account.*bring-your-own Google Cloud"):connect.configure("project-one","bucket-one")
         self.assertEqual(self.selected(),before);self.assertEqual(self.config.read_bytes(),self.original)
         self.mock_command.assert_not_called()
+
+    def test_project_list_keeps_only_owned_google_cloud_destinations(self):
+        def listing(gcloud, url, body=None):
+            if "userinfo" in url:
+                return {"email": "owner@example.com"}
+            if "projects?" in url:
+                return {"projects": [
+                    {"projectId": "owned-proj", "name": "Owned", "lifecycleState": "ACTIVE"},
+                    {"projectId": "shared-proj", "name": "Readable", "lifecycleState": "ACTIVE"},
+                ]}
+            if "owned-proj" in url and "getIamPolicy" in url:
+                return {"bindings": [{"role": "roles/owner", "members": ["user:owner@example.com"]}]}
+            if "getIamPolicy" in url:
+                return {"bindings": [{"role": "roles/viewer", "members": ["user:owner@example.com"]}]}
+            return {}
+        with patch.object(connect, "google_json", side_effect=listing):
+            connect.projects()
+        payload = self.mock_reply.call_args.kwargs
+        self.assertEqual([item["id"] for item in payload["projects"]], ["owned-proj"])
+        self.assertIn("bring-your-own Google Cloud", payload["message"])
 
     def test_custom_native_install_uses_adjacent_bundle_rclone(self):
         helper=Path("/Applications/GenDragoon Cloud SSD.app/Contents/Resources/gendragoon_connect.py")

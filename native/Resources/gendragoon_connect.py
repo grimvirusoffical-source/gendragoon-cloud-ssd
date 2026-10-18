@@ -3,6 +3,12 @@
 
 Uses official CLIs for delegated OAuth. Does not ask for passwords or export keys.
 JSON responses contain status only, never tokens or account secrets.
+
+A Google Cloud Owner-role check applies only when this Mac attaches a
+bring-your-own Google Cloud bucket. Hosted workspaces live in the shared
+customer bucket and are authorized by the signed-in account on the service.
+Other clouds and VPS destinations use the local provider connection and never
+call this Owner-role check.
 """
 
 # Bundled helpers are signed resources: imports must never create or update caches.
@@ -261,7 +267,10 @@ def assert_project_owner(gcloud, project, email=None):
     bindings = policy.get("bindings") if isinstance(policy, dict) else None
     if not isinstance(bindings, list) or not any(
             item.get("role") == "roles/owner" and member in (item.get("members") or []) for item in bindings if isinstance(item, dict)):
-        raise RuntimeError("This Google Cloud project is not owned by the signed-in account. Only buckets in workspaces you own can be used.")
+        raise RuntimeError(
+            "This Google Cloud project is not owned by the signed-in account. "
+            "A GCP Owner role is required only for a bring-your-own Google Cloud destination. "
+            "Hosted workspaces and other cloud or VPS destinations do not use this check.")
     return email
 
 
@@ -289,7 +298,7 @@ def projects():
         if not token:
             break
         url = "https://cloudresourcemanager.googleapis.com/v1/projects?pageSize=100&pageToken=" + urllib.parse.quote(token)
-    reply(message=f"Found {len(data)} accessible Google Cloud projects.", projects=data)
+    reply(message=f"Found {len(data)} Google Cloud projects you own. This list is only for a bring-your-own Google Cloud destination.", projects=data)
 
 
 def valid_project(name):

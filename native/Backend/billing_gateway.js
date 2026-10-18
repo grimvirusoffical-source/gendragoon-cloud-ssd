@@ -151,15 +151,13 @@ function installedBilling({app,db,bucket,admin,firebaseAuth,accountKey,env=proce
    const object=event.data?.object||{};
    if(event.type.startsWith("customer.subscription.")){
     const latest=await stripe.subscriptions.retrieve(object.id);
-    if(latest.metadata?.kind==="workspace_month")await billing.projects.reconcileWorkspaceSubscription(latest);
-    else if(await billing.reconcileSubscription(latest))await provisionIfPaid(latest);
+    if(await billing.reconcileSubscription(latest))await provisionIfPaid(latest);
    } else if(event.type.startsWith("invoice.")){
     const id=typeof object.subscription==="string"?object.subscription:
       object.subscription?.id||object.parent?.subscription_details?.subscription;
     if(id){
       const latest=await stripe.subscriptions.retrieve(id);
-      if(latest.metadata?.kind==="workspace_month")await billing.projects.reconcileWorkspaceSubscription(latest);
-      else if(await billing.reconcileSubscription(latest))await provisionIfPaid(latest);
+      if(await billing.reconcileSubscription(latest))await provisionIfPaid(latest);
     }
    } else if(event.type.startsWith("checkout.session.")){
     if(object.metadata?.kind==="project_creation"){
@@ -172,8 +170,7 @@ function installedBilling({app,db,bucket,admin,firebaseAuth,accountKey,env=proce
       const id=typeof object.subscription==="string"?object.subscription:object.subscription.id;
       if(id){
       const latest=await stripe.subscriptions.retrieve(id);
-      if(latest.metadata?.kind==="workspace_month")await billing.projects.reconcileWorkspaceSubscription(latest);
-      else if(await billing.reconcileSubscription(latest))await provisionIfPaid(latest);
+      if(await billing.reconcileSubscription(latest))await provisionIfPaid(latest);
     }
     }
    } else if(event.type==="charge.refunded"||event.type==="charge.dispute.created"){

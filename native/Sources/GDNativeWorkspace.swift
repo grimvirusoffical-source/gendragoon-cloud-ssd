@@ -227,7 +227,7 @@ enum GDNativeHelper {
         VStack(alignment: .leading, spacing: 20) {
             HStack(alignment: .top) {
                 VStack(alignment: .leading, spacing: 6) {
-                    Text("CONNECTED GOOGLE CLOUD").font(.system(size: 9, weight: .bold, design: .monospaced)).tracking(2).foregroundStyle(.purple)
+                    Text("CLOUD LIBRARY").font(.system(size: 9, weight: .bold, design: .monospaced)).tracking(2).foregroundStyle(.purple)
                     Label(content == .applications ? "Managed Mac applications" : "Connected files & folders", systemImage: content == .applications ? "app.badge.fill" : "folder.fill")
                         .font(.system(size: 24, weight: .bold, design: .rounded))
                     Text(native.destinationLabel).font(.caption.monospaced()).foregroundStyle(.secondary).textSelection(.enabled)
@@ -238,10 +238,12 @@ enum GDNativeHelper {
                 Button { showCleanup.toggle() } label: { Label("Cleanup Drive", systemImage: "folder.badge.gearshape") }
                     .disabled(native.maintenanceBusy)
             }
-            Text("This library uses the verified Google Cloud destination shown above. Its objects remain separate from your product project's private Files index.")
+            Text("Hosted workspaces use the shared customer bucket and your signed-in account. Bring-your-own storage can be any cloud or VPS and is $5/month per workspace, the same as a hosted workspace. A Google Cloud Owner role is required only for a bring-your-own Google Cloud bucket.")
                 .font(.system(size: 11)).foregroundStyle(.secondary)
-            DisclosureGroup("Connection and Google Cloud destination", isExpanded: $showConnection) {
+            DisclosureGroup("Connect a cloud or VPS", isExpanded: $showConnection) {
                 VStack(alignment: .leading, spacing: 12) {
+                    Text("Google Cloud is one bring-your-own option. Other clouds and a VPS connect from the provider section and do not use the Owner-role check. Performance features cost extra unless you stay on the free performance tier.")
+                        .font(.caption).foregroundStyle(.secondary)
                     HStack {
                         Button("Connect Google Cloud") { native.connectGoogle() }
                             .buttonStyle(.borderedProminent).tint(.purple).disabled(locked)
@@ -249,9 +251,9 @@ enum GDNativeHelper {
                         Button("Cloud Console") { cloud.openCloudConsole() }
                     }
                     Text(cloud.accountStatus).font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
-                    DisclosureGroup("Connect a specific project and bucket") {
+                    DisclosureGroup("Bring your own Google Cloud bucket") {
                         VStack(alignment: .leading, spacing: 8) {
-                            Text("Enter the Google Cloud project ID that owns the bucket. The current destination changes only after access is verified.")
+                            Text("Enter a Google Cloud project you own. The Owner role is checked only for this destination. The current destination changes only after access is verified.")
                                 .font(.caption).foregroundStyle(.secondary)
                             HStack {
                                 TextField("Google Cloud project ID", text: $candidateProject)
@@ -305,7 +307,7 @@ enum GDNativeHelper {
                         .font(.caption).foregroundStyle(.secondary)
                 }.frame(maxWidth: .infinity, alignment: .leading).padding(8)
             }
-            if content == .applications { GDManualProviderSection(library: native.manualLibrary) }
+            GDManualProviderSection(library: native.manualLibrary)
         }
         .padding(24).background(.white.opacity(0.035), in: RoundedRectangle(cornerRadius: 21))
         .overlay(RoundedRectangle(cornerRadius: 21).stroke(dropTarget ? Color.purple : .white.opacity(0.08), lineWidth: dropTarget ? 2 : 1))
@@ -447,9 +449,9 @@ enum GDNativeHelper {
     @ObservedObject var library: LibraryModel
     @ObservedObject private var activity = GDUpdateActivity.shared
     var body: some View {
-        DisclosureGroup("Other cloud providers · manual configuration") {
+        DisclosureGroup("Bring your own cloud or VPS") {
             VStack(alignment: .leading, spacing: 10) {
-                Text("Configure SFTP, S3-compatible storage, Google Drive, WebDAV or another rclone provider on this Mac. This separate provider library does not change your Google Cloud destination.")
+                Text("Connect SFTP, a VPS, S3-compatible storage, Google Drive, WebDAV, or another provider on this Mac. This is $5/month per workspace, the same as a hosted workspace, and it does not require a Google Cloud Owner role. Performance features cost extra unless you stay on the free performance tier.")
                     .font(.caption).foregroundStyle(.secondary)
                 HStack {
                     Button("Open Provider Configuration") { library.openProviderSetup() }

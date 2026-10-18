@@ -3,6 +3,30 @@ import AppKit
 import Foundation
 import CryptoKit
 
+/// Client-facing workspace offer. Billing enforcement stays on the service.
+enum GDWorkspaceOffer {
+    static let monthlyCents = 500
+    static let freePerformanceWorkers = 1
+    static let providers: [GDByoProvider] = [
+        GDByoProvider(id: "s3", title: "Amazon S3 or S3-compatible"),
+        GDByoProvider(id: "sftp", title: "SFTP or your own VPS"),
+        GDByoProvider(id: "gcs", title: "Google Cloud Storage"),
+        GDByoProvider(id: "r2", title: "Cloudflare R2"),
+        GDByoProvider(id: "b2", title: "Backblaze B2"),
+        GDByoProvider(id: "webdav", title: "WebDAV"),
+        GDByoProvider(id: "google-drive", title: "Google Drive"),
+        GDByoProvider(id: "onedrive", title: "OneDrive"),
+        GDByoProvider(id: "other", title: "Another cloud"),
+    ]
+    static var monthlyLabel: String { String(format: "$%.2f/month", Double(monthlyCents) / 100) }
+    static let byoSummary = "Connect any cloud or VPS you already run. The workspace fee is $5/month, the same as a hosted workspace. Performance features cost extra unless you stay on the free performance tier."
+}
+
+struct GDByoProvider: Identifiable {
+    let id: String
+    let title: String
+}
+
 private struct GDBillingEndpoint: Decodable { let endpoint: String }
 private struct GDBillingStatus: Decodable { let checkoutEnabled: Bool; let stripeMode: String }
 private struct GDCheckoutResponse: Decodable { let url: String?; let complimentary: Bool?; let message: String?; let alreadyActivated: Bool? }
@@ -190,7 +214,7 @@ private struct GDBillingSelection: Codable, Equatable {
         guard remote.range(of: "^[A-Za-z0-9_-]{3,40}$", options: .regularExpression) != nil else { status = "Enter an existing remote name using 3–40 letters, numbers, dashes or underscores."; return }
         guard let root = Bundle.main.resourceURL, FileManager.default.isExecutableFile(atPath: root.appendingPathComponent("rclone").path) else { status = "The local provider tool is unavailable."; return }
         begin(login: session) {
-            self.status = "Checking your locally configured provider…"
+            self.status = "Checking your cloud or VPS connection…"
             let process = Process()
             process.executableURL = root.appendingPathComponent("rclone")
             let config = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support/GenDragoon Cloud SSD/gendragoon-rclone.conf")
@@ -317,7 +341,7 @@ struct GenDragoonStripePurchases: View {
             if let project = billing.workspaces.first(where: { $0.id == selected.workspaceID }) {
                 if project.isAvailable {
                     let storage = project.storageActive ? (project.storageTier ?? "Paid storage") : "2 GB basic storage"
-                    let performance = project.performanceActive == true ? (project.performanceTier?.capitalized ?? "Performance") : project.storageMode == "bundle" && project.storageActive ? "Bundle performance" : "Basic performance"
+                    let performance = project.performanceActive == true ? (project.performanceTier?.capitalized ?? "Performance") : project.storageMode == "bundle" && project.storageActive ? "Bundle performance" : "Free performance tier"
                     Text("Verified for \(project.name): \(storage) · \(performance) · \(project.workers ?? 1) transfer worker(s)").font(.system(size: 11)).foregroundStyle(.secondary)
                 } else {
                     Text("This project's activation is pending. Finish activation or restore it in Cloud before adding a subscription.").font(.system(size: 11)).foregroundStyle(.orange)
@@ -363,15 +387,21 @@ struct GenDragoonStripePurchases: View {
                 Button(billing.ownerBenefits ? "Activate selected performance — included" : "Continue with selected performance") { billing.buyPerformance(login: login, workspaceID: selected.workspaceID, tier: selected.performanceTier, yearly: selected.yearly) }
                     .buttonStyle(.borderedProminent).tint(.cyan).disabled(blocked || !billing.workspaces.contains { $0.id == selected.workspaceID && $0.supportsPerformance })
             }
-            Text("Performance is billed independently and can be added to your active basic, storage, or BYO project.").font(.system(size: 11)).foregroundStyle(.secondary)
+            Text("Paid performance is separate from the workspace fee and applies to hosted and bring-your-own workspaces. The free performance tier (\(GDWorkspaceOffer.freePerformanceWorkers) transfer worker) stays included.").font(.system(size: 11)).foregroundStyle(.secondary)
         } else if focus == "byo" {
             projectPicker
-            Text("Configure your cloud connection in My Cloud, then enter its existing remote name. Provider credentials stay on your Mac.").font(.system(size: 12)).foregroundStyle(.secondary)
-            Picker("Provider", selection: $selected.provider) { ForEach(["s3", "gcs", "r2", "b2", "sftp", "webdav", "google-drive", "onedrive", "other"], id: \.self) { Text($0.uppercased()).tag($0) } }
-            TextField("Existing rclone remote name", text: $selected.remote).textFieldStyle(.roundedBorder)
-            periodPicker
-            Text("Selected: Bring Your Own Cloud · \(money(selected.yearly ? catalog.byo.yearlyCents : catalog.byo.monthlyCents))/\(period). Your provider's storage and transfer charges are separate.").font(.system(size: 12, weight: .semibold))
-            Button(billing.ownerBenefits ? "Verify provider and activate — included" : "Verify provider and continue to Checkout") { billing.buyManualBYO(login: login, workspaceID: selected.workspaceID, remote: selected.remote, provider: selected.provider, yearly: selected.yearly) }
+            Text(GDWorkspaceOffer.byoSummary).font(.system(size: 12)).foregroundStyle(.secondary)
+            Picker("Cloud or VPS", selection: $selected.provider) {
+                ForEach(GDWorkspaceOffer.providers) { provider in Text(provider.title).tag(provider.id) }
+            }
+            if selected.provider == "gcs" {
+                Text("Google Cloud is one option. This Mac checks that your Google account is Owner on that project before the bucket is used. Hosted workspaces on the shared customer bucket do not use that check.").font(.system(size: 11)).foregroundStyle(.secondary)
+            } else {
+                Text("SFTP, a VPS, S3-compatible storage, and the other providers here do not require a Google Cloud Owner role. Credentials stay on this Mac.").font(.system(size: 11)).foregroundStyle(.secondary)
+            }
+            TextField("Existing remote name", text: $selected.remote).textFieldStyle(.roundedBorder)
+            Text("Workspace fee: \(GDWorkspaceOffer.monthlyLabel), the same as a hosted workspace. Your provider's own storage and network charges stay separate. Performance features cost extra unless you stay on the free performance tier.").font(.system(size: 12, weight: .semibold))
+            Button(billing.ownerBenefits ? "Verify connection and activate — included" : "Verify connection and continue · \(GDWorkspaceOffer.monthlyLabel)") { billing.buyManualBYO(login: login, workspaceID: selected.workspaceID, remote: selected.remote, provider: selected.provider, yearly: false) }
                 .buttonStyle(.borderedProminent).tint(.cyan).disabled(blocked || selected.remote.isEmpty || (catalog.catalogVersion ?? 1) < 2 || !billing.workspaces.contains { $0.id == selected.workspaceID && $0.isAvailable })
         } else if focus == "ads" {
             Text("Permanent ad removal · " + money(catalog.removeAds.oneTimeCents) + " once").font(.system(size: 16, weight: .semibold))

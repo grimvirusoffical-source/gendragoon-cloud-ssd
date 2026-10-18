@@ -144,7 +144,7 @@ private struct GDDraftWorkspace: Identifiable, Codable {
     }
     private var chosen:GDTier? { gdTiers.first(where:{$0.id == selectedTier}) }
     private var chosenLabel:String {
-        if storageMode == "byo" { return annual ? "$100.00/year · Bring Your Own Cloud" : "$10.00/month · Bring Your Own Cloud" }
+        if storageMode == "byo" { return "\(GDWorkspaceOffer.monthlyLabel) · Your cloud or VPS" }
         guard let t=chosen else {return "Choose a plan"}
         return "\(t.capacity) · \(gdMoney(annual ? t.yearly : t.monthly))/\(annual ? "year" : "month")"
     }
@@ -295,8 +295,8 @@ private struct GDDraftWorkspace: Identifiable, Codable {
             GDHeading(kicker:"STORAGE + PERFORMANCE",title:"Choose your cloud plan.",subtitle:"Select a server-listed tier, retain your choice, and review the exact amount in secure checkout.")
             GenDragoonStripePurchases(focus:"bundle")
             GDPanel {
-                Label("Your own cloud provider",systemImage:"server.rack").font(.headline)
-                Text("Use a separately configured SFTP, S3-compatible or other supported provider. Your provider bills its storage and network usage separately.")
+                Label("Bring your own cloud or VPS",systemImage:"server.rack").font(.headline)
+                Text("Connect any cloud or VPS, not only Google Cloud. The workspace is \(GDWorkspaceOffer.monthlyLabel), the same as a hosted workspace. Your provider bills its own storage and network. Performance features cost extra unless you stay on the free performance tier.")
                     .font(.caption).foregroundStyle(gdSecondary)
             }
             GenDragoonStripePurchases(focus:"byo")
@@ -313,7 +313,7 @@ private struct GDDraftWorkspace: Identifiable, Codable {
     }
     private var performancePage: some View {
         VStack(alignment:.leading,spacing:20) {
-            GDHeading(kicker:"PERFORMANCE",title:"Tune your transfer workload.",subtitle:"Select an active storage workspace and choose its transfer-worker plan. Actual speed depends on the network, provider and workload.")
+            GDHeading(kicker:"PERFORMANCE",title:"Tune your transfer workload.",subtitle:"The free performance tier is included with every hosted or bring-your-own workspace. Paid transfer-worker plans cost extra. Actual speed depends on the network, provider and workload.")
             GenDragoonStripePurchases(focus:"performance")
         }
     }
@@ -370,7 +370,7 @@ private struct GDDraftWorkspace: Identifiable, Codable {
     }
     private var workspacesPage: some View {
         VStack(alignment:.leading,spacing:20) {
-            GDHeading(kicker:"PROJECT WORKSPACES",title:"A separate cloud for every project.",subtitle:"Each managed workspace has its own $5/month management fee and a required storage plan. Billing and access are independent from your other workspaces.")
+            GDHeading(kicker:"PROJECT WORKSPACES",title:"A separate cloud for every project.",subtitle:"The first hosted workspace is free. Each additional hosted workspace, and each bring-your-own cloud or VPS workspace, is $5/month. Performance features cost extra unless you stay on the free performance tier.")
             if loginSession.isOwner { GDPanel {
                 HStack {
                     Image(systemName:"externaldrive.fill.badge.checkmark")

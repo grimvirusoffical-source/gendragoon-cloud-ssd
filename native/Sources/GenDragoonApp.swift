@@ -686,7 +686,7 @@ struct GDManagedAppSession: Identifiable {
     @ObservedObject var library: LibraryModel
     var body: some View {
         Panel(title: "Cloud Providers & Your Own VPS") {
-            Text("Add SFTP, S3-compatible storage, Backblaze B2, Cloudflare R2, WebDAV, Google Drive, OneDrive or other rclone-compatible servers. You must manually supply endpoint, provider, region, bucket, access ID, secret and permissions in the local Terminal wizard.").font(.system(size: 12)).foregroundStyle(.gray)
+            Text("Connect any cloud or VPS: SFTP, a virtual private server, S3-compatible storage, Backblaze B2, Cloudflare R2, WebDAV, Google Drive, OneDrive, or Google Cloud. The workspace fee is $5/month, the same as a hosted workspace. Supply endpoint, provider, region, bucket, access ID, secret and permissions in the local Terminal wizard. A Google Cloud Owner role is checked only for a bring-your-own Google Cloud bucket.").font(.system(size: 12)).foregroundStyle(.gray)
             HStack {
                 ActionButton(title: "Open Manual Terminal Configuration", systemName: "terminal", action: library.openProviderSetup, isPrimary: true)
                 ActionButton(title: "Refresh Providers", systemName: "arrow.clockwise", action: library.refresh, isDisabled: library.busy)
@@ -696,7 +696,7 @@ struct GDManagedAppSession: Identifiable {
                     ForEach(library.remotes,id:\.self) { name in Text(name).tag(name) }
                 }
             }
-            Text("Providers use the dedicated GenDragoon rclone configuration. Adding one does not replace your mounted Google Cloud drive.").font(.system(size: 11)).foregroundStyle(.gray)
+            Text("Providers use the dedicated GenDragoon rclone configuration. A bring-your-own connection does not replace a hosted workspace, and it does not require a Google Cloud Owner role unless the destination itself is Google Cloud.").font(.system(size: 11)).foregroundStyle(.gray)
             Text(library.message).font(.system(size: 11)).foregroundStyle(.gray).textSelection(.enabled)
         }
     }
@@ -742,7 +742,7 @@ struct GDManagedAppSession: Identifiable {
     @ObservedObject var cloud: CloudModel
     var body: some View {
         Panel(title: "Google Cloud · Browser Login") {
-                        Text("GenDragoonSSD · Personal Cloud Storage. This connection uses the existing storage project ID (gendragood-ssd). Customer Google sign-in uses the separate Firebase project (gendragoonssd).")
+                        Text("GenDragoonSSD · Personal Cloud Storage. This Google Cloud connection is only for a bucket you bring yourself, and it requires the Owner role on that project. Hosted workspaces use your signed-in account on the shared customer bucket. Any other cloud or VPS is $5/month as well and does not use this check. Customer Google sign-in uses the separate Firebase project (gendragoonssd).")
                             .font(.system(size: 12)).foregroundStyle(.gray)
                         HStack(spacing: 10) {
                             ActionButton(title: "Connect Google Cloud · Opera", systemName: "person.crop.circle.badge.checkmark", action: cloud.connectGoogle, isPrimary: true, isDisabled: cloud.cloudBusy)
@@ -862,8 +862,8 @@ private struct PlansPanel: View {
             }
             HStack {
                 VStack(alignment:.leading,spacing:3) {
-                    Text("Bring Your Own Cloud · $10/mo or $100/yr").font(.system(size:12,weight:.semibold))
-                    Text("Advanced setup: provider fees extra, and reliability depends on your VPS. Not recommended for beginners.")
+                    Text("Your cloud or VPS · $5/month").font(.system(size:12,weight:.semibold))
+                    Text("Same workspace fee as a hosted workspace. Any cloud or VPS, not only Google Cloud. Provider charges stay with that provider. Performance features cost extra unless you stay on the free performance tier.")
                         .font(.system(size:11)).foregroundStyle(.gray)
                 }
                 Spacer()

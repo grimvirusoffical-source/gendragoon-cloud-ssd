@@ -16,7 +16,7 @@ Primary sources: `Sources/GenDragoonCommercialUI.swift`, `Sources/GenDragoonCust
 
 Files, Storage and Performance share the selected product project. Choices and view/transfer preferences are scoped to the authenticated account and project. Storage and performance activation target existing projects; intended selections and entitlement state are retained through the billing APIs. An unavailable or inactive saved project is shown explicitly instead of silently switching its destination.
 
-The base workspace is free. Each additional workspace is its own $5/month subscription. The shared policy module is native/Backend/workspace_subscriptions.js. A lapse keeps the free workspace plus every workspace with an active subscription; it does not rewrite existing billing records. The default cap is 10 workspaces, or 20 when an active project is on a medium or highest storage tier (1 TB–3 TB, or 4 TB–6 TB) or performance tier (Turbo, or Ultra/Max). Pending payment/capacity states remain visible.
+The server enforces one lifetime free project and a one-time $5 fee for each additional new project, with the authorized owner fee waiver handled by server policy. The default cap is 10 projects. It rises to 20 when the account has a qualifying active, provisioned project with at least 2 TB storage and Turbo performance (8 workers), including a qualifying bundle. Pending payment/capacity states remain visible.
 
 Project removal is **Archive Project**: it retains files and underlying cloud resources. Existing subscriptions continue until cancelled in billing; the archive flow requires acknowledgement when billing continues. Restoring a project is cap-checked and does not create a new-project fee.
 
