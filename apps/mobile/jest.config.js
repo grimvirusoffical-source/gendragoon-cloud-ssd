@@ -1,3 +1,7 @@
+/* global process */
+// Pin the zone so local-time formatting (Payment due date) is tested as a New York user sees it.
+process.env.TZ = "America/New_York";
+
 module.exports = {
   preset: "jest-expo",
   setupFiles: ["<rootDir>/jest.setup.ts"],

@@ -1,15 +1,15 @@
 /**
  * QA review probes for gendragoon-apps PR #3 at f1d3487 (Casey).
  * Passing tests pin behaviour that is correct today.
- * `it.failing` marks a gap found in review; it turns red once the gap is fixed,
- * so move it to a plain `it` in that commit.
+ * The nine gaps found in review were `it.failing`; each is now a required `it`
+ * (fixed by Jordan on PR #3, gap notes kept above each test).
  */
 import { GenDragoonClient, MemorySecretStore, SUPPORT_CONTACT, requestDeletionSupport } from "@gendragoon/core";
 import { fireEvent, render, waitFor } from "@testing-library/react-native";
 import { Linking, StyleSheet } from "react-native";
-import { DeleteAccountScreen, NewWorkspaceScreen, WorkspacesScreen } from "../src/screens";
+import { DeleteAccountScreen, NewWorkspaceScreen, PassphraseScreen, WorkspacesScreen } from "../src/screens";
 import { supportContactTarget } from "../src/supportContact";
-import { contrastRatio, tapTarget } from "../src/theme";
+import { colors, contrastRatio, tapTarget } from "../src/theme";
 import { graceBanner } from "../src/workspaceState";
 
 const TOKEN = "status-token";
@@ -127,7 +127,7 @@ describe("PR #3 review: support request falls back to mail and never to sign-in"
   // Gap: a 2xx other than 202, or a 3xx, makes core throw ApiError(status).
   // contact() then routes it through showFailure, which calls onError with a raw
   // message instead of mailing support.
-  it.failing.each([[200], [204], [302]])("HTTP %i (unexpected) also mails support", async (status) => {
+  it.each([[200], [204], [302]])("HTTP %i (unexpected) also mails support", async (status) => {
     await expectMailNoSignIn(await pressContact(post(status, status === 204 ? null : { ok: true })));
   });
 });
@@ -168,13 +168,13 @@ describe("PR #3 review: pricing UI", () => {
 
   // Gap: graceBanner formats in UTC. A deadline of 02:00Z on Oct 21 is 10 pm on
   // Oct 20 in New York, but the banner says Oct 21, a day after the real deadline.
-  it.failing("the Payment due date is not later than the deadline in the user's zone (America/New_York)", () => {
+  it("the Payment due date is not later than the deadline in the user's zone (America/New_York)", () => {
     const deadline = Date.UTC(2026, 9, 21, 2); // Oct 20, 22:00 EDT
     expect(graceBanner(deadline)).toContain("Oct 20, 2026");
   });
 
   // Gap: a feeWaived (owner) quote labels Included, but the explanation says "billed monthly".
-  it.failing("create screen does not say 'billed monthly' for a feeWaived quote", async () => {
+  it("create screen does not say 'billed monthly' for a feeWaived quote", async () => {
     const s = await render(
       <NewWorkspaceScreen pricingEnabled quote={price({ feeWaived: true, monthlyPriceCents: 0 })} onCreate={() => undefined} />,
     );
@@ -221,7 +221,7 @@ describe("PR #3 review: merge section", () => {
   // Gap: picker state is seeded once by useState. When the selected source is
   // removed from the list (deleted elsewhere), Merge stays enabled and posts the
   // removed workspace's id.
-  it.failing("Merge never sends a workspace that is no longer in the list", async () => {
+  it("Merge never sends a workspace that is no longer in the list", async () => {
     const onMerge = jest.fn();
     const s = await render(<WorkspacesScreen workspaces={[A, B, C]} unpaidIds={[]} onDelete={() => undefined} onMerge={onMerge} />);
     await s.rerender(<WorkspacesScreen workspaces={[B, C]} unpaidIds={[]} onDelete={() => undefined} onMerge={onMerge} />);
@@ -235,7 +235,7 @@ describe("PR #3 review: merge section", () => {
 
   // Gap: same seeding. A list that arrives after mount (empty while loading) leaves
   // no source or target selected, so Merge is disabled with nothing highlighted.
-  it.failing("a list that loads after mount preselects a source and a different target", async () => {
+  it("a list that loads after mount preselects a source and a different target", async () => {
     const s = await render(<WorkspacesScreen workspaces={[]} unpaidIds={[]} onDelete={() => undefined} onMerge={() => undefined} />);
     await s.rerender(<WorkspacesScreen workspaces={[A, B]} unpaidIds={[]} onDelete={() => undefined} onMerge={() => undefined} />);
     expect(s.getByTestId(`merge-source-${A.id}`).props.accessibilityState.checked).toBe(true);
@@ -252,7 +252,7 @@ describe("PR #3 review: theme", () => {
 
   // Gap: the "Open <workspace>" Pressable has no minHeight or hitSlop, so its
   // target is one text line (~18pt), not 44pt.
-  it.failing("the Open workspace control is at least 44pt tall", async () => {
+  it("the Open workspace control is at least 44pt tall", async () => {
     const A = ws("11111111-1111-4111-8111-00000000000a", "Alpha", {});
     const s = await render(<WorkspacesScreen workspaces={[A]} unpaidIds={[]} onDelete={() => undefined} onMerge={() => undefined} />);
     const open = s.getByTestId(`open-${A.id}`);
@@ -263,8 +263,18 @@ describe("PR #3 review: theme", () => {
 
   // Gap: non-text contrast (WCAG 1.4.11, 3:1). Field and ghost borders are #3a3352
   // on #100e17 (1.62:1); the unchecked passphrase checkbox border is #5b4a99 (2.63:1).
-  it.failing("input, ghost and checkbox borders are at least 3:1 against the screen", () => {
-    expect(contrastRatio("#3a3352", "#100e17")).toBeGreaterThanOrEqual(3);
-    expect(contrastRatio("#5b4a99", "#100e17")).toBeGreaterThanOrEqual(3);
+  // Now read from the rendered styles, so a token swap back to a dim border fails here.
+  it("input, ghost and checkbox borders are at least 3:1 against the screen", async () => {
+    const flat = (node: { props: { style?: unknown } }) =>
+      StyleSheet.flatten(typeof node.props.style === "function" ? node.props.style({ pressed: false }) : node.props.style) ?? {};
+    const pass = await render(<PassphraseScreen onSubmit={() => undefined} />);
+    const input = flat(pass.getByTestId("passphrase"));
+    const ghost = flat(pass.getByTestId("passphrase-visibility"));
+    const box = flat(pass.getByTestId("passphrase-ack").children[0] as never);
+    for (const border of [input.borderColor, ghost.borderColor, box.borderColor]) {
+      expect(typeof border).toBe("string");
+      expect(contrastRatio(String(border), colors.bg)).toBeGreaterThanOrEqual(3);
+      expect(contrastRatio(String(border), colors.surface)).toBeGreaterThanOrEqual(3);
+    }
   });
 });

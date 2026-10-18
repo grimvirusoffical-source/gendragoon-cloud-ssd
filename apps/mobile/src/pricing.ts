@@ -72,7 +72,12 @@ export function workspaceQuoteExplanation(storage: "hosted" | "byo", quote: unkn
   const record = quote && typeof quote === "object" ? quote as { isFree?: unknown; grandfathered?: unknown } : {};
   const isFree = record.isFree === true;
   const grandfathered = record.grandfathered === true;
-  const amount = formatMonthlyPrice(isFree || grandfathered ? 0 : quoteCents(quote));
+  const cents = quoteCents(quote);
+  const amount = formatMonthlyPrice(isFree || grandfathered ? 0 : cents);
+  // A server price of 0 (feeWaived, grandfathered) is never "billed monthly".
+  if (cents === 0 && !isFree) {
+    return storage === "byo" ? "Bring-your-own storage has no monthly charge" : "This workspace has no monthly charge";
+  }
   if (storage === "byo") {
     return amount ? `Bring-your-own storage is ${amount}` : "Bring-your-own storage is billed monthly.";
   }
