@@ -7,7 +7,7 @@ let package = Package(
     targets: [
         .target(
             name: "GenDragoonContract",
-            path: "../Sources",
+            path: "Sources",
             sources: [
                 "GDAccountContract.swift",
                 "GDStorageContract.swift",
@@ -19,7 +19,7 @@ let package = Package(
         .testTarget(
             name: "GenDragoonContractTests",
             dependencies: ["GenDragoonContract"],
-            path: "Tests"
+            path: "ContractTests/Tests"
         ),
     ]
 )

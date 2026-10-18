@@ -107,7 +107,7 @@ jobs:
       - name: Compile the Mac client
         run: xcrun swiftc -parse-as-library -target arm64-apple-macosx14.0 -framework SwiftUI -framework AppKit -o "$RUNNER_TEMP/GenDragoon" native/Sources/*.swift
       - name: Run contract XCTest
-        working-directory: native/ContractTests
+        working-directory: native
         run: swift test
 
   android:

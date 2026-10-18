@@ -36,8 +36,9 @@ class NativeHelperTests(unittest.TestCase):
         # Extract unchanged production declarations; no Process or runtime facade.
         production = production[production.index("enum GDRuntime {"):
                                 production.index("@MainActor private final class GDNativeUploadSignal:")]
+        account = (NATIVE / "Sources/GDAccountContract.swift").read_text()
         source = cls.root / "HelperRegression.swift"
-        source.write_text("import Foundation\nimport Darwin\n" + production + HARNESS)
+        source.write_text("import Foundation\nimport Darwin\n" + account + production + HARNESS)
         compiled = subprocess.run(["/usr/bin/xcrun", "swiftc", "-parse-as-library", str(source),
                                    "-o", str(cls.binary)], capture_output=True, text=True, timeout=60)
         if compiled.returncode:
