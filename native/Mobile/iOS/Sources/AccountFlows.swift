@@ -170,7 +170,7 @@ struct CloudDeletionTransport:DeletionTransport {
     private func contactSupport() async {
         let call=DeletionSupport.call(jobId:model.flow.jobId,statusToken:model.flow.statusToken)
         guard call.send,let path=call.path,let token=call.statusToken else {
-            if let url=SupportContact.mailto(jobId:model.flow.jobId){UIApplication.shared.open(url)}
+            if let url=SupportContact.mailto(jobId:model.flow.jobId){await UIApplication.shared.open(url)}
             return
         }
         let result:DeletionSupport.Result
@@ -181,7 +181,7 @@ struct CloudDeletionTransport:DeletionTransport {
             result=DeletionSupport.interpret(status:0,body:"",transportFailed:true)
         }
         if model.applySupport(result) {
-            if let url=SupportContact.mailto(jobId:model.flow.jobId){UIApplication.shared.open(url)}
+            if let url=SupportContact.mailto(jobId:model.flow.jobId){await UIApplication.shared.open(url)}
             return
         }
         if model.flow.keepsPolling() {await poll()}

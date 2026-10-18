@@ -43,7 +43,7 @@ enum DeletionSupport {
         var kind:Kind
         var requestId:String?
         var message:String?
-        var opensMailto:Bool { kind==.mailto }
+        var opensMailto:Bool { kind == .mailto }
     }
     static func call(jobId:String?,statusToken:String?)->Call { call(jobId:jobId,statusToken:statusToken,enabled:enabled) }
     static func call(jobId:String?,statusToken:String?,enabled:Bool)->Call {
