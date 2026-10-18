@@ -293,6 +293,8 @@ export class GenDragoonClient {
    * POST /v2/account/deletions/:jobId/support-request.
    * No body. Authorization is the status token, so getToken is not called.
    * 404, every 401, other 4xx, a network error, and 5xx return the email fallback.
+   * So does any other unexpected status (e.g. 200, 204, 3xx) or a body read error:
+   * this method never throws.
    * This method does not call onAuthFailure or clear a session.
    * 409 support_not_needed refreshes GET status with the same token.
    * A failed refresh is the same email fallback.
@@ -306,9 +308,9 @@ export class GenDragoonClient {
       const text = await response.text();
       body = text ? safeJson(text) : null;
       status = response.status;
-    } catch (error) {
-      if (error instanceof ApiError && (error.status === 0 || error.status >= 400)) return deletionSupportFallback();
-      throw error;
+    } catch {
+      // Network error (ApiError 0) or a body that cannot be read.
+      return deletionSupportFallback();
     }
     const record = body && typeof body === "object" ? body as Record<string, unknown> : {};
     if (status === 202) {
@@ -328,8 +330,8 @@ export class GenDragoonClient {
         return deletionSupportFallback();
       }
     }
-    if (status >= 400) return deletionSupportFallback();
-    throw toError(status, body);
+    // Every other status, 4xx/5xx or an unexpected 2xx/3xx, is the email fallback.
+    return deletionSupportFallback();
   }
 
   /** POST /v2/workspaces/:id/byo/challenge. No body. Response is `{ nonce, expiresAtMs, ttlMs }`. */
