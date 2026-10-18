@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 struct AccountDeletedScreen:View {
     @EnvironmentObject private var session:MobileSession
@@ -41,6 +42,7 @@ struct CloudDeletionTransport:DeletionTransport {
         next.step = .failed
         next.showSupport=true
         next.dismissible=true
+        next.jobId="00000000-0000-4000-8000-0000000000aa"
         next.message="Account deletion failed and cannot be resumed. Nothing on this device was erased."
         flow=next
     }
@@ -112,7 +114,9 @@ struct CloudDeletionTransport:DeletionTransport {
                         Text(model.flow.message ?? "Account deletion did not finish. You can retry.")
                         if model.flow.offersRetry() { Button("Retry"){model.retry()} }
                         if model.flow.showSupport {
-                            Text(SupportContact.address).textSelection(.enabled).accessibilityIdentifier("deletion-support")
+                            Button("Contact support"){
+                                if let url=SupportContact.mailto(jobId:model.flow.jobId){UIApplication.shared.open(url)}
+                            }.accessibilityIdentifier("deletion-support")
                         }
                         if model.flow.canDismiss() { Button("Dismiss"){model.dismissError();dismiss()} }
                         else { Button("Cancel"){dismiss()} }

@@ -19,7 +19,7 @@ final class AccountLogicTests: XCTestCase {
     }
 
     func testParsesRealStatusJson() throws {
-        XCTAssertEqual(BackendFixtures.accountDeletionSHA,"d788ccb")
+        XCTAssertEqual(BackendFixtures.accountDeletionSHA,"9d0f056")
         let created=AccountHttp.parse(status:202,data:Data(BackendFixtures.body("delete202").utf8))
         XCTAssertEqual(created.jobStatus,"deleting")
         XCTAssertTrue(AccountDeletion.validJob(created.jobId ?? ""))
@@ -521,16 +521,15 @@ final class AccountLogicTests: XCTestCase {
         XCTAssertFalse(gone.allowsDelete())
     }
 
-    func testSingularPathHtmlAndOtherNonJsonDoNotThrow() async {
+    func testSingularPathIsJson404AndSyntheticNonJsonDoesNotThrow() async {
         XCTAssertTrue(BackendFixtures.requestPath(area:"account-deletion",name:"singular-path").contains("/v2/account/deletion/"))
-        let html=AccountHttp.parse(status:BackendFixtures.responseStatus(area:"account-deletion",name:"singular-path"),data:BackendFixtures.responseBodyData(area:"account-deletion",name:"singular-path"))
-        XCTAssertEqual(html.status,404)
-        XCTAssertTrue(html.raw.contains("Cannot GET"))
-        XCTAssertNil(html.error)
-        XCTAssertNil(html.jobId)
+        let missingPath=fixture("singular-path")
+        XCTAssertEqual(missingPath.status,404)
+        XCTAssertEqual(missingPath.error,"not_found")
+        XCTAssertNil(missingPath.jobId)
         var polling=AccountDeletion.resume(DeletionReceipt.of(jobId:"job_html",statusToken:token))
         let script=ScriptedDeletionTransport()
-        script.respond(html)
+        script.respond(missingPath)
         await polling.pollThrough(script)
         XCTAssertEqual(polling.step,.failed)
         XCTAssertTrue(polling.offersRetry())
@@ -540,8 +539,10 @@ final class AccountLogicTests: XCTestCase {
         XCTAssertFalse(polling.dropReceipt)
         XCTAssertFalse(polling.requestsWipe())
 
+        // SYNTHETIC non-JSON body. singular-path.json is JSON 404 and is not this case.
         var generic=AccountDeletion.resume(DeletionReceipt.of(jobId:"job_html",statusToken:token))
         let other=AccountHttp.parse(status:503,data:Data("<html>unavailable</html>".utf8))
+        XCTAssertTrue(other.raw.contains("<html>unavailable</html>"))
         XCTAssertNil(other.error)
         let genericScript=ScriptedDeletionTransport()
         genericScript.respond(other)
@@ -554,12 +555,24 @@ final class AccountLogicTests: XCTestCase {
 
         var missing=ready()
         let plain=ScriptedDeletionTransport()
-        plain.respond(AccountHttp(status:404,raw:html.raw,error:nil,jobId:nil,jobStatus:nil,retryable:nil,statusToken:nil))
+        plain.respond(missingPath)
         await missing.deleteThrough(plain,authorization:"Bearer firebase-token")
         XCTAssertTrue(missing.plainError)
         XCTAssertFalse(missing.offersRetry())
         XCTAssertFalse(missing.requestsWipe())
         XCTAssertNil(missing.jobId)
+
+        let expired=fixture("expired-token")
+        XCTAssertEqual(expired.status,404)
+        XCTAssertEqual(expired.error,"not_found")
+        XCTAssertTrue(BackendFixtures.requestPath(area:"account-deletion",name:"expired-token").hasSuffix("000000000005"))
+        let otherJob=fixture("other-job-token")
+        XCTAssertEqual(otherJob.status,404)
+        XCTAssertEqual(otherJob.error,"not_found")
+        XCTAssertTrue(BackendFixtures.requestPath(area:"account-deletion",name:"other-job-token").hasSuffix("000000000006"))
+        XCTAssertEqual(fixture("accepted").statusToken,"<redacted>")
+        XCTAssertEqual(fixture("retry-after-failed").statusToken,"<redacted>")
+        XCTAssertTrue(AccountDeletion.validToken("<redacted>"))
     }
 
     func testStatusTokenPollStopsOnInvalidTokenAndUnauthorized() async {
@@ -617,22 +630,36 @@ final class AccountLogicTests: XCTestCase {
         XCTAssertEqual(flow.step,.reauth)
         XCTAssertTrue(flow.acceptFreshSignIn(authTime:Date(timeIntervalSince1970:2),now:Date(timeIntervalSince1970:2)))
         XCTAssertTrue(flow.allowsDelete())
-        // DERIVED until fixtures/account-deletion/retry-after-failed.json lands from PR #6.
-        let derived="{\"jobId\":\"\(failed.jobId ?? "")\",\"status\":\"deleting\",\"statusToken\":\"status-token-after-failed\"}"
-        let again=AccountHttp.parse(status:202,data:Data(derived.utf8))
-        flow.onDeleteHttp(status:again.status,jobId:again.jobId,errorCode:again.error,statusToken:again.statusToken)
+        let again=fixture("retry-after-failed")
+        XCTAssertEqual(again.status,202)
+        XCTAssertEqual(again.jobStatus,"queued")
+        XCTAssertEqual(again.statusToken,"<redacted>")
+        XCTAssertEqual(BackendFixtures.requestPath(area:"account-deletion",name:"retry-after-failed"),"/v2/account")
+        let retried=ScriptedDeletionTransport()
+        retried.respond(again)
+        await flow.deleteThrough(retried,authorization:"Bearer firebase-token")
+        XCTAssertEqual(retried.calls.first?.0,"DELETE")
+        XCTAssertEqual(retried.calls.first?.1,"v2/account")
         XCTAssertEqual(flow.step,.polling)
-        XCTAssertEqual(flow.jobId,failed.jobId)
-        XCTAssertEqual(flow.statusToken,"status-token-after-failed")
+        XCTAssertEqual(flow.jobId,again.jobId)
+        XCTAssertEqual(flow.statusToken,"<redacted>")
         XCTAssertFalse(flow.requestsWipe())
 
         var gone=AccountDeletion.resume(DeletionReceipt.of(jobId:failed.jobId ?? "",statusToken:token))
-        gone.onPollHttp(status:200,jobStatus:"failed",errorCode:nil,retryable:true)
+        let failedAgain=ScriptedDeletionTransport()
+        failedAgain.respond(failed)
+        await gone.pollThrough(failedAgain)
         gone.retry()
         XCTAssertTrue(gone.acceptFreshSignIn(authTime:Date(timeIntervalSince1970:2),now:Date(timeIntervalSince1970:2)))
-        gone.onDeleteHttp(status:410,jobId:failed.jobId,errorCode:"account_deleted",statusToken:"status-token-410")
+        let deleted=fixture("account-deleted")
+        let finished=ScriptedDeletionTransport()
+        finished.respond(deleted)
+        await gone.deleteThrough(finished,authorization:"Bearer firebase-token")
+        XCTAssertEqual(finished.calls.first?.0,"DELETE")
+        XCTAssertEqual(finished.calls.first?.1,"v2/account")
         XCTAssertEqual(gone.step,.polling)
-        XCTAssertEqual(gone.statusToken,"status-token-410")
+        XCTAssertEqual(gone.jobId,deleted.jobId)
+        XCTAssertEqual(gone.statusToken,"<redacted>")
         XCTAssertFalse(gone.requestsWipe())
     }
 
@@ -650,24 +677,58 @@ final class AccountLogicTests: XCTestCase {
         XCTAssertNil(failed.jobId)
         XCTAssertFalse(failed.requestsWipe())
 
-        var blocked=AccountDeletion.resume(DeletionReceipt.of(jobId:"job_block",statusToken:token))
-        // DERIVED until fixtures/account-deletion/retry-not-retryable.json lands from PR #6.
-        let derived=Data("{\"error\":\"deletion_not_retryable\",\"jobId\":\"00000000-0000-4000-8000-000000000004\"}".utf8)
-        let conflict=AccountHttp.parse(status:409,data:derived)
+        let failedBody=fixture("status-failed")
+        var blocked=AccountDeletion.resume(DeletionReceipt.of(jobId:failedBody.jobId ?? "",statusToken:token))
+        let failedScript=ScriptedDeletionTransport()
+        failedScript.respond(failedBody)
+        await blocked.pollThrough(failedScript)
+        blocked.retry()
+        XCTAssertTrue(blocked.acceptFreshSignIn(authTime:Date(timeIntervalSince1970:2),now:Date(timeIntervalSince1970:2)))
+        let conflict=fixture("retry-not-retryable")
+        XCTAssertEqual(conflict.status,409)
+        XCTAssertEqual(conflict.error,"deletion_not_retryable")
+        XCTAssertEqual(BackendFixtures.requestPath(area:"account-deletion",name:"retry-not-retryable"),"/v2/account")
         let script=ScriptedDeletionTransport()
         script.respond(conflict)
-        await blocked.pollThrough(script)
+        await blocked.deleteThrough(script,authorization:"Bearer firebase-token")
+        XCTAssertEqual(script.calls.first?.0,"DELETE")
+        XCTAssertEqual(script.calls.first?.1,"v2/account")
         XCTAssertEqual(blocked.step,.failed)
         XCTAssertTrue(blocked.showSupport)
         XCTAssertFalse(blocked.offersRetry())
         XCTAssertTrue(blocked.canDismiss())
-        XCTAssertEqual(blocked.jobId,"00000000-0000-4000-8000-000000000004")
+        XCTAssertEqual(blocked.jobId,"00000000-0000-4000-8000-0000000000aa")
         XCTAssertEqual(blocked.statusToken,token)
+        XCTAssertTrue(SupportContact.mailto(jobId:blocked.jobId)?.absoluteString.contains("Account%20deletion%20"+(conflict.jobId ?? "")) ?? false)
         XCTAssertFalse(blocked.requestsWipe())
         XCTAssertTrue(blocked.dismissError())
         XCTAssertNil(blocked.jobId)
         XCTAssertFalse(blocked.requestsWipe())
         XCTAssertTrue(LocalWipePlan.keychainServicesRemoved(wipe:blocked.requestsWipe()).isEmpty)
+    }
+
+    func testVendoredKeyEnvelopeAndPayloadTooLargeAreLoaded() {
+        XCTAssertEqual(BackendFixtures.accountDeletionSHA,"9d0f056")
+        XCTAssertEqual(BackendFixtures.keyEnvelopeSHA,"24fba02")
+        let tooLarge=AccountHttp.parse(status:BackendFixtures.responseStatus(area:"errors",name:"payload-too-large"),data:BackendFixtures.responseBodyData(area:"errors",name:"payload-too-large"))
+        XCTAssertEqual(tooLarge.status,413)
+        XCTAssertEqual(tooLarge.error,"payload_too_large")
+        XCTAssertEqual(BackendFixtures.requestPath(area:"errors",name:"payload-too-large"),"/v2/account")
+        var huge=ready()
+        huge.onDeleteHttp(status:tooLarge.status,jobId:tooLarge.jobId,errorCode:tooLarge.error,statusToken:tooLarge.statusToken)
+        XCTAssertEqual(huge.step,.failed)
+        XCTAssertFalse(huge.requestsWipe())
+        XCTAssertEqual(BackendFixtures.responseStatus(area:"key-envelope",name:"create"),201)
+        XCTAssertTrue(BackendFixtures.requestPath(area:"key-envelope",name:"create").hasSuffix("/key-envelope"))
+        let conflict=AccountHttp.parse(status:BackendFixtures.responseStatus(area:"key-envelope",name:"conflict"),data:BackendFixtures.responseBodyData(area:"key-envelope",name:"conflict"))
+        XCTAssertEqual(conflict.status,409)
+        XCTAssertEqual(conflict.error,"envelope_exists")
+        let mismatch=AccountHttp.parse(status:BackendFixtures.responseStatus(area:"key-envelope",name:"version-mismatch"),data:BackendFixtures.responseBodyData(area:"key-envelope",name:"version-mismatch"))
+        XCTAssertEqual(mismatch.status,412)
+        XCTAssertEqual(mismatch.error,"version_mismatch")
+        let envelopeSize=AccountHttp.parse(status:BackendFixtures.responseStatus(area:"key-envelope",name:"payload-too-large"),data:BackendFixtures.responseBodyData(area:"key-envelope",name:"payload-too-large"))
+        XCTAssertEqual(envelopeSize.status,413)
+        XCTAssertEqual(envelopeSize.error,"payload_too_large")
     }
 
     func testReleaseBuildRejectsPlaceholderSupportContact() {
@@ -754,6 +815,10 @@ final class AccountLogicTests: XCTestCase {
         XCTAssertFalse(deleteStore.events.contains("trash"))
     }
 
+    private func fixture(_ name:String)->AccountHttp {
+        AccountHttp.parse(status:BackendFixtures.responseStatus(area:"account-deletion",name:name),data:BackendFixtures.responseBodyData(area:"account-deletion",name:name))
+    }
+
     private func ready()->AccountDeletion {
         var flow=AccountDeletion()
         flow.continueFromExplain()
@@ -818,7 +883,7 @@ private final class MemoryReplacement:ReplacementStore {
 /// `reauth_required` and a 401 with no code go to sign-in. None of them wipe.
 ///
 /// Generated fixtures live under `native/Mobile/fixtures/shared/account-deletion/`.
-/// `status-invalid-token` and `status-unauthorized` are from f943a58.
+/// `status-invalid-token` and `status-unauthorized` are from 9d0f056.
 /// The export redacts tokens to `"<redacted>"`; that string is the opaque token here.
 final class InvalidTokenDeletionTests: XCTestCase {
     private let area="account-deletion"
@@ -955,9 +1020,10 @@ final class InvalidTokenDeletionTests: XCTestCase {
 }
 
 /// The repo-root `fixtures/` directory wins when this branch has it.
-/// A response body may be JSON or a raw string such as Express HTML.
+/// `singular-path.json` is JSON. A non-JSON body in a test is synthetic.
 private enum BackendFixtures {
-    static let accountDeletionSHA="d788ccb"
+    static let accountDeletionSHA="9d0f056"
+    static let keyEnvelopeSHA="24fba02"
     static let sharedFixtureSHA="da39276"
 
     static func body(_ name:String)->String {

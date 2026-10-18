@@ -16,7 +16,7 @@ import static org.junit.Assert.assertTrue;
  * {@code reauth_required} and a 401 with no code go to sign-in. None of them wipe.
  *
  * Generated fixtures are vendored under src/test/resources/fixtures/account-deletion.
- * {@code status-invalid-token} and {@code status-unauthorized} are from f943a58.
+ * {@code status-invalid-token} and {@code status-unauthorized} are from 9d0f056.
  * The export redacts tokens to {@code "<redacted>"}; that string is the opaque token here.
  */
 public final class InvalidTokenDeletionTest {

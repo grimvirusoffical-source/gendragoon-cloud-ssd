@@ -45,7 +45,7 @@ public final class AccountDeletionTest {
     @Test public void parsesRealStatusJson(){
         AccountActions.HttpBody created=AccountActions.parse(202,BackendFixtures.body("delete202"));
         assertEquals("deleting",created.jobStatus);
-        assertEquals(BackendFixtures.ACCOUNT_DELETION_SHA,"d788ccb");
+        assertEquals(BackendFixtures.ACCOUNT_DELETION_SHA,"9d0f056");
         assertTrue(AccountActions.validJob(created.jobId));
         assertTrue(AccountActions.validToken(created.statusToken));
         AccountActions.HttpBody running=AccountActions.parse(200,BackendFixtures.body("pollRunning"));
@@ -566,15 +566,14 @@ public final class AccountDeletionTest {
         assertFalse(gone.allowsDelete());
     }
 
-    @Test public void singularPathHtmlAndOtherNonJsonDoNotThrow() throws Exception {
+    @Test public void singularPathIsJson404AndSyntheticNonJsonDoesNotThrow() throws Exception {
         assertTrue(BackendFixtures.requestPath("account-deletion","singular-path").contains("/v2/account/deletion/"));
-        AccountActions.HttpBody html=fixture("singular-path");
-        assertEquals(404,html.status);
-        assertTrue(html.raw.contains("Cannot GET"));
-        assertNull(html.error);
-        assertNull(html.jobId);
+        AccountActions.HttpBody missingPath=fixture("singular-path");
+        assertEquals(404,missingPath.status);
+        assertEquals("not_found",missingPath.error);
+        assertNull(missingPath.jobId);
         AccountDeletion polling=AccountDeletion.resume(DeletionReceipt.of("job_html",TOKEN));
-        polling.pollThrough(new Script().respond(html));
+        polling.pollThrough(new Script().respond(missingPath));
         assertEquals(AccountDeletion.Step.FAILED,polling.step);
         assertTrue(polling.offersRetry());
         assertTrue(polling.canDismiss());
@@ -583,8 +582,10 @@ public final class AccountDeletionTest {
         assertFalse(polling.dropReceipt);
         assertFalse(polling.requestsWipe());
 
+        // SYNTHETIC non-JSON body. singular-path.json is JSON 404 and is not this case.
         AccountDeletion generic=AccountDeletion.resume(DeletionReceipt.of("job_html",TOKEN));
         AccountActions.HttpBody other=AccountActions.parse(503,"<html>unavailable</html>");
+        assertTrue(other.raw.contains("<html>unavailable</html>"));
         assertNull(other.error);
         generic.pollThrough(new Script().respond(other));
         assertTrue(generic.offersRetry());
@@ -594,11 +595,23 @@ public final class AccountDeletionTest {
         assertFalse(generic.requestsWipe());
 
         AccountDeletion missing=ready();
-        missing.deleteThrough(new Script().respond(new AccountActions.HttpBody(404,html.raw,null,null,null,null,null)),"Bearer firebase-token");
+        missing.deleteThrough(new Script().respond(missingPath),"Bearer firebase-token");
         assertTrue(missing.plainError);
         assertFalse(missing.offersRetry());
         assertFalse(missing.requestsWipe());
         assertNull(missing.jobId);
+
+        AccountActions.HttpBody expired=fixture("expired-token");
+        assertEquals(404,expired.status);
+        assertEquals("not_found",expired.error);
+        assertTrue(BackendFixtures.requestPath("account-deletion","expired-token").endsWith("000000000005"));
+        AccountActions.HttpBody otherJob=fixture("other-job-token");
+        assertEquals(404,otherJob.status);
+        assertEquals("not_found",otherJob.error);
+        assertTrue(BackendFixtures.requestPath("account-deletion","other-job-token").endsWith("000000000006"));
+        assertEquals("<redacted>",fixture("accepted").statusToken);
+        assertEquals("<redacted>",fixture("retry-after-failed").statusToken);
+        assertTrue(AccountActions.validToken("<redacted>"));
     }
 
     @Test public void statusTokenPollStopsOnInvalidTokenAndUnauthorized() throws Exception {
@@ -648,22 +661,30 @@ public final class AccountDeletionTest {
         assertEquals(AccountDeletion.Step.REAUTH,flow.step);
         assertTrue(flow.acceptFreshSignIn(2_000L,2_000L));
         assertTrue(flow.allowsDelete());
-        // DERIVED until fixtures/account-deletion/retry-after-failed.json lands from PR #6.
-        String retryAfterFailedDerived="{\"jobId\":\""+failed.jobId+"\",\"status\":\"deleting\",\"statusToken\":\"status-token-after-failed\"}";
-        AccountActions.HttpBody again=AccountActions.parse(202,retryAfterFailedDerived);
-        flow.onDeleteHttp(again.status,again.jobId,again.error,again.statusToken);
+        AccountActions.HttpBody again=fixture("retry-after-failed");
+        assertEquals(202,again.status);
+        assertEquals("queued",again.jobStatus);
+        assertEquals("<redacted>",again.statusToken);
+        assertEquals("/v2/account",BackendFixtures.requestPath("account-deletion","retry-after-failed"));
+        Script retried=new Script().respond(again);
+        flow.deleteThrough(retried,"Bearer firebase-token");
+        assertEquals("DELETE /v2/account",retried.calls.get(0));
         assertEquals(AccountDeletion.Step.POLLING,flow.step);
-        assertEquals(failed.jobId,flow.jobId);
-        assertEquals("status-token-after-failed",flow.statusToken);
+        assertEquals(again.jobId,flow.jobId);
+        assertEquals("<redacted>",flow.statusToken);
         assertFalse(flow.requestsWipe());
 
         AccountDeletion gone=AccountDeletion.resume(DeletionReceipt.of(failed.jobId,TOKEN));
-        gone.onPollHttp(200,"failed",null,true);
+        gone.pollThrough(new Script().respond(failed));
         gone.retry();
         assertTrue(gone.acceptFreshSignIn(2_000L,2_000L));
-        gone.onDeleteHttp(410,failed.jobId,"account_deleted","status-token-410");
+        AccountActions.HttpBody deleted=fixture("account-deleted");
+        Script finished=new Script().respond(deleted);
+        gone.deleteThrough(finished,"Bearer firebase-token");
+        assertEquals("DELETE /v2/account",finished.calls.get(0));
         assertEquals(AccountDeletion.Step.POLLING,gone.step);
-        assertEquals("status-token-410",gone.statusToken);
+        assertEquals(deleted.jobId,gone.jobId);
+        assertEquals("<redacted>",gone.statusToken);
         assertFalse(gone.requestsWipe());
     }
 
@@ -681,22 +702,54 @@ public final class AccountDeletionTest {
         assertNull(failed.jobId);
         assertFalse(failed.requestsWipe());
 
-        AccountDeletion blocked=AccountDeletion.resume(DeletionReceipt.of("job_block",TOKEN));
-        // DERIVED until fixtures/account-deletion/retry-not-retryable.json lands from PR #6.
-        String retryNotRetryableDerived="{\"error\":\"deletion_not_retryable\",\"jobId\":\"00000000-0000-4000-8000-000000000004\"}";
-        AccountActions.HttpBody conflict=AccountActions.parse(409,retryNotRetryableDerived);
-        blocked.pollThrough(new Script().respond(conflict));
+        AccountActions.HttpBody failedBody=fixture("status-failed");
+        AccountDeletion blocked=AccountDeletion.resume(DeletionReceipt.of(failedBody.jobId,TOKEN));
+        blocked.pollThrough(new Script().respond(failedBody));
+        blocked.retry();
+        assertTrue(blocked.acceptFreshSignIn(2_000L,2_000L));
+        AccountActions.HttpBody conflict=fixture("retry-not-retryable");
+        assertEquals(409,conflict.status);
+        assertEquals("deletion_not_retryable",conflict.error);
+        assertEquals("/v2/account",BackendFixtures.requestPath("account-deletion","retry-not-retryable"));
+        Script script=new Script().respond(conflict);
+        blocked.deleteThrough(script,"Bearer firebase-token");
+        assertEquals("DELETE /v2/account",script.calls.get(0));
         assertEquals(AccountDeletion.Step.FAILED,blocked.step);
         assertTrue(blocked.showSupport);
         assertFalse(blocked.offersRetry());
         assertTrue(blocked.canDismiss());
-        assertEquals("00000000-0000-4000-8000-000000000004",blocked.jobId);
+        assertEquals("00000000-0000-4000-8000-0000000000aa",blocked.jobId);
         assertEquals(TOKEN,blocked.statusToken);
+        assertTrue(SupportContact.mailto(blocked.jobId).contains("Account%20deletion%20"+conflict.jobId));
         assertFalse(blocked.requestsWipe());
         assertTrue(blocked.dismissError());
         assertNull(blocked.jobId);
         assertFalse(blocked.requestsWipe());
         assertTrue(LocalDataWipe.secretsRemoved(blocked.requestsWipe(),ALIASES).isEmpty());
+    }
+
+    @Test public void vendoredKeyEnvelopeAndPayloadTooLargeAreLoaded(){
+        assertEquals("9d0f056",BackendFixtures.ACCOUNT_DELETION_SHA);
+        assertEquals("24fba02",BackendFixtures.KEY_ENVELOPE_SHA);
+        AccountActions.HttpBody tooLarge=AccountActions.parse(BackendFixtures.responseStatus("errors","payload-too-large"),BackendFixtures.responseBody("errors","payload-too-large"));
+        assertEquals(413,tooLarge.status);
+        assertEquals("payload_too_large",tooLarge.error);
+        assertEquals("/v2/account",BackendFixtures.requestPath("errors","payload-too-large"));
+        AccountDeletion huge=ready();
+        huge.onDeleteHttp(tooLarge.status,tooLarge.jobId,tooLarge.error,tooLarge.statusToken);
+        assertEquals(AccountDeletion.Step.FAILED,huge.step);
+        assertFalse(huge.requestsWipe());
+        assertEquals(201,BackendFixtures.responseStatus("key-envelope","create"));
+        assertTrue(BackendFixtures.requestPath("key-envelope","create").endsWith("/key-envelope"));
+        AccountActions.HttpBody conflict=AccountActions.parse(BackendFixtures.responseStatus("key-envelope","conflict"),BackendFixtures.responseBody("key-envelope","conflict"));
+        assertEquals(409,conflict.status);
+        assertEquals("envelope_exists",conflict.error);
+        AccountActions.HttpBody mismatch=AccountActions.parse(BackendFixtures.responseStatus("key-envelope","version-mismatch"),BackendFixtures.responseBody("key-envelope","version-mismatch"));
+        assertEquals(412,mismatch.status);
+        assertEquals("version_mismatch",mismatch.error);
+        AccountActions.HttpBody envelopeSize=AccountActions.parse(BackendFixtures.responseStatus("key-envelope","payload-too-large"),BackendFixtures.responseBody("key-envelope","payload-too-large"));
+        assertEquals(413,envelopeSize.status);
+        assertEquals("payload_too_large",envelopeSize.error);
     }
 
     @Test public void retryAfterNetworkErrorSendsDeleteAgain() throws Exception {

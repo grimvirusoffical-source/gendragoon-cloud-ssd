@@ -7,14 +7,15 @@ import java.util.ArrayList;
 import java.util.List;
 
 /**
- * Account-deletion fixtures are {@code fixtures/account-deletion} at d788ccb.
- * Lock, workspace, merge, BYO, and ownership cases stay on the shared fixtures at da39276
- * ({@code fixtures/<area>/<case>.json}, shape {@code {request, response:{status, body}}}).
+ * Account-deletion fixtures are {@code fixtures/account-deletion} at 9d0f056.
+ * Key-envelope fixtures are {@code fixtures/key-envelope} at 24fba02.
+ * Lock, workspace, merge, BYO, and ownership cases stay on the shared fixtures at da39276.
  * The repo-root {@code fixtures/} directory wins when this branch has it.
- * A response body may be JSON or a raw string such as Express HTML.
+ * {@code singular-path.json} is JSON. A non-JSON body in a test is synthetic.
  */
 final class BackendFixtures {
-    static final String ACCOUNT_DELETION_SHA="d788ccb";
+    static final String ACCOUNT_DELETION_SHA="9d0f056";
+    static final String KEY_ENVELOPE_SHA="24fba02";
     static final String SHARED_FIXTURE_SHA="da39276";
 
     private BackendFixtures(){}

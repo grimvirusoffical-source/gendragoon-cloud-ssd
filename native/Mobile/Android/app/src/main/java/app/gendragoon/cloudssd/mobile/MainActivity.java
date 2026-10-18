@@ -314,7 +314,7 @@ public final class MainActivity extends AppCompatActivity {
             case FAILED -> {
                 content.addView(text(deletion.message==null?"Account deletion did not finish. You can retry.":deletion.message,15,false));
                 if(deletion.offersRetry()){space(content,12);content.addView(button("Retry",()->{deletion.retry();if(deletion.step==AccountDeletion.Step.POLLING){advanceDeletion();return;}deletionSignInStarted=false;showDeleteAccount();}));}
-                if(deletion.showSupport){space(content,8);TextView contact=text(SupportContact.ADDRESS,15,false);contact.setContentDescription("deletion-support");content.addView(contact);}
+                if(deletion.showSupport){space(content,8);MaterialButton support=button("Contact support",()->{try{startActivity(new Intent(Intent.ACTION_SENDTO,Uri.parse(SupportContact.mailto(deletion.jobId))));}catch(Exception ignored){}});support.setContentDescription("deletion-support");content.addView(support);}
                 if(deletion.canDismiss()){space(content,8);content.addView(button("Dismiss",this::dismissDeletionError));}
                 else{space(content,8);content.addView(button("Cancel",this::cancelDeletion));}
             }
