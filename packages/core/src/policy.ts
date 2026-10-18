@@ -51,6 +51,8 @@ export interface WorkspaceRecord {
   monthlyPriceCents?: number;
   /** Server flag on list and create items. */
   grandfathered?: boolean;
+  /** Server flag on list and create items. */
+  feeWaived?: boolean;
   accountHash?: string;
   accountKey?: string;
   projectStatus?: ProjectStatus;
@@ -120,18 +122,19 @@ export function planSummary(access: {
 
 /**
  * Price fields copied off a workspace list item, a create `project`, or a
- * BYO register body. `monthlyPriceCents` is 0 exactly when `isFree` or
- * `grandfathered` is true. This type does not recompute either flag.
+ * BYO register body. `monthlyPriceCents` is 0 exactly when `isFree`,
+ * `grandfathered`, or `feeWaived` is true. This type does not recompute them.
  */
 export interface WorkspacePrice {
   isFree: boolean;
   monthlyPriceCents: number;
   grandfathered: boolean;
+  feeWaived: boolean;
 }
 
 /**
- * Reads the server price. `isFree`, `monthlyPriceCents`, and `grandfathered`
- * are required. The input object is not changed.
+ * Reads the server price. `isFree`, `monthlyPriceCents`, `grandfathered`,
+ * and `feeWaived` are required. The input object is not changed.
  */
 export function parseWorkspacePrice(value: unknown): WorkspacePrice {
   if (!value || typeof value !== "object") throw new TypeError("Workspace price is missing");
@@ -141,17 +144,19 @@ export function parseWorkspacePrice(value: unknown): WorkspacePrice {
     throw new TypeError("Workspace monthlyPriceCents is missing");
   }
   if (typeof record.grandfathered !== "boolean") throw new TypeError("Workspace grandfathered is missing");
+  if (typeof record.feeWaived !== "boolean") throw new TypeError("Workspace feeWaived is missing");
   return {
     isFree: record.isFree,
     monthlyPriceCents: record.monthlyPriceCents,
     grandfathered: record.grandfathered,
+    feeWaived: record.feeWaived,
   };
 }
 
-/** `Free` when `isFree`, `Included` when `grandfathered`, otherwise USD cents. */
+/** `Free` when `isFree`, `Included` when `grandfathered` or `feeWaived`, otherwise USD cents. */
 export function workspacePriceLabel(price: WorkspacePrice): string {
   if (price.isFree) return "Free";
-  if (price.grandfathered) return "Included";
+  if (price.grandfathered || price.feeWaived) return "Included";
   return formatMonthlyPriceCents(price.monthlyPriceCents);
 }
 

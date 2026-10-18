@@ -8,6 +8,8 @@ import type {
   ByoChallengeResponse,
   ByoProofRequest,
   ByoProofResponse,
+  ByoRegisterResponse,
+  DeletionSupportResult,
   CapabilitiesResponse,
   CheckoutResponse,
   CloudFile,
@@ -106,6 +108,11 @@ export class GenDragoonClient {
     const body = await this.request<Workspace>("GET", `/v2/projects/${encodeURIComponent(id)}`);
     assertServerPrices(body);
     return body;
+  }
+
+  /** POST /v2/projects/:id/make-hosted. No body. The server returns the new hosted row. */
+  makeHosted(id: string): Promise<Record<string, unknown>> {
+    return this.request("POST", `/v2/projects/${encodeURIComponent(id)}/make-hosted`);
   }
 
   async createProject(body: { name: string; intentId: string }): Promise<Record<string, unknown>> {
@@ -269,7 +276,7 @@ export class GenDragoonClient {
   }
 
   /** POST /v2/workspaces/:id/byo/register. SFTP and the other coming-soon providers return 422. */
-  async registerByo(id: string, body: ByoRegisterRequest): Promise<Record<string, unknown>> {
+  async registerByo(id: string, body: ByoRegisterRequest): Promise<ByoRegisterResponse & Record<string, unknown>> {
     assertNoCredentialFields(body);
     const bucketFingerprint = (body.bucketFingerprint || body.hostFingerprint || "").trim();
     const payload = {
@@ -277,9 +284,41 @@ export class GenDragoonClient {
       endpoint: body.endpoint,
       ...(bucketFingerprint ? { bucketFingerprint } : {}),
     };
-    const registered = await this.request<Record<string, unknown>>("POST", `/v2/workspaces/${encodeURIComponent(id)}/byo/register`, payload);
+    const registered = await this.request<ByoRegisterResponse & Record<string, unknown>>("POST", `/v2/workspaces/${encodeURIComponent(id)}/byo/register`, payload);
     assertServerPrices(registered);
     return registered;
+  }
+
+  /**
+   * POST /v2/account/deletions/:jobId/support-request.
+   * No body. Authorization is the status token, so this works signed out.
+   * 404, 401 unauthorized, a network error, and 5xx use the support email.
+   * None of those call onAuthFailure or start sign-in.
+   */
+  async requestDeletionSupport(
+    jobId: string,
+    statusToken: string,
+    hooks?: { onAuthFailure?: (signal: "signed_out" | "reauth_required", error: unknown) => void },
+  ): Promise<DeletionSupportResult> {
+    void hooks;
+    try {
+      const body = await this.request<{ status?: unknown; requestId?: unknown }>(
+        "POST",
+        `/v2/account/deletions/${encodeURIComponent(jobId)}/support-request`,
+        undefined,
+        { Authorization: `Bearer ${statusToken}` },
+      );
+      const requestId = typeof body?.requestId === "string" ? body.requestId : "";
+      if (body?.status === "received" && requestId) return { result: "sent", requestId };
+      return deletionSupportFallback();
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 429) return { result: "already_sent" };
+      if (error instanceof ApiError && error.status === 409 && error.code === "support_not_needed") {
+        return { result: "refresh_status" };
+      }
+      if (isDeletionSupportFallback(error)) return deletionSupportFallback();
+      throw error;
+    }
   }
 
   /** POST /v2/workspaces/:id/byo/challenge. No body. Response is `{ nonce, expiresAtMs, ttlMs }`. */
@@ -451,6 +490,16 @@ function toError(status: number, parsed: unknown): ApiError {
 function machineCode(errorField: string, codeField: string): string {
   if (errorField.length > 0) return errorField;
   return codeField;
+}
+
+function deletionSupportFallback(): DeletionSupportResult {
+  return { result: "use_fallback_email", supportContact: SUPPORT_CONTACT };
+}
+
+/** 404, 401, transport failure, and 5xx stay on the email fallback. They are not sign-in. */
+function isDeletionSupportFallback(error: unknown): boolean {
+  if (!(error instanceof ApiError)) return false;
+  return error.status === 404 || error.status === 401 || error.status === 0 || error.status >= 500;
 }
 
 /**

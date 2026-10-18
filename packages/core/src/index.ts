@@ -189,6 +189,7 @@ export type {
   ByoChallengeResponse,
   ByoProofRequest,
   ByoProofResponse,
+  ByoRegisterResponse,
   AccessResponse,
   StorageOp,
   StorageMode,
@@ -201,5 +202,6 @@ export type {
   DeleteAccountRequest,
   DeleteAccountAccepted,
   AccountDeletionStatus,
+  DeletionSupportResult,
   KeyEnvelope,
 } from "./api/types.js";

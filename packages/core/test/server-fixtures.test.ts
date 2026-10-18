@@ -1,6 +1,6 @@
 /**
  * Drives GenDragoonClient with Riley's vendored fixtures
- * (gendragoon-cloud-ssd fix/backend-workspace-policy @ 4c3dd13).
+ * (gendragoon-cloud-ssd fix/backend-workspace-policy @ 0715b1a).
  * Deletion, storage-urls, and key-envelope are not in this export.
  */
 import { readFileSync } from "node:fs";
@@ -40,6 +40,7 @@ async function invoke(client: GenDragoonClient, fixture: ServerFixture): Promise
   if (method === "POST" && path === "/v2/projects") {
     return client.createProject(body as { name: string; intentId: string });
   }
+  if (method === "POST" && path.endsWith("/make-hosted")) return client.makeHosted(id);
   if (method === "GET" && path === "/v2/workspaces") return client.listWorkspaces();
   if (method === "GET" && /^\/v2\/projects\/[^/]+$/.test(path)) return client.getProject(id);
   if (method === "POST" && path.endsWith("/cloud/uploads")) {
@@ -67,8 +68,8 @@ async function invoke(client: GenDragoonClient, fixture: ServerFixture): Promise
 describe("vendored server fixtures", () => {
   it("records the source repo and commit", () => {
     expect(source.repository).toBe("grimvirusoffical-source/gendragoon-cloud-ssd");
-    expect(source.commit).toBe("4c3dd13587fae1ddfa907ad2b84c0886d7794ade");
-    expect(source.sources?.[0]?.commit).toBe("4c3dd13587fae1ddfa907ad2b84c0886d7794ade");
+    expect(source.commit).toBe("0715b1a933a3ee3bb489e28a6122475403bb341d");
+    expect(source.sources?.[0]?.commit).toBe("0715b1a933a3ee3bb489e28a6122475403bb341d");
   });
 
   const cases = listServerFixtures();
@@ -89,7 +90,7 @@ describe("vendored server fixtures", () => {
   it("records the later fixture commits", () => {
     const sources = source.sources ?? [];
     const commits = sources.map((item) => item.commit);
-    expect(commits).toContain("fff0a84b6d75acb3a79cff7f146450c486efbe56");
+    expect(commits).toContain("d33970cbf0175a74898c37a8a624a92b1c1a5a94");
     expect(commits).toContain("8267784a790bbe8418b3cbe36e8a4b91849b0e81");
     expect(commits).toContain("ee4f76f07bc798635002ae2c272fb47d83db7698");
   });

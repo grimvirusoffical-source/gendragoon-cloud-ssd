@@ -3,7 +3,7 @@
   "url": "https://github.com/grimvirusoffical-source/gendragoon-cloud-ssd",
   "branch": "fix/account-deletion",
   "pullRequest": 6,
-  "commit": "fff0a84b6d75acb3a79cff7f146450c486efbe56",
+  "commit": "d33970cbf0175a74898c37a8a624a92b1c1a5a94",
   "paths": [
     "fixtures/account-deletion"
   ]
