@@ -251,7 +251,13 @@ export class GenDragoonClient {
   /** POST /v2/workspaces/:id/byo/register. SFTP and the other coming-soon providers return 422. */
   async registerByo(id: string, body: ByoRegisterRequest): Promise<Record<string, unknown>> {
     assertNoCredentialFields(body);
-    return this.request("POST", `/v2/workspaces/${encodeURIComponent(id)}/byo/register`, body);
+    const bucketFingerprint = (body.bucketFingerprint || body.hostFingerprint || "").trim();
+    const payload = {
+      provider: body.provider,
+      endpoint: body.endpoint,
+      ...(bucketFingerprint ? { bucketFingerprint } : {}),
+    };
+    return this.request("POST", `/v2/workspaces/${encodeURIComponent(id)}/byo/register`, payload);
   }
 
   /** POST /v2/workspaces/:id/byo/challenge. No body. Response is `{ nonce, expiresAtMs, ttlMs }`. */
@@ -261,18 +267,17 @@ export class GenDragoonClient {
 
   /**
    * POST /v2/workspaces/:id/byo/verify.
-   * The body is `{ presignedUrl }` when a URL is present, otherwise `{}`.
-   * `readBack` is never sent. A missing URL is 400 `presigned_url_required`.
+   * The body is `{ presignedUrl }` with a non-empty URL, otherwise `{}`.
+   * A missing URL is 400 `presigned_url_required`.
    */
   async verifyByo(id: string, body: ByoProofRequest): Promise<ByoProofResponse> {
-    const record = body && typeof body === "object" ? body as ByoProofRequest & { readBack?: unknown } : undefined;
-    const presignedUrl = typeof record?.presignedUrl === "string" ? record.presignedUrl : "";
+    const presignedUrl = typeof body?.presignedUrl === "string" ? body.presignedUrl.trim() : "";
     const payload = presignedUrl ? { presignedUrl } : {};
     assertNoCredentialFields(payload);
     return this.request("POST", `/v2/workspaces/${encodeURIComponent(id)}/byo/verify`, payload);
   }
 
-  async submitByoProof(id: string, body: { presignedUrl?: string; presignedGetUrl?: string; readBack?: unknown }): Promise<ByoProofResponse> {
+  async submitByoProof(id: string, body: { presignedUrl?: string; presignedGetUrl?: string }): Promise<ByoProofResponse> {
     const presignedUrl = body?.presignedUrl ?? body?.presignedGetUrl ?? "";
     return this.verifyByo(id, { presignedUrl });
   }

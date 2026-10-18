@@ -150,6 +150,8 @@ The server does not send **409** `byo_unverifiable`. The client still maps that 
 { "provider": "s3", "endpoint": "https://bucket.s3.us-east-1.amazonaws.com", "bucketFingerprint": "<hex>" }
 ```
 
+`hostFingerprint` is an alias of `bucketFingerprint`. The client sends `bucketFingerprint`. SFTP, Azure, and WebDAV still return **422** `byo_provider_unsupported`.
+
 `POST /v2/workspaces/:id/byo/challenge` has no body. Response:
 
 ```json
@@ -164,7 +166,7 @@ The client writes `nonce` to `.gendragoon-challenge/<nonce>` with credentials th
 { "presignedUrl": "https://…" }
 ```
 
-Do not send stored credentials, access keys, or `readBack`. A body without `presignedUrl` is **400** `{ "error": "presigned_url_required" }` (`byo/verify-missing-url`). Registering the same storage again runs a new challenge. The previous proof is not reused. Activate the workspace only when the server can GET that URL and the challenge has not expired. Persist `provider`, `endpoint`, and `bucketFingerprint` only. Reject any body that contains credential fields (`secretAccessKey`, `password`, `privateKey`, `token`, and the rest listed in `assertNoCredentialFields`).
+The URL must be non-empty. A missing or blank URL is sent as `{}` and is **400** `{ "error": "presigned_url_required" }` (`byo/verify-missing-url`). Registering the same storage again runs a new challenge. The previous proof is not reused. Activate the workspace only when the server can GET that URL and the challenge has not expired. Persist `provider`, `endpoint`, and `bucketFingerprint` only. Reject any body that contains credential fields (`secretAccessKey`, `password`, `privateKey`, `token`, and the rest listed in `assertNoCredentialFields`).
 
 `POST /v2/workspaces/:id/manual-provider` can stay as a label, but `connectionTested: true` is not this proof.
 

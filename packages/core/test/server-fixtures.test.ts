@@ -80,15 +80,28 @@ describe("vendored server fixtures", () => {
     ]));
   });
 
-  it("verify drops readBack and a missing URL is presigned_url_required", async () => {
+  it("a blank presignedUrl is omitted and verify-missing-url is presigned_url_required", async () => {
     const fixture = loadServerFixture("byo", "verify-missing-url");
     const { client, seen } = clientFor(fixture);
     const id = fixture.request.path.split("/")[3] ?? "";
-    const error = await client.verifyByo(id, { readBack: "nonce" } as unknown as { presignedUrl: string }).catch((caught: unknown) => caught);
+    const error = await client.verifyByo(id, { presignedUrl: "   " }).catch((caught: unknown) => caught);
     expect(seen[0]?.body).toEqual({});
-    expect(seen[0]?.body).not.toHaveProperty("readBack");
     expect(error).toMatchObject({ status: 400, code: "presigned_url_required" });
     expect(byoErrorMessage(error)).toMatch(/presigned URL/i);
+  });
+
+  it("SFTP register sends hostFingerprint as bucketFingerprint", async () => {
+    const fixture = loadServerFixture("byo", "provider-unsupported");
+    const { client, seen } = clientFor(fixture);
+    const id = fixture.request.path.split("/")[3] ?? "";
+    const fields = fixture.request.body as { provider: string; endpoint: string; bucketFingerprint: string };
+    const error = await client.registerByo(id, {
+      provider: fields.provider,
+      endpoint: fields.endpoint,
+      hostFingerprint: fields.bucketFingerprint,
+    }).catch((caught: unknown) => caught);
+    expect(seen[0]?.body).toEqual(fixture.request.body);
+    expect(error).toMatchObject({ status: 422, code: "byo_provider_unsupported" });
   });
 
   for (const { area, name, fixture } of cases) {

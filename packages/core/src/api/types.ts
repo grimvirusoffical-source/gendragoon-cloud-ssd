@@ -192,11 +192,15 @@ export interface MergePreviewResponse {
   targetId: string;
 }
 
-/** POST /v2/workspaces/:id/byo/register. No secrets. */
+/**
+ * POST /v2/workspaces/:id/byo/register. No secrets.
+ * `hostFingerprint` is an alias of `bucketFingerprint`. The request sends `bucketFingerprint`.
+ */
 export interface ByoRegisterRequest {
   provider: string;
   endpoint: string;
-  bucketFingerprint: string;
+  bucketFingerprint?: string;
+  hostFingerprint?: string;
 }
 
 /** Registration body. The challenge request itself has no body. */
