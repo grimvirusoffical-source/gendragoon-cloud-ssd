@@ -74,11 +74,16 @@ test("performance activates only exact separately subscribed tier",async()=>{
  assert.equal(s.workspace.performanceActive,false);
 });
 test("BYO entitlements never create managed cloud storage or automatic provider credentials",async()=>{
- const s=setup({kind:"byo",storageTier:null,storageInterval:"month",
-   manualProviderConfigured:true});
  const sub={id:"sub_byo_test",customer:"cus_test_own",status:"active",
   metadata:{kind:"byo",accountHash:owner,workspaceId:wid},
   items:{data:[{price:{id:"price_byo"},quantity:1}]}};
+ const unverified=setup({kind:"byo",storageTier:null,storageInterval:"month",
+   manualProviderConfigured:true,byoChallengeVerified:false});
+ assert.equal(await unverified.result.reconcileSubscription(sub),true);
+ assert.notEqual(unverified.workspace.byoActive,true);
+ assert.equal(unverified.workspace.provisioned,false);
+ const s=setup({kind:"byo",storageTier:null,storageInterval:"month",
+   manualProviderConfigured:true,byoChallengeVerified:true});
  assert.equal(await s.result.reconcileSubscription(sub),true);
  assert.equal(s.workspace.byoActive,true);
  assert.equal(s.workspace.provisioned,false);

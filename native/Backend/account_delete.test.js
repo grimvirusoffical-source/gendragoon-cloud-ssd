@@ -1,7 +1,7 @@
 "use strict";
 // Contract tests for DELETE /v2/account (Avery's spec; Riley implements).
 // Contract: 202 + job id, job polled until done; recent sign-in window 5 min;
-// stale auth refused immediately (no job); second call 401 (Firebase user gone).
+// stale auth refused immediately (no job); second call 410 once the user is gone.
 //   const {createAccountDeletion}=require("./account_delete");
 //   const svc=createAccountDeletion({db,stripe,bucket,auth,byoProviders,hash,now});
 //   await svc.deleteAccount({user:{uid,auth_time}})  -> {status:202,jobId}
@@ -88,9 +88,15 @@ test("account delete: bring-your-own storage is never touched",async()=>{
   const f=fixture();await runToDone(f,f.fresh);
   assert.deepEqual(f.byoCalls,[],"no calls to BYO provider stubs");
 });
-test("account delete: second call returns 401 (user gone) and repeats no side effects",async()=>{
-  const f=fixture();await runToDone(f,f.fresh);const before=f.canceled.length;
-  await assert.rejects(f.svc.deleteAccount(f.fresh),{status:401});
+test("account delete: second call returns 410 after the user is gone and repeats no side effects",async()=>{
+  const f=fixture();const started=await runToDone(f,f.fresh);const before=f.canceled.length;
+  await assert.rejects(f.svc.deleteAccount(f.fresh),error=>{
+    assert.equal(error.status,410);
+    assert.equal(error.code,"account_deleted");
+    assert.equal(error.jobId,started.jobId);
+    assert.match(error.statusToken,/^[A-Za-z0-9_-]{43}$/);
+    return true;
+  });
   assert.equal(f.canceled.length,before);assert.deepEqual(f.auth.deletedUsers,[uid]);
 });
 test("route: DELETE /v2/account answers 202 with a job id",async()=>{
