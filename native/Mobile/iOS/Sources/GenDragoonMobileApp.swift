@@ -38,6 +38,8 @@ private struct UIPreviewHost:View {
             NavigationStack{AccountSettingsForm(confirmReset:.constant(false),close:{},delete:{})}.environmentObject(session).environmentObject(cloud)
         case "confirm-delete":
             DeleteAccountView(previewStep:.confirm).environmentObject(session).environmentObject(cloud)
+        case "deletion-support":
+            DeleteAccountView(previewSupport:true).environmentObject(session).environmentObject(cloud)
         case "locked":
             WorkspaceLockView(lock:UIPreview.lock).environmentObject(session).environmentObject(cloud)
         default:

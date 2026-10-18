@@ -11,17 +11,13 @@ import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 
 /**
- * Avery's ruling (Oct 17): a 401 {@code {"error":"invalid_token"}} signs the user out.
- * Sign-out clears only the session. The saved jobId and statusToken stay, polling continues
- * with {@code Bearer statusToken}, and local data is wiped only on {@code done}.
- * {@code reauth_required} and a 401 with no code go to sign-in instead. None of them wipe.
+ * A status-token poll {@code invalid_token} stops polling, keeps the job, and asks for sign-in.
+ * An owner-token DELETE {@code invalid_token} signs out, keeps the job, and keeps polling.
+ * {@code reauth_required} and a 401 with no code go to sign-in. None of them wipe.
  *
- * Every server body here is Riley's generated fixture from PR #6 at d788ccb
- * ({@code fixtures/account-deletion/}, vendored under src/test/resources/fixtures/account-deletion).
- * The 410, poll-404 and status-done fixtures share job ...0005, so they chain as one job.
+ * Generated fixtures are vendored under src/test/resources/fixtures/account-deletion.
+ * {@code status-invalid-token} and {@code status-unauthorized} are from f943a58.
  * The export redacts tokens to {@code "<redacted>"}; that string is the opaque token here.
- *
- * After {@code invalid_token} the same session keeps polling, so {@code done} wipes without a relaunch.
  */
 public final class InvalidTokenDeletionTest {
     private static final String AREA="account-deletion";
@@ -40,13 +36,13 @@ public final class InvalidTokenDeletionTest {
         return flow;
     }
 
-    /** 410 account_deleted for job ...0005 starts polling, then the poll gets invalid_token. */
+    /** 410 account_deleted starts polling, then the status poll returns invalid_token. */
     private static AccountDeletion pollingThenInvalidToken(){
         AccountDeletion flow=ready();
         AccountActions.HttpBody gone=fixture("account-deleted");
         flow.onDeleteHttp(gone.status,gone.jobId,gone.error,gone.statusToken);
         assertEquals(AccountDeletion.Step.POLLING,flow.step);
-        AccountActions.HttpBody invalid=fixture("invalid-token");
+        AccountActions.HttpBody invalid=fixture("status-invalid-token");
         flow.onPollHttp(invalid.status,invalid.jobStatus,invalid.error,invalid.retryable);
         return flow;
     }
@@ -74,7 +70,9 @@ public final class InvalidTokenDeletionTest {
 
     @Test public void invalidTokenIsSignOutWhileReauthRequiredAndBare401AreSignIn(){
         AccountDeletion invalid=pollingThenInvalidToken();
-        assertEquals(AccountDeletion.Step.SIGNED_OUT,invalid.step);
+        assertEquals(AccountDeletion.Step.REAUTH,invalid.step);
+        assertFalse(invalid.keepsPolling());
+        assertFalse(invalid.clearSession);
 
         AccountDeletion reauth=ready();
         AccountActions.HttpBody gone=fixture("account-deleted");
@@ -92,7 +90,7 @@ public final class InvalidTokenDeletionTest {
         AccountDeletion flow=pollingThenInvalidToken();
         assertFalse(flow.requestsWipe());
         assertFalse(flow.wipe);
-        assertFalse("sign-out must not drop the saved receipt",flow.dropReceipt);
+        assertFalse("stopping the poll must not drop the saved receipt",flow.dropReceipt);
         assertEquals(gone.jobId,flow.jobId);
         assertEquals(gone.statusToken,flow.statusToken);
         DeletionReceipt receipt=flow.receipt();
@@ -122,20 +120,42 @@ public final class InvalidTokenDeletionTest {
         assertEquals(gone.jobId,resumed.jobId);
         assertFalse(resumed.dropReceipt);
         resumed.retry();
-        assertEquals(AccountDeletion.Step.POLLING,resumed.step);
-
-        AccountActions.HttpBody done=fixture("status-done");
-        resumed.onPollHttp(done.status,done.jobStatus,done.error,done.retryable);
-        assertEquals(AccountDeletion.Step.DONE,resumed.step);
-        assertTrue(resumed.requestsWipe());
+        assertEquals(AccountDeletion.Step.REAUTH,resumed.step);
+        assertTrue(resumed.acceptFreshSignIn(1_000L,1_000L));
+        assertTrue(resumed.allowsDelete());
     }
 
-    /** After sign-out the same session still polls, so {@code done} wipes without a relaunch. */
+    /** A later poll is ignored once the status token has been rejected. */
     @Test
-    public void bug_invalidTokenKeepsPollingInTheSameSessionAndWipesOnDone(){
+    public void statusInvalidTokenStopsPollingSoDoneDoesNotWipe(){
         AccountDeletion flow=pollingThenInvalidToken();
         AccountActions.HttpBody done=fixture("status-done");
         flow.onPollHttp(done.status,done.jobStatus,done.error,done.retryable);
-        assertTrue("done after invalid_token should wipe without a relaunch",flow.requestsWipe());
+        assertEquals(AccountDeletion.Step.REAUTH,flow.step);
+        assertFalse(flow.requestsWipe());
+    }
+
+    /** DELETE invalid_token signs out, keeps the saved job, and a later done still wipes. */
+    @Test public void ownerTokenInvalidTokenKeepsPollingUntilDone(){
+        AccountDeletion flow=ready();
+        AccountActions.HttpBody gone=fixture("account-deleted");
+        flow.onDeleteHttp(gone.status,gone.jobId,gone.error,gone.statusToken);
+        flow.onPollHttp(200,"failed",null,true);
+        flow.retry();
+        assertTrue(flow.acceptFreshSignIn(1_000L,1_000L));
+        assertTrue(flow.allowsDelete());
+        AccountActions.HttpBody invalid=fixture("invalid-token");
+        flow.onDeleteHttp(invalid.status,invalid.jobId,invalid.error,invalid.statusToken);
+        assertEquals(AccountDeletion.Step.SIGNED_OUT,flow.step);
+        assertTrue(flow.clearSession);
+        assertTrue(flow.keepsPolling());
+        assertEquals(gone.jobId,flow.jobId);
+        assertEquals(gone.statusToken,flow.statusToken);
+        assertFalse(flow.dropReceipt);
+        assertFalse(flow.requestsWipe());
+        AccountActions.HttpBody done=fixture("status-done");
+        flow.onPollHttp(done.status,done.jobStatus,done.error,done.retryable);
+        assertTrue(flow.requestsWipe());
+        assertTrue(LocalDataWipe.secretsRemoved(false,ALIASES).isEmpty());
     }
 }

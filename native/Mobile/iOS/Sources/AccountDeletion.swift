@@ -27,11 +27,17 @@ struct AccountDeletion:Equatable {
     var polls=0
     var wipe=false
     var wiped=false
+    /// Retry must send DELETE again, even when a job and status token are already saved.
+    var repeatDelete=false
+    /// Non-retryable failure. The screen shows `SupportContact.address` next to Dismiss.
+    var showSupport=false
+    /// Dismiss clears the saved job and wipes nothing.
+    var dismissible=false
+    /// Dismiss already cleared the job. Retry must not send DELETE after that.
+    var closed=false
     /// Clear the saved job and token without erasing the rest of the device.
     var dropReceipt=false
-    /// A 404 means this token does not match the job. Do not send DELETE again.
-    var refuseDelete=false
-    /// A poll `invalid_token` cleared the session. The saved job keeps polling.
+    /// An owner-token `invalid_token` cleared the Firebase session. Polling may continue.
     var clearSession=false
     /// A DELETE 404 with no saved job. Show the error without Retry.
     var plainError=false
@@ -50,15 +56,16 @@ struct AccountDeletion:Equatable {
             message="Sign in again. The server only accepts a sign-in from the last 5 minutes."
             return false
         }
+        if repeatDelete {step = .deleting;message=nil;return true}
         if beginPolling(jobId:jobId,statusToken:statusToken) {return true}
-        if refuseDelete || jobId != nil || statusToken != nil {
+        if jobId != nil || statusToken != nil {
             fail("A saved deletion is already in progress. DELETE was not sent again.")
             return false
         }
         step = .deleting;message=nil;return true
     }
-    /// DELETE is sent only when nothing is saved. Up to 5 status tokens stay valid, so a saved token is kept and polled.
-    func allowsDelete()->Bool { step == .deleting && !refuseDelete && jobId==nil && statusToken==nil }
+    /// DELETE when nothing is saved, or when Retry asked to send it again for a saved job.
+    func allowsDelete()->Bool { step == .deleting && (repeatDelete || (jobId==nil && statusToken==nil)) }
     mutating func noteDeleteSent(){deleteAttempts+=1}
     func requestsWipe()->Bool { wipe && step == .done }
     func receipt()->DeletionReceipt? { DeletionReceipt.of(jobId:jobId,statusToken:statusToken) }
@@ -87,6 +94,7 @@ struct AccountDeletion:Equatable {
             fail("Account deletion did not include a usable job. Nothing on this device was erased.")
             return
         }
+        if status==409 && errorCode=="deletion_not_retryable" {noteNotRetryable(jobId);return}
         if status==202 && beginPolling(jobId:jobId,statusToken:statusToken) {return}
         if status==404 && self.jobId==nil && self.statusToken==nil {
             plainError=true
@@ -94,27 +102,30 @@ struct AccountDeletion:Equatable {
             return
         }
         plainError=false
+        showSupport=false
         fail("Account deletion did not start. You can retry.")
     }
-    /// Polling continues after `invalid_token`. Sign-out keeps the job and later polls are not ignored.
+    /// Polling continues after an owner-token sign-out that kept a status token. A status-token `invalid_token` stops it.
     func keepsPolling()->Bool { step == .polling || (step == .signedOut && jobId != nil && !(statusToken ?? "").isEmpty) }
-    mutating func onPollHttp(status:Int,jobStatus:String?,errorCode:String?,retryable:Bool?){
+    mutating func onPollHttp(status:Int,jobStatus:String?,errorCode:String?,retryable:Bool?,reportedJobId:String?=nil){
         guard keepsPolling() else {return}
         plainError=false
+        showSupport=false
         if status==423 && errorCode==CloudSignals.lockCode {wipe=false;return}
         if status==401 {onUnauthorized(errorCode);return}
         if status==404 {
-            // Keep the saved job and token. Retry polls again. Dismiss is the only clear.
-            wipe=false;refuseDelete=true;dropReceipt=false
+            // Keep the saved job and token. Retry sends DELETE again. Dismiss clears the job.
+            wipe=false;dismissible=true;dropReceipt=false
             fail("This deletion could not be confirmed. Nothing on this device was erased.")
             return
         }
+        if status==409 && errorCode=="deletion_not_retryable" {noteNotRetryable(reportedJobId);return}
         if (200..<300).contains(status) {
             if jobStatus=="queued" || jobStatus=="running" {if step != .signedOut {step = .polling};wipe=false;return}
             if jobStatus=="done" {step = .done;wipe=true;message=nil;return}
             if jobStatus=="failed" {
                 if retryable==false {
-                    dropReceipt=true;self.jobId=nil;self.statusToken=nil;self.statusPath=nil
+                    showSupport=true;dismissible=true;dropReceipt=false
                     fail("Account deletion failed and cannot be resumed. Nothing on this device was erased.")
                 } else {fail("Account deletion failed. You can retry.")}
                 return
@@ -124,20 +135,40 @@ struct AccountDeletion:Equatable {
             return
         }
         wipe=false
+        dismissible=false
         fail("Could not read deletion status. You can retry.")
     }
     private mutating func beginPolling(jobId:String?,statusToken:String?)->Bool {
         guard let jobId,let statusToken,let path=Self.statusPath(jobId:jobId),Self.validToken(statusToken),Self.safeAccountPath(path) else {return false}
         self.jobId=jobId;self.statusToken=statusToken;self.statusPath=path
-        step = .polling;wipe=false;dropReceipt=false;message=nil
+        step = .polling;wipe=false;dropReceipt=false;repeatDelete=false;showSupport=false;dismissible=false;message=nil
         return true
+    }
+    /// A non-retryable failure keeps the job until Dismiss. Dismiss wipes nothing.
+    private mutating func noteNotRetryable(_ reportedJobId:String?){
+        if let reportedJobId,Self.validJob(reportedJobId) {jobId=reportedJobId}
+        showSupport=true;dismissible=true;dropReceipt=false;repeatDelete=false;wipe=false
+        fail("This deletion cannot be retried. Nothing on this device was erased.")
     }
     private mutating func onUnauthorized(_ errorCode:String?){
         wipe=false
         plainError=false
+        let polling=step == .polling || (step == .signedOut && keepsPolling())
         if errorCode=="invalid_token" {
+            if polling {
+                // Status token rejected. Stop, keep the job, and ask for sign-in.
+                // The next fresh sign-in sends DELETE and saves the token from 202 or 410.
+                clearSession=false
+                dropReceipt=false
+                repeatDelete=true
+                step = .reauth
+                message="Sign in again to continue."
+                return
+            }
+            // Owner token rejected. Sign out. A saved status token keeps polling.
+            clearSession=true
+            repeatDelete=false
             if let jobId,let statusToken,Self.validJob(jobId),Self.validToken(statusToken) {
-                clearSession=true
                 dropReceipt=false
                 step = .signedOut
                 message="Deleting your account…"
@@ -155,23 +186,19 @@ struct AccountDeletion:Equatable {
     func exhausted()->Bool { polls>=Self.pollLimit }
     mutating func nextPollDelayMillis()->Int { let delay=1000<<min(polls,3);polls+=1;return delay }
     mutating func fail(_ text:String){step = .failed;wipe=false;message=text}
+    /// Re-authenticate when needed, then send DELETE again and poll the job from 202 or 410.
     mutating func retry(){
-        guard step == .failed else {return}
-        wipe=false;message=nil;polls=0
-        if let jobId,let statusToken,Self.validJob(jobId),Self.validToken(statusToken),let path=Self.statusPath(jobId:jobId) {
-            statusPath=path;step = .polling;dropReceipt=false;return
-        }
-        if refuseDelete {return}
-        jobId=nil;statusToken=nil;statusPath=nil;step = .reauth
+        guard offersRetry() else {return}
+        wipe=false;message=nil;polls=0;dismissible=false;repeatDelete=true;step = .reauth
     }
-    /// Failed responses offer Retry, except a DELETE 404 for a job that was never saved.
-    func offersRetry()->Bool { step == .failed && !plainError }
-    /// True after a 404 while the saved pair is still held.
-    func canDismiss()->Bool { step == .failed && refuseDelete }
+    /// Failed responses offer Retry, except a non-retryable failure and a DELETE 404 that never saved a job.
+    func offersRetry()->Bool { step == .failed && !plainError && !showSupport && !closed }
+    /// True when Dismiss should clear the saved job without wiping the device.
+    func canDismiss()->Bool { step == .failed && dismissible && !closed }
     /// The user dismissed the 404 error. Clears the saved pair and wipes nothing.
     mutating func dismissError()->Bool {
         guard canDismiss() else {return false}
-        wipe=false;dropReceipt=true;jobId=nil;statusToken=nil;statusPath=nil
+        wipe=false;dropReceipt=true;closed=true;jobId=nil;statusToken=nil;statusPath=nil
         message="Nothing on this device was erased."
         return true
     }
@@ -222,29 +249,28 @@ struct AccountDeletion:Equatable {
             return
         }
         lastHttp=body
-        onPollHttp(status:body.status,jobStatus:body.jobStatus,errorCode:body.error,retryable:body.retryable)
+        onPollHttp(status:body.status,jobStatus:body.jobStatus,errorCode:body.error,retryable:body.retryable,reportedJobId:body.jobId)
     }
     static func exchange(_ transport:any DeletionTransport,method:String,path:String,body:Data?,authorization:String) async -> DeletionExchange {
         do { return DeletionExchange(body:try await transport.execute(method:method,path:path,body:body,authorization:authorization),failed:false) }
         catch { return DeletionExchange(body:nil,failed:true) }
     }
 
-    static func validJob(_ jobId:String)->Bool {
-        jobId.range(of:"^[A-Za-z0-9_-]{1,80}$",options:.regularExpression) != nil && !jobId.contains("..") && !jobId.contains("/") && !jobId.contains("\\")
-    }
-    /// Runtime gate only. Redacted fixture tokens such as `<redacted>` stay valid. A shape check must not cause another DELETE.
+    /// Non-empty only. No length or character-set check.
+    static func validJob(_ jobId:String)->Bool { !jobId.isEmpty }
+    /// Non-empty only. No length or character-set check. Redacted fixture tokens such as `<redacted>` stay valid.
     static func validToken(_ token:String)->Bool { !token.isEmpty }
     static func statusPath(jobId:String)->String? {
         guard validJob(jobId) else {return nil}
-        let allowed=CharacterSet(charactersIn:"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-")
+        var allowed=CharacterSet.alphanumerics
+        allowed.insert(charactersIn:"-_.~")
         guard let encoded=jobId.addingPercentEncoding(withAllowedCharacters:allowed) else {return nil}
         return deletionStatusPath+encoded
     }
     static func safeAccountPath(_ path:String)->Bool {
         guard path.hasPrefix(deletionStatusPath), !path.contains("/v2/account/deletion/") else {return false}
         let rest=String(path.dropFirst(deletionStatusPath.count))
-        if rest.contains("/") || rest.contains("\\") || rest.contains("..") || rest.contains("%") {return false}
-        return validJob(rest)
+        return !rest.isEmpty && !rest.contains("/") && !rest.contains("\\")
     }
     static func pollCall(path:String,statusToken:String)->(method:String,path:String,authorization:String)? {
         guard safeAccountPath(path),validToken(statusToken) else {return nil}
@@ -358,7 +384,7 @@ struct AccountHttp:Equatable,Sendable {
         else {retryable=nil}
         return AccountHttp(status:status,raw:raw,error:errorCode(in:json),jobId:json["jobId"] as? String,jobStatus:json["status"] as? String,retryable:retryable,statusToken:json["statusToken"] as? String)
     }
-    /// PR #6 sends the machine code in `error`. `code` is only a fallback.
+    /// A non-empty `error` string wins. Otherwise `code`. No pattern check on either.
     static func errorCode(in json:[String:Any])->String? {
         if let error=json["error"] as? String, !error.isEmpty {return error}
         if let code=json["code"] as? String, !code.isEmpty {return code}

@@ -10,6 +10,7 @@ final class ScreenPreviewTests: XCTestCase {
         try capture("sign-in",file:"sign-in.png",identifier:"sign-in-title")
         try capture("account",file:"account-delete.png",identifier:"delete-account")
         try capture("confirm-delete",file:"confirm-delete.png",identifier:"delete-confirm")
+        try capture("deletion-support",file:"deletion-support.png",identifier:"deletion-support")
         try capture("locked",file:"workspaces-locked.png",identifier:"workspaces-locked")
     }
 

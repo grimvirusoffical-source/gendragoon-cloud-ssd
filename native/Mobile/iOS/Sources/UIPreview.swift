@@ -1,7 +1,7 @@
 import Foundation
 import SwiftUI
 
-/// DEBUG-only launch argument `-GenDragoonUIPreview` with `sign-in`, `account`, `confirm-delete`, or `locked`.
+/// DEBUG-only launch argument `-GenDragoonUIPreview` with `sign-in`, `account`, `confirm-delete`, `deletion-support`, or `locked`.
 /// Screenshot runs use mock data and never contact Google or the cloud.
 enum UIPreview {
     static var screen:String? {
@@ -10,7 +10,7 @@ enum UIPreview {
         guard let index=args.firstIndex(of:"-GenDragoonUIPreview"),index+1<args.count else {return nil}
         let value=args[index+1]
         switch value {
-        case "sign-in","account","confirm-delete","locked": return value
+        case "sign-in","account","confirm-delete","deletion-support","locked": return value
         default: return nil
         }
         #else

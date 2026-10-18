@@ -314,6 +314,7 @@ public final class MainActivity extends AppCompatActivity {
             case FAILED -> {
                 content.addView(text(deletion.message==null?"Account deletion did not finish. You can retry.":deletion.message,15,false));
                 if(deletion.offersRetry()){space(content,12);content.addView(button("Retry",()->{deletion.retry();if(deletion.step==AccountDeletion.Step.POLLING){advanceDeletion();return;}deletionSignInStarted=false;showDeleteAccount();}));}
+                if(deletion.showSupport){space(content,8);TextView contact=text(SupportContact.ADDRESS,15,false);contact.setContentDescription("deletion-support");content.addView(contact);}
                 if(deletion.canDismiss()){space(content,8);content.addView(button("Dismiss",this::dismissDeletionError));}
                 else{space(content,8);content.addView(button("Cancel",this::cancelDeletion));}
             }
@@ -431,6 +432,7 @@ public final class MainActivity extends AppCompatActivity {
     }
     private void advanceDeletion(){
         if(deletion==null)return;
+        if(deletion.step==AccountDeletion.Step.REAUTH)deletionSignInStarted=false;
         if(deletion.dropReceipt&&!deletion.requestsWipe())DeletionReceiptVault.clear(this);
         if(deletion.clearSession){deletion.clearSession=false;holdAuthNavigation=true;if(auth.getCurrentUser()!=null)auth.signOut();}
         if(deletion.step==AccountDeletion.Step.SIGNED_OUT&&!deletion.keepsPolling()){leaveDeletionSignedOut();return;}

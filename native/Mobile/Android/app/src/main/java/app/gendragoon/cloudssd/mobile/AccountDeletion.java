@@ -30,11 +30,17 @@ final class AccountDeletion {
     int polls;
     boolean wipe;
     boolean wiped;
-    /** A 404 means this token does not match the job. Do not send DELETE again. */
-    boolean refuseDelete;
+    /** Retry must send DELETE again, even when a job and status token are already saved. */
+    boolean repeatDelete;
+    /** Non-retryable failure. The screen shows {@link SupportContact#ADDRESS} next to Dismiss. */
+    boolean showSupport;
+    /** Dismiss clears the saved job and wipes nothing. */
+    boolean dismissible;
+    /** Dismiss already cleared the job. Retry must not send DELETE after that. */
+    boolean closed;
     /** Clear the saved job and token without erasing the rest of the device. */
     boolean dropReceipt;
-    /** A poll {@code invalid_token} cleared the session. The saved job keeps polling. */
+    /** An owner-token {@code invalid_token} cleared the Firebase session. Polling may continue. */
     boolean clearSession;
     /** A DELETE 404 with no saved job. Show the error without Retry. */
     boolean plainError;
@@ -57,8 +63,13 @@ final class AccountDeletion {
             message="Sign in again. The server only accepts a sign-in from the last 5 minutes.";
             return false;
         }
+        if(repeatDelete){
+            step=Step.DELETING;
+            message=null;
+            return true;
+        }
         if(beginPolling(jobId,statusToken))return true;
-        if(refuseDelete||jobId!=null||statusToken!=null){
+        if(jobId!=null||statusToken!=null){
             fail("A saved deletion is already in progress. DELETE was not sent again.");
             return false;
         }
@@ -67,8 +78,8 @@ final class AccountDeletion {
         return true;
     }
 
-    /** DELETE is sent only when nothing is saved. Up to 5 status tokens stay valid, so a saved token is kept and polled. */
-    boolean allowsDelete(){return step==Step.DELETING&&!refuseDelete&&jobId==null&&statusToken==null;}
+    /** DELETE when nothing is saved, or when Retry asked to send it again for a saved job. */
+    boolean allowsDelete(){return step==Step.DELETING&&(repeatDelete||(jobId==null&&statusToken==null));}
 
     void noteDeleteSent(){deleteAttempts++;}
 
@@ -99,6 +110,7 @@ final class AccountDeletion {
             fail("Account deletion did not include a usable job. Nothing on this device was erased.");
             return;
         }
+        if(status==409&&"deletion_not_retryable".equals(errorCode)){noteNotRetryable(jobId);return;}
         if(status==202&&beginPolling(jobId,statusToken))return;
         if(status==404&&this.jobId==null&&this.statusToken==null){
             plainError=true;
@@ -106,34 +118,40 @@ final class AccountDeletion {
             return;
         }
         plainError=false;
+        showSupport=false;
         fail("Account deletion did not start. You can retry.");
     }
 
-    /** Polling continues after {@code invalid_token}. Sign-out keeps the job and later polls are not ignored. */
+    /** Polling continues after an owner-token sign-out that kept a status token. A status-token {@code invalid_token} stops it. */
     boolean keepsPolling(){return step==Step.POLLING||(step==Step.SIGNED_OUT&&jobId!=null&&statusToken!=null&&!statusToken.isEmpty());}
 
     void onPollHttp(int status,String jobStatus,String errorCode,Boolean retryable){
+        onPollHttp(status,jobStatus,errorCode,retryable,null);
+    }
+
+    void onPollHttp(int status,String jobStatus,String errorCode,Boolean retryable,String reportedJobId){
         if(!keepsPolling())return;
         plainError=false;
+        showSupport=false;
         if(status==423&&CloudSignals.CODE_LOCK.equals(errorCode)){wipe=false;return;}
         if(status==401){onUnauthorized(errorCode);return;}
         if(status==404){
-            // Keep the saved job and token. Retry polls again. Dismiss is the only clear.
+            // Keep the saved job and token. Retry sends DELETE again. Dismiss clears the job.
             wipe=false;
-            refuseDelete=true;
+            dismissible=true;
             dropReceipt=false;
             fail("This deletion could not be confirmed. Nothing on this device was erased.");
             return;
         }
+        if(status==409&&"deletion_not_retryable".equals(errorCode)){noteNotRetryable(reportedJobId);return;}
         if(status>=200&&status<300){
             if("queued".equals(jobStatus)||"running".equals(jobStatus)){if(step!=Step.SIGNED_OUT)step=Step.POLLING;wipe=false;return;}
             if("done".equals(jobStatus)){step=Step.DONE;wipe=true;message=null;return;}
             if("failed".equals(jobStatus)){
                 if(Boolean.FALSE.equals(retryable)){
-                    dropReceipt=true;
-                    this.jobId=null;
-                    this.statusToken=null;
-                    this.statusPath=null;
+                    showSupport=true;
+                    dismissible=true;
+                    dropReceipt=false;
                     fail("Account deletion failed and cannot be resumed. Nothing on this device was erased.");
                 }else fail("Account deletion failed. You can retry.");
                 return;
@@ -143,6 +161,7 @@ final class AccountDeletion {
             return;
         }
         wipe=false;
+        dismissible=false;
         fail("Could not read deletion status. You can retry.");
     }
 
@@ -155,16 +174,43 @@ final class AccountDeletion {
         step=Step.POLLING;
         wipe=false;
         dropReceipt=false;
+        repeatDelete=false;
+        showSupport=false;
+        dismissible=false;
         message=null;
         return true;
+    }
+
+    /** A non-retryable failure keeps the job until Dismiss. Dismiss wipes nothing. */
+    private void noteNotRetryable(String reportedJobId){
+        if(AccountActions.validJob(reportedJobId))this.jobId=reportedJobId;
+        showSupport=true;
+        dismissible=true;
+        dropReceipt=false;
+        repeatDelete=false;
+        wipe=false;
+        fail("This deletion cannot be retried. Nothing on this device was erased.");
     }
 
     private void onUnauthorized(String errorCode){
         wipe=false;
         plainError=false;
+        boolean polling=step==Step.POLLING||(step==Step.SIGNED_OUT&&keepsPolling());
         if("invalid_token".equals(errorCode)){
+            if(polling){
+                // Status token rejected. Stop, keep the job, and ask for sign-in.
+                // The next fresh sign-in sends DELETE and saves the token from 202 or 410.
+                clearSession=false;
+                dropReceipt=false;
+                repeatDelete=true;
+                step=Step.REAUTH;
+                message="Sign in again to continue.";
+                return;
+            }
+            // Owner token rejected. Sign out. A saved status token keeps polling.
+            clearSession=true;
+            repeatDelete=false;
             if(AccountActions.validJob(jobId)&&AccountActions.validToken(statusToken)){
-                clearSession=true;
                 dropReceipt=false;
                 step=Step.SIGNED_OUT;
                 message="Deleting your account…";
@@ -194,30 +240,22 @@ final class AccountDeletion {
 
     void fail(String text){step=Step.FAILED;wipe=false;message=text==null?"Account deletion did not finish. You can retry.":text;}
 
-    /** Keeps a known job id and token and resumes polling. Never sends DELETE, including after a 404. */
+    /** Re-authenticate when needed, then send DELETE again and poll the job from 202 or 410. */
     void retry(){
-        if(step!=Step.FAILED)return;
+        if(!offersRetry())return;
         wipe=false;
         message=null;
         polls=0;
-        if(AccountActions.validJob(jobId)&&AccountActions.validToken(statusToken)){
-            statusPath=AccountActions.statusPath(jobId);
-            step=Step.POLLING;
-            dropReceipt=false;
-            return;
-        }
-        if(refuseDelete)return;
-        jobId=null;
-        statusToken=null;
-        statusPath=null;
+        dismissible=false;
+        repeatDelete=true;
         step=Step.REAUTH;
     }
 
-    /** Failed responses offer Retry, except a DELETE 404 for a job that was never saved. */
-    boolean offersRetry(){return step==Step.FAILED&&!plainError;}
+    /** Failed responses offer Retry, except a non-retryable failure and a DELETE 404 that never saved a job. */
+    boolean offersRetry(){return step==Step.FAILED&&!plainError&&!showSupport&&!closed;}
 
-    /** True after a 404 while the saved pair is still held. */
-    boolean canDismiss(){return step==Step.FAILED&&refuseDelete;}
+    /** True when Dismiss should clear the saved job without wiping the device. */
+    boolean canDismiss(){return step==Step.FAILED&&dismissible&&!closed;}
 
     /**
      * The user dismissed the 404 error. Clears the saved pair and wipes nothing.
@@ -227,6 +265,7 @@ final class AccountDeletion {
         if(!canDismiss())return false;
         wipe=false;
         dropReceipt=true;
+        closed=true;
         jobId=null;
         statusToken=null;
         statusPath=null;
@@ -300,7 +339,7 @@ final class AccountDeletion {
             return;
         }
         lastBody=exchange.body;
-        onPollHttp(exchange.body.status,exchange.body.jobStatus,exchange.body.error,exchange.body.retryable);
+        onPollHttp(exchange.body.status,exchange.body.jobStatus,exchange.body.error,exchange.body.retryable,exchange.body.jobId);
     }
 }
 
@@ -391,7 +430,7 @@ final class AccountActions {
     /** The only deletion status route. It is plural: {@code GET /v2/account/deletions/:jobId}. */
     static final String DELETION_STATUS_PATH="/v2/account/deletions/";
 
-    /** PR #6 sends the machine code in {@code error}. {@code code} is only a fallback. */
+    /** A non-empty {@code error} string wins. Otherwise {@code code}. No pattern check on either. */
     static String errorCode(String raw){
         String error=JsonFields.string(raw,"error");
         if(error!=null&&!error.isEmpty())return error;
@@ -406,12 +445,12 @@ final class AccountActions {
         }
     }
 
+    /** Non-empty only. No length or character-set check. */
     static boolean validJob(String jobId){
-        if(jobId==null||!jobId.matches("[A-Za-z0-9_-]{1,80}"))return false;
-        return !jobId.contains("..")&&!jobId.contains("/")&&!jobId.contains("\\");
+        return jobId!=null&&!jobId.isEmpty();
     }
 
-    /** Runtime gate only. Redacted fixture tokens such as {@code <redacted>} stay valid. A shape check must not cause another DELETE. */
+    /** Non-empty only. No length or character-set check. Redacted fixture tokens such as {@code <redacted>} stay valid. */
     static boolean validToken(String token){
         return token!=null&&!token.isEmpty();
     }
@@ -431,8 +470,7 @@ final class AccountActions {
         if(path==null||!path.startsWith(DELETION_STATUS_PATH))return false;
         if(path.contains("/v2/account/deletion/"))return false;
         String rest=path.substring(DELETION_STATUS_PATH.length());
-        if(rest.contains("/")||rest.contains("\\")||rest.contains("..")||rest.contains("%"))return false;
-        return validJob(rest);
+        return !rest.isEmpty()&&!rest.contains("/")&&!rest.contains("\\");
     }
 
     static PollCall pollCall(String path,String statusToken){

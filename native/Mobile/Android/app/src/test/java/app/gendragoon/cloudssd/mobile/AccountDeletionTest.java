@@ -105,7 +105,8 @@ public final class AccountDeletionTest {
         assertTrue(LocalDataWipe.secretsRemoved(missing.requestsWipe(),ALIASES).isEmpty());
         AccountDeletion invalid=ready();
         invalid.onDeleteHttp(410,"../secret","account_deleted",TOKEN);
-        assertEquals(AccountDeletion.Step.FAILED,invalid.step);
+        assertEquals(AccountDeletion.Step.POLLING,invalid.step);
+        assertEquals("/v2/account/deletions/..%2Fsecret",invalid.statusPath);
         assertFalse(invalid.requestsWipe());
         AccountDeletion noToken=ready();
         noToken.onDeleteHttp(410,"job_410","account_deleted",null);
@@ -121,9 +122,14 @@ public final class AccountDeletionTest {
         assertEquals("job_keep",kept.jobId);
         assertFalse(kept.requestsWipe());
         kept.retry();
-        assertEquals(AccountDeletion.Step.POLLING,kept.step);
+        assertEquals(AccountDeletion.Step.REAUTH,kept.step);
         assertEquals("job_keep",kept.jobId);
         assertEquals(TOKEN,kept.statusToken);
+        assertTrue(kept.acceptFreshSignIn(2_000L,2_000L));
+        assertTrue(kept.allowsDelete());
+        kept.onDeleteHttp(202,"job_keep",null,"status-token-new");
+        assertEquals(AccountDeletion.Step.POLLING,kept.step);
+        assertEquals("status-token-new",kept.statusToken);
         assertFalse(kept.requestsWipe());
 
         AccountDeletion again=ready();
@@ -213,17 +219,28 @@ public final class AccountDeletionTest {
         flow.onDeleteHttp(202,"job_dead",null,TOKEN);
         flow.onPollHttp(200,"failed",null,false);
         assertEquals(AccountDeletion.Step.FAILED,flow.step);
-        assertTrue(flow.dropReceipt);
+        assertFalse(flow.dropReceipt);
+        assertTrue(flow.showSupport);
+        assertFalse(flow.offersRetry());
+        assertTrue(flow.canDismiss());
+        assertEquals("job_dead",flow.jobId);
+        assertEquals(TOKEN,flow.statusToken);
         assertFalse(flow.requestsWipe());
+        assertTrue(flow.dismissError());
+        assertTrue(flow.dropReceipt);
         assertNull(flow.jobId);
+        assertFalse(flow.requestsWipe());
         assertTrue(LocalDataWipe.secretsRemoved(flow.requestsWipe(),ALIASES).isEmpty());
         AccountDeletion retryable=ready();
         retryable.onDeleteHttp(202,"job_live",null,TOKEN);
         retryable.onPollHttp(200,"failed",null,true);
         assertFalse(retryable.dropReceipt);
+        assertFalse(retryable.showSupport);
         assertEquals("job_live",retryable.jobId);
         retryable.retry();
-        assertEquals(AccountDeletion.Step.POLLING,retryable.step);
+        assertEquals(AccountDeletion.Step.REAUTH,retryable.step);
+        assertTrue(retryable.acceptFreshSignIn(2_000L,2_000L));
+        assertTrue(retryable.allowsDelete());
     }
 
     @Test public void storesTokenAndResumesWithBearer(){
@@ -263,13 +280,8 @@ public final class AccountDeletionTest {
         assertFalse(flow.requestsWipe());
         assertTrue(flow.message!=null&&!flow.message.isEmpty());
         assertFalse(flow.message.contains(TOKEN));
+        assertTrue(flow.offersRetry());
         assertTrue(LocalDataWipe.secretsRemoved(flow.requestsWipe(),ALIASES).isEmpty());
-        flow.retry();
-        assertEquals(AccountDeletion.Step.POLLING,flow.step);
-        assertEquals("job_404",flow.jobId);
-        assertEquals(TOKEN,flow.statusToken);
-        assertFalse(flow.allowsDelete());
-        flow.onPollHttp(404,null,"not_found",null);
         assertTrue(flow.dismissError());
         assertTrue(flow.dropReceipt);
         assertNull(flow.jobId);
@@ -281,6 +293,15 @@ public final class AccountDeletionTest {
         assertEquals(AccountDeletion.Step.FAILED,flow.step);
         assertEquals(attempts,flow.deleteAttempts);
         assertFalse(flow.allowsDelete());
+        AccountDeletion again=AccountDeletion.resume(DeletionReceipt.of("job_404",TOKEN));
+        again.onPollHttp(404,null,"not_found",null);
+        again.retry();
+        assertEquals(AccountDeletion.Step.REAUTH,again.step);
+        assertEquals("job_404",again.jobId);
+        assertEquals(TOKEN,again.statusToken);
+        assertTrue(again.acceptFreshSignIn(2_000L,2_000L));
+        assertTrue(again.allowsDelete());
+        assertEquals(AccountDeletion.Step.DELETING,again.step);
     }
 
     @Test public void lockDuringDeleteOrPollDoesNotWipe(){
@@ -337,19 +358,30 @@ public final class AccountDeletionTest {
         assertTrue(LocalDataWipe.secretsRemoved(flow.requestsWipe(),ALIASES).isEmpty());
     }
 
-    @Test public void unsafeJobAndSingularPathAreRefused(){
-        assertFalse(AccountActions.validJob("a/b"));
-        assertFalse(AccountActions.validJob(".."));
-        assertFalse(AccountActions.validJob("a..b"));
-        assertNull(AccountActions.statusPath("a/b"));
-        assertNull(AccountActions.statusPath(".."));
+    @Test public void jobAndTokenNeedOnlyBeNonEmpty(){
+        assertTrue(AccountActions.validJob("a/b"));
+        assertTrue(AccountActions.validJob(".."));
+        assertTrue(AccountActions.validJob("a..b"));
+        assertTrue(AccountActions.validJob("x".repeat(200)));
+        assertFalse(AccountActions.validJob(""));
+        assertFalse(AccountActions.validJob(null));
+        assertTrue(AccountActions.validToken("<redacted>"));
+        assertTrue(AccountActions.validToken("x"));
+        assertTrue(AccountActions.validToken("t".repeat(600)));
+        assertFalse(AccountActions.validToken(""));
+        assertFalse(AccountActions.validToken(null));
+        assertEquals("/v2/account/deletions/a%2Fb",AccountActions.statusPath("a/b"));
+        assertEquals("/v2/account/deletions/..",AccountActions.statusPath(".."));
         assertEquals("/v2/account/deletions/job_1",AccountActions.statusPath("job_1"));
         assertEquals("job_1",AccountActions.encodeJob("job_1"));
+        assertNull(AccountActions.statusPath(""));
         assertFalse(AccountActions.safeAccountPath("/v2/account/deletion/job_1"));
         assertFalse(AccountActions.safeAccountPath("/v2/account/deletions/a/b"));
-        assertFalse(AccountActions.safeAccountPath("/v2/account/deletions/.."));
+        assertTrue(AccountActions.safeAccountPath("/v2/account/deletions/.."));
+        assertTrue(AccountActions.safeAccountPath("/v2/account/deletions/a%2Fb"));
         assertTrue(AccountActions.safeAccountPath("/v2/account/deletions/job_1"));
         assertNull(AccountActions.pollCall("/v2/account/deletion/job_1",TOKEN));
+        assertNotNull(AccountActions.pollCall(AccountActions.statusPath("a/b"),TOKEN));
     }
 
     @Test public void sameGoogleAccountIsRequired(){
@@ -569,33 +601,105 @@ public final class AccountDeletionTest {
         assertNull(missing.jobId);
     }
 
-    @Test public void pollUnauthorizedKeepsTheJobUntilFixturesLand() throws Exception {
-        AccountDeletion invalid=AccountDeletion.resume(DeletionReceipt.of("job_poll",TOKEN));
-        invalid.pollThrough(new Script().respond(AccountActions.parse(401,"{\"error\":\"invalid_token\"}")));
-        assertEquals(AccountDeletion.Step.SIGNED_OUT,invalid.step);
-        assertTrue(invalid.keepsPolling());
-        assertTrue(invalid.clearSession);
-        assertEquals("job_poll",invalid.jobId);
-        assertEquals(TOKEN,invalid.statusToken);
-        assertFalse(invalid.dropReceipt);
-        assertFalse(invalid.requestsWipe());
-        assertFalse(invalid.allowsDelete());
-        Script done=new Script().respond(AccountActions.parse(200,"{\"jobId\":\"job_poll\",\"status\":\"done\",\"retryable\":false}"));
-        invalid.pollThrough(done);
-        assertEquals("Bearer "+TOKEN,done.authorizations.get(0));
-        assertTrue(invalid.requestsWipe());
+    @Test public void statusTokenPollStopsOnInvalidTokenAndUnauthorized() throws Exception {
+        AccountActions.HttpBody invalid=fixture("status-invalid-token");
+        assertTrue(BackendFixtures.requestPath("account-deletion","status-invalid-token").startsWith("/v2/account/deletions/"));
+        assertEquals(401,invalid.status);
+        assertEquals("invalid_token",invalid.error);
+        AccountDeletion stopped=AccountDeletion.resume(DeletionReceipt.of("job_poll",TOKEN));
+        stopped.pollThrough(new Script().respond(invalid));
+        assertEquals(AccountDeletion.Step.REAUTH,stopped.step);
+        assertFalse(stopped.keepsPolling());
+        assertFalse(stopped.clearSession);
+        assertTrue(stopped.repeatDelete);
+        assertEquals("job_poll",stopped.jobId);
+        assertEquals(TOKEN,stopped.statusToken);
+        assertFalse(stopped.dropReceipt);
+        assertFalse(stopped.requestsWipe());
+        stopped.pollThrough(new Script().respond(AccountActions.parse(200,"{\"jobId\":\"job_poll\",\"status\":\"done\",\"retryable\":false}")));
+        assertEquals(AccountDeletion.Step.REAUTH,stopped.step);
+        assertFalse(stopped.requestsWipe());
+        assertTrue(stopped.acceptFreshSignIn(2_000L,2_000L));
+        assertTrue(stopped.allowsDelete());
 
-        AccountDeletion reauth=AccountDeletion.resume(DeletionReceipt.of("job_poll",TOKEN));
-        reauth.pollThrough(new Script().respond(AccountActions.parse(401,"{}")));
-        assertEquals(AccountDeletion.Step.REAUTH,reauth.step);
-        assertFalse(reauth.clearSession);
-        assertEquals("job_poll",reauth.jobId);
-        assertEquals(TOKEN,reauth.statusToken);
-        assertFalse(reauth.requestsWipe());
-        assertFalse(reauth.allowsDelete());
+        AccountActions.HttpBody unauthorized=fixture("status-unauthorized");
+        assertEquals(401,unauthorized.status);
+        assertEquals("unauthorized",unauthorized.error);
+        AccountDeletion signIn=AccountDeletion.resume(DeletionReceipt.of("job_poll",TOKEN));
+        signIn.pollThrough(new Script().respond(unauthorized));
+        assertEquals(AccountDeletion.Step.REAUTH,signIn.step);
+        assertFalse(signIn.keepsPolling());
+        assertFalse(signIn.clearSession);
+        assertEquals("job_poll",signIn.jobId);
+        assertEquals(TOKEN,signIn.statusToken);
+        assertFalse(signIn.requestsWipe());
     }
 
-    @Test public void pollNetworkErrorRetriesWithoutSendingDelete() throws Exception {
+    @Test public void retryAfterFailureSendsDeleteAndSavesTheNewToken() throws Exception {
+        AccountActions.HttpBody failed=fixture("status-failed");
+        assertEquals(Boolean.TRUE,failed.retryable);
+        AccountDeletion flow=AccountDeletion.resume(DeletionReceipt.of(failed.jobId,TOKEN));
+        flow.pollThrough(new Script().respond(failed));
+        assertEquals(AccountDeletion.Step.FAILED,flow.step);
+        assertTrue(flow.offersRetry());
+        assertFalse(flow.showSupport);
+        assertEquals(failed.jobId,flow.jobId);
+        flow.retry();
+        assertEquals(AccountDeletion.Step.REAUTH,flow.step);
+        assertTrue(flow.acceptFreshSignIn(2_000L,2_000L));
+        assertTrue(flow.allowsDelete());
+        // DERIVED until fixtures/account-deletion/retry-after-failed.json lands from PR #6.
+        String retryAfterFailedDerived="{\"jobId\":\""+failed.jobId+"\",\"status\":\"deleting\",\"statusToken\":\"status-token-after-failed\"}";
+        AccountActions.HttpBody again=AccountActions.parse(202,retryAfterFailedDerived);
+        flow.onDeleteHttp(again.status,again.jobId,again.error,again.statusToken);
+        assertEquals(AccountDeletion.Step.POLLING,flow.step);
+        assertEquals(failed.jobId,flow.jobId);
+        assertEquals("status-token-after-failed",flow.statusToken);
+        assertFalse(flow.requestsWipe());
+
+        AccountDeletion gone=AccountDeletion.resume(DeletionReceipt.of(failed.jobId,TOKEN));
+        gone.onPollHttp(200,"failed",null,true);
+        gone.retry();
+        assertTrue(gone.acceptFreshSignIn(2_000L,2_000L));
+        gone.onDeleteHttp(410,failed.jobId,"account_deleted","status-token-410");
+        assertEquals(AccountDeletion.Step.POLLING,gone.step);
+        assertEquals("status-token-410",gone.statusToken);
+        assertFalse(gone.requestsWipe());
+    }
+
+    @Test public void notRetryableFailureShowsSupportAndDismissWipesNothing() throws Exception {
+        assertTrue(SupportContact.IS_PLACEHOLDER);
+        assertEquals("SUPPORT_CONTACT_PLACEHOLDER@invalid",SupportContact.ADDRESS);
+        AccountDeletion failed=ready();
+        failed.onDeleteHttp(202,"job_support",null,TOKEN);
+        failed.onPollHttp(200,"failed",null,false);
+        assertTrue(failed.showSupport);
+        assertTrue(failed.canDismiss());
+        assertFalse(failed.offersRetry());
+        assertEquals("job_support",failed.jobId);
+        assertTrue(failed.dismissError());
+        assertNull(failed.jobId);
+        assertFalse(failed.requestsWipe());
+
+        AccountDeletion blocked=AccountDeletion.resume(DeletionReceipt.of("job_block",TOKEN));
+        // DERIVED until fixtures/account-deletion/retry-not-retryable.json lands from PR #6.
+        String retryNotRetryableDerived="{\"error\":\"deletion_not_retryable\",\"jobId\":\"00000000-0000-4000-8000-000000000004\"}";
+        AccountActions.HttpBody conflict=AccountActions.parse(409,retryNotRetryableDerived);
+        blocked.pollThrough(new Script().respond(conflict));
+        assertEquals(AccountDeletion.Step.FAILED,blocked.step);
+        assertTrue(blocked.showSupport);
+        assertFalse(blocked.offersRetry());
+        assertTrue(blocked.canDismiss());
+        assertEquals("00000000-0000-4000-8000-000000000004",blocked.jobId);
+        assertEquals(TOKEN,blocked.statusToken);
+        assertFalse(blocked.requestsWipe());
+        assertTrue(blocked.dismissError());
+        assertNull(blocked.jobId);
+        assertFalse(blocked.requestsWipe());
+        assertTrue(LocalDataWipe.secretsRemoved(blocked.requestsWipe(),ALIASES).isEmpty());
+    }
+
+    @Test public void retryAfterNetworkErrorSendsDeleteAgain() throws Exception {
         AccountDeletion flow=ready();
         flow.onDeleteHttp(202,"job_net",null,TOKEN);
         int attempts=flow.deleteAttempts;
@@ -606,18 +710,24 @@ public final class AccountDeletionTest {
         assertEquals(TOKEN,flow.statusToken);
         assertFalse(flow.requestsWipe());
         flow.retry();
-        assertEquals(AccountDeletion.Step.POLLING,flow.step);
+        assertEquals(AccountDeletion.Step.REAUTH,flow.step);
         assertEquals(attempts,flow.deleteAttempts);
+        assertTrue(flow.acceptFreshSignIn(2_000L,2_000L));
+        assertTrue(flow.allowsDelete());
+        flow.onDeleteHttp(202,"job_net",null,"status-token-net");
+        assertEquals("status-token-net",flow.statusToken);
         Script again=new Script().respond(AccountActions.parse(200,"{\"jobId\":\"job_net\",\"status\":\"running\",\"retryable\":true}"));
         flow.pollThrough(again);
         assertEquals("GET /v2/account/deletions/job_net",again.calls.get(0));
-        assertEquals("Bearer "+TOKEN,again.authorizations.get(0));
+        assertEquals("Bearer status-token-net",again.authorizations.get(0));
         assertEquals(AccountDeletion.Step.POLLING,flow.step);
     }
 
     @Test public void errorCodeIgnoresMessageText(){
         assertEquals("other",AccountActions.errorCode("{\"error\":\"other\",\"message\":\"manifest_generation_required\"}"));
         assertEquals("manifest_generation_required",AccountActions.errorCode("{\"message\":\"try manifest_generation_required\",\"code\":\"manifest_generation_required\"}"));
+        assertEquals("reauth_required",AccountActions.errorCode("{\"error\":\"\",\"code\":\"reauth_required\"}"));
+        assertEquals("not a code!!",AccountActions.errorCode("{\"error\":\"not a code!!\",\"code\":\"reauth_required\"}"));
     }
 
     @Test public void fileReplacementFailureLeavesTheOldCopyReadable() throws Exception {

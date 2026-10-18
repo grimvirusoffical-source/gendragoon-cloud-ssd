@@ -27,7 +27,7 @@ struct CloudDeletionTransport:DeletionTransport {
     func acceptFreshSignIn(authTime:Date,now:Date)->Bool { flow.acceptFreshSignIn(authTime:authTime,now:now) }
     func noteDeleteSent(){flow.noteDeleteSent()}
     func onDeleteHttp(_ http:AccountHttp){flow.onDeleteHttp(status:http.status,jobId:http.jobId,errorCode:http.error,statusToken:http.statusToken);syncReceipt()}
-    func onPollHttp(_ http:AccountHttp){flow.onPollHttp(status:http.status,jobStatus:http.jobStatus,errorCode:http.error,retryable:http.retryable);syncReceipt()}
+    func onPollHttp(_ http:AccountHttp){flow.onPollHttp(status:http.status,jobStatus:http.jobStatus,errorCode:http.error,retryable:http.retryable,reportedJobId:http.jobId);syncReceipt()}
     func exhausted()->Bool { flow.exhausted() }
     func nextPollDelayMillis()->Int { flow.nextPollDelayMillis() }
     func fail(_ text:String){flow.fail(text)}
@@ -36,6 +36,14 @@ struct CloudDeletionTransport:DeletionTransport {
     func noteWipeFailed(_ text:String){flow.noteWipeFailed(text)}
     func resume(_ receipt:DeletionReceipt){flow=AccountDeletion.resume(receipt);syncReceipt()}
     func preview(_ step:AccountDeletion.Step){var next=AccountDeletion();next.step=step;flow=next}
+    func previewSupportFailure(){
+        var next=AccountDeletion()
+        next.step = .failed
+        next.showSupport=true
+        next.dismissible=true
+        next.message="Account deletion failed and cannot be resumed. Nothing on this device was erased."
+        flow=next
+    }
     func askForSignIn(_ text:String){flow.askForSignIn(text)}
     func dismissError(){flow.dismissError();syncReceipt()}
     func deleteThrough(_ transport:any DeletionTransport,authorization:String) async {
@@ -68,9 +76,10 @@ struct CloudDeletionTransport:DeletionTransport {
     @StateObject private var model:AccountDeletionModel
     @State private var phrase=""
     @State private var working=false
-    init(resume:DeletionReceipt?=nil,previewStep:AccountDeletion.Step?=nil){
+    init(resume:DeletionReceipt?=nil,previewStep:AccountDeletion.Step?=nil,previewSupport:Bool=false){
         let model=AccountDeletionModel()
-        if let previewStep {model.preview(previewStep)}
+        if previewSupport {model.previewSupportFailure()}
+        else if let previewStep {model.preview(previewStep)}
         else if let resume {model.resume(resume)}
         else if let saved=DeletionReceiptVault.load() {model.resume(saved)}
         _model=StateObject(wrappedValue:model)
@@ -102,6 +111,9 @@ struct CloudDeletionTransport:DeletionTransport {
                     case .failed:
                         Text(model.flow.message ?? "Account deletion did not finish. You can retry.")
                         if model.flow.offersRetry() { Button("Retry"){model.retry()} }
+                        if model.flow.showSupport {
+                            Text(SupportContact.address).textSelection(.enabled).accessibilityIdentifier("deletion-support")
+                        }
                         if model.flow.canDismiss() { Button("Dismiss"){model.dismissError();dismiss()} }
                         else { Button("Cancel"){dismiss()} }
                     case .signedOut:
