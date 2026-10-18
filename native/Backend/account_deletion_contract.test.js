@@ -16,7 +16,7 @@ const TOKEN_RE=/^[A-Za-z0-9_-]{43}$/;
 const hash=uid=>crypto.createHash("sha256").update("gd-v1:"+uid).digest("hex");
 const termsDoc=()=>({termsVersion:TERMS_VERSION,readConfirmed:true,agreed:true});
 
-function harness({uids,terms=uids,authAge=30,holdStripe=false}){
+function harness({uids,terms=uids,authAge=30,holdStripe=false,bucket={deleteFiles:async()=>{}},stripe:stripeOverride}){
  let now=NOW;
  const db=memoryFirestore([
   ...uids.map(u=>["gd_accounts/"+hash(u),{uid:u}]),
@@ -58,21 +58,21 @@ function harness({uids,terms=uids,authAge=30,holdStripe=false}){
  }
  // Each build is one server instance: its own express app and its own
  // account_delete service (in-memory job cache), sharing db, Firebase and clock.
- const build=stripeImpl=>{
+ const build=(stripeImpl,bucketImpl=bucket)=>{
   const app=express();
   app.use("/v2",express.json({limit:"16kb"}));
-  installedBilling({app,db,bucket:{deleteFiles:async()=>{}},admin:{firestore:{FieldValue:{serverTimestamp:()=>0}}},
+  installedBilling({app,db,bucket:bucketImpl,admin:{firestore:{FieldValue:{serverTimestamp:()=>0}}},
    firebaseAuth:gate.firebaseAuth,firebaseAuthWithoutTerms:gate.firebaseAuthWithoutTerms,accountKey:hash,
    env:{},stripeOverride:stripeImpl,adminAuth,now:()=>now});
   return app;
  };
- const app=build(stripe);
+ const app=build(stripeOverride||stripe);
  const errors=[];
  const extra=[];
  return {db,users,ages,app,release,errors,
   // A second server instance on the same Firestore (multi-instance Cloud Run).
-  async instance(stripeImpl=stripe){
-   const server=build(stripeImpl).listen(0,"127.0.0.1");
+  async instance(stripeImpl=stripe,bucketImpl){
+   const server=build(stripeImpl,bucketImpl).listen(0,"127.0.0.1");
    await new Promise(r=>server.once("listening",r));
    extra.push(server);
    return "http://127.0.0.1:"+server.address().port;
@@ -462,5 +462,126 @@ test("contract 15 (F3/F4): a repeat-202 token is persisted before the 202 is ret
   assert.equal(viaC.json.status,"running");
   h.release();
   await h.pollUntil(first.jobId,again.json.statusToken);
+ }finally{h.close();}
+});
+
+// ---- Job lease (Riley, PR #6): the job-doc transaction grants a 60 s lease;
+// only the holder runs the job, renews it every batch and stops if it loses it;
+// after expiry another instance resumes from the last completed batch.
+const LEASE_MS=60_000;
+const LEASE_TODO="LEASE SERVER GAP account_delete.js:209-223: schedule() runs the job on whichever instance receives a DELETE (or a repeat DELETE) whenever that instance's in-memory job is not inflight; there is no lease in Firestore, so two instances run the same job concurrently and a stalled or superseded runner keeps writing. Fix (ruled): 60 s lease in the job-doc transaction, renewed every batch, holder-only steps and saves, stop on loss.";
+// Per-instance Stripe and bucket stubs that log every side effect into one
+// shared array, so cross-instance duplicates are countable.
+function sideEffects(log,name,{hangCancel=false,hangPrefix=null}={}){
+ let release=()=>{};
+ const gate=new Promise(r=>{release=r;});
+ const stripe={subscriptions:{
+  list:async q=>({has_more:false,data:[{id:"sub_lease",status:"active",customer:q.customer}]}),
+  cancel:async id=>{log.push({by:name,kind:"cancel",id});if(hangCancel)await gate;return {};},
+ }};
+ const bucket={deleteFiles:async({prefix})=>{
+  log.push({by:name,kind:"bucket",prefix});
+  if(hangPrefix&&prefix.startsWith(hangPrefix))await gate;
+ }};
+ return {stripe,bucket,release};
+}
+const count=(log,pred)=>log.filter(pred).length;
+const settle=(ms=60)=>new Promise(r=>setTimeout(r,ms));
+async function pollAt(h,jobId,token,base,want="done"){
+ const deadline=Date.now()+5000;let last;
+ do{last=await h.poll(jobId,token,base);if(last.status!==200||last.json.status===want)return last;await settle(5);}
+ while(Date.now()<deadline);
+ return last;
+}
+function seedCustomer(h,uid){h.db.rows.set("gd_accounts/"+hash(uid),{uid,stripeCustomerId:"cus_lease"});}
+
+test("contract 16 (lease): two instances racing on one job - only one runs it; each Stripe cancel and bucket batch happens once",
+ {todo:LEASE_TODO},async()=>{
+ const log=[];
+ const A=sideEffects(log,"A",{hangCancel:true}),B=sideEffects(log,"B");
+ const h=harness({uids:["u-race"],stripe:A.stripe,bucket:A.bucket});
+ seedCustomer(h,"u-race");
+ await h.listen();
+ try{
+  const first=await h.del("u-race");                 // A takes the lease, held inside Stripe cancel
+  assert.equal(first.status,202,first.text);
+  const b=await h.instance(B.stripe,B.bucket);
+  const fromB=await h.del("u-race",{base:b});         // B races for the same job while A holds the lease
+  assert.equal(fromB.status,202,fromB.text);
+  assert.equal(fromB.json.jobId,first.json.jobId);
+  await settle();
+  assert.equal(count(log,e=>e.by==="B"),0,"lease: B ran side effects while A holds the lease: "+JSON.stringify(log));
+  A.release();
+  const c=await h.instance(B.stripe,B.bucket);
+  const last=await pollAt(h,first.json.jobId,first.json.statusToken,c);
+  assert.deepEqual(last.json,{jobId:first.json.jobId,status:"done",retryable:false});
+  await settle();
+  assert.equal(count(log,e=>e.kind==="cancel"&&e.id==="sub_lease"),1,"lease: Stripe cancel ran more than once: "+JSON.stringify(log));
+  for(const prefix of ["customer/"+hash("u-race")+"/","tenants/"+hash("u-race")+"/"])
+   assert.equal(count(log,e=>e.kind==="bucket"&&e.prefix===prefix),1,"lease: bucket batch "+prefix.split("/")[0]+" ran more than once: "+JSON.stringify(log));
+  assert.equal(h.users.has("u-race"),false);
+ }finally{h.close();}
+});
+
+test("contract 17 (lease): holder dies mid-job - after 60 s another instance takes over, never repeats a completed batch, reaches done",
+ {todo:LEASE_TODO},async()=>{
+ const log=[];
+ // A completes the Stripe batch, then stalls forever in the first bucket batch
+ // (simulated death: never advances, never releases the lease).
+ const A=sideEffects(log,"A",{hangPrefix:"customer/"}),B=sideEffects(log,"B");
+ const h=harness({uids:["u-dead"],stripe:A.stripe,bucket:A.bucket});
+ seedCustomer(h,"u-dead");
+ await h.listen();
+ try{
+  const first=(await h.del("u-dead")).json;
+  await settle();
+  assert.equal(count(log,e=>e.by==="A"&&e.kind==="cancel"),1);
+  assert.equal(count(log,e=>e.by==="A"&&e.kind==="bucket"),1,"A is stalled in the first bucket batch");
+  const b=await h.instance(B.stripe,B.bucket);
+  h.setNow(NOW+LEASE_MS-1);
+  const early=await h.del("u-dead",{base:b});
+  assert.equal(early.status,202,early.text);
+  await settle();
+  assert.equal(count(log,e=>e.by==="B"),0,"lease: B ran before A's 60 s lease expired: "+JSON.stringify(log));
+  h.setNow(NOW+LEASE_MS+1);
+  const takeover=await h.del("u-dead",{base:b});
+  assert.equal(takeover.status,202,takeover.text);
+  assert.equal(takeover.json.jobId,first.jobId);
+  const c=await h.instance(B.stripe,B.bucket);
+  const last=await pollAt(h,first.jobId,takeover.json.statusToken,c);
+  assert.deepEqual(last.json,{jobId:first.jobId,status:"done",retryable:false},"lease: job did not reach done after takeover");
+  assert.equal(count(log,e=>e.kind==="cancel"),1,"lease: completed Stripe batch repeated after takeover: "+JSON.stringify(log));
+  assert.equal(count(log,e=>e.by==="B"&&e.kind==="bucket"&&e.prefix.startsWith("tenants/")),1,"B finishes the remaining bucket batch once");
+  assert.equal(count(log,e=>e.kind==="bucket"&&e.prefix.startsWith("tenants/")),1,"tenants batch exactly once");
+  assert.equal(h.users.has("u-dead"),false,"Firebase user deleted by the new holder");
+ }finally{h.close();}
+});
+
+test("contract 18 (lease): an instance that lost its lease makes no further writes or side effects after its current step",
+ {todo:LEASE_TODO},async()=>{
+ const log=[];
+ const A=sideEffects(log,"A",{hangCancel:true}),B=sideEffects(log,"B");
+ const h=harness({uids:["u-lost"],stripe:A.stripe,bucket:A.bucket});
+ seedCustomer(h,"u-lost");
+ await h.listen();
+ try{
+  const first=(await h.del("u-lost")).json;          // A holds the lease, stuck in Stripe cancel
+  await settle();
+  const b=await h.instance(B.stripe,B.bucket);
+  h.setNow(NOW+LEASE_MS+1);                           // A's lease expires without renewal
+  const takeover=await h.del("u-lost",{base:b});
+  assert.equal(takeover.status,202,takeover.text);
+  const c=await h.instance(B.stripe,B.bucket);
+  // poll with the newest token so F2 (single hash) cannot mask the lease check
+  const last=await pollAt(h,first.jobId,takeover.json.statusToken,c);
+  assert.deepEqual(last.json,{jobId:first.jobId,status:"done",retryable:false},"B took over and finished: "+last.text);
+  await settle();
+  const before=JSON.stringify([...h.db.rows.entries()].sort());
+  const aBefore=count(log,e=>e.by==="A");
+  A.release();                                        // A's current step returns after it lost the lease
+  await settle(150);
+  assert.equal(count(log,e=>e.by==="A"),aBefore,"lease: A kept running side effects after losing its lease: "+JSON.stringify(log.filter(e=>e.by==="A")));
+  assert.equal(JSON.stringify([...h.db.rows.entries()].sort()),before,"lease: A wrote to Firestore after losing its lease");
+  assert.deepEqual((await pollAt(h,first.jobId,takeover.json.statusToken,c)).json,{jobId:first.jobId,status:"done",retryable:false});
  }finally{h.close();}
 });
