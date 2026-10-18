@@ -56,6 +56,15 @@ test("cap: while locked, data stays readable but uploads are blocked",{todo:"loc
   assert.equal((await f.service.inventory(f.req)).policy.uploadsBlocked,true);
 });
 
+test("cap: paid storage route denies access to workspaces over the cap after downgrade (Casey: paid_storage.js:20-28)",{todo:"EXPECTED FAIL until fix: scopeFromWorkspace checks kind/owner/quota only, never the account cap, so workspaces 11-15 keep working"},()=>{
+  const {scopeFromWorkspace}=require("./paid_storage");
+  const f=fixture();for(let n=1;n<=15;n++)f.put(idFor(n),n===1?qualifier:{});
+  f.db.rows.set(f.path(idFor(1)),{...f.record(idFor(1)),storageActive:false,performanceActive:false});
+  // Over the 10 cap after downgrade: uploads must be blocked (reads may stay allowed by the lock rule).
+  const scope=scopeFromWorkspace(f.record(idFor(15)),owner,idFor(15));
+  assert.ok(scope===null||scope.uploadsBlocked===true,"workspace 15 still gets a writable storage scope");
+});
+
 // ---- 2. Billing ($5/month, FREE_WORKSPACES) ----
 test("billing: workspace fee is $5 per month, not one-time",{todo:"EXPECTED FAIL: policyFor reports feeIsOneTime:true ($5 once)"},()=>{
   const p=policyFor({},[]);assert.equal(p.feeIsOneTime,false);assert.equal(p.workspaceMonthlyCents,500);
