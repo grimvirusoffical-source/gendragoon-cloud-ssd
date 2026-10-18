@@ -122,6 +122,7 @@ export {
   dismissDeletion,
   requestDeletionSupport,
   DELETION_UID_KEY,
+  readDeletionUid,
   resumeAccountDeletion,
   retryDeletion,
 } from "./account.js";
