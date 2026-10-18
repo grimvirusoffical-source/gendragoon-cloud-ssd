@@ -300,8 +300,11 @@ export class GenDragoonClient {
    * A failed refresh, a refresh body that is not a status for this job, or a
    * refreshed job that is `failed` (it needs a person) is the same email fallback.
    * 429 retryAfterSec defaults to 60 and is clamped to 1..86400.
+   * A missing, empty, or whitespace-only status token is the email fallback
+   * with no request, so an empty `Bearer` header is never sent.
    */
   async postDeletionSupport(jobId: string, statusToken: string): Promise<DeletionSupportResult> {
+    if (typeof statusToken !== "string" || statusToken.trim() === "") return deletionSupportFallback();
     let status: number;
     let body: unknown;
     try {

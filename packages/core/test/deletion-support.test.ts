@@ -624,3 +624,63 @@ describe("requestDeletionSupport edges on 0fe9942", () => {
     await expectNoSignInAndJobKept(t2, d2.secureStore, jobId);
   });
 });
+
+/**
+ * The client itself refuses a missing, empty or whitespace-only status token:
+ * fallback, no throw, and zero requests, so `Authorization: Bearer ` is never sent.
+ */
+describe("postDeletionSupport refuses a blank status token", () => {
+  const JOB = "00000000-0000-4000-8000-00000000000a";
+  function countingClient() {
+    const seen = { requests: 0, firebase: 0, authHeaders: [] as string[] };
+    const client = new GenDragoonClient({
+      baseUrl: BASE,
+      getToken: () => { seen.firebase += 1; throw new Error("signed out"); },
+      fetch: async (_input, init) => {
+        seen.requests += 1;
+        seen.authHeaders.push(new Headers(init?.headers).get("authorization") ?? "");
+        return new Response(JSON.stringify({ status: "received", requestId: "req-1" }), { status: 202 });
+      },
+    });
+    return { client, seen };
+  }
+  const blanks: Array<[string, unknown]> = [
+    ["undefined", undefined],
+    ["null", null],
+    ["empty", ""],
+    ["spaces", "   "],
+    ["tabs and newlines", "\t\n \r"],
+  ];
+  for (const [label, token] of blanks) {
+    it(`client.postDeletionSupport with a blank token (${label}) -> fallback, no throw, zero requests`, async () => {
+      const { client, seen } = countingClient();
+      const result = await client.postDeletionSupport(JOB, token as string).then(
+        (r) => r,
+        (e: unknown) => ({ threw: String(e) }),
+      );
+      expect(result).toEqual({ kind: "fallback", contact: SUPPORT_CONTACT });
+      expect(seen.requests).toBe(0);
+      expect(seen.authHeaders).toEqual([]);
+      expect(seen.firebase).toBe(0);
+    });
+  }
+
+  it("requestDeletionSupport with a whitespace-only saved token -> fallback, zero requests, job and token kept", async () => {
+    const { client, seen } = countingClient();
+    const store = await savedJob(JOB, "   ");
+    const result = await requestDeletionSupport()(JOB, { client, secureStore: store });
+    expect(result).toEqual({ kind: "fallback", contact: SUPPORT_CONTACT });
+    expect(seen.requests).toBe(0);
+    expect(seen.authHeaders).toEqual([]);
+    expect(await read(store, JOB_KEY)).toBe(JOB);
+    expect(await read(store, TOKEN_KEY)).toBe("   ");
+  });
+
+  it("control: a real token still sends exactly one request with Bearer <token>", async () => {
+    const { client, seen } = countingClient();
+    const result = await client.postDeletionSupport(JOB, STATUS_TOKEN);
+    expect(result).toEqual({ kind: "received", requestId: "req-1" });
+    expect(seen.requests).toBe(1);
+    expect(seen.authHeaders).toEqual([`Bearer ${STATUS_TOKEN}`]);
+  });
+});
