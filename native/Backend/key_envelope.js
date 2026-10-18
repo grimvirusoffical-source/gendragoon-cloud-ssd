@@ -2,8 +2,6 @@
 // Wrapped workspace key envelope. The server stores the opaque wrapped key
 // and a version. It does not accept a passphrase, a plaintext key, or a filename.
 const UUID=/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
-const B64=/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
-const B64URL=/^[A-Za-z0-9_-]+={0,2}$/;
 const MAX_ENVELOPE_BYTES=4*1024;
 const ARGON_MEMORY_MIN=19456;
 const ARGON_MEMORY_MAX=1048576;
@@ -30,17 +28,15 @@ function rejectForbidden(value,depth=0){
   if(child&&typeof child==="object")rejectForbidden(child,depth+1);
  }
 }
-function validWrappedKey(value){
- if(typeof value!=="string"||!B64.test(value))return false;
- const buf=Buffer.from(value,"base64");
- return buf.length>=32&&buf.toString("base64")===value;
-}
 function integer(value){return Number.isSafeInteger(value);}
-function base64UrlBytes(value){
- if(typeof value!=="string"||!B64URL.test(value))return -1;
- const buf=Buffer.from(value,"base64url");
- if(buf.toString("base64url")!==value.replace(/=+$/,""))return -1;
- return buf.length;
+// Standard base64 and base64url are both accepted. The canonical form is unpadded base64url.
+function decodeBinary(value){
+ if(typeof value!=="string"||value.length===0||/\s/.test(value))return null;
+ const url=value.replace(/=+$/,"").replace(/\+/g,"-").replace(/\//g,"_");
+ if(!/^[A-Za-z0-9_-]+$/.test(url))return null;
+ const buf=Buffer.from(url,"base64url");
+ if(buf.toString("base64url")!==url)return null;
+ return buf;
 }
 function kdfRecord(kdf){
  if(!kdf||typeof kdf!=="object"||Array.isArray(kdf))throw refusal(422,"kdf_params_invalid");
@@ -58,7 +54,7 @@ function kdfRecord(kdf){
  const keys=Object.keys(kdf);
  if(keys.length!==4||!["alg","N","r","p"].every(key=>keys.includes(key)))throw refusal(422,"kdf_params_invalid");
  const {N,r,p}=kdf;
- if(!integer(N)||N<SCRYPT_N_MIN||N>SCRYPT_N_MAX||r!==8||!integer(p)||p<1||p>4)throw refusal(422,"kdf_params_invalid");
+ if(!integer(N)||N<SCRYPT_N_MIN||N>SCRYPT_N_MAX||(N&(N-1))!==0||r!==8||!integer(p)||p<1||p>4)throw refusal(422,"kdf_params_invalid");
  return {alg:"scrypt",N,r,p};
 }
 function parseEnvelope(body){
@@ -69,12 +65,13 @@ function parseEnvelope(body){
  const extra=Object.keys(body).filter(key=>!ENVELOPE_KEYS.includes(key));
  if(extra.length)throw refusal(400,"invalid_envelope");
  if(!Number.isSafeInteger(body.version)||body.version<1||body.version>1_000_000_000)throw refusal(400,"invalid_envelope");
- if(!validWrappedKey(body.wrappedKey))throw refusal(400,"invalid_envelope");
- const saltBytes=base64UrlBytes(body.salt);
- const ivBytes=base64UrlBytes(body.iv);
- if(saltBytes<16||saltBytes>64||ivBytes<12||ivBytes>32)throw refusal(422,"envelope_invalid");
+ const wrapped=decodeBinary(body.wrappedKey);
+ if(!wrapped||wrapped.length<32)throw refusal(400,"invalid_envelope");
+ const salt=decodeBinary(body.salt);
+ const iv=decodeBinary(body.iv);
+ if(!salt||!iv||salt.length<16||salt.length>64||iv.length<12||iv.length>32)throw refusal(422,"envelope_invalid");
  const kdf=kdfRecord(body.kdf);
- const envelope={version:body.version,kdf,salt:body.salt,iv:body.iv,wrappedKey:body.wrappedKey};
+ const envelope={version:body.version,kdf,salt:salt.toString("base64url"),iv:iv.toString("base64url"),wrappedKey:wrapped.toString("base64url")};
  if(Buffer.byteLength(JSON.stringify(envelope),"utf8")>MAX_ENVELOPE_BYTES)throw refusal(413,"payload_too_large");
  return envelope;
 }

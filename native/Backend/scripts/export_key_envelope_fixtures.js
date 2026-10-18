@@ -12,9 +12,9 @@ const ownerUid="owner";
 const hash=uid=>crypto.createHash("sha256").update("fixture:"+uid).digest("hex");
 const owner=hash(ownerUid);
 const workspace="11111111-1111-4111-8111-000000000001";
-const wrapped=Buffer.alloc(48,7).toString("base64");
-const salt=Buffer.alloc(16,2).toString("base64url");
-const iv=Buffer.alloc(12,3).toString("base64url");
+const wrapped=Buffer.alloc(48,0xfb).toString("base64");
+const salt=Buffer.alloc(16,0xff).toString("base64");
+const iv=Buffer.alloc(12,0xfb).toString("base64");
 const argon={alg:"argon2id",memoryKiB:19456,iterations:2,parallelism:1};
 function envelope(version,extra={}){return {version,kdf:argon,salt,iv,wrappedKey:wrapped,...extra};}
 
