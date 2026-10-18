@@ -339,6 +339,10 @@ function freshNotify(at){
  return {state:"pending",attempts:0,nextAttemptAt:new Date(at).toISOString(),
   staleDueAt:new Date(at+SUPPORT_STALE_MS+1).toISOString()};
 }
+function supportTerminal(notify){
+ if(notify?.state==="sent")return true;
+ return notify?.state==="failed"&&(notify.jobMissing===true||(Number.isInteger(notify.attempts)&&notify.attempts>=NOTIFY_MAX_ATTEMPTS));
+}
 function keepStale(current){
  const kept={};
  if(typeof current?.staleAlertedAt==="string")kept.staleAlertedAt=current.staleAlertedAt;
@@ -930,10 +934,11 @@ function createAccountDeletion({db,stripe,bucket,auth,byoProviders,hash,now,noti
    if(!data.workspaceNames&&!data.namesExpireAt)return;
    delete data.workspaceNames;
    delete data.namesExpireAt;
-   const account=accountRef(data.accountHash);
-   const accountSnap=await tx.get(account);
+   const hasAccount=typeof data.accountHash==="string"&&data.accountHash!=="";
+   const account=hasAccount?accountRef(data.accountHash):null;
+   const accountSnap=account?await tx.get(account):null;
    tx.set(ref,data);
-   if(accountSnap.exists&&accountSnap.data()?.jobId===jobId)tx.set(account,data);
+   if(accountSnap?.exists&&accountSnap.data()?.jobId===jobId)tx.set(account,data);
   });
  }
  async function claimNotify(jobId){
@@ -1019,11 +1024,15 @@ function createAccountDeletion({db,stripe,bucket,auth,byoProviders,hash,now,noti
   await markNotify(jobId,"sent");
   await clearWorkspaceNames(jobId);
  }
+ function sweepQueryFailed(query,error){
+  const code=error&&(typeof error.code==="string"||typeof error.code==="number")?String(error.code):"unknown";
+  console.error("support_sweep_query_failed "+query+" "+code.replace(/[^A-Za-z0-9_.-]/g,"").slice(0,40));
+ }
  async function dueSupportRequests(at){
   try{
    return await db.collection("supportRequests").where("notify.state","in",["pending","failed"])
     .where("notify.nextAttemptAt","<=",new Date(at).toISOString()).orderBy("notify.nextAttemptAt").limit(SWEEP_LIMIT).get();
-  }catch{return {docs:[]};}
+  }catch(error){sweepQueryFailed("due",error);return {docs:[]};}
  }
  async function deferTerminal(jobId,at){
   await db.runTransaction(async tx=>{
@@ -1044,7 +1053,7 @@ function createAccountDeletion({db,stripe,bucket,auth,byoProviders,hash,now,noti
   try{
    snap=await db.collection("supportRequests").where("notify.state","in",["pending","failed"])
     .where("notify.staleDueAt","<=",new Date(at).toISOString()).orderBy("notify.staleDueAt").limit(SWEEP_LIMIT).get();
-  }catch{return;}
+  }catch(error){sweepQueryFailed("stale",error);return;}
   for(const doc of snap.docs||[]){
    const jobId=doc.data()?.jobId;
    if(typeof jobId!=="string")continue;
@@ -1083,19 +1092,33 @@ function createAccountDeletion({db,stripe,bucket,auth,byoProviders,hash,now,noti
   let snap;
   try{
    snap=await db.collection("deletion_jobs").where("namesExpireAt","<=",new Date(at)).orderBy("namesExpireAt").limit(SWEEP_LIMIT).get();
-  }catch{return;}
+  }catch(error){sweepQueryFailed("names",error);return;}
   for(const doc of snap.docs||[]){
    const data=doc.data()||{};
    if(typeof data.jobId!=="string"||!data.workspaceNames)continue;
-   await clearWorkspaceNames(data.jobId);
+   try{await clearWorkspaceNames(data.jobId);}
+   catch(_){console.error("support_names_clear_failed "+data.jobId);}
   }
  }
  async function expireSupportDocuments(at){
   let snap;
   try{
    snap=await db.collection("supportRequests").where("expireAt","<=",new Date(at)).orderBy("expireAt").limit(SWEEP_LIMIT).get();
-  }catch{return;}
-  for(const doc of snap.docs||[])await doc.ref.delete();
+  }catch(error){sweepQueryFailed("expire",error);return;}
+  for(const doc of snap.docs||[]){
+   const id=doc.id;
+   try{
+    await db.runTransaction(async tx=>{
+     const fresh=await tx.get(doc.ref);
+     if(!fresh.exists)return;
+     const data=fresh.data()||{};
+     const expires=data.expireAt instanceof Date?data.expireAt.getTime():
+      typeof data.expireAt?.toMillis==="function"?data.expireAt.toMillis():Date.parse(data.expireAt);
+     if(!Number.isFinite(expires)||expires>at||!supportTerminal(data.notify))return;
+     tx.delete(doc.ref);
+    });
+   }catch(_){console.error("support_expire_failed "+id);}
+  }
  }
  async function sweepSupportNotifications(){
   const at=clock();
@@ -1148,8 +1171,10 @@ function createAccountDeletion({db,stripe,bucket,auth,byoProviders,hash,now,noti
     saved={limited:true,retryAfterSec:Math.max(1,Math.ceil((start+SUPPORT_WINDOW_MS-at)/1000))};
     return;
    }
+   const keepNotify=inWindow&&existing?.notify;
    const doc={accountHash,uid,jobId,failureReason,createdAt:inWindow?existing.createdAt:new Date(at).toISOString(),
-    count:count+1,notify:inWindow&&existing?.notify?existing.notify:freshNotify(at)};
+    count:count+1,notify:keepNotify?existing.notify:freshNotify(at)};
+   if(keepNotify&&existing.expireAt&&supportTerminal(existing.notify))doc.expireAt=existing.expireAt;
    tx.set(ref,doc);
    saved={limited:false,notify:doc.count===1};
   });

@@ -93,7 +93,7 @@ test("N1 stale alert across 48 h of 10-minute sweeps fires exactly once (Avery: 
  assert.equal(stale,1,"stale "+stale);assert.equal(failed,1,"failed "+failed);
 });
 
-test("N2 expireAt cleanup never removes a pending/unsent request; a sent or terminal one keeps a 30-day expireAt",{todo:"G2 (Low, hardening): expireSupportDocuments deletes on expireAt alone without checking notify.state"},async()=>{
+test("N2 expireAt cleanup never removes a pending/unsent request; a sent or terminal one keeps a 30-day expireAt",async()=>{
  const w=world({env:{SUPPORT_DISCORD_WEBHOOK_URL:WEBHOOK},fetchImpl:async()=>({ok:false,status:503})});
  try{
   const j=await failedJob(w);await sup(w,j.jobId,j.statusToken);await whenSupportSettled();
@@ -109,7 +109,7 @@ test("N2 expireAt cleanup never removes a pending/unsent request; a sent or term
  }finally{w.close();}
 });
 
-test("N2b a repeat send after the post was sent must keep expireAt (retention)",{todo:"G1 (Low): requestSupport rewrites the doc and drops expireAt"},async()=>{
+test("N2b a repeat send after the post was sent must keep expireAt (retention)",async()=>{
  const w=world();
  try{
   const j=await failedJob(w);await sup(w,j.jobId,j.statusToken);await whenSupportSettled();

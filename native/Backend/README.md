@@ -95,6 +95,8 @@ The deployment command uses the active Google application-default account throug
 
 ### Release blocker
 
+Deploy the Firestore indexes before this revision takes production traffic: run `firebase deploy --only firestore:indexes` from the repo root (it reads `firebase.json` and `firestore.indexes.json`) and wait until every index is Enabled. Without them the support sweep queries fail and the server logs `support_sweep_query_failed`. This is a release blocker.
+
 Do not send this revision production traffic until Cloud Scheduler calls `POST /internal/support-notifications/sweep` every minute with `Authorization: Bearer <SUPPORT_SWEEP_TOKEN>`. The token is at least 16 characters and is not stored in this repo. The once-a-minute timer inside the process is not a substitute: Cloud Run can scale the instance away. This is a release blocker, not an optional follow-up.
 
 ### Release checklist
