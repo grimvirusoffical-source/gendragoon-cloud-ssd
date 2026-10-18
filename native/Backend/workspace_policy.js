@@ -109,8 +109,9 @@ function subscriptionActive(w){
 }
 function byoLapsed(w){return isByoWorkspace(w)&&!isGrandfathered(w)&&!subscriptionActive(w);}
 function feeLapsed(w){return !!w&&(evaluateLapse(w).lapsed||byoLapsed(w));}
+function slotHolder(w){return !!w&&!isByoWorkspace(w)&&!isGrandfathered(w);}
 function hostedEligible(w){
- if(!w||!w.id||isByoWorkspace(w))return false;
+ if(!slotHolder(w))return false;
  const status=projectStatus(w);
  return status!=="archived"&&status!=="merged";
 }
@@ -118,29 +119,31 @@ function byCreated(a,b){
  const ca=createdAtMs(a),cb=createdAtMs(b);
  const da=ca==null?Number.MAX_SAFE_INTEGER:ca,db=cb==null?Number.MAX_SAFE_INTEGER:cb;
  if(da!==db)return da-db;
- return String(a.id).localeCompare(String(b.id));
+ const ia=String(a.id),ib=String(b.id);
+ if(ia<ib)return -1;
+ if(ia>ib)return 1;
+ return 0;
 }
 function chooseFreeWorkspaceId(projects,{avoidId=null}={}){
  const eligible=(Array.isArray(projects)?projects:[]).filter(hostedEligible).sort(byCreated);
  const pick=eligible.find(workspace=>workspace.id!==avoidId);
  return pick?pick.id:null;
 }
-// The one hosted workspace that does not pay the monthly fee. A stored id keeps
-// the slot through archive. A BYO id is never eligible, so the oldest remaining
-// hosted workspace is chosen instead. Callers pass the account plus its projects.
+// Oldest non-grandfathered hosted workspace, by createdAtMs then id. A stored id
+// keeps the slot through archive. Grandfathered and BYO workspaces never hold it.
 function freeWorkspaceId(account,projects){
  const stored=typeof account?.freeWorkspaceId==="string"&&account.freeWorkspaceId?account.freeWorkspaceId:null;
  if(!Array.isArray(projects))return stored;
  if(stored){
   const holder=projects.find(workspace=>workspace&&workspace.id===stored);
-  if(holder&&!isByoWorkspace(holder))return stored;
+  if(slotHolder(holder))return stored;
  }
  return chooseFreeWorkspaceId(projects);
 }
 function workspacePrice(workspace,freeId){
- const isFree=!!workspace&&workspace.id===freeId&&!isByoWorkspace(workspace);
- const monthlyPriceCents=isByoWorkspace(workspace)?WORKSPACE_FEE_CENTS
-  :(isFree||isGrandfathered(workspace)||workspace?.projectFeeStatus==="owner"?0:WORKSPACE_FEE_CENTS);
+ const grandfathered=isGrandfathered(workspace);
+ const isFree=!!workspace&&workspace.id===freeId&&!isByoWorkspace(workspace)&&!grandfathered;
+ const monthlyPriceCents=isFree||grandfathered?0:WORKSPACE_FEE_CENTS;
  return {isFree,monthlyPriceCents};
 }
 function countsTowardCap(w){return !["archived","merged"].includes(projectStatus(w));}

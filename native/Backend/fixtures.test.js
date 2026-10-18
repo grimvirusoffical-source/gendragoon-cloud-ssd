@@ -25,6 +25,19 @@ function bodyKeys(body){
  assert.equal(typeof body,"object");
  return Object.keys(body).sort();
 }
+ function assertPriceInvariant(rel,body){
+ if(!body||typeof body!=="object")return;
+ const items=[...(Array.isArray(body.workspaces)?body.workspaces:[]),...(Array.isArray(body.projects)?body.projects:[])];
+ if(body.project&&typeof body.project==="object")items.push(body.project);
+ for(const item of items){
+  if(typeof item.monthlyPriceCents!=="number")continue;
+  assert.equal(item.monthlyPriceCents===0,item.isFree===true||item.grandfathered===true,rel+" "+(item.id||"item"));
+ }
+ if(typeof body.monthlyPriceCents==="number"&&typeof body.isFree==="boolean"){
+  const grandfathered=body.grandfathered===true||body.project?.grandfathered===true;
+  assert.equal(body.monthlyPriceCents===0,body.isFree===true||grandfathered,rel+" response");
+ }
+}
 function assertDocumentedBody(rel,fixture,routes){
  const route=routes.find(item=>item.method===fixture.request?.method&&item.pattern.test(fixture.request?.path||""));
  assert.ok(route,rel+" has no documented route for "+fixture.request?.method+" "+fixture.request?.path);
@@ -71,6 +84,7 @@ test("committed API fixtures match a fresh generation from the handlers",{timeou
   const rel=path.relative(committed,saved[i]);
   assert.deepEqual(stored,generated,rel+" is stale; run npm run fixtures");
   assert.deepEqual(keysNamedCode(generated.response?.body),[],rel+" puts an error code in `code`");
+  assertPriceInvariant(rel,generated.response?.body);
   const headers=JSON.stringify(generated.request?.headers||{});
   assert.equal(headers.includes("Bearer "),false,"request token was not redacted");
   assertDocumentedBody(rel,generated,routes);

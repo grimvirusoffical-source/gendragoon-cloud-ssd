@@ -83,7 +83,7 @@ function paid(name,extra={}){
   provisioned:true,storageActive:false,performanceActive:false,usedBytes:0,reservedBytes:0,createdAt:NOW,...extra};
 }
 function put(db,id,data,account=owner){db.rows.set("gd_accounts/"+account+"/workspaces/"+id,data);}
-async function start(db,{byoFetch=null,env:useEnv=env,stripe:useStripe=stripe}={}){
+async function start(db,{byoFetch=null,env:useEnv=env,stripe:useStripe=stripe,stamp=NOW}={}){
  const app=express();
  app.use(express.json({limit:"16kb"}));
  const auth=(req,res,next)=>{
@@ -91,10 +91,10 @@ async function start(db,{byoFetch=null,env:useEnv=env,stripe:useStripe=stripe}={
   if(token==="owner"||token==="other"){req.user={uid:token};return next();}
   res.status(401).json({error:"Sign in required"});
  };
- registerBillingV2({app,db,stripe:useStripe,admin:{firestore:{FieldValue:{serverTimestamp:()=>NOW}}},
+ registerBillingV2({app,db,stripe:useStripe,admin:{firestore:{FieldValue:{serverTimestamp:()=>stamp}}},
   auth,agreed:(_req,_res,next)=>next(),hash,prices:{},env:useEnv,byoFetch});
  registerPaidStorage({app,db,bucket:{file:()=>({})},accountKey:hash,
-  FieldValue:{increment:n=>({increment:n}),serverTimestamp:()=>NOW},
+  FieldValue:{increment:n=>({increment:n}),serverTimestamp:()=>stamp},
   apiKeys:{verify:async()=>null},getAuth:()=>({}),firebaseAuth:auth});
  const server=app.listen(0,"127.0.0.1");
  await new Promise(resolve=>server.once("listening",resolve));
@@ -220,8 +220,9 @@ function assertPrice(record,isFree,cents,label){
  if(record.response.status!==200&&record.response.status!==201)throw Error(label+" status "+JSON.stringify(record.response));
  if(body.isFree!==isFree||body.monthlyPriceCents!==cents)throw Error(label+" price "+JSON.stringify(body));
 }
+const FREE_STAMP=Date.parse("2026-10-18T00:00:00Z");
 async function freeSlotCases(){
- const hosted=await start(memoryFirestore(),{env:monthlyEnv,stripe:monthlyStripe()});
+ const hosted=await start(memoryFirestore(),{env:monthlyEnv,stripe:monthlyStripe(),stamp:FREE_STAMP});
  try{
   const first=await capture(hosted.base,"POST","/v2/projects",{body:{name:"Free Hosted",intentId:wid(1)}});
   assertPrice(first,true,0,"free-first");
@@ -242,7 +243,7 @@ async function freeSlotCases(){
    throw Error("hosted plus byo lock "+JSON.stringify(both.response.body?.policy));
   writeCase("workspaces","list-hosted-plus-byo",both);
  }finally{await hosted.close();}
- const only=await start(memoryFirestore(),{env:monthlyEnv,stripe:monthlyStripe()});
+ const only=await start(memoryFirestore(),{env:monthlyEnv,stripe:monthlyStripe(),stamp:FREE_STAMP});
  try{
   const created=await capture(only.base,"POST","/v2/projects",{body:{name:"Only BYO",intentId:wid(3)}});
   if(created.response.status!==201)throw Error("only byo create "+JSON.stringify(created.response));
@@ -259,7 +260,7 @@ async function freeSlotCases(){
    throw Error("list byo lock "+JSON.stringify(policy));
   writeCase("workspaces","list-byo-only",listed);
  }finally{await only.close();}
- const replaced=await start(memoryFirestore(),{env:monthlyEnv,stripe:monthlyStripe()});
+ const replaced=await start(memoryFirestore(),{env:monthlyEnv,stripe:monthlyStripe(),stamp:FREE_STAMP});
  try{
   const original=await capture(replaced.base,"POST","/v2/projects",{body:{name:"Disposable Free",intentId:wid(4)}});
   if(original.response.body?.isFree!==true)throw Error("disposable was not free");
@@ -271,7 +272,7 @@ async function freeSlotCases(){
   if(again.response.body?.policy?.usedProjectSlots!==1)throw Error("more than one workspace survived delete "+JSON.stringify(again.response.body?.policy));
   writeCase("workspaces","delete-free-then-create",again);
  }finally{await replaced.close();}
- const concurrent=await start(memoryFirestore(),{env:monthlyEnv,stripe:monthlyStripe()});
+ const concurrent=await start(memoryFirestore(),{env:monthlyEnv,stripe:monthlyStripe(),stamp:FREE_STAMP});
  try{
   const created=await Promise.all([
    capture(concurrent.base,"POST","/v2/projects",{body:{name:"Concurrent A",intentId:wid(6)}}),
@@ -284,6 +285,29 @@ async function freeSlotCases(){
    throw Error("concurrent list "+JSON.stringify(items.map(item=>({id:item.id,isFree:item.isFree,monthlyPriceCents:item.monthlyPriceCents}))));
   writeCase("workspaces","concurrent-create-one-free",listed);
  }finally{await concurrent.close();}
+ const mixed=memoryFirestore();
+ const grandfatheredId=wid(8),newId=wid(9);
+ put(mixed,grandfatheredId,paid("One-time paid",{feeIsOneTime:true,projectFeeStatus:"paid",createdAt:NOW}));
+ const mixedApp=await start(mixed,{env:monthlyEnv,stripe:monthlyStripe(),stamp:FREE_STAMP});
+ try{
+  const created=await capture(mixedApp.base,"POST","/v2/projects",{body:{name:"New Hosted",intentId:newId}});
+  if(created.response.status!==201||created.response.body?.isFree!==true||created.response.body?.project?.grandfathered!==false)
+   throw Error("new hosted beside grandfathered "+JSON.stringify(created.response));
+  const listed=await capture(mixedApp.base,"GET","/v2/workspaces");
+  const items=listed.response.body?.workspaces||[];
+  const old=items.find(item=>item.id===grandfatheredId),neu=items.find(item=>item.id===newId);
+  if(old?.isFree!==false||old?.monthlyPriceCents!==0||old?.grandfathered!==true)
+   throw Error("grandfathered row "+JSON.stringify(old));
+  if(neu?.isFree!==true||neu?.monthlyPriceCents!==0||neu?.grandfathered!==false)
+   throw Error("new free row "+JSON.stringify(neu));
+  if(listed.response.body?.policy?.freeWorkspaceId!==newId)
+   throw Error("grandfathered held the slot "+JSON.stringify(listed.response.body?.policy));
+  for(const item of items){
+   if((item.monthlyPriceCents===0)!==(item.isFree===true||item.grandfathered===true))
+    throw Error("price invariant "+JSON.stringify(item));
+  }
+  writeCase("workspaces","grandfathered-plus-new",listed);
+ }finally{await mixedApp.close();}
 }
 async function main(){
  fs.mkdirSync(outDir,{recursive:true});

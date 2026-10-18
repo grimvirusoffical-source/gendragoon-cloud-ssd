@@ -146,7 +146,9 @@ function createProjectService({db,stamp,hash,stripe,env={},prices={},ensureCusto
        provisioned:feeStatus!=="pending",quotaBytes:BASIC_QUOTA_BYTES,usedBytes:0,reservedBytes:0,
        createdAt:stamp(),updatedAt:stamp()};
      tx.create(ref,data);
-     const assignedFree=p.freeProjectAvailable?id:p.freeWorkspaceId;
+     const candidate={...data,id};
+     const takesSlot=p.freeProjectAvailable&&!isGrandfathered(candidate)&&!isByoWorkspace(candidate);
+     const assignedFree=takesSlot?id:p.freeWorkspaceId;
      touch(tx,owner,state,{freeProjectClaimed:true,freeWorkspaceId:assignedFree,projectsCreatedLifetime:(state.account.projectsCreatedLifetime||state.records.length)+1});
      const next={...state,account:{...state.account,freeProjectClaimed:true,freeWorkspaceId:assignedFree},records:[...state.records,{id,ref,data}]};
      const price=workspacePrice({...data,id},assignedFree);
@@ -430,6 +432,33 @@ function createProjectService({db,stamp,hash,stripe,env={},prices={},ensureCusto
      return {...patch,isFree:price.isFree,monthlyPriceCents:price.monthlyPriceCents,freeWorkspaceId:nextFree||null,lapsed:byoLapsed({...current.data,...patch,id})};
    });
  }
+ async function makeHosted(req,id){
+  const owner=hash(req.user.uid);
+  return db.runTransaction(async tx=>{
+    const state=await snapshot(owner,tx),current=state.records.find(w=>w.id===id);
+    if(!current)throw new ProjectError(404,"Project not found","PROJECT_NOT_FOUND");
+    const createdAt=current.data.createdAt??current.data.createdAtMs??null;
+    const patch={byoRegistered:false,providerType:null,endpoint:null,bucketFingerprint:null,byoActive:false,
+      byoChallengeVerified:false,byoChallenge:null,manualProviderConfigured:false,updatedAt:stamp(),
+      ...(current.data.kind==="byo"?{kind:"paid"}:{})};
+    const projects=projectViews(state).map(workspace=>workspace.id===id?{...workspace,...patch,providerType:null,byoRegistered:false}:workspace);
+    const previous=freeWorkspaceId(state.account,projectViews(state));
+    const nextFree=chooseFreeWorkspaceId(projects);
+    if(previous&&previous!==nextFree){
+      const loser=state.records.find(w=>w.id===previous);
+      if(loser&&loser.data.projectFeeStatus==="free"&&!isGrandfathered(loser.data))
+        tx.update(loser.ref,{projectFeeStatus:"pending",projectFeeCents:WORKSPACE_FEE_CENTS,workspaceFeeModel:"monthly",
+          feeIsOneTime:false,workspaceFeeStatus:"unpaid",workspaceFeePaid:false,workspaceFeeCents:WORKSPACE_FEE_CENTS,updatedAt:stamp()});
+    }
+    if(nextFree===id){
+      patch.projectFeeStatus="free";patch.projectFeeCents=0;patch.projectStatus="active";patch.provisioned=true;
+      patch.workspaceFeeModel=null;patch.workspaceFeeStatus=null;patch.workspaceFeePaid=null;patch.workspaceFeeCents=0;
+    }else if(nextFree)assignFree(tx,state.records.find(w=>w.id===nextFree));
+    tx.update(current.ref,patch);
+    touch(tx,owner,state,{freeWorkspaceId:nextFree||null});
+    return {workspaceId:id,hosted:true,createdAt,freeWorkspaceId:nextFree||null};
+  });
+ }
  async function issueByoChallenge(req,id){
    const owner=hash(req.user.uid),ref=refFor(owner,id),challenge=issueChallenge(Date.now());
    await db.runTransaction(async tx=>{
@@ -700,7 +729,7 @@ function createProjectService({db,stamp,hash,stripe,env={},prices={},ensureCusto
    for(const id of ids)await cancel(id,{},{idempotencyKey:"gd-merge-"+mergeId+"-cancel-"+id});
  }
  return {inventory,get,create,setSelection,checkout,archive,restore,remove,withLease,reconcilePayment,revokePayment,
-   registerByo,issueByoChallenge,verifyByo,reconcileWorkspaceFee,mergePreview,merge,
+   registerByo,makeHosted,issueByoChallenge,verifyByo,reconcileWorkspaceFee,mergePreview,merge,
    paymentAvailable,monthlyReady,refFor,legacyRef,policy,hasContinuingBilling};
 }
 module.exports={createProjectService,ProjectError,projectStatus,activatedBasicProject,effectiveStorageQuota,

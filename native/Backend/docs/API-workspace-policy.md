@@ -6,7 +6,7 @@ Server-side rules for GenDragoon workspaces. This note is the source Avery can f
 
 | Constant | Value | Meaning |
 | --- | --- | --- |
-| `FREE_WORKSPACES` | `1` | One hosted free workspace per account. `freeWorkspaceId(account)` is that workspace. A BYO workspace never fills the slot. |
+| `FREE_WORKSPACES` | `1` | One hosted free workspace per account. `freeWorkspaceId(account, projects)` is that workspace. Grandfathered and BYO workspaces never fill the slot. |
 | `WORKSPACE_FEE_USD_MONTHLY` | `5` | Recurring fee for every workspace that is not the free hosted slot. BYO is always this price. |
 | `workspaceMonthlyCents` | `500` | Same fee in USD cents. |
 | `BASE_CAP` | `10` | Owned active + pending workspaces (archived and merged do not count). |
@@ -44,16 +44,18 @@ Account policy from `GET /v2/projects` and `GET /v2/workspaces` includes:
 
 ## Free workspace
 
-`freeWorkspaceId(account)` is the one hosted workspace that does not pay the monthly fee. The choice is made inside the Firestore transaction on create, delete, BYO registration, and merge, so two simultaneous creates cannot both be free.
+`freeWorkspaceId(account, projects)` is the one hosted workspace that does not pay the monthly fee. The choice is made inside the Firestore transaction on create, delete, BYO registration, and merge, so two simultaneous creates cannot both be free. Deleting the free workspace while another create is in flight still leaves exactly one free workspace.
 
 - The slot is hosted storage only. A BYO workspace (S3 or any bring-your-own provider) is never free: `isFree` is false and `monthlyPriceCents` is 500 even when it is the account's only workspace.
-- The slot is the oldest active hosted workspace. Create assigns it when the account has none. Delete of that workspace assigns the oldest remaining hosted workspace inside the same transaction. If none remain, the next hosted workspace created becomes free.
-- Archive does not release the slot. The stored id stays on the archived workspace.
+- Eligible rows are hosted workspaces that are not grandfathered and not archived or merged. Order is `createdAtMs` ascending (`createdAtMs`, otherwise `createdAt`; a missing time sorts last), then workspace id ascending in code-unit order.
+- Create assigns the slot when no eligible workspace holds it. Delete of that workspace assigns the oldest remaining eligible hosted workspace inside the same transaction. If none remain, the next hosted workspace created becomes free.
+- Archive does not release the slot. A stored id stays while that workspace is still a non-grandfathered hosted row, including while it is archived.
 - Merge keeps the survivor's fee status. If the deleted source held the slot, the slot moves to another hosted workspace and does not rewrite the survivor. When the survivor is the only one left, the next create takes the slot.
-- Registering BYO on the free hosted workspace makes that workspace the $5 monthly fee and moves the slot to another hosted workspace when one exists.
+- Registering BYO on the free hosted workspace makes that workspace the $5 monthly fee and moves the slot to the oldest other eligible hosted workspace.
+- A workspace that goes hosted, then BYO, then back to hosted is eligible again. Ordering uses its original `createdAt`, so the older workspace takes the slot back and the workspace that held it in the meantime becomes the $5 monthly fee.
 - A BYO workspace with no active subscription is locked immediately: **423** `{error:"workspace_lock", reason:"lapsed", unpaidWorkspaceIds:[id]}`. It does not get the hosted grace period.
-- Grandfathered one-time workspaces stay exempt (`monthlyPriceCents` 0) and are not rewritten into the monthly fee.
-- Each workspace list item, and the create response, includes `isFree` and `monthlyPriceCents` (`0` or `500`). Clients use those fields instead of a hardcoded price.
+- Grandfathered one-time workspaces never take the free slot and are not rewritten into the monthly fee. They report `isFree: false`, `monthlyPriceCents: 0`, and `grandfathered: true`. The slot goes to the oldest non-grandfathered hosted workspace. A stored id that points at a grandfathered workspace is ignored.
+- `monthlyPriceCents` is `0` exactly when `isFree` or `grandfathered` is true, and `500` otherwise. Each workspace list item, and the create response, includes `isFree`, `monthlyPriceCents`, and `grandfathered`.
 
 ## Grandfathering
 

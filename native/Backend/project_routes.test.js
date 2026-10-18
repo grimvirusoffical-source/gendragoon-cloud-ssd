@@ -22,7 +22,7 @@ async function fixture(t){
  const app=express();app.use("/v2",express.json());
  const firebaseAuth=(req,res,next)=>{const uid=req.headers.authorization?.replace("Bearer ","");if(!["test-a","test-b"].includes(uid))return res.status(401).json({error:"Sign in"});req.user={uid};next();};
  const runtime=installedBilling({app,db,bucket:{file:name=>({save:async()=>markers.push(name)})},stripeOverride:stripe,
-   admin:{firestore:{FieldValue:{serverTimestamp:()=>123}}},firebaseAuth,accountKey:hash,
+   admin:{firestore:{FieldValue:{serverTimestamp:()=>Date.parse("2026-10-18T00:00:00Z")}}},firebaseAuth,accountKey:hash,
    env:{STRIPE_SECRET_KEY:"sk_test_dummyABC123",STRIPE_WEBHOOK_SECRET:hookSecret,STRIPE_CHECKOUT_ENABLED:"true",
      STRIPE_PROJECT_CHECKOUT_READY:"true",STRIPE_ENVIRONMENT:"test",PUBLIC_URL:"https://billing.example",STRIPE_PRICE_CATALOG_JSON:JSON.stringify(configured)}});
  const server=app.listen(0,"127.0.0.1");await new Promise(resolve=>server.once("listening",resolve));

@@ -14,4 +14,4 @@ Error codes are in `error` (never `code`).
 
 Request bodies use only the fields listed for that route under Request fields in `native/Backend/docs/API-workspace-policy.md`. `byo/verify-missing-url` sends an empty body. Every other `byo/verify-*` request sends `{presignedUrl}`.
 
-Workspace list items and create responses include `isFree` and `monthlyPriceCents` (`0` or `500`).
+Workspace list items and create responses include `isFree`, `monthlyPriceCents`, and `grandfathered`. `monthlyPriceCents` is `0` exactly when `isFree` or `grandfathered` is true, and `500` otherwise. A grandfathered one-time workspace does not take the free slot (`workspaces/grandfathered-plus-new.json`).
