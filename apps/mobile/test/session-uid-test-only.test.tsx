@@ -18,7 +18,7 @@ function ui() {
 describe("session-uid is test-only", () => {
   const before = process.env.NODE_ENV;
   afterEach(() => {
-    process.env.NODE_ENV = before;
+    (process.env as Record<string, string | undefined>).NODE_ENV = before;
   });
 
   it("renders under Jest (NODE_ENV=test)", async () => {
@@ -27,7 +27,7 @@ describe("session-uid is test-only", () => {
     expect(s.getByTestId("session-uid").props.children).toBe("user-1");
   });
 
-  it.each(["production", "development"])("is absent when NODE_ENV=%s", async (env) => {
+  it.each(["production", "development"] as const)("is absent when NODE_ENV=%s", async (env) => {
     process.env.NODE_ENV = env;
     expect(isTestBuild()).toBe(false);
     const s = await render(ui());
