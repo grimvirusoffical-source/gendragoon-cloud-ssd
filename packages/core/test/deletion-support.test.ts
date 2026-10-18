@@ -17,7 +17,7 @@
  * `requestDeletionSupport` is the core export. Each case checks its setup, then
  * calls that function. Assertions below are Morgan's contract from 12d5024.
  *
- * Proposed shape (Avery can rename; update the CoreSupport type below):
+ * Shape (core export, see the CoreSupport type below):
  *   requestDeletionSupport(jobId, { client, secureStore, onAuthFailure?, clearSession? })
  *     -> { kind: "received", requestId }
  *      | { kind: "already_sent", retryAfterSec? }
@@ -30,6 +30,7 @@ import * as core from "../src/index.js";
 import { GenDragoonClient, MemorySecretStore, SUPPORT_CONTACT } from "../src/index.js";
 import type { AccountDeletionStatus } from "../src/index.js";
 import { loadDeletionFixture } from "./fixtures/server-pr6/load.js";
+import { loadServerFixture } from "./fixtures/server/load.js";
 
 type SupportResult =
   | { kind: "received"; requestId: string }
@@ -265,5 +266,74 @@ describe("requestDeletionSupport(jobId, { client, secureStore })", () => {
     expect(result).toEqual({ kind: "fallback", contact: SUPPORT_CONTACT });
     expect(t.srv.calls).toHaveLength(0);
     await expectNoSignInAndJobKept(t, deps.secureStore, jobId, null);
+  });
+});
+
+/**
+ * Gaps found reviewing bcc1c39 (client.ts:299-334, account.ts:433-447). Each case
+ * does its setup and checks it, then calls the real export. On bcc1c39 each one
+ * fails because the call throws, or because a request is sent. Remove a marker
+ * when its fix lands.
+ */
+describe("requestDeletionSupport gaps on bcc1c39 (it.fails until fixed)", () => {
+  const fail = (r: SupportResult | { threw: string }) => r;
+  const call = (fn: CoreSupport, jobId: string, deps: Parameters<CoreSupport>[1]) =>
+    fn(jobId, deps).then(fail, (e: unknown) => fail({ threw: `${(e as Error)?.name}: ${(e as Error)?.message}` }));
+
+  // Refresh failures after 409 support_not_needed. 404: real expired-token status-poll body.
+  // 401: real status-invalid-token body. Network: fetch rejects.
+  const refreshFailures: Array<[string, Reply]> = [
+    ["404 (real expired-token)", reply("expired-token")],
+    ["401 invalid_token (real status-invalid-token)", reply("status-invalid-token")],
+    ["network error", "network"],
+  ];
+  for (const [label, refresh] of refreshFailures) {
+    it.fails(`409 support_not_needed, then the status refresh fails with ${label} -> fallback SUPPORT_CONTACT, no throw, no sign-in (client.ts:328-330)`, async () => {
+      const jobId = jobOf("support-not-needed");
+      const t = setup(jobId, { support: [reply("support-not-needed")], status: [refresh] });
+      const deps = await t.deps();
+      expect(await read(deps.secureStore, TOKEN_KEY)).toBe(STATUS_TOKEN);
+      const result = await call(requestDeletionSupport(), jobId, deps);
+      expect(result).toEqual({ kind: "fallback", contact: SUPPORT_CONTACT });
+      expect(t.srv.calls.map((c) => c.method)).toEqual(["POST", "GET"]);
+      expect(t.srv.calls[1]!.headers.authorization).toBe(`Bearer ${STATUS_TOKEN}`);
+      await expectNoSignInAndJobKept(t, deps.secureStore, jobId);
+    });
+  }
+
+  // 413: the server's real /v2 payload_too_large body (fixtures/server/errors, captured on
+  // POST /v2/account; v2_errors.js sends the same body for every /v2 route).
+  // 400, 403, 422: DERIVED, no fixture for the support route.
+  const tooLarge = loadServerFixture("errors", "payload-too-large");
+  const otherClientErrors: Array<[string, Reply]> = [
+    ["400 (DERIVED)", { status: 400, body: { error: "invalid_json" } }],
+    ["403 (DERIVED)", { status: 403, body: { error: "forbidden" } }],
+    ["413 (real errors/payload-too-large)", { status: tooLarge.response.status, body: tooLarge.response.body }],
+    ["422 (DERIVED)", { status: 422, body: { error: "unprocessable" } }],
+  ];
+  for (const [label, r] of otherClientErrors) {
+    it.fails(`support request ${label} -> fallback SUPPORT_CONTACT, no throw (client.ts:333)`, async () => {
+      const jobId = jobOf("support-received");
+      const t = setup(jobId, { support: [r] });
+      const deps = await t.deps();
+      expect(await read(deps.secureStore, TOKEN_KEY)).toBe(STATUS_TOKEN);
+      const result = await call(requestDeletionSupport(), jobId, deps);
+      expect(result).toEqual({ kind: "fallback", contact: SUPPORT_CONTACT });
+      expect(t.srv.calls).toHaveLength(1);
+      await expectNoSignInAndJobKept(t, deps.secureStore, jobId);
+    });
+  }
+
+  it.fails("saved job id differs from the jobId argument -> fallback SUPPORT_CONTACT and NO request to any route (account.ts:444-446)", async () => {
+    const savedJobId = jobOf("support-received");
+    const otherJobId = jobOf("support-not-needed");
+    expect(otherJobId).not.toBe(savedJobId);
+    const t = setup(savedJobId, { support: [reply("support-bad-token")], status: [reply("expired-token")] });
+    const deps = await t.deps();
+    expect(await read(deps.secureStore, JOB_KEY)).toBe(savedJobId);
+    const result = await call(requestDeletionSupport(), otherJobId, deps);
+    expect(t.srv.calls).toEqual([]);
+    expect(result).toEqual({ kind: "fallback", contact: SUPPORT_CONTACT });
+    await expectNoSignInAndJobKept(t, deps.secureStore, savedJobId);
   });
 });
