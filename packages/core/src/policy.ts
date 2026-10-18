@@ -43,6 +43,14 @@ export interface WorkspaceRecord {
   id: string;
   name: string;
   kind: WorkspaceKind;
+  /**
+   * Copied from the server list or create item. A local placeholder omits them.
+   * The client does not count workspaces to fill these in.
+   */
+  isFree?: boolean;
+  monthlyPriceCents?: number;
+  /** Server flag on list and create items. */
+  grandfathered?: boolean;
   accountHash?: string;
   accountKey?: string;
   projectStatus?: ProjectStatus;
@@ -108,4 +116,49 @@ export function planSummary(access: {
   if (typeof access.renewsAtMs === "number") summary.renewsAtMs = access.renewsAtMs;
   if (typeof access.lifetime === "boolean") summary.lifetime = access.lifetime;
   return summary;
+}
+
+/**
+ * Price fields copied off a workspace list item, a create `project`, or a
+ * BYO register body. `monthlyPriceCents` is 0 exactly when `isFree` or
+ * `grandfathered` is true. This type does not recompute either flag.
+ */
+export interface WorkspacePrice {
+  isFree: boolean;
+  monthlyPriceCents: number;
+  grandfathered: boolean;
+}
+
+/**
+ * Reads the server price. `isFree`, `monthlyPriceCents`, and `grandfathered`
+ * are required. The input object is not changed.
+ */
+export function parseWorkspacePrice(value: unknown): WorkspacePrice {
+  if (!value || typeof value !== "object") throw new TypeError("Workspace price is missing");
+  const record = value as Record<string, unknown>;
+  if (typeof record.isFree !== "boolean") throw new TypeError("Workspace isFree is missing");
+  if (typeof record.monthlyPriceCents !== "number" || !Number.isInteger(record.monthlyPriceCents)) {
+    throw new TypeError("Workspace monthlyPriceCents is missing");
+  }
+  if (typeof record.grandfathered !== "boolean") throw new TypeError("Workspace grandfathered is missing");
+  return {
+    isFree: record.isFree,
+    monthlyPriceCents: record.monthlyPriceCents,
+    grandfathered: record.grandfathered,
+  };
+}
+
+/** `Free` when `isFree`, `Included` when `grandfathered`, otherwise USD cents. */
+export function workspacePriceLabel(price: WorkspacePrice): string {
+  if (price.isFree) return "Free";
+  if (price.grandfathered) return "Included";
+  return formatMonthlyPriceCents(price.monthlyPriceCents);
+}
+
+function formatMonthlyPriceCents(cents: number): string {
+  const negative = cents < 0;
+  const absolute = Math.abs(cents);
+  const dollars = Math.floor(absolute / 100);
+  const remainder = absolute % 100;
+  return `${negative ? "-" : ""}$${dollars}.${String(remainder).padStart(2, "0")}`;
 }

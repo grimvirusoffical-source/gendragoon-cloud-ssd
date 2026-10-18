@@ -13,11 +13,12 @@ export {
 } from "./manifest-cas.js";
 export type { ManifestMergeDocument, ManifestMergeFile } from "./manifest-cas.js";
 export { replaceEncryptedObject, uploadEncryptedObject } from "./upload.js";
-export { planSummary } from "./policy.js";
+export { parseWorkspacePrice, planSummary, workspacePriceLabel } from "./policy.js";
 export type {
   ProjectStatus,
   ProjectFeeStatus,
   WorkspaceKind,
+  WorkspacePrice,
   WorkspaceRecord,
   WorkspaceStorage,
   LockAssessment,

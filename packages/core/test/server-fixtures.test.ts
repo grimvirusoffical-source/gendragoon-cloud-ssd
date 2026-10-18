@@ -1,6 +1,6 @@
 /**
  * Drives GenDragoonClient with Riley's vendored fixtures
- * (gendragoon-cloud-ssd fix/backend-workspace-policy @ da392762).
+ * (gendragoon-cloud-ssd fix/backend-workspace-policy @ 4c3dd13).
  * Deletion, storage-urls, and key-envelope are not in this export.
  */
 import { readFileSync } from "node:fs";
@@ -11,6 +11,7 @@ import { listServerFixtures, loadServerFixture, type ServerFixture } from "./fix
 const source = JSON.parse(readFileSync(new URL("./fixtures/server/SOURCE.json", import.meta.url), "utf8")) as {
   commit: string;
   repository: string;
+  sources?: { commit: string }[];
 };
 
 function clientFor(fixture: ServerFixture) {
@@ -66,7 +67,8 @@ async function invoke(client: GenDragoonClient, fixture: ServerFixture): Promise
 describe("vendored server fixtures", () => {
   it("records the source repo and commit", () => {
     expect(source.repository).toBe("grimvirusoffical-source/gendragoon-cloud-ssd");
-    expect(source.commit).toBe("da3927627fee76103981714f9f8ffa954843b74b");
+    expect(source.commit).toBe("4c3dd13587fae1ddfa907ad2b84c0886d7794ade");
+    expect(source.sources?.[0]?.commit).toBe("4c3dd13587fae1ddfa907ad2b84c0886d7794ade");
   });
 
   const cases = listServerFixtures();
@@ -85,7 +87,7 @@ describe("vendored server fixtures", () => {
   });
 
   it("records the later fixture commits", () => {
-    const sources = (source as { sources?: { commit: string }[] }).sources ?? [];
+    const sources = source.sources ?? [];
     const commits = sources.map((item) => item.commit);
     expect(commits).toContain("fff0a84b6d75acb3a79cff7f146450c486efbe56");
     expect(commits).toContain("8267784a790bbe8418b3cbe36e8a4b91849b0e81");

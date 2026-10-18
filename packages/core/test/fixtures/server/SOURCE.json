@@ -2,11 +2,11 @@
   "repository": "grimvirusoffical-source/gendragoon-cloud-ssd",
   "url": "https://github.com/grimvirusoffical-source/gendragoon-cloud-ssd",
   "branch": "fix/backend-workspace-policy",
-  "commit": "da3927627fee76103981714f9f8ffa954843b74b",
+  "commit": "4c3dd13587fae1ddfa907ad2b84c0886d7794ade",
   "sources": [
     {
       "branch": "fix/backend-workspace-policy",
-      "commit": "da3927627fee76103981714f9f8ffa954843b74b",
+      "commit": "4c3dd13587fae1ddfa907ad2b84c0886d7794ade",
       "areas": [
         "workspace-lock",
         "workspaces",

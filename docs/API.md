@@ -16,9 +16,11 @@ Customers have logical workspaces inside one shared `CUSTOMER_BUCKET`. They do n
 
 Caps, the monthly fee, grandfathering, and lapse are decided on the server. `packages/core` does not recompute them and does not include `feeIsOneTime` on client types. The client renders lock fields on the workspace list and HTTP 423. There is no `/v2/access` route.
 
+Workspace list items and create `project` objects carry `isFree`, `monthlyPriceCents`, and `grandfathered` from the server. All three are required. `monthlyPriceCents` is 0 exactly when `isFree` or `grandfathered` is true. `workspacePriceLabel` renders `Free` only when `isFree` is true, `Included` when `grandfathered` is true, and otherwise formats `monthlyPriceCents` as USD. The client does not count workspaces and does not hard-code a dollar amount. `GET /v2/pricing` remains the server catalog (`additionalOneTimeCents` and the rest). That catalog is not a per-workspace price.
+
 `planSummary(access)` copies `activeCount` to `used`, `cap` to `limit`, and `locked`. It copies `paidThroughMs`, `renewsAtMs`, and `lifetime` only when the server sent them. It does not invent a grace period or a lifetime rule.
 
-The live catalog still sells an extra project as a one-time activation (`additionalOneTimeCents: 500`, `workspaceFeeMonthlyCents: 0` on billing version 2 storage quotes). Recurring workspace-fee checkout is an addition for Riley. Until it exists, the client keeps calling `POST /v2/projects` and `POST /v2/projects/:id/checkout`.
+Recurring workspace-fee checkout is an addition for Riley. Until it exists, the client keeps calling `POST /v2/projects` and `POST /v2/projects/:id/checkout`. The quoted cents on that response are the server's.
 
 ## Lock
 
@@ -93,7 +95,7 @@ Both ids must belong to the caller. A foreign id is 404. The pure planner lives 
 | GET | `/v2/projects?includeArchived=true` | Inventory. |
 | POST | `/v2/projects` | `{name, intentId}`. Reserves a project. One-time checkout URL when the fee is pending. |
 | GET | `/v2/projects/:id` | |
-| POST | `/v2/projects/:id/checkout` | Resume the one-time $5 activation. |
+| POST | `/v2/projects/:id/checkout` | Resume checkout. The amount is the server quote. |
 | PUT | `/v2/projects/:id/selection` | Intended storage/performance only. Does not grant entitlement. |
 | POST | `/v2/projects/:id/archive` | `{confirmName, acknowledgeBillingContinues?}`. Keeps objects. |
 | POST | `/v2/projects/:id/restore` | Same project, no new free slot and no second fee. |
@@ -136,7 +138,7 @@ Keys do not grant billing, merge, or BYO setup.
 
 `POST /v2/workspaces/:id/checkout/workspace-fee`
 
-Subscription mode, metadata `{kind:"workspace_fee", accountHash, workspaceId}`. The price, the free slot, and whether a workspace is already paid are server decisions. The client does not send `feeIsOneTime` and does not decide the quote.
+Subscription mode, metadata `{kind:"workspace_fee", accountHash, workspaceId}`. The price, the free slot, and whether a workspace is already paid are server decisions. `monthlyCents` on the response is that quote. The client does not send `feeIsOneTime` and does not decide the quote.
 
 ### BYO challenge
 
