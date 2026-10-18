@@ -247,6 +247,19 @@ describe("requestDeletionSupport(jobId, { client, secureStore })", () => {
     }
   });
 
+  it("401 support-unauthorized (no auth header, cloud-ssd 0486412) -> fallback SUPPORT_CONTACT, no throw, never sign-in", async () => {
+    const f = fx("support-unauthorized");
+    expect(f.request.headers).toEqual({});
+    expect(f.response).toEqual({ status: 401, body: { error: "unauthorized" } });
+    const jobId = jobOf("support-unauthorized");
+    const t = setup(jobId, { support: [reply("support-unauthorized")] });
+    const deps = await t.deps();
+    const result = await requestDeletionSupport()(jobId, deps);
+    expect(result).toEqual({ kind: "fallback", contact: SUPPORT_CONTACT });
+    await expectNoSignInAndJobKept(t, deps.secureStore, jobId);
+    expect(t.srv.calls).toHaveLength(1);
+  });
+
   it("a network error, 500 or 503 (DERIVED) -> fallback SUPPORT_CONTACT", async () => {
     const jobId = jobOf("support-received");
     for (const r of ["network", { status: 500, body: { error: "internal" } }, { status: 503 }] as Reply[]) {
@@ -270,10 +283,10 @@ describe("requestDeletionSupport(jobId, { client, secureStore })", () => {
 });
 
 /**
- * Gaps found reviewing bcc1c39 (client.ts:299-334, account.ts:433-447). Each case
- * does its setup and checks it, then calls the real export. On bcc1c39 each one
- * fails because the call throws, or because a request is sent. Remove a marker
- * when its fix lands.
+ * Morgan's support-gap findings from reviewing bcc1c39 (client.ts:299-334,
+ * account.ts:433-447): a failed status refresh after 409, other 4xx responses,
+ * and a saved job id that does not match. Each case does its setup and checks
+ * it, then calls the real export. All are fixed as of 03ce526.
  */
 describe("requestDeletionSupport gaps on bcc1c39", () => {
   const fail = (r: SupportResult | { threw: string }) => r;
