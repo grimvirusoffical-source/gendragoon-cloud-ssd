@@ -1,0 +1,19 @@
+{
+  "request": {
+    "body": {
+      "jobId": "00000000-0000-4000-8000-00000000000a"
+    },
+    "headers": {
+      "authorization": "<redacted>",
+      "content-type": "application/json"
+    },
+    "method": "POST",
+    "path": "/v2/support/deletion-request"
+  },
+  "response": {
+    "body": {
+      "error": "not_found"
+    },
+    "status": 404
+  }
+}
