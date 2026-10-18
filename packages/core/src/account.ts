@@ -429,6 +429,7 @@ export async function dismissAccountDeletion(store: SecureStore): Promise<void> 
  * POST /v2/account/deletions/:jobId/support-request using the status token
  * saved for that job. Works signed out: the Firebase token is never read.
  * Does not call `onAuthFailure` or `clearSession`, and does not clear the job.
+ * A saved job id that does not match `jobId` returns the email fallback and sends nothing.
  */
 export async function requestDeletionSupport(
   jobId: string,
@@ -441,8 +442,9 @@ export async function requestDeletionSupport(
 ): Promise<DeletionSupportResult> {
   void deps.onAuthFailure;
   void deps.clearSession;
+  const savedJobId = decodeSecret(await deps.secureStore.get(DELETION_JOB_KEY));
   const statusToken = decodeSecret(await deps.secureStore.get(DELETION_TOKEN_KEY));
-  if (!statusToken) return { kind: "fallback", contact: SUPPORT_CONTACT };
+  if (!statusToken || savedJobId !== jobId) return { kind: "fallback", contact: SUPPORT_CONTACT };
   return deps.client.postDeletionSupport(jobId, statusToken);
 }
 

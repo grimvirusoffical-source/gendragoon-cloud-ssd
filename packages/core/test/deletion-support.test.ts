@@ -275,7 +275,7 @@ describe("requestDeletionSupport(jobId, { client, secureStore })", () => {
  * fails because the call throws, or because a request is sent. Remove a marker
  * when its fix lands.
  */
-describe("requestDeletionSupport gaps on bcc1c39 (it.fails until fixed)", () => {
+describe("requestDeletionSupport gaps on bcc1c39", () => {
   const fail = (r: SupportResult | { threw: string }) => r;
   const call = (fn: CoreSupport, jobId: string, deps: Parameters<CoreSupport>[1]) =>
     fn(jobId, deps).then(fail, (e: unknown) => fail({ threw: `${(e as Error)?.name}: ${(e as Error)?.message}` }));
@@ -288,7 +288,7 @@ describe("requestDeletionSupport gaps on bcc1c39 (it.fails until fixed)", () => 
     ["network error", "network"],
   ];
   for (const [label, refresh] of refreshFailures) {
-    it.fails(`409 support_not_needed, then the status refresh fails with ${label} -> fallback SUPPORT_CONTACT, no throw, no sign-in (client.ts:328-330)`, async () => {
+    it(`409 support_not_needed, then the status refresh fails with ${label} -> fallback SUPPORT_CONTACT, no throw, no sign-in (client.ts:328-330)`, async () => {
       const jobId = jobOf("support-not-needed");
       const t = setup(jobId, { support: [reply("support-not-needed")], status: [refresh] });
       const deps = await t.deps();
@@ -312,7 +312,7 @@ describe("requestDeletionSupport gaps on bcc1c39 (it.fails until fixed)", () => 
     ["422 (DERIVED)", { status: 422, body: { error: "unprocessable" } }],
   ];
   for (const [label, r] of otherClientErrors) {
-    it.fails(`support request ${label} -> fallback SUPPORT_CONTACT, no throw (client.ts:333)`, async () => {
+    it(`support request ${label} -> fallback SUPPORT_CONTACT, no throw (client.ts:333)`, async () => {
       const jobId = jobOf("support-received");
       const t = setup(jobId, { support: [r] });
       const deps = await t.deps();
@@ -324,7 +324,7 @@ describe("requestDeletionSupport gaps on bcc1c39 (it.fails until fixed)", () => 
     });
   }
 
-  it.fails("saved job id differs from the jobId argument -> fallback SUPPORT_CONTACT and NO request to any route (account.ts:444-446)", async () => {
+  it("saved job id differs from the jobId argument -> fallback SUPPORT_CONTACT and NO request to any route (account.ts:444-446)", async () => {
     const savedJobId = jobOf("support-received");
     const otherJobId = jobOf("support-not-needed");
     expect(otherJobId).not.toBe(savedJobId);
