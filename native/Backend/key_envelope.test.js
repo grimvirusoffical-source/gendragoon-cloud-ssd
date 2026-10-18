@@ -12,7 +12,10 @@ const workspace="12345678-1234-4000-8000-000000000001";
 const foreignWorkspace="12345678-1234-4000-8000-000000000099";
 function hash(value){return crypto.createHash("sha256").update(value).digest("hex");}
 function wrapped(byte=7,length=48){return Buffer.alloc(length,byte).toString("base64");}
-function body(version,key=wrapped()){return {version,wrappedKey:key};}
+const ARGON={memory:19*1024*1024,iterations:2,parallelism:1};
+function body(version,key=wrapped(),kdf="argon2id",kdfParams=kdf==="argon2id"?ARGON:{N:2**14,r:8,p:1}){
+ return {version,wrappedKey:key,kdf,kdfParams};
+}
 function listen(app){
  const server=app.listen(0,"127.0.0.1");
  return new Promise(resolve=>server.once("listening",()=>resolve({
@@ -132,4 +135,40 @@ test("key envelope: account deletion removes only that account's envelopes",asyn
  assert.equal(kept.data().wrappedKey,keep);
  const receipts=await db.collection("billing_receipts").get();
  assert.equal(JSON.stringify(receipts.docs.map(doc=>doc.data())).includes(drop),false);
+});
+
+test("key envelope: bad KDF params are 422 and 64 GiB is refused",async()=>{
+ const db=seed();
+ const {server,base}=await listen(appFor(db));
+ const url=base+"/v2/workspaces/"+workspace+"/key-envelope";
+ const headers={authorization:"Bearer owner","content-type":"application/json","if-none-match":"*"};
+ const put=params=>fetch(url,{method:"PUT",headers,body:JSON.stringify({version:1,wrappedKey:wrapped(),...params})});
+ try{
+  await assertError(await put({}),422,"kdf_params_invalid");
+  await assertError(await put({kdf:"pbkdf2",kdfParams:ARGON}),422,"kdf_params_invalid");
+  await assertError(await put({kdf:"argon2id",kdfParams:{memory:64*1024*1024*1024,iterations:1,parallelism:1}}),422,"kdf_params_invalid");
+  await assertError(await put({kdf:"argon2id",kdfParams:{memory:19*1024*1024-1,iterations:1,parallelism:1}}),422,"kdf_params_invalid");
+  await assertError(await put({kdf:"argon2id",kdfParams:{memory:1024*1024*1024+1,iterations:1,parallelism:1}}),422,"kdf_params_invalid");
+  await assertError(await put({kdf:"argon2id",kdfParams:{memory:19*1024*1024,iterations:0,parallelism:1}}),422,"kdf_params_invalid");
+  await assertError(await put({kdf:"argon2id",kdfParams:{memory:19*1024*1024,iterations:11,parallelism:1}}),422,"kdf_params_invalid");
+  await assertError(await put({kdf:"argon2id",kdfParams:{memory:19*1024*1024,iterations:1,parallelism:5}}),422,"kdf_params_invalid");
+  await assertError(await put({kdf:"scrypt",kdfParams:{N:2**14,r:7,p:1}}),422,"kdf_params_invalid");
+  await assertError(await put({kdf:"scrypt",kdfParams:{N:2**13,r:8,p:1}}),422,"kdf_params_invalid");
+  await assertError(await put({kdf:"scrypt",kdfParams:{N:2**21,r:8,p:1}}),422,"kdf_params_invalid");
+  await assertError(await put({kdf:"scrypt",kdfParams:{N:2**14,r:8,p:5}}),422,"kdf_params_invalid");
+  assert.equal((await db.collection("gd_accounts").doc(owner).collection("key_envelopes").doc(workspace).get()).exists,false);
+  const edge=await put({kdf:"argon2id",kdfParams:{memory:1024*1024*1024,iterations:10,parallelism:4}});
+  assert.equal(edge.status,201);
+  const replaceHeaders={authorization:headers.authorization,"content-type":headers["content-type"],"if-match":'"1"'};
+  const scrypt=await fetch(url,{method:"PUT",headers:replaceHeaders,body:JSON.stringify(body(2,wrapped(2),"scrypt",{N:2**20,r:8,p:1}))});
+  assert.equal(scrypt.status,200);
+  assert.equal(scrypt.headers.get("etag"),'"2"');
+  const stored=await db.collection("gd_accounts").doc(owner).collection("key_envelopes").doc(workspace).get();
+  assert.equal(stored.data().version,2);
+  assert.equal(stored.data().kdf,"scrypt");
+  assert.deepEqual(stored.data().kdfParams,{N:2**20,r:8,p:1});
+  const stale=await fetch(url,{method:"PUT",headers:{...replaceHeaders,"if-match":'"1"'},body:JSON.stringify(body(2,wrapped(3),"scrypt"))});
+  await assertError(stale,412,"version_mismatch");
+  assert.equal((await db.collection("gd_accounts").doc(owner).collection("key_envelopes").doc(workspace).get()).data().wrappedKey,wrapped(2));
+ }finally{server.close();}
 });
