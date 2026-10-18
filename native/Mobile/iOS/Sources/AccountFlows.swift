@@ -39,11 +39,15 @@ struct CloudDeletionTransport:DeletionTransport {
     func askForSignIn(_ text:String){flow.askForSignIn(text)}
     func dismissError(){flow.dismissError();syncReceipt()}
     func deleteThrough(_ transport:any DeletionTransport,authorization:String) async {
-        await flow.deleteThrough(transport,authorization:authorization)
+        var next=flow
+        await next.deleteThrough(transport,authorization:authorization)
+        flow=next
         syncReceipt()
     }
     func pollThrough(_ transport:any DeletionTransport) async {
-        await flow.pollThrough(transport)
+        var next=flow
+        await next.pollThrough(transport)
+        flow=next
         syncReceipt()
     }
     func acknowledgeClearedSession(){flow.clearSession=false}
