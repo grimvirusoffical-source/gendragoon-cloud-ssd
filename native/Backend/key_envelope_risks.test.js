@@ -1,5 +1,5 @@
 "use strict";
-// QA risk tests for the workspace key envelope (PR #9 @ 24fba02, nested shape):
+// QA risk tests for the workspace key envelope (PR #9 @ ee4f76f, nested shape; binary fields accept base64 or base64url, stored as unpadded base64url):
 // {version, kdf:{alg,memoryKiB,iterations,parallelism}|{alg:"scrypt",N,r,p}, salt, iv, wrappedKey}.
 // In-memory Firestore, stub Firebase/Stripe, 127.0.0.1 only. No credentials or network.
 const test=require("node:test"),assert=require("node:assert/strict"),crypto=require("node:crypto");
@@ -101,7 +101,7 @@ test("no plaintext: stored doc has only {version,kdf,salt,iv,wrappedKey}; key-li
  }finally{s.close();}
 });
 
-test("salt/iv: base64url lengths at the edges pass, just outside -> 422 envelope_invalid",async()=>{
+test("salt/iv: lengths (standard base64 salt is valid since ee4f76f; see dual-form test) at the edges pass, just outside -> 422 envelope_invalid",async()=>{
  const db=seed();const {s,call}=await server(db);
  try{
   let v=0;
@@ -109,7 +109,7 @@ test("salt/iv: base64url lengths at the edges pass, just outside -> 422 envelope
    const r=await call("PUT",WS,"tok-a",env(++v,{salt,iv}),v===1?{"if-none-match":"*"}:{"if-match":String(v-1)});
    assert.ok([200,201].includes(r.status),salt+" "+r.text);}
   const before=JSON.stringify(stored(db,ha,WS));
-  const bad=[{salt:b64u(15)},{salt:b64u(65)},{iv:b64u(11)},{iv:b64u(33)},{salt:""},{iv:""},{salt:Buffer.alloc(16,255).toString("base64")},{iv:"AAAA AAAA AAAA AAAA"},{salt:undefined},{iv:undefined},{salt:16},{iv:null}];
+  const bad=[{salt:b64u(15)},{salt:b64u(65)},{iv:b64u(11)},{iv:b64u(33)},{salt:""},{iv:""},{iv:"AAAA AAAA AAAA AAAA"},{salt:undefined},{iv:undefined},{salt:16},{iv:null}];
   for(const o of bad){const e=env(v+1,o);for(const k of Object.keys(o))if(o[k]===undefined)delete e[k];
    const r=await call("PUT",WS,"tok-a",e,{"if-match":String(v)});assert.equal(r.status,422,JSON.stringify(o)+" "+r.text);assert.deepEqual(r.json,{error:"envelope_invalid"});}
   assert.equal(JSON.stringify(stored(db,ha,WS)),before);
@@ -166,10 +166,40 @@ test("KDF bounds: edges accepted, just outside -> 422 kdf_params_invalid, nothin
  }finally{s.close();}
 });
 
-test("BUG: scrypt N must be a power of two (49152 is accepted)",{todo:"RISK-KE2: key_envelope.js:61 checks only the N range, not N&(N-1)===0"},async()=>{
+test("scrypt N must be a power of two: 49152 -> 422; every 2^14..2^20 accepted (was RISK-KE2, fixed in ee4f76f key_envelope.js:57)",async()=>{
  const db=seed();const {s,call}=await server(db);
- try{const r=await call("PUT",WS,"tok-a",env(1,{kdf:{...SCRYPT,N:3*2**14}}),{"if-none-match":"*"});
-  assert.equal(r.status,422);assert.deepEqual(r.json,{error:"kdf_params_invalid"});}finally{s.close();}
+ try{
+  for(const N of [3*2**14,49152,2**14+1,2**20-1,3*2**18]){const r=await call("PUT",WS,"tok-a",env(1,{kdf:{...SCRYPT,N}}),{"if-none-match":"*"});
+   assert.equal(r.status,422,"N="+N);assert.deepEqual(r.json,{error:"kdf_params_invalid"});}
+  assert.equal(stored(db,ha,WS),undefined,"nothing written");
+  let v=0;for(let e=14;e<=20;e++){const r=await call("PUT",WS,"tok-a",env(++v,{kdf:{...SCRYPT,N:2**e}}),v===1?{"if-none-match":"*"}:{"if-match":String(v-1)});
+   assert.ok([200,201].includes(r.status),"N=2^"+e+" "+r.text);assert.equal(stored(db,ha,WS).kdf.N,2**e);}
+  for(const N of [2**13,2**21]){const r=await call("PUT",WS,"tok-a",env(v+1,{kdf:{...SCRYPT,N}}),{"if-match":String(v)});assert.equal(r.status,422,"N="+N);}
+ }finally{s.close();}
+});
+
+test("salt/iv/wrappedKey accept standard base64 (padded or not) and base64url; stored and returned as unpadded base64url",async()=>{
+ const db=seed();const {s,call}=await server(db);
+ // bytes chosen so both alphabets differ (+/ vs -_) and padding is needed
+ const raw=n=>Buffer.from(Array.from({length:n},(_,i)=>(i*67+251)&255));
+ const forms=buf=>({std:buf.toString("base64"),stdNoPad:buf.toString("base64").replace(/=+$/,""),url:buf.toString("base64url"),urlPad:buf.toString("base64").replace(/\+/g,"-").replace(/\//g,"_")});
+ const salt=raw(17),iv=raw(13),wk=raw(49);
+ const fs_=forms(salt),fi=forms(iv),fw=forms(wk);
+ assert.match(fs_.std,/[+/]/);assert.match(fw.std,/=$/);
+ try{
+  let v=0;
+  for(const k of ["std","stdNoPad","url","urlPad"]){
+   const r=await call("PUT",WS,"tok-a",env(++v,{salt:fs_[k],iv:fi[k],wrappedKey:fw[k]}),v===1?{"if-none-match":"*"}:{"if-match":String(v-1)});
+   assert.ok([200,201].includes(r.status),k+" "+r.text);
+   const want={salt:salt.toString("base64url"),iv:iv.toString("base64url"),wrappedKey:wk.toString("base64url")};
+   for(const f of ["salt","iv","wrappedKey"]){assert.equal(stored(db,ha,WS)[f],want[f],k+" stored "+f);assert.doesNotMatch(stored(db,ha,WS)[f],/[+/=]/);}
+   const g=await call("GET",WS,"tok-a");assert.equal(g.status,200);
+   for(const f of ["salt","iv","wrappedKey"])assert.equal(g.json[f],want[f],k+" GET "+f);
+   assert.equal(Buffer.from(g.json.wrappedKey,"base64url").equals(wk),true);
+  }
+  for(const bad of ["a b","@@@@","QUJD=X","QUJDRA===","QUJDR"]){const r=await call("PUT",WS,"tok-a",env(v+1,{salt:bad}),{"if-match":String(v)});assert.equal(r.status,422,"salt "+JSON.stringify(bad));}
+  const short=await call("PUT",WS,"tok-a",env(v+1,{wrappedKey:raw(31).toString("base64")}),{"if-match":String(v)});assert.equal(short.status,400);
+ }finally{s.close();}
 });
 
 test("account deletion (PR #9 carries the deletion job) removes the envelope; GET then 404",async()=>{
