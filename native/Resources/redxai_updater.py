@@ -35,16 +35,114 @@ def load_manifest(path=None):
     return apps
 
 
-def apply_ready_update(entry, staged, *, quit_app, replace_app, relaunch_app):
-    """Quit, replace, and relaunch one app whose update is already on disk."""
-    if not isinstance(entry, dict) or "bundleId" not in entry:
+class RedXAIUpdateFailed(RuntimeError):
+    """The update did not install. The previous version was restored and relaunched."""
+
+
+class RedXAIRelaunchFailed(RuntimeError):
+    """Neither the new nor the restored previous version could be relaunched.
+    The previous bundle is left in place at the install path."""
+
+
+def _log(log, event, **fields):
+    record = {"event": event, **{key: str(value) for key, value in fields.items()}}
+    if log is not None:
+        log(record)
+    else:
+        print(json.dumps(record), file=sys.stderr, flush=True)
+
+
+def _discard(path, log):
+    """Remove a half-installed bundle that is not the previous version."""
+    import shutil
+    import uuid
+    if not os.path.lexists(path):
+        return
+    aside = path.with_name(path.name + ".redxai-failed-" + uuid.uuid4().hex)
+    os.replace(path, aside)
+    try:
+        if aside.is_dir() and not aside.is_symlink():
+            shutil.rmtree(aside)
+        else:
+            aside.unlink()
+    except OSError as error:
+        _log(log, "redxai_cleanup_failed", path=aside, error=error)
+
+
+def install_path(entry):
+    return Path(os.path.expanduser(entry["installPath"]))
+
+
+def apply_ready_update(entry, staged, *, quit_app, replace_app, relaunch_app, log=None):
+    """Quit, replace, and relaunch one app whose update is already on disk.
+
+    The installed bundle is moved aside first. If the replacement or the new
+    version's relaunch fails, the previous bundle is put back and relaunched,
+    so the app is never left quit. ``relaunch_app(entry, path)`` gets the path
+    of the bundle that is actually installed at that moment.
+    """
+    if not isinstance(entry, dict) or "bundleId" not in entry or "installPath" not in entry:
         raise ValueError("Choose a manifest app before applying an update")
     staged = Path(staged)
     if not staged.is_file():
         raise ValueError("A downloaded update package is required")
+    app = install_path(entry)
+    if app.is_symlink() or not app.is_dir():
+        raise ValueError("The installed app was not found; nothing was changed")
+    import uuid
+    previous = app.with_name(app.name + ".redxai-previous-" + uuid.uuid4().hex)
     quit_app(entry)
-    replace_app(entry, staged)
-    return relaunch_app(entry)
+    failure = None
+    moved = False
+    try:
+        os.replace(app, previous)
+        moved = True
+        replace_app(entry, staged)
+        if app.is_symlink() or not app.is_dir():
+            raise RuntimeError("The update did not install an app bundle")
+    except Exception as error:
+        failure = error
+        _log(log, "redxai_install_failed", app=app, error=error)
+    if failure is None:
+        try:
+            result = relaunch_app(entry, app)
+        except Exception as error:
+            failure = error
+            _log(log, "redxai_relaunch_new_failed", app=app, error=error)
+        else:
+            import shutil
+            try:
+                shutil.rmtree(previous)
+            except OSError as error:
+                _log(log, "redxai_cleanup_failed", path=previous, error=error)
+            return result
+    # Roll back: discard whatever was installed, restore the previous bundle, relaunch it.
+    try:
+        if moved:
+            _discard(app, log)
+            os.replace(previous, app)
+            _log(log, "redxai_restored_previous", app=app)
+        relaunch_app(entry, app)
+    except Exception as error:
+        _log(log, "redxai_relaunch_previous_failed", app=app, error=error)
+        raise RedXAIRelaunchFailed("The update failed and the previous version could not be relaunched. "
+                                   "It is still installed at " + str(app)) from error
+    raise RedXAIUpdateFailed("The update failed. The previous version was restored and relaunched.") from failure
+
+
+def apply_and_report(entry, staged, *, quit_app, replace_app, relaunch_app, log=None):
+    """Exit status for the Red-XAI process: 0 updated and relaunched, 1 update failed but
+    the previous version was restored and relaunched, 2 nothing could be relaunched."""
+    try:
+        apply_ready_update(entry, staged, quit_app=quit_app, replace_app=replace_app,
+                           relaunch_app=relaunch_app, log=log)
+    except RedXAIRelaunchFailed as error:
+        _log(log, "redxai_attention", message=error)
+        return 2
+    except (RedXAIUpdateFailed, ValueError) as error:
+        _log(log, "redxai_update_failed", message=error)
+        return 1
+    return 0
 
 
 def offer_relaunch(app):
