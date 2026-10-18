@@ -11,7 +11,9 @@ The nonce is not echoed back. The server fetches the URL, checks the host
 against the registered endpoint, and derives the fingerprint itself. Changing
 the endpoint or registering again must run a new challenge.
 
-A 422 byo_provider_unsupported or 409 byo_unverifiable is a specific message.
+Registration of an unsupported provider, including SFTP, is 422
+byo_provider_unsupported. 409 byo_unverifiable is only the fallback when the
+server did not name that provider error.
 The workspace fee shown to the customer is $5/month.
 """
 import argparse
@@ -88,13 +90,12 @@ def unverifiable_message():
 
 
 def explain_server(status, body):
+    """Name a 422 provider error. Leave 409 for the verification fallback."""
     code = ""
     if isinstance(body, dict):
         code = str(body.get("error") or body.get("code") or "")
     if status == 422 or code == "byo_provider_unsupported":
         return {"code": "byo_provider_unsupported", "message": unsupported_message()}
-    if status == 409 or code == "byo_unverifiable":
-        return {"code": "byo_unverifiable", "message": unverifiable_message()}
     return None
 
 
@@ -196,6 +197,7 @@ def activate(provider, *, nonce, endpoint, bucket, access_key, secret_key, regio
         explained = explain_server(status, result if isinstance(result, dict) else {})
         if explained:
             raise ConnectError(explained["message"], explained["code"])
+        # 409 byo_unverifiable, and any other failed check, use this fallback.
         raise ConnectError(unverifiable_message(), "byo_unverifiable")
     delete(key)
     return {"verified": True, "deleted": key, "presignedUrl": url, "monthlyCents": MONTHLY_CENTS}

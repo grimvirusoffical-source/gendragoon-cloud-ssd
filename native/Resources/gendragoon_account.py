@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """Account deletion against Riley's contract: DELETE /v2/account.
 
-The route is not merged in this tree. Assumptions, until his PR lands the JSON:
+Avery confirmed the status route stays plural:
 - The user types DELETE. A sign-in older than 5 minutes asks them to sign in again
   before the request is sent.
 - 202 returns {"job": {"id", "status", "progress", "phase", "statusPath"}}.
 - statusPath, when present, must stay under /v2/account/deletions/.
-- Otherwise the client polls GET /v2/account/deletions/<id>.
+- Otherwise the client polls GET /v2/account/deletions/:jobId.
 - A repeat DELETE that returns 401 means the account is already gone. That is
   success: wipe the Keychain and caches, then sign out locally.
 """

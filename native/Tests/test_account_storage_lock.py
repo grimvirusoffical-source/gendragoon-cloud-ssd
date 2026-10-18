@@ -35,7 +35,9 @@ class AccountDeletionTests(unittest.TestCase):
         job = account.accept_start(202, {"job": {"id": "job_12345678", "status": "queued", "progress": 0,
                                                  "phase": "queued"}})
         self.assertEqual(job["action"], "poll")
-        self.assertTrue(job["path"].startswith("/v2/account/deletions/"))
+        self.assertEqual(job["path"], "/v2/account/deletions/job_12345678")
+        with self.assertRaises(account.AccountError):
+            account.accept_start(202, {"job": {"id": "job_12345678", "statusPath": "/v2/account/deletion/job_12345678"}})
         done = account.accept_poll(200, {"status": "completed", "progress": 100, "phase": "completed"})
         self.assertEqual(done["action"], "wipe")
         repeat = account.accept_start(401, {"error": "unauthorized"})

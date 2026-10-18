@@ -26,7 +26,7 @@ enum GDWorkspaceOffer {
         if status == 422 || code == "byo_provider_unsupported" {
             return "This provider is not supported. Choose Amazon S3, Cloudflare R2, Backblaze B2, Wasabi, MinIO, or Google Cloud with an S3/HMAC key."
         }
-        if status == 409 || code == "byo_unverifiable" {
+        if code == "byo_unverifiable" || status == 409 {
             return "GenDragoon could not verify the challenge object from your bucket. Check the endpoint and keys, then run the challenge again."
         }
         return code.isEmpty ? "Billing is temporarily unavailable. Please retry." : code

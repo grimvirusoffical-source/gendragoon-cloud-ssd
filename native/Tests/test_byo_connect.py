@@ -75,25 +75,35 @@ class BringYourOwnLaunchTests(unittest.TestCase):
         self.assertEqual(result["monthlyCents"], 500)
         self.assertNotEqual(result["monthlyCents"], 1000)
 
-    def test_server_errors_are_specific_and_leave_the_object(self):
-        cases = (
-            (422, {"error": "byo_provider_unsupported"}, "not supported"),
-            (409, {"error": "byo_unverifiable"}, "could not verify"),
-        )
-        for status, body, expected in cases:
-            explained = byo.explain_server(status, body)
-            self.assertNotIn("temporarily unavailable", explained["message"].lower())
-            self.assertIn(expected, explained["message"].lower())
-            deleted = []
-            with self.assertRaises(byo.ConnectError) as caught:
-                byo.activate("aws", nonce=NONCE, endpoint=ENDPOINT, bucket=BUCKET,
-                             access_key=ACCESS, secret_key=SECRET, region="us-east-1",
-                             write=lambda *args: None,
-                             confirm=lambda payload: {"verified": False, **body, "status": status},
-                             delete=deleted.append, now=NOW)
-            self.assertEqual(caught.exception.code, body["error"])
-            self.assertIn(expected, str(caught.exception).lower())
-            self.assertEqual(deleted, [])
+    def test_sftp_registration_422_is_not_the_409_fallback(self):
+        explained = byo.explain_server(422, {"error": "byo_provider_unsupported"})
+        self.assertEqual(explained["code"], "byo_provider_unsupported")
+        self.assertIn("not supported", explained["message"].lower())
+        self.assertNotIn("could not verify", explained["message"].lower())
+        self.assertIsNone(byo.explain_server(409, {"error": "byo_unverifiable"}))
+        deleted = []
+        with self.assertRaises(byo.ConnectError) as caught:
+            byo.activate("aws", nonce=NONCE, endpoint=ENDPOINT, bucket=BUCKET,
+                         access_key=ACCESS, secret_key=SECRET, region="us-east-1",
+                         write=lambda *args: None,
+                         confirm=lambda payload: {"verified": False, "error": "byo_provider_unsupported", "status": 422},
+                         delete=deleted.append, now=NOW)
+        self.assertEqual(caught.exception.code, "byo_provider_unsupported")
+        self.assertIn("not supported", str(caught.exception).lower())
+        self.assertEqual(deleted, [])
+
+    def test_409_unverifiable_is_only_the_fallback_and_leaves_the_object(self):
+        deleted = []
+        with self.assertRaises(byo.ConnectError) as caught:
+            byo.activate("aws", nonce=NONCE, endpoint=ENDPOINT, bucket=BUCKET,
+                         access_key=ACCESS, secret_key=SECRET, region="us-east-1",
+                         write=lambda *args: None,
+                         confirm=lambda payload: {"verified": False, "error": "byo_unverifiable", "status": 409},
+                         delete=deleted.append, now=NOW)
+        self.assertEqual(caught.exception.code, "byo_unverifiable")
+        self.assertIn("could not verify", str(caught.exception).lower())
+        self.assertNotIn("temporarily unavailable", str(caught.exception).lower())
+        self.assertEqual(deleted, [])
 
     def test_endpoint_change_requires_a_new_challenge(self):
         saved = {"verified": True, "endpoint": ENDPOINT, "bucket": BUCKET}

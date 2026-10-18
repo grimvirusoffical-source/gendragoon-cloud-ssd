@@ -3,7 +3,8 @@ import Security
 import SwiftUI
 
 /// Account deletion matches DELETE /v2/account: a 5-minute sign-in, the word DELETE,
-/// a 202 job, then a local wipe. A later 401 means the account is already gone.
+/// a 202 job, then a local wipe. Status is GET /v2/account/deletions/:jobId.
+/// A later 401 means the account is already gone.
 @MainActor struct GDAccountDeletionSection: View {
     @EnvironmentObject private var login: GDLoginSession
     @State private var confirmation = ""
