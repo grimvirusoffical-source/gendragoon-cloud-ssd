@@ -89,6 +89,7 @@ const requireWrite=apiKeys.requireScope("files:write");
 // server-verified workspace provisioning have passed acceptance tests.
 app.use("/v2",express.json({limit:"16kb"}));
 require("./billing_bootstrap").installBillingBootstrap({app,db,bucket,admin:{firestore:{FieldValue}},firebaseAuth,accountKey});
+require("./storage_urls").registerStorageUrls({app,db,bucket,firebaseAuth,hash:accountKey,now:()=>Date.now()});
 const paidStorage=require("./paid_storage").registerPaidStorage({app,db,bucket,firebaseAuth,accountKey,FieldValue,apiKeys,getAuth});
 require("./transfer_v3").registerTransferV3({app,db,bucket,firebaseAuth,accountKey,FieldValue,apiKeys,getAuth,freeGovernor:governor,paidGovernor:paidStorage.governor});
 

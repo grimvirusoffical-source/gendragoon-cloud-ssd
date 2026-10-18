@@ -19,6 +19,7 @@ crypto.randomUUID=()=>{
 
 const fs=require("node:fs");
 const path=require("node:path");
+const {spawnSync}=require("node:child_process");
 const express=require("express");
 const {memoryFirestore}=require("../test_firestore");
 const {registerBillingV2}=require("../billing_v2");
@@ -324,5 +325,7 @@ async function main(){
  await mergeCases();
  await byoCases();
  await freeSlotCases();
+ const storage=spawnSync(process.execPath,[path.join(__dirname,"export_storage_fixtures.js"),outDir],{encoding:"utf8"});
+ if(storage.status!==0)throw Error((storage.stderr||"")+(storage.stdout||"")||"storage fixtures failed");
 }
 main().catch(error=>{console.error(error);process.exit(1);});
