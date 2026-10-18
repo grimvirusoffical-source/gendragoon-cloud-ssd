@@ -1,4 +1,4 @@
-import { SUPPORT_CONTACT, MemorySecretStore } from "@gendragoon/core";
+import { GenDragoonClient, MemorySecretStore, SUPPORT_CONTACT, requestDeletionSupport } from "@gendragoon/core";
 import { fireEvent, render, waitFor } from "@testing-library/react-native";
 import { Linking } from "react-native";
 import { DELETION_SUPPORT_ENDPOINT_ENABLED } from "../src/flags";
@@ -9,7 +9,6 @@ import {
   SUPPORT_REQUEST_ALREADY,
   SUPPORT_REQUEST_SENT,
   deletionSupportRequestPath,
-  requestDeletionSupport,
 } from "../src/supportRequest";
 import { SUPPORT_FIXTURE_SHA, loadFixture } from "./loadFixture";
 
@@ -37,9 +36,22 @@ function jobIdOf(path: string): string {
 }
 
 function responseFor(status: number, body: unknown): Response {
-  return new Response(JSON.stringify(body), {
+  return new Response(body == null ? "" : JSON.stringify(body), {
     status,
     headers: { "content-type": "application/json" },
+  });
+}
+
+async function ask(job: string, fetchImpl: typeof fetch) {
+  const secrets = new MemorySecretStore();
+  await secrets.set("account-deletion:status-token", new TextEncoder().encode(TOKEN));
+  return requestDeletionSupport(job, {
+    client: new GenDragoonClient({
+      baseUrl: "https://api.example.test",
+      getToken: async () => "",
+      fetch: fetchImpl,
+    }),
+    secureStore: secrets,
   });
 }
 
@@ -74,20 +86,10 @@ describe("deletion support request", () => {
       const fixture = seen.length === 1 ? received : repeat;
       return responseFor(fixture.response.status, fixture.response.body);
     }) as typeof fetch;
-    const first = await requestDeletionSupport({
-      baseUrl: "https://api.example.test",
-      jobId,
-      statusToken: TOKEN,
-      fetchImpl,
-    });
-    const second = await requestDeletionSupport({
-      baseUrl: "https://api.example.test",
-      jobId,
-      statusToken: TOKEN,
-      fetchImpl,
-    });
-    expect(first).toEqual({ kind: "sent", requestId });
-    expect(second).toEqual({ kind: "sent", requestId });
+    const first = await ask(jobId, fetchImpl);
+    const second = await ask(jobId, fetchImpl);
+    expect(first).toEqual({ kind: "received", requestId });
+    expect(second).toEqual({ kind: "received", requestId });
     expect(seen).toHaveLength(2);
     for (const call of seen) {
       expect(call.url).toBe(`https://api.example.test${received.request.path}`);
@@ -100,39 +102,28 @@ describe("deletion support request", () => {
   });
 
   it("409 support_not_needed asks for a status refresh and 429 does not mail", async () => {
-    const refresh = await requestDeletionSupport({
-      baseUrl: "https://api.example.test",
-      jobId: jobIdOf(unneeded.request.path),
-      statusToken: TOKEN,
-      fetchImpl: (async () => responseFor(unneeded.response.status, unneeded.response.body)) as typeof fetch,
+    const refreshJob = jobIdOf(unneeded.request.path);
+    const refresh = await ask(refreshJob, (async (url: string | URL | Request, init?: RequestInit) => {
+      if (init?.method === "GET") {
+        return responseFor(200, { jobId: refreshJob, status: "failed", retryable: true });
+      }
+      return responseFor(unneeded.response.status, unneeded.response.body);
+    }) as typeof fetch);
+    expect(refresh).toEqual({
+      kind: "not_needed",
+      status: { jobId: refreshJob, status: "failed", retryable: true },
     });
-    expect(refresh).toEqual({ kind: "refresh" });
-    const already = await requestDeletionSupport({
-      baseUrl: "https://api.example.test",
-      jobId,
-      statusToken: TOKEN,
-      fetchImpl: (async () => responseFor(limited.response.status, limited.response.body)) as typeof fetch,
-    });
-    expect(already).toEqual({ kind: "already" });
+    const already = await ask(jobId, (async () => responseFor(limited.response.status, limited.response.body)) as typeof fetch);
+    expect(already).toEqual({ kind: "already_sent", retryAfterSec: limited.response.body.retryAfterSec });
   });
 
   it("a network error or HTTP 5xx falls back, and the screen mails when the flag is off", async () => {
-    const failed = await requestDeletionSupport({
-      baseUrl: "https://api.example.test",
-      jobId,
-      statusToken: TOKEN,
-      fetchImpl: (async () => responseFor(500, { error: "unavailable" })) as typeof fetch,
-    });
-    expect(failed).toEqual({ kind: "fallback" });
-    const thrown = await requestDeletionSupport({
-      baseUrl: "https://api.example.test",
-      jobId,
-      statusToken: TOKEN,
-      fetchImpl: (async () => {
-        throw new Error("offline");
-      }) as typeof fetch,
-    });
-    expect(thrown).toEqual({ kind: "fallback" });
+    const failed = await ask(jobId, (async () => responseFor(500, { error: "unavailable" })) as typeof fetch);
+    expect(failed).toEqual({ kind: "fallback", contact: SUPPORT_CONTACT });
+    const thrown = await ask(jobId, (async () => {
+      throw new Error("offline");
+    }) as typeof fetch);
+    expect(thrown).toEqual({ kind: "fallback", contact: SUPPORT_CONTACT });
 
     const openURL = jest.spyOn(Linking, "openURL").mockResolvedValue(undefined as never);
     const secrets = new MemorySecretStore();
@@ -202,13 +193,8 @@ describe("deletion support request", () => {
   });
 
   it("a 404 falls back to the support email and never shows sign-in", async () => {
-    const missed = await requestDeletionSupport({
-      baseUrl: "https://api.example.test",
-      jobId,
-      statusToken: TOKEN,
-      fetchImpl: (async () => responseFor(missing.response.status, missing.response.body)) as typeof fetch,
-    });
-    expect(missed).toEqual({ kind: "fallback" });
+    const missed = await ask(jobId, (async () => responseFor(missing.response.status, missing.response.body)) as typeof fetch);
+    expect(missed).toEqual({ kind: "fallback", contact: SUPPORT_CONTACT });
 
     const openURL = jest.spyOn(Linking, "openURL").mockResolvedValue(undefined as never);
     const onReauth = jest.fn();
@@ -249,20 +235,10 @@ describe("deletion support request", () => {
 
   it("PROVISIONAL: a local 401 unauthorized or a 401 with no code mails and never asks for sign-in", async () => {
     // Riley has not shipped a support-request 401 fixture. Both cases are local until that file exists.
-    const unauthorized = await requestDeletionSupport({
-      baseUrl: "https://api.example.test",
-      jobId,
-      statusToken: TOKEN,
-      fetchImpl: (async () => responseFor(401, { error: "unauthorized" })) as typeof fetch,
-    });
-    const noCode = await requestDeletionSupport({
-      baseUrl: "https://api.example.test",
-      jobId,
-      statusToken: TOKEN,
-      fetchImpl: (async () => new Response("", { status: 401 })) as typeof fetch,
-    });
-    expect(unauthorized).toEqual({ kind: "fallback" });
-    expect(noCode).toEqual({ kind: "fallback" });
+    const unauthorized = await ask(jobId, (async () => responseFor(401, { error: "unauthorized" })) as typeof fetch);
+    const noCode = await ask(jobId, (async () => new Response("", { status: 401 })) as typeof fetch);
+    expect(unauthorized).toEqual({ kind: "fallback", contact: SUPPORT_CONTACT });
+    expect(noCode).toEqual({ kind: "fallback", contact: SUPPORT_CONTACT });
 
     const openURL = jest.spyOn(Linking, "openURL").mockResolvedValue(undefined as never);
     const onReauth = jest.fn();
@@ -308,24 +284,30 @@ describe("deletion support request", () => {
     const secrets = new MemorySecretStore();
     await secrets.set("account-deletion:status-token", new TextEncoder().encode(TOKEN));
     let statusCalls = 0;
+    const refreshJob = jobIdOf(unneeded.request.path);
     const refresh = await render(
       <DeleteAccountScreen
         frame="not-retryable"
-        jobId={jobIdOf(unneeded.request.path)}
+        jobId={refreshJob}
         supportEndpointEnabled
         apiBase="https://api.example.test"
-        supportFetch={(async () => responseFor(unneeded.response.status, unneeded.response.body)) as typeof fetch}
+        supportFetch={(async (_url: string | URL | Request, init?: RequestInit) => {
+          if (init?.method === "GET") {
+            statusCalls += 1;
+            return responseFor(200, { jobId: refreshJob, status: "failed", retryable: true });
+          }
+          return responseFor(unneeded.response.status, unneeded.response.body);
+        }) as typeof fetch}
         activeTransfers={0}
         secrets={secrets}
         workspaceIds={["ws-1"]}
         idToken=""
         client={{
           async deleteAccount() {
-            return { jobId: jobIdOf(unneeded.request.path) };
+            return { jobId: refreshJob };
           },
           async deletionStatus() {
-            statusCalls += 1;
-            return { jobId: jobIdOf(unneeded.request.path), status: "failed", retryable: true };
+            return { jobId: refreshJob, status: "failed", retryable: true };
           },
         }}
         onReauth={() => undefined}

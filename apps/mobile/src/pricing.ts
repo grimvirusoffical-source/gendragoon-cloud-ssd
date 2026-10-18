@@ -1,39 +1,15 @@
 /**
  * Sentence copy around `@gendragoon/core`'s `workspacePriceLabel`.
- * Free, Included, and cent formatting live in core.
- * `feeWaived` is not on core's helper yet (296cb96). Until
- * `workspacePriceLabel` returns Included for that flag, this file does.
- * The flag is required: a missing or non-boolean value is a parse error,
- * not `false`.
+ * Free, Included, cent formatting, and required `feeWaived` live in core.
+ * A missing `feeWaived` is a parse error, so this returns no label.
  */
 import { parseWorkspacePrice, workspacePriceLabel, type WorkspacePrice } from "@gendragoon/core";
 
-/** Reads `feeWaived`. Missing and non-booleans throw; they are not false. */
-export function parseFeeWaived(value: unknown): boolean {
-  if (!value || typeof value !== "object" || !Object.prototype.hasOwnProperty.call(value, "feeWaived")) {
-    throw new TypeError("Workspace feeWaived is missing");
-  }
-  const flag = (value as { feeWaived: unknown }).feeWaived;
-  if (typeof flag !== "boolean") throw new TypeError("Workspace feeWaived is missing");
-  return flag;
-}
-
 export function serverPriceLabel(value: unknown): string | null {
-  let waived: boolean;
   try {
-    waived = parseFeeWaived(value);
+    return workspacePriceLabel(parseWorkspacePrice(value));
   } catch (error) {
     if (error instanceof TypeError) return null;
-    throw error;
-  }
-  try {
-    const price = parseWorkspacePrice(value);
-    const label = workspacePriceLabel(price);
-    if (price.isFree) return label;
-    if (waived) return "Included";
-    return label;
-  } catch (error) {
-    if (error instanceof TypeError) return waived ? "Included" : null;
     throw error;
   }
 }
@@ -52,7 +28,7 @@ export function grandfatheringEndedPrice(value: unknown): string | null {
 /** `$5.00/mo` from core's cent formatter. Zero and missing amounts stay blank. */
 export function formatMonthlyPrice(cents: number | undefined | null): string | null {
   if (typeof cents !== "number" || !Number.isInteger(cents) || cents === 0) return null;
-  const label = workspacePriceLabel({ isFree: false, grandfathered: false, monthlyPriceCents: cents });
+  const label = workspacePriceLabel({ isFree: false, grandfathered: false, feeWaived: false, monthlyPriceCents: cents });
   return `${label}/mo`;
 }
 
@@ -93,12 +69,14 @@ function quoteCents(quote: unknown): number | undefined {
  * uses those cents through core's formatter.
  */
 export function workspaceQuoteExplanation(storage: "hosted" | "byo", quote: unknown): string {
-  const price = quotePrice(quote);
-  const amount = formatMonthlyPrice(price?.isFree || price?.grandfathered ? 0 : quoteCents(quote));
+  const record = quote && typeof quote === "object" ? quote as { isFree?: unknown; grandfathered?: unknown } : {};
+  const isFree = record.isFree === true;
+  const grandfathered = record.grandfathered === true;
+  const amount = formatMonthlyPrice(isFree || grandfathered ? 0 : quoteCents(quote));
   if (storage === "byo") {
     return amount ? `Bring-your-own storage is ${amount}` : "Bring-your-own storage is billed monthly.";
   }
-  if (price?.isFree === true) return "Your first hosted workspace is free";
+  if (isFree) return "Your first hosted workspace is free";
   return amount ? `Additional workspaces are ${amount}` : "Additional workspaces are billed monthly.";
 }
 

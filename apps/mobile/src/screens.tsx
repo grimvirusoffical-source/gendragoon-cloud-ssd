@@ -14,6 +14,8 @@ import {
   planMerge,
   planSummary,
   type LockAssessment,
+  GenDragoonClient,
+  requestDeletionSupport,
   type SecretStore,
   type SortOverrides,
   type TreeNode,
@@ -30,7 +32,6 @@ import {
   isDeletionNotRetryableError,
   resumeSignedInDeletion,
   retrySignedInDeletion,
-  savedDeletionStatusToken,
   savedDeletionUid,
 } from "./account/deleteAccount";
 import { SAME_ACCOUNT_MESSAGE, sessionMaySwap } from "./account/session";
@@ -45,7 +46,7 @@ import {
   workspaceQuoteExplanation,
 } from "./pricing";
 import { WORKSPACE_BUSY_MESSAGE, graceBanner, isDeletingWorkspace, isWorkspaceBusy } from "./workspaceState";
-import { SUPPORT_REQUEST_ALREADY, SUPPORT_REQUEST_SENT, requestDeletionSupport } from "./supportRequest";
+import { SUPPORT_REQUEST_ALREADY, SUPPORT_REQUEST_SENT } from "./supportRequest";
 import { supportContactTarget } from "./supportContact";
 import { Banner, Button, Screen, Title, cardStyle } from "./ui";
 
@@ -857,30 +858,32 @@ export function DeleteAccountScreen(props: {
     const jobId = notice?.jobId ?? "";
     const enabled = props.supportEndpointEnabled ?? DELETION_SUPPORT_ENDPOINT_ENABLED;
     if (enabled) {
-      const statusToken = await savedDeletionStatusToken(props.secrets);
-      if (statusToken) {
-        const result = await requestDeletionSupport({
-          baseUrl: props.apiBase ?? "https://api.example.test",
-          jobId,
-          statusToken,
-          fetchImpl: props.supportFetch,
+      try {
+        const result = await requestDeletionSupport(jobId, {
+          client: new GenDragoonClient({
+            baseUrl: props.apiBase ?? "https://api.example.test",
+            getToken: async () => "",
+            fetch: props.supportFetch,
+          }),
+          secureStore: props.secrets,
         });
-        if (result.kind === "sent") {
+        if (result.kind === "received") {
           setSupportNotice(SUPPORT_REQUEST_SENT);
           return;
         }
-        if (result.kind === "already") {
+        if (result.kind === "already_sent") {
           setSupportNotice(SUPPORT_REQUEST_ALREADY);
           return;
         }
-        if (result.kind === "refresh") {
-          try {
-            applyStatus(await props.client.deletionStatus(jobId, statusToken));
-          } catch (error) {
-            showFailure(error);
-          }
+        if (result.kind === "not_needed") {
+          applyStatus(result.status);
           return;
         }
+        await Linking.openURL(supportContactTarget(result.contact.value, jobId));
+        return;
+      } catch (error) {
+        showFailure(error);
+        return;
       }
     }
     await Linking.openURL(supportContactTarget(SUPPORT_CONTACT.value, jobId));
