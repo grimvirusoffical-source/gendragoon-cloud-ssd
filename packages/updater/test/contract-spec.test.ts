@@ -3,7 +3,7 @@
  * manifest {version,url,sha256,notes}; checksum mismatch -> no install, current
  * version keeps running; install -> automatic relaunch (no restart button) ->
  * health check -> rollback on failure; stable gets non-prerelease only; the feed
- * token never reaches a manifest, error, or log. TODO(contract) tests use it.fails.
+ * token never reaches a manifest, error, or log.
  */
 import { createHash } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
