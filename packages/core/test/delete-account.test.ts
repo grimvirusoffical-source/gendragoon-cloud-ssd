@@ -5,6 +5,7 @@ import {
   InvalidTokenError,
   MemorySecretStore,
   ReauthRequiredError,
+  accountUidFromIdToken,
   authTimeMsFromIdToken,
   deleteAccountAndWipe,
   deletionAuthFailure,
@@ -294,5 +295,86 @@ describe("DELETE /v2/account contract", () => {
     });
     expect(result.status).toBe("done");
     expect(await secrets.get(workspaceKeyId("w1"))).toBeNull();
+  });
+});
+
+describe("accountUidFromIdToken", () => {
+  const b64url = (text: string) => Buffer.from(text).toString("base64url");
+  const header = b64url(JSON.stringify({ alg: "none", typ: "JWT" }));
+
+  it("reads sub from a Firebase-shaped token", () => {
+    expect(accountUidFromIdToken(unsignedToken({ sub: "user-1", user_id: "user-1" }))).toBe("user-1");
+    expect(accountUidFromIdToken(unsignedToken({ sub: "user-1" }))).toBe("user-1");
+  });
+
+  it.each([
+    ["empty string", ""],
+    ["one part", "abc"],
+    ["two parts", `${header}.${b64url(JSON.stringify({ sub: "user-1" }))}`],
+    ["four parts", `${header}.${b64url(JSON.stringify({ sub: "user-1" }))}.sig.extra`],
+    ["empty payload segment", `${header}..sig`],
+    ["payload with non-base64url characters", `${header}.${Buffer.from(JSON.stringify({ sub: "user-1" })).toString("base64")}+/=.sig`],
+    ["payload that is not valid base64", `${header}.a.sig`],
+    ["payload that is not JSON", `${header}.${b64url("not json {")}.sig`],
+    ["payload that is a JSON string", `${header}.${b64url(JSON.stringify("user-1"))}.sig`],
+    ["payload that is JSON null", `${header}.${b64url("null")}.sig`],
+  ])("returns null without throwing for a malformed token: %s", (_label, token) => {
+    expect(() => accountUidFromIdToken(token)).not.toThrow();
+    expect(accountUidFromIdToken(token)).toBeNull();
+  });
+
+  it.each([
+    ["no sub and no user_id", { auth_time: 1 }],
+    ["no sub, user_id only (never a fallback)", { user_id: "user-1" }],
+    ["empty sub", { sub: "" }],
+    ["non-string sub", { sub: 42 }],
+  ])("returns null without throwing for a payload with %s", (_label, claims) => {
+    const token = unsignedToken(claims);
+    expect(() => accountUidFromIdToken(token)).not.toThrow();
+    expect(accountUidFromIdToken(token)).toBeNull();
+  });
+
+  it("returns null when user_id disagrees with sub", () => {
+    const token = unsignedToken({ sub: "user-1", user_id: "user-2" });
+    expect(() => accountUidFromIdToken(token)).not.toThrow();
+    expect(accountUidFromIdToken(token)).toBeNull();
+  });
+
+  it("treats a uid that differs from the job's saved uid as not this account, with no auth action", async () => {
+    const secrets = new MemorySecretStore();
+    const encode = (text: string) => new TextEncoder().encode(text);
+    await secrets.set("account-deletion:job-id", encode("job-uid"));
+    await secrets.set("account-deletion:status-token", encode("token-uid"));
+    await secrets.set("account-deletion:uid", encode("user-1"));
+    await secrets.set(workspaceKeyId("w1"), new Uint8Array([1]));
+    let requests = 0;
+    let tokenReads = 0;
+    // Constructed so any network or token use would be counted; the uid check must use neither.
+    new GenDragoonClient({
+      baseUrl: "https://api.example.test",
+      getToken: () => {
+        tokenReads += 1;
+        return "fresh-token";
+      },
+      fetch: async () => {
+        requests += 1;
+        return jsonResponse(500, {});
+      },
+    });
+    const savedUid = new TextDecoder().decode((await secrets.get("account-deletion:uid"))!);
+    const otherAccount = unsignedToken({ sub: "user-2", user_id: "user-2" });
+    let uid: string | null = "unset";
+    expect(() => {
+      uid = accountUidFromIdToken(otherAccount);
+    }).not.toThrow();
+    expect(uid).toBe("user-2");
+    expect(uid === savedUid).toBe(false);
+    expect(requests).toBe(0);
+    expect(tokenReads).toBe(0);
+    expect(new TextDecoder().decode((await secrets.get("account-deletion:job-id"))!)).toBe("job-uid");
+    expect(new TextDecoder().decode((await secrets.get("account-deletion:status-token"))!)).toBe("token-uid");
+    expect(new TextDecoder().decode((await secrets.get("account-deletion:uid"))!)).toBe("user-1");
+    expect(await secrets.get(workspaceKeyId("w1"))).not.toBeNull();
+    expect(accountUidFromIdToken(unsignedToken({ sub: "user-1" }))).toBe(savedUid);
   });
 });
