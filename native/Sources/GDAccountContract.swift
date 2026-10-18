@@ -26,6 +26,21 @@ enum GDAccountDecision: Equatable {
     case wipe
     case failed(String)
     case hold(String)
+    /// A 404 while polling. The saved job stays until `done` or the user dismisses it.
+    case notFound(String)
+}
+
+struct GDPollRecovery: Equatable {
+    var wipe: Bool
+    var keepSavedJob: Bool
+    var showRetry: Bool
+    var allowDismiss: Bool
+    var sendDelete: Bool
+}
+
+enum GDSignInAdoption: Equatable {
+    case adopt(uid: String)
+    case reject(String)
 }
 
 enum GDReauthFollowUp: Equatable {
@@ -82,6 +97,9 @@ enum GDAccountContract {
     static func interpretPoll(status: Int, json: [String: Any]) -> GDAccountDecision {
         if status == 401 {
             return .reauthenticate(code: errorCode(json))
+        }
+        if status == 404 {
+            return .notFound("This deletion could not be found. Retry the status check, or dismiss it. Local keys and caches were kept.")
         }
         guard status == 200 else {
             return .hold("Account deletion status could not be read. Local keys and caches were kept.")
@@ -148,6 +166,50 @@ enum GDAccountContract {
             return .promptAgain("Sign in again. Account deletion needs a sign-in from the last 5 minutes.")
         }
         return retryDelete ? .retryDelete : .resume
+    }
+
+    /// A 401 with no `error` still returns to sign-in. Nothing is wiped, and a saved job stays.
+    static func unauthorizedMessage(json: [String: Any]) -> String {
+        if GDServerCode.read(json) == "reauth_required" {
+            return "Sign in again. Account deletion needs a sign-in from the last 5 minutes."
+        }
+        return "Sign in again. Local keys and caches were kept."
+    }
+
+    static func pollRecovery(for decision: GDAccountDecision) -> GDPollRecovery {
+        switch decision {
+        case .notFound:
+            return GDPollRecovery(wipe: false, keepSavedJob: true, showRetry: true, allowDismiss: true, sendDelete: false)
+        case .wipe:
+            return GDPollRecovery(wipe: true, keepSavedJob: false, showRetry: false, allowDismiss: false, sendDelete: false)
+        default:
+            return GDPollRecovery(wipe: false, keepSavedJob: true, showRetry: false, allowDismiss: false, sendDelete: false)
+        }
+    }
+
+    /// Dismiss clears the saved job. It does not wipe the Mac and it does not send DELETE.
+    static func dismissRecovery() -> GDPollRecovery {
+        GDPollRecovery(wipe: false, keepSavedJob: false, showRetry: false, allowDismiss: false, sendDelete: false)
+    }
+
+    /// Switch the session only when the incoming account is the one that started the saved job.
+    static func adoptSignIn(incomingUID: String, savedOwnerUID: String?) -> GDSignInAdoption {
+        let incoming = incomingUID.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !incoming.isEmpty else {
+            return .reject("Sign in again with the same account. Local keys and caches were kept.")
+        }
+        let saved = savedOwnerUID?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if !saved.isEmpty && saved != incoming {
+            return .reject("Sign in again with the account that started this deletion. Local keys and caches were kept.")
+        }
+        return .adopt(uid: incoming)
+    }
+
+    /// A resumed deletion keeps the account that started it, even if a later sign-in differs.
+    static func retainedDeletionOwner(savedOwnerUID: String, incomingUID: String) -> String {
+        let saved = savedOwnerUID.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !saved.isEmpty { return saved }
+        return incomingUID.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     private static func errorCode(_ json: [String: Any]) -> String {

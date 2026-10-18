@@ -10,9 +10,7 @@ import SwiftUI
     @Published private(set) var unpaidWorkspaceIds: [String] = []
     @Published var deletionPollActive = false
     @Published var actionStatus = ""
-    var message: String {
-        "This account is over its workspace limit. Delete or merge the extra workspaces. Downloads stay available."
-    }
+    var message: String { GDStorageContract.lockMessage(reason: reason) }
     func present(json: [String: Any]) {
         guard let body = GDStorageContract.parseLock(json) else { return }
         reason = body.reason

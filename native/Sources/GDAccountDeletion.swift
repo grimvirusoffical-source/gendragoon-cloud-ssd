@@ -8,6 +8,8 @@ import SwiftUI
     static let shared = GDAccountDeletionMonitor()
     @Published private(set) var statusText = "Type DELETE to permanently remove this GenDragoon account."
     @Published private(set) var isPolling = false
+    @Published private(set) var offersPollRetry = false
+    @Published private(set) var offersJobDismiss = false
     private var pollTask: Task<Void, Never>?
     private var expectedUID: String?
     private var retryDelete = false
@@ -79,12 +81,17 @@ import SwiftUI
                     statusText = "Account deletion did not return a job. Local keys and caches were kept."
                     return
                 }
-                try Self.saveJob(jobId: jobId, statusToken: statusToken)
-                poll(GDSavedDeletionJob(jobId: jobId, statusToken: statusToken), login: login)
+                let owner = GDAccountContract.retainedDeletionOwner(savedOwnerUID: "", incomingUID: login.userID)
+                try Self.saveJob(jobId: jobId, statusToken: statusToken, ownerUID: owner)
+                poll(GDSavedDeletionJob(jobId: jobId, statusToken: statusToken, ownerUID: owner), login: login)
             case .reauthenticate:
                 acceptUnauthorized(started.json, login: login)
             case .failed(let message), .hold(let message):
                 statusText = message
+            case .notFound(let message):
+                statusText = message
+                offersPollRetry = true
+                offersJobDismiss = true
             case .wipe, .polling:
                 statusText = "Account deletion did not start. Local keys and caches were kept."
             }
@@ -93,8 +100,30 @@ import SwiftUI
         }
     }
 
+    func retryStatus(login: GDLoginSession) {
+        guard let saved = Self.loadJob() else {
+            offersPollRetry = false
+            offersJobDismiss = false
+            statusText = "There is no saved deletion to check."
+            return
+        }
+        poll(saved, login: login)
+    }
+
+    func dismissSavedJob() {
+        let recovery = GDAccountContract.dismissRecovery()
+        pollTask?.cancel()
+        if !recovery.keepSavedJob { Self.deleteSavedJob() }
+        offersPollRetry = false
+        offersJobDismiss = false
+        isPolling = false
+        statusText = "Stopped watching that deletion. Local keys and caches were kept."
+    }
+
     private func poll(_ saved: GDSavedDeletionJob, login: GDLoginSession) {
         pollTask?.cancel()
+        offersPollRetry = false
+        offersJobDismiss = false
         isPolling = true
         GDWorkspaceLock.shared.deletionPollActive = true
         let jobId = saved.jobId
@@ -115,6 +144,7 @@ import SwiftUI
                 do {
                     let poll = try await Self.request(url: base.appendingPathComponent(String(target.path.dropFirst())),
                                                        method: target.method, token: statusToken, body: nil)
+                    if Task.isCancelled { return }
                     if poll.status == 401 {
                         if let login { self.acceptUnauthorized(poll.json, login: login) }
                         else { self.statusText = "Sign in again. Local keys and caches were kept." }
@@ -135,8 +165,16 @@ import SwiftUI
                         }
                         try Self.wipeLocal()
                         Self.deleteSavedJob()
+                        self.offersPollRetry = false
+                        self.offersJobDismiss = false
                         self.statusText = "This account was deleted from this Mac."
                         login?.logout()
+                        return
+                    case .notFound(let message):
+                        let recovery = GDAccountContract.pollRecovery(for: .notFound(message))
+                        self.statusText = message
+                        self.offersPollRetry = recovery.showRetry
+                        self.offersJobDismiss = recovery.allowDismiss
                         return
                     case .failed(let message), .hold(let message):
                         self.statusText = message
@@ -160,12 +198,12 @@ import SwiftUI
     }
 
     private func acceptUnauthorized(_ json: [String: Any], login: GDLoginSession) {
-        let decision = GDAccountContract.unauthorizedDeletion(json: json, savedJobExists: Self.loadJob() != nil)
-        expectedUID = login.userID
+        let saved = Self.loadJob()
+        let decision = GDAccountContract.unauthorizedDeletion(json: json, savedJobExists: saved != nil)
+        let savedOwner = saved?.ownerUID ?? ""
+        expectedUID = savedOwner.isEmpty ? login.userID : savedOwner
         retryDelete = decision.retryDelete
-        let message = GDServerCode.read(json) == "invalid_token"
-            ? "Sign in again. Local keys and caches were kept."
-            : "Sign in again. Account deletion needs a sign-in from the last 5 minutes."
+        let message = GDAccountContract.unauthorizedMessage(json: json)
         statusText = message
         if decision.showSignIn { login.requireFreshSignIn(message: message) }
     }
@@ -204,8 +242,9 @@ import SwiftUI
     private static let service = "app.gendragoon.cloudssd"
     private static let jobAccount = "account-deletion-job"
 
-    static func saveJob(jobId: String, statusToken: String) throws {
-        let payload = try JSONSerialization.data(withJSONObject: ["jobId": jobId, "statusToken": statusToken])
+    static func saveJob(jobId: String, statusToken: String, ownerUID: String) throws {
+        let owner = GDAccountContract.retainedDeletionOwner(savedOwnerUID: loadJob()?.ownerUID ?? "", incomingUID: ownerUID)
+        let payload = try JSONSerialization.data(withJSONObject: ["jobId": jobId, "statusToken": statusToken, "ownerUID": owner])
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
@@ -221,7 +260,7 @@ import SwiftUI
         }
     }
 
-    static func loadJob() -> GDSavedDeletionJob? {
+    nonisolated static func loadJob() -> GDSavedDeletionJob? {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
@@ -235,7 +274,8 @@ import SwiftUI
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let jobId = json["jobId"] as? String, GDAccountContract.isJobID(jobId),
               let statusToken = json["statusToken"] as? String, GDAccountContract.isStatusToken(statusToken) else { return nil }
-        return GDSavedDeletionJob(jobId: jobId, statusToken: statusToken)
+        let ownerUID = (json["ownerUID"] as? String) ?? ""
+        return GDSavedDeletionJob(jobId: jobId, statusToken: statusToken, ownerUID: ownerUID)
     }
 
     static func deleteSavedJob() {
@@ -276,6 +316,7 @@ import SwiftUI
 struct GDSavedDeletionJob: Equatable {
     var jobId: String
     var statusToken: String
+    var ownerUID: String
 }
 
 @MainActor struct GDAccountDeletionSection: View {
@@ -299,6 +340,18 @@ struct GDSavedDeletionJob: Equatable {
                 .disabled(confirmation != "DELETE" || transfersRunning || monitor.isPolling)
                 .buttonStyle(.bordered)
                 .tint(.red)
+            if monitor.offersPollRetry || monitor.offersJobDismiss {
+                HStack {
+                    if monitor.offersPollRetry {
+                        Button("Retry") { monitor.retryStatus(login: login) }
+                            .buttonStyle(.bordered)
+                    }
+                    if monitor.offersJobDismiss {
+                        Button("Dismiss") { monitor.dismissSavedJob() }
+                            .buttonStyle(.bordered)
+                    }
+                }
+            }
             Text(monitor.statusText)
                 .font(.system(size: 12))
                 .foregroundStyle(.secondary)

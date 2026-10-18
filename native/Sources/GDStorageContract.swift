@@ -90,6 +90,17 @@ enum GDStorageContract {
         return GDWorkspaceLockBody(error: "workspace_lock", reason: reason, overBy: overBy, unpaidWorkspaceIds: Array(unpaid))
     }
 
+    static func lockMessage(reason: String) -> String {
+        switch reason {
+        case "merge_in_progress":
+            return "A workspace merge is still in progress. Wait for it to finish before uploading. Downloads stay available."
+        case "scope_unavailable":
+            return "This workspace is outside the current allowance. Review it before uploading. Downloads stay available."
+        default:
+            return "This account is over its workspace limit. Delete or merge the extra workspaces. Downloads stay available."
+        }
+    }
+
     static func downloadStaysAvailable(method: String) -> Bool {
         let verb = method.uppercased()
         return verb == "GET" || verb == "HEAD"
@@ -105,6 +116,7 @@ enum GDStorageContract {
         case "BYO_CHALLENGE_MISMATCH": return "The challenge object path does not match the nonce."
         case "BYO_CHALLENGE_PROOF_REQUIRED": return "GenDragoon has to read the challenge object from your bucket. Send the presigned URL, not a copy of the nonce."
         case "BYO_CHALLENGE_USED": return "That challenge was already used. Start a new one."
+        case "presigned_url_required": return "Enter the presigned URL for the challenge object."
         default:
             if status == 422 { return byoUnsupportedMessage }
             return nil

@@ -113,6 +113,14 @@ import Foundation
                 providers.contains(where:{$0["providerId"] as? String=="google.com"}) else {
                 self.stage = .login;self.status="Firebase rejected the account. Sign in using Google, not email/password.";return
             }
+            switch GDAccountContract.adoptSignIn(incomingUID: uid, savedOwnerUID: GDAccountDeletionMonitor.loadJob()?.ownerUID) {
+            case .reject(let message):
+                self.stage = .login
+                self.status = message
+                return
+            case .adopt:
+                break
+            }
             self.userID=uid
             self.email=(user["email"] as? String) ?? "Google user"
             self.adoptIDToken(token)

@@ -3,7 +3,7 @@ import XCTest
 @testable import GenDragoonContract
 
 /// Riley's fixtures are `{request, response:{status, body}}` at `fixtures/<area>/<case>.json`
-/// (cloud-ssd PR #5, `4dfde4b`). Account and storage files are the response bodies from
+/// (cloud-ssd PR #5, `da39276`). Account and storage files are the response bodies from
 /// PR #6 `84f6fff` and PR #7 `cc1a1e7` until those areas land in the same folder.
 struct GDFixtureFile {
     var method: String
@@ -136,13 +136,76 @@ final class AccountDeletionContractTests: XCTestCase {
 
     func testNotFoundAndUnavailableDoNotWipe() throws {
         let missing = try GDFixtureFile.load("account", "status-not-found")
-        guard case .hold = GDAccountContract.interpretPoll(status: missing.status, json: missing.body) else {
+        guard case .notFound = GDAccountContract.interpretPoll(status: missing.status, json: missing.body) else {
             return XCTFail("an unknown job must not wipe")
         }
         let unavailable = try GDFixtureFile.load("account", "status-unavailable")
         guard case .hold = GDAccountContract.interpretPoll(status: unavailable.status, json: unavailable.body) else {
             return XCTFail("a non-2xx poll must not wipe")
         }
+    }
+
+    func testUnauthorizedWithoutAnErrorCodeShowsSignInAndKeepsTheJob() throws {
+        let body: [String: Any] = [:]
+        XCTAssertEqual(GDServerCode.read(body), "")
+        let kept = GDAccountContract.unauthorizedDeletion(json: body, savedJobExists: true)
+        XCTAssertFalse(kept.wipe)
+        XCTAssertTrue(kept.showSignIn)
+        XCTAssertTrue(kept.keepSavedJob)
+        XCTAssertFalse(kept.retryDelete)
+        XCTAssertEqual(GDAccountContract.interpretStart(status: 401, json: body), .reauthenticate(code: "unauthorized"))
+        XCTAssertEqual(GDAccountContract.interpretPoll(status: 401, json: body), .reauthenticate(code: "unauthorized"))
+        let message = GDAccountContract.unauthorizedMessage(json: body)
+        XCTAssertFalse(message.contains("5 minutes"))
+        let saved = try GDFixtureFile.load("account", "delete-accepted")
+        let jobId = try XCTUnwrap(saved.body["jobId"] as? String)
+        let token = try XCTUnwrap(saved.body["statusToken"] as? String)
+        guard case .pollSaved = GDAccountContract.deletionIntent(savedJobId: jobId, savedStatusToken: token) else {
+            return XCTFail("a bare 401 must not turn a saved job into a new DELETE")
+        }
+    }
+
+    func testNotFoundWhilePollingKeepsTheJobAndOffersRetry() throws {
+        let missing = try GDFixtureFile.load("account", "status-not-found")
+        XCTAssertEqual(missing.status, 404)
+        XCTAssertEqual(GDServerCode.read(missing.body), "not_found")
+        guard case .notFound(let message) = GDAccountContract.interpretPoll(status: missing.status, json: missing.body) else {
+            return XCTFail("a 404 while polling keeps the saved job")
+        }
+        XCTAssertFalse(message.contains("not_found"))
+        let recovery = GDAccountContract.pollRecovery(for: .notFound(message))
+        XCTAssertFalse(recovery.wipe)
+        XCTAssertTrue(recovery.keepSavedJob)
+        XCTAssertTrue(recovery.showRetry)
+        XCTAssertTrue(recovery.allowDismiss)
+        XCTAssertFalse(recovery.sendDelete)
+        let dismiss = GDAccountContract.dismissRecovery()
+        XCTAssertFalse(dismiss.wipe)
+        XCTAssertFalse(dismiss.keepSavedJob)
+        XCTAssertFalse(dismiss.sendDelete)
+        let done = GDAccountContract.pollRecovery(for: .wipe)
+        XCTAssertTrue(done.wipe)
+        XCTAssertFalse(done.keepSavedJob)
+        XCTAssertFalse(done.sendDelete)
+        let saved = try GDFixtureFile.load("account", "delete-accepted")
+        let jobId = try XCTUnwrap(saved.body["jobId"] as? String)
+        let token = try XCTUnwrap(saved.body["statusToken"] as? String)
+        guard case .pollSaved(let job) = GDAccountContract.deletionIntent(savedJobId: jobId, savedStatusToken: token) else {
+            return XCTFail("a 404 must keep polling the saved token")
+        }
+        XCTAssertEqual(job.jobId, String(missing.path.split(separator: "/").last ?? ""))
+    }
+
+    func testResignInAdoptsOnlyTheSameAccountAndResumeKeepsTheStarter() {
+        XCTAssertEqual(GDAccountContract.adoptSignIn(incomingUID: "uid-a", savedOwnerUID: nil), .adopt(uid: "uid-a"))
+        XCTAssertEqual(GDAccountContract.adoptSignIn(incomingUID: "uid-a", savedOwnerUID: ""), .adopt(uid: "uid-a"))
+        XCTAssertEqual(GDAccountContract.adoptSignIn(incomingUID: "uid-a", savedOwnerUID: "uid-a"), .adopt(uid: "uid-a"))
+        guard case .reject = GDAccountContract.adoptSignIn(incomingUID: "uid-b", savedOwnerUID: "uid-a") else {
+            return XCTFail("a different account must not take the session")
+        }
+        XCTAssertEqual(GDAccountContract.retainedDeletionOwner(savedOwnerUID: "uid-a", incomingUID: "uid-b"), "uid-a")
+        XCTAssertEqual(GDAccountContract.retainedDeletionOwner(savedOwnerUID: "uid-a", incomingUID: "uid-a"), "uid-a")
+        XCTAssertEqual(GDAccountContract.retainedDeletionOwner(savedOwnerUID: "", incomingUID: "uid-b"), "uid-b")
     }
 
     func testCompletedAndUnknownStatusFailWithoutWiping() {
@@ -174,18 +237,52 @@ final class AccountDeletionContractTests: XCTestCase {
 }
 
 final class WorkspaceFixtureContractTests: XCTestCase {
-    func testEveryWorkspaceLockFixtureOpensTheReviewScreen() throws {
-        for name in ["over-cap", "lapsed", "over-cap-and-lapsed", "scope-unavailable", "merge-in-progress"] {
-            let fixture = try GDFixtureFile.load("workspace-lock", name)
-            XCTAssertEqual(fixture.status, 423, name)
-            XCTAssertEqual(GDServerCode.read(fixture.body), "workspace_lock", name)
-            guard case .reviewWorkspaces(let lock) = GDStorageContract.routeLock(status: fixture.status, json: fixture.body) else {
-                return XCTFail(name)
-            }
-            XCTAssertEqual(lock.reason, fixture.body["reason"] as? String ?? "", name)
-            XCTAssertEqual(lock.overBy, (fixture.body["overBy"] as? NSNumber)?.intValue ?? -1, name)
-            XCTAssertEqual(lock.unpaidWorkspaceIds, fixture.body["unpaidWorkspaceIds"] as? [String] ?? [], name)
+    func testWorkspaceLockOverCap() throws {
+        try assertWorkspaceLock("over-cap", reason: "over_cap")
+        XCTAssertEqual(GDStorageContract.lockMessage(reason: "over_cap"),
+                       "This account is over its workspace limit. Delete or merge the extra workspaces. Downloads stay available.")
+    }
+
+    func testWorkspaceLockLapsed() throws {
+        try assertWorkspaceLock("lapsed", reason: "lapsed")
+    }
+
+    func testWorkspaceLockOverCapAndLapsed() throws {
+        try assertWorkspaceLock("over-cap-and-lapsed", reason: "over_cap_and_lapsed")
+    }
+
+    func testWorkspaceLockScopeUnavailable() throws {
+        try assertWorkspaceLock("scope-unavailable", reason: "scope_unavailable")
+        XCTAssertEqual(GDStorageContract.lockMessage(reason: "scope_unavailable"),
+                       "This workspace is outside the current allowance. Review it before uploading. Downloads stay available.")
+        XCTAssertNotEqual(GDStorageContract.lockMessage(reason: "scope_unavailable"),
+                          GDStorageContract.lockMessage(reason: "over_cap"))
+    }
+
+    func testWorkspaceLockMergeInProgress() throws {
+        try assertWorkspaceLock("merge-in-progress", reason: "merge_in_progress")
+        XCTAssertEqual(GDStorageContract.lockMessage(reason: "merge_in_progress"),
+                       "A workspace merge is still in progress. Wait for it to finish before uploading. Downloads stay available.")
+        XCTAssertNotEqual(GDStorageContract.lockMessage(reason: "merge_in_progress"),
+                          GDStorageContract.lockMessage(reason: "scope_unavailable"))
+        XCTAssertNotEqual(GDStorageContract.lockMessage(reason: "merge_in_progress"),
+                          GDStorageContract.lockMessage(reason: "over_cap"))
+    }
+
+    private func assertWorkspaceLock(_ name: String, reason: String, file: StaticString = #filePath, line: UInt = #line) throws {
+        let fixture = try GDFixtureFile.load("workspace-lock", name)
+        XCTAssertEqual(fixture.status, 423, name, file: file, line: line)
+        XCTAssertEqual(GDServerCode.read(fixture.body), "workspace_lock", name, file: file, line: line)
+        guard case .reviewWorkspaces(let lock) = GDStorageContract.routeLock(status: fixture.status, json: fixture.body) else {
+            return XCTFail(name, file: file, line: line)
         }
+        XCTAssertEqual(lock.reason, reason, file: file, line: line)
+        XCTAssertEqual(lock.reason, fixture.body["reason"] as? String ?? "", file: file, line: line)
+        XCTAssertEqual(lock.overBy, (fixture.body["overBy"] as? NSNumber)?.intValue ?? -1, file: file, line: line)
+        XCTAssertEqual(lock.unpaidWorkspaceIds, fixture.body["unpaidWorkspaceIds"] as? [String] ?? [], file: file, line: line)
+        let message = GDStorageContract.lockMessage(reason: lock.reason)
+        XCTAssertFalse(message.contains(reason), file: file, line: line)
+        XCTAssertTrue(message.contains("Downloads stay available."), file: file, line: line)
     }
 
     func testWorkspaceCreateListAndCapUseTheFixtureBodies() throws {
@@ -261,7 +358,7 @@ final class WorkspaceFixtureContractTests: XCTestCase {
         let attacker = GDFixtureFile.strings(mismatch.requestBody)["presignedUrl"] ?? ""
         XCTAssertFalse(GDStorageContract.presignedHostMatches(presignedUrl: attacker, endpoint: registerBody["endpoint"] ?? ""))
 
-        for name in ["verify-expired", "verify-host-mismatch", "verify-mismatch", "verify-proof-required", "verify-used", "provider-unsupported"] {
+        for name in ["verify-expired", "verify-host-mismatch", "verify-mismatch", "verify-used", "provider-unsupported"] {
             let fixture = try GDFixtureFile.load("byo", name)
             let code = GDServerCode.read(fixture.body)
             XCTAssertFalse(code.isEmpty, name)
@@ -269,6 +366,28 @@ final class WorkspaceFixtureContractTests: XCTestCase {
             XCTAssertNotNil(message, name)
             XCTAssertFalse(message?.contains(code) ?? true, name)
         }
+    }
+
+    func testVerifyMissingUrlSendsOnlyPresignedUrl() throws {
+        let missing = try GDFixtureFile.load("byo", "verify-missing-url")
+        XCTAssertEqual(missing.method, "POST")
+        XCTAssertEqual(missing.status, 400)
+        XCTAssertEqual(GDServerCode.read(missing.body), "presigned_url_required")
+        let request = try XCTUnwrap(missing.requestBody as? [String: Any])
+        XCTAssertTrue(request.isEmpty)
+        let success = try GDFixtureFile.load("byo", "verify-success")
+        let proof = GDFixtureFile.strings(success.requestBody)
+        XCTAssertEqual(Set(proof.keys), Set(["presignedUrl"]))
+        XCTAssertNil(proof["readBack"])
+        XCTAssertNil(proof["proofUrl"])
+        let sent = GDStorageContract.byoVerifyBody(presignedUrl: proof["presignedUrl"] ?? "")
+        XCTAssertEqual(sent, proof)
+        XCTAssertEqual(Array(sent.keys), ["presignedUrl"])
+        XCTAssertNil(sent["readBack"])
+        XCTAssertNil(sent["proofUrl"])
+        let message = try XCTUnwrap(GDStorageContract.byoMessage(code: "presigned_url_required", status: missing.status))
+        XCTAssertFalse(message.contains("presigned_url_required"))
+        XCTAssertFalse(message.isEmpty)
     }
 
     func testForeignWorkspaceIsNotOnThisAccount() throws {
