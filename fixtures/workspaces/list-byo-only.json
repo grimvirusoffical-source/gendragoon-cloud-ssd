@@ -1,0 +1,86 @@
+{
+  "request": {
+    "body": null,
+    "headers": {
+      "authorization": "<redacted>"
+    },
+    "method": "GET",
+    "path": "/v2/workspaces"
+  },
+  "response": {
+    "body": {
+      "ownerBenefits": false,
+      "policy": {
+        "activeProjects": 1,
+        "archivedProjects": 0,
+        "currency": "usd",
+        "defaultLimit": 10,
+        "feeIsOneTime": false,
+        "firstProjectFree": true,
+        "freeProjectAvailable": true,
+        "freeProjectClaimed": false,
+        "freeWorkspaceId": null,
+        "freeWorkspaces": 1,
+        "grandfatheredProjects": 0,
+        "locked": true,
+        "newProjectOneTimeCents": 500,
+        "overBy": 0,
+        "ownerFeeWaived": false,
+        "paymentAvailable": true,
+        "pendingProjects": 0,
+        "projectLimit": 10,
+        "qualificationLabel": "2 TB or more storage AND Turbo (8 workers) or higher on the same active project; equivalent bundles qualify",
+        "qualifiedLimit": 20,
+        "qualifiesForHigherLimit": false,
+        "qualifyingPerformanceTier": "turbo",
+        "qualifyingStorageGB": 2000,
+        "qualifyingStorageTier": "2TB",
+        "qualifyingWorkers": 8,
+        "reason": "lapsed",
+        "unpaidWorkspaceIds": [
+          "11111111-1111-4111-8111-000000000003"
+        ],
+        "uploadsBlocked": true,
+        "usedProjectSlots": 1,
+        "workspaceMonthlyCents": 500
+      },
+      "workspaces": [
+        {
+          "byoActive": false,
+          "byoChallengeVerified": false,
+          "dataRetained": false,
+          "grandfathered": false,
+          "hasContinuingBilling": false,
+          "id": "11111111-1111-4111-8111-000000000003",
+          "intendedSelection": {},
+          "isFree": false,
+          "kind": "paid",
+          "lapsed": true,
+          "manualProviderConfigured": false,
+          "monthlyPriceCents": 500,
+          "name": "Only BYO",
+          "performanceActive": false,
+          "performanceInterval": null,
+          "performanceTier": null,
+          "projectBillingVersion": 2,
+          "projectFeeCents": 500,
+          "projectFeeStatus": "pending",
+          "projectStatus": "active",
+          "provisioned": true,
+          "quotaGB": 2,
+          "reservedBytes": 0,
+          "storageActive": false,
+          "storageBillingVersion": 2,
+          "storageInterval": "month",
+          "storageMode": "standard",
+          "storageTier": null,
+          "transferEligible": true,
+          "usedBytes": 0,
+          "workers": 1,
+          "workspaceFeeModel": "monthly"
+        }
+      ]
+    },
+    "status": 200
+  }
+}

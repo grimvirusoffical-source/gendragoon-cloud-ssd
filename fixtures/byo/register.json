@@ -17,8 +17,17 @@
       "bucketFingerprint": "abababababababab",
       "byoRegistered": true,
       "endpoint": "https://bucket.s3.us-east-1.amazonaws.com",
+      "feeIsOneTime": false,
+      "freeWorkspaceId": null,
+      "isFree": false,
+      "lapsed": true,
+      "monthlyPriceCents": 500,
       "providerType": "s3",
-      "updatedAt": 1700000000000
+      "updatedAt": 1700000000000,
+      "workspaceFeeCents": 500,
+      "workspaceFeeModel": "monthly",
+      "workspaceFeePaid": false,
+      "workspaceFeeStatus": "unpaid"
     },
     "status": 200
   }
