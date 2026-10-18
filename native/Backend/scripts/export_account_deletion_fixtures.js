@@ -285,6 +285,10 @@ async function main(){
   if(limited.response.status!==429||limited.response.body?.error!=="rate_limited"||!Number.isInteger(limited.response.body?.retryAfterSec))
    throw Error("support limit "+JSON.stringify(limited.response));
   publish("support-rate-limited",limited,[token]);
+  const unauthorized=await capture(support.base,"POST",supportPath,{token:null});
+  if(unauthorized.response.status!==401||unauthorized.response.body?.error!=="unauthorized"||unauthorized.request.headers.authorization)
+   throw Error("support unauthorized "+JSON.stringify(unauthorized.response));
+  publish("support-unauthorized",unauthorized,[token]);
  }finally{await support.close();}
 
  const finishedSupport=await listen();

@@ -17,7 +17,9 @@ const NOTIFY_BACKOFF_MS=[60*1000,5*60*1000,30*60*1000,2*60*60*1000,6*60*60*1000]
 const NOTIFY_MAX_ATTEMPTS=5;
 const SUPPORT_STALE_MS=60*60*1000;
 const NAMES_TTL_MS=30*24*60*60*1000;
+const SUPPORT_DOC_TTL_MS=NAMES_TTL_MS;
 const SUPPORT_SWEEP_INTERVAL_MS=60*1000;
+const SWEEP_LIMIT=50;
 const CONTENT_LIMIT=1800;
 const JOB_STATUS=new Set(["queued","running","done","failed"]);
 const SUBSCRIPTION_KEY=/SubscriptionId$/;
@@ -25,6 +27,21 @@ const SUB_STATUS=new Set(["incomplete","incomplete_expired","trialing","active",
 const FIREBASE_STATUS=new Set(["active","disabled","missing","deleted","unknown"]);
 const DISCORD_CONFIG_MESSAGE="support_notify_unconfigured: SUPPORT_DISCORD_WEBHOOK_URL must be an https://discord.com/api/webhooks/ URL";
 let registeredSweep=null;
+const supportInflight=new Set();
+function trackSupport(work){
+ const done=Promise.resolve().then(work);
+ supportInflight.add(done);
+ done.finally(()=>supportInflight.delete(done));
+ return done;
+}
+function whenSupportSettled(){
+ const step=()=>supportInflight.size?Promise.allSettled([...supportInflight]).then(step):Promise.resolve();
+ return step();
+}
+function supportGateRequired(env){
+ if(typeof env?.K_SERVICE==="string"&&env.K_SERVICE.length>0)return true;
+ return env?.NODE_ENV==="production";
+}
 
 function refusal(status,code,extra){
  const error=new Error(code);
@@ -241,18 +258,29 @@ function discordWebhookUrl(env){
 }
 function supportDiscordStartup(env=process.env){
  const valid=discordWebhookUrl(env).valid;
- if(env&&env.NODE_ENV==="production")return valid?{exit:false}:{exit:true,code:1,message:DISCORD_CONFIG_MESSAGE};
+ if(supportGateRequired(env))return valid?{exit:false}:{exit:true,code:1,message:DISCORD_CONFIG_MESSAGE};
  if(!valid)return {exit:false,warn:true,message:DISCORD_CONFIG_MESSAGE};
  return {exit:false};
+}
+function escapeDiscord(value){
+ return String(value).replace(/[\\*_~`|>\[\]()#-]/g,"\\$&");
+}
+function mentionStrip(value){
+ return String(value??"").replaceAll("@everyone","everyone").replaceAll("@here","here").replaceAll("<@","<");
+}
+function discordText(value){
+ return escapeDiscord(mentionStrip(value));
 }
 function discordContent(job){
  const names=job?.workspaceNames&&typeof job.workspaceNames==="object"?job.workspaceNames:{};
  const ids=Array.isArray(job?.workspaceIds)?job.workspaceIds:Object.keys(job?.prefixProgress||{});
  const listed=ids.map(id=>{
-  const name=plaintextWorkspaceName(names[id]).replaceAll("@everyone","everyone").replaceAll("@here","here").replaceAll("<@","<");
-  return name?id+" "+name:id;
+  const name=plaintextWorkspaceName(names[id]);
+  const safe=name?discordText(name):"";
+  return safe?id+" "+safe:id;
  }).join(", ");
- const content=["uid: "+(typeof job?.uid==="string"?job.uid:""),"jobId: "+(job?.jobId||""),
+ const uid=typeof job?.uid==="string"?mentionStrip(job.uid):"";
+ const content=["uid: "+uid,"jobId: "+(job?.jobId||""),
   "failureReason: "+(typeof job?.failureReason==="string"?job.failureReason:""),
   "attempts: "+(Number.isInteger(job?.attempts)?job.attempts:0),"workspaces: "+listed].join("\n");
  return content.length>CONTENT_LIMIT?content.slice(0,CONTENT_LIMIT):content;
@@ -308,7 +336,14 @@ function createDiscordNotifier({env=process.env,fetchImpl=globalThis.fetch,warn=
  };
 }
 function freshNotify(at){
- return {state:"pending",attempts:0,nextAttemptAt:new Date(at).toISOString()};
+ return {state:"pending",attempts:0,nextAttemptAt:new Date(at).toISOString(),
+  staleDueAt:new Date(at+SUPPORT_STALE_MS+1).toISOString()};
+}
+function keepStale(current){
+ const kept={};
+ if(typeof current?.staleAlertedAt==="string")kept.staleAlertedAt=current.staleAlertedAt;
+ if(typeof current?.staleDueAt==="string")kept.staleDueAt=current.staleDueAt;
+ return kept;
 }
 function rememberSubscription(job,id,status){
  if(typeof id!=="string"||!id||id.includes("@"))return;
@@ -721,6 +756,7 @@ function createAccountDeletion({db,stripe,bucket,auth,byoProviders,hash,now,noti
     job.failureReason=null;
     job.namesCleared=true;
     job.workspaceNames=null;
+    job.namesExpireAt=null;
     await commitCheckpoint(job);
     return;
    }
@@ -885,14 +921,15 @@ function createAccountDeletion({db,stripe,bucket,auth,byoProviders,hash,now,noti
  }
  async function clearWorkspaceNames(jobId){
   const live=jobs.get(jobId);
-  if(live){live.namesCleared=true;live.workspaceNames=null;}
+  if(live){live.namesCleared=true;live.workspaceNames=null;live.namesExpireAt=null;}
   await db.runTransaction(async tx=>{
    const ref=jobRef(jobId);
    const snap=await tx.get(ref);
    if(!snap.exists)return;
    const data={...snap.data()};
-   if(!data.workspaceNames)return;
+   if(!data.workspaceNames&&!data.namesExpireAt)return;
    delete data.workspaceNames;
+   delete data.namesExpireAt;
    const account=accountRef(data.accountHash);
    const accountSnap=await tx.get(account);
    tx.set(ref,data);
@@ -925,17 +962,39 @@ function createAccountDeletion({db,stripe,bucket,auth,byoProviders,hash,now,noti
    const data=snap.data();
    const current=data.notify||freshNotify(clock());
    const at=clock();
-   if(outcome==="sent")data.notify={state:"sent",attempts:Number.isInteger(current.attempts)?current.attempts:0,nextAttemptAt:null};
-   else{
-    const attempts=(Number.isInteger(current.attempts)?current.attempts:0)+1;
-    if(attempts>=NOTIFY_MAX_ATTEMPTS){
-     data.notify={state:"failed",attempts,nextAttemptAt:new Date(at+NOTIFY_BACKOFF_MS[NOTIFY_BACKOFF_MS.length-1]).toISOString()};
+   const kept=keepStale(current);
+   const attempts=Number.isInteger(current.attempts)?current.attempts:0;
+   if(outcome==="sent"){
+    data.notify={state:"sent",attempts,nextAttemptAt:null,...kept};
+    data.expireAt=new Date(at+SUPPORT_DOC_TTL_MS);
+   }else{
+    const nextAttempts=attempts+1;
+    if(nextAttempts>=NOTIFY_MAX_ATTEMPTS){
+     data.notify={state:"failed",attempts:nextAttempts,nextAttemptAt:new Date(at+NOTIFY_BACKOFF_MS[NOTIFY_BACKOFF_MS.length-1]).toISOString(),...kept};
+     data.expireAt=new Date(at+SUPPORT_DOC_TTL_MS);
      terminal=true;
-    }else data.notify={state:"pending",attempts,nextAttemptAt:new Date(at+NOTIFY_BACKOFF_MS[attempts-1]).toISOString()};
+    }else data.notify={state:"pending",attempts:nextAttempts,nextAttemptAt:new Date(at+NOTIFY_BACKOFF_MS[nextAttempts-1]).toISOString(),...kept};
    }
    tx.set(ref,data);
   });
   if(terminal)console.error("support_notify_failed "+jobId);
+ }
+ async function failNotifyMissing(jobId){
+  let log=false;
+  await db.runTransaction(async tx=>{
+   const ref=db.collection("supportRequests").doc(jobId);
+   const snap=await tx.get(ref);
+   if(!snap.exists)return;
+   const data=snap.data();
+   const current=data.notify||{};
+   if(current.jobMissing)return;
+   const at=clock();
+   data.notify={...keepStale(current),state:"failed",attempts:Number.isInteger(current.attempts)?current.attempts:0,jobMissing:true};
+   data.expireAt=new Date(at+SUPPORT_DOC_TTL_MS);
+   tx.set(ref,data);
+   log=true;
+  });
+  if(log)console.error("support_notify_failed "+jobId);
  }
  async function deliver(jobId,reason){
   if(!webhookReady()){
@@ -944,7 +1003,10 @@ function createAccountDeletion({db,stripe,bucket,auth,byoProviders,hash,now,noti
   }
   if(!(await claimNotify(jobId)))return;
   const stored=await readJob(jobId);
-  if(!stored)return;
+  if(!stored){
+   await failNotifyMissing(jobId);
+   return;
+  }
   const filename="deletion-"+String(stored.jobId||jobId).replace(/[^A-Za-z0-9_-]/g,"")+".json";
   try{
    await notify({content:discordContent(stored),filename,file:discordFile(stored),jobId:stored.jobId||jobId});
@@ -957,41 +1019,98 @@ function createAccountDeletion({db,stripe,bucket,auth,byoProviders,hash,now,noti
   await markNotify(jobId,"sent");
   await clearWorkspaceNames(jobId);
  }
+ async function dueSupportRequests(at){
+  try{
+   return await db.collection("supportRequests").where("notify.state","in",["pending","failed"])
+    .where("notify.nextAttemptAt","<=",new Date(at).toISOString()).orderBy("notify.nextAttemptAt").limit(SWEEP_LIMIT).get();
+  }catch{return {docs:[]};}
+ }
+ async function deferTerminal(jobId,at){
+  await db.runTransaction(async tx=>{
+   const ref=db.collection("supportRequests").doc(jobId);
+   const snap=await tx.get(ref);
+   if(!snap.exists)return;
+   const data=snap.data();
+   const notify=data.notify;
+   if(!notify||notify.state!=="failed"||notify.jobMissing)return;
+   const due=Date.parse(notify.nextAttemptAt);
+   if(!Number.isFinite(due)||due>at)return;
+   data.notify={...notify,nextAttemptAt:new Date(at+SUPPORT_WINDOW_MS).toISOString()};
+   tx.set(ref,data);
+  });
+ }
+ async function noteStale(at){
+  let snap;
+  try{
+   snap=await db.collection("supportRequests").where("notify.state","in",["pending","failed"])
+    .where("notify.staleDueAt","<=",new Date(at).toISOString()).orderBy("notify.staleDueAt").limit(SWEEP_LIMIT).get();
+  }catch{return;}
+  for(const doc of snap.docs||[]){
+   const jobId=doc.data()?.jobId;
+   if(typeof jobId!=="string")continue;
+   let alert=false;
+   await db.runTransaction(async tx=>{
+    const ref=db.collection("supportRequests").doc(jobId);
+    const fresh=await tx.get(ref);
+    if(!fresh.exists)return;
+    const data=fresh.data();
+    const notify=data.notify;
+    const state=notify?.state;
+    if(state!=="pending"&&state!=="failed")return;
+    const created=Date.parse(data.createdAt);
+    if(!Number.isFinite(created)||at-created<=SUPPORT_STALE_MS)return;
+    const alerted=Date.parse(notify.staleAlertedAt);
+    if(Number.isFinite(alerted)&&at-alerted<SUPPORT_WINDOW_MS)return;
+    const due=Date.parse(notify.staleDueAt);
+    if(!Number.isFinite(due)||due>at)return;
+    data.notify={...notify,staleAlertedAt:new Date(at).toISOString(),staleDueAt:new Date(at+SUPPORT_WINDOW_MS).toISOString()};
+    tx.set(ref,data);
+    alert=true;
+   });
+   if(alert)console.error("support_notify_stale "+jobId);
+  }
+ }
  async function expireWorkspaceNames(at){
   let snap;
-  try{snap=await db.collection("deletion_jobs").get();}catch{return;}
+  try{
+   snap=await db.collection("deletion_jobs").where("namesExpireAt","<=",new Date(at)).orderBy("namesExpireAt").limit(SWEEP_LIMIT).get();
+  }catch{return;}
   for(const doc of snap.docs||[]){
    const data=doc.data()||{};
-   if(!data.workspaceNames||typeof data.jobId!=="string")continue;
-   const expire=data.namesExpireAt?new Date(data.namesExpireAt).getTime():Number.NaN;
-   let sent=false;
-   try{
-    const support=await db.collection("supportRequests").doc(data.jobId).get();
-    sent=support.exists&&support.data()?.notify?.state==="sent";
-   }catch{sent=false;}
-   if(data.status==="done"||sent||(Number.isFinite(expire)&&at>=expire))await clearWorkspaceNames(data.jobId);
+   if(typeof data.jobId!=="string"||!data.workspaceNames)continue;
+   await clearWorkspaceNames(data.jobId);
   }
+ }
+ async function expireSupportDocuments(at){
+  let snap;
+  try{
+   snap=await db.collection("supportRequests").where("expireAt","<=",new Date(at)).orderBy("expireAt").limit(SWEEP_LIMIT).get();
+  }catch{return;}
+  for(const doc of snap.docs||[])await doc.ref.delete();
  }
  async function sweepSupportNotifications(){
   const at=clock();
-  let snap;
-  try{snap=await db.collection("supportRequests").get();}catch{snap={docs:[]};}
+  const snap=await dueSupportRequests(at);
   let delivered=0,failed=0;
   for(const doc of snap.docs||[]){
    const data=doc.data()||{};
+   if(typeof data.jobId!=="string")continue;
    const state=data.notify?.state;
-   const created=Date.parse(data.createdAt);
-   if((state==="pending"||state==="failed")&&Number.isFinite(created)&&at-created>SUPPORT_STALE_MS)
-    console.error("support_notify_stale "+data.jobId);
-   if(state!=="pending"||typeof data.jobId!=="string")continue;
+   if(state==="failed"){
+    await deferTerminal(data.jobId,at);
+    continue;
+   }
+   if(state!=="pending")continue;
    const before=Number.isInteger(data.notify?.attempts)?data.notify.attempts:0;
    await deliver(data.jobId,"sweep");
    const after=await db.collection("supportRequests").doc(data.jobId).get();
    const next=after.exists?after.data()?.notify:null;
    if(next?.state==="sent")delivered+=1;
-   else if((next?.attempts||0)>before)failed+=1;
+   else if((next?.attempts||0)>before||next?.jobMissing)failed+=1;
   }
+  await noteStale(at);
   await expireWorkspaceNames(at);
+  await expireSupportDocuments(at);
   return {delivered,failed};
  }
  async function requestSupport(req){
@@ -1026,7 +1145,7 @@ function createAccountDeletion({db,stripe,bucket,auth,byoProviders,hash,now,noti
    saved={limited:false,notify:doc.count===1};
   });
   if(saved?.limited)throw refusal(429,"rate_limited",{retryAfterSec:saved.retryAfterSec});
-  if(saved?.notify)await deliver(jobId,"request");
+  if(saved?.notify)trackSupport(()=>deliver(jobId,"request"));
   return {status:202,requestId};
  }
  return {deleteAccount,jobStatus,statusTokenMatches,resumeIfStalled,requestSupport,sweepSupportNotifications};
@@ -1180,4 +1299,4 @@ function continueWithFirebase(firebaseAuth,req,res,onOk){
 function sweepRegisteredSupportNotifications(){
  return typeof registeredSweep==="function"?registeredSweep():Promise.resolve({delivered:0,failed:0});
 }
-module.exports={createAccountDeletion,registerAccountDeletion,createDiscordNotifier,supportDiscordStartup,sweepRegisteredSupportNotifications,REAUTH_SECONDS,STATUS_TOKEN_TTL_MS,LEASE_MS,SUPPORT_WINDOW_MS,SUPPORT_SWEEP_INTERVAL_MS,NAMES_TTL_MS,NOTIFY_BACKOFF_MS};
+module.exports={createAccountDeletion,registerAccountDeletion,createDiscordNotifier,supportDiscordStartup,sweepRegisteredSupportNotifications,whenSupportSettled,REAUTH_SECONDS,STATUS_TOKEN_TTL_MS,LEASE_MS,SUPPORT_WINDOW_MS,SUPPORT_SWEEP_INTERVAL_MS,NAMES_TTL_MS,NOTIFY_BACKOFF_MS};

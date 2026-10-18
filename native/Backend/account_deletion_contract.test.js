@@ -10,7 +10,7 @@ const express=require("express");
 const {memoryFirestore}=require("./test_firestore");
 const {installedBilling}=require("./billing_gateway");
 const {createLoginGate,TERMS_VERSION}=require("./login_gate");
-const {STATUS_TOKEN_TTL_MS,REAUTH_SECONDS,supportDiscordStartup}=require("./account_delete");
+const {STATUS_TOKEN_TTL_MS,REAUTH_SECONDS,supportDiscordStartup,whenSupportSettled}=require("./account_delete");
 const {installV2Errors}=require("./v2_errors");
 const NOW=1_800_000_000_000;
 const TOKEN_RE=/^[A-Za-z0-9_-]{43}$/;
@@ -872,7 +872,11 @@ async function failedJob(opts={}){
  assert.equal(last.json.retryable,false);
  return {h,uid,jobId:created.json.jobId,statusToken:created.json.statusToken};
 }
-function support(h,jobId,token,body){return h.call("POST",supportPath(jobId),body===undefined?{token}:{token,body});}
+async function support(h,jobId,token,body){
+ const result=await h.call("POST",supportPath(jobId),body===undefined?{token}:{token,body});
+ await whenSupportSettled();
+ return result;
+}
 function captureLogs(){
  const lines=[];const saved={};
  for(const k of ["log","warn","error","info"]){saved[k]=console[k];console[k]=(...a)=>lines.push(a.map(String).join(" "));}
@@ -1185,15 +1189,13 @@ function webhookHits(){
  }
  return hits;
 }
-// The one known hit is a fake test literal, not a real secret. Allowed here so
-// any NEW webhook URL fails; contract 28b stays todo until it is removed.
-const KNOWN_FAKE_WEBHOOK_LITERALS=["native/Backend/support_deletion.test.js:12"];
+// Webhook URLs in tests are assembled at runtime, so a tracked literal is a failure.
+const KNOWN_FAKE_WEBHOOK_LITERALS=[];
 test("contract 28: no Discord webhook URL appears in tracked files or fixtures (beyond the known fake test literal)",()=>{
  const hits=webhookHits().filter(hit=>!KNOWN_FAKE_WEBHOOK_LITERALS.includes(hit));
  assert.deepEqual(hits,[]);
  assert.deepEqual(webhookHits().filter(h=>h.startsWith("fixtures/")),[],"fixtures carry no webhook URL");
 });
-test("contract 28b: strict - no webhook-shaped URL at all in tracked files",
- {todo:"support_deletion.test.js:12 commits a webhook-shaped fake (discord.com/api/webhooks/<18 digits>/WebhookSecretMarker123). Not a real secret, but it trips any repo scanner; build it from parts as contract 26 does."},()=>{
+test("contract 28b: strict - no webhook-shaped URL at all in tracked files",()=>{
  assert.deepEqual(webhookHits(),[]);
 });

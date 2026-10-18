@@ -89,9 +89,18 @@ python3 native/Backend/deploy_free.py --project gendragood-ssd --region us-centr
 
 The deployment command uses the active Google application-default account through a temporary file readable only by the current user. No credential value is printed. Use `--customer-bucket` or `--service-account` only when intentionally configuring or changing those service properties. Keep real `customer-storage.json` outside version control; `customer-storage.example.json` documents its purpose without a production customer bucket name.
 
-`SUPPORT_DISCORD_WEBHOOK_URL` is loaded from Secret Manager in production and is never written in this repo. When `NODE_ENV=production`, `free_server.js` exits before it listens if that variable is missing or is not an `https://discord.com/api/webhooks/` URL. The error names the variable and does not print the value, so Cloud Run keeps serving the previous revision. `npm run predeploy:check` is an optional extra that confirms the secret exists (`gcloud secrets versions describe`) without printing it. It is not the promotion gate.
+`SUPPORT_DISCORD_WEBHOOK_URL` is loaded from Secret Manager in production and is never written in this repo. `free_server.js` exits before it listens if that variable is missing or is not an `https://discord.com/api/webhooks/` URL when `NODE_ENV=production`. Whenever Cloud Run sets `K_SERVICE`, that gate stays on even if `NODE_ENV` is `development`, `dev`, or `test`. `deploy_free.py` sets `NODE_ENV=production` on every Cloud Run deploy. The error names the variable and does not print the value, so Cloud Run keeps serving the previous revision. `npm run predeploy:check` is an optional extra that confirms the secret exists (`gcloud secrets versions describe`) without printing it. It is not the promotion gate.
 
 ## Validation
+
+### Release blocker
+
+Do not send this revision production traffic until Cloud Scheduler calls `POST /internal/support-notifications/sweep` every minute with `Authorization: Bearer <SUPPORT_SWEEP_TOKEN>`. The token is at least 16 characters and is not stored in this repo. The once-a-minute timer inside the process is not a substitute: Cloud Run can scale the instance away. This is a release blocker, not an optional follow-up.
+
+### Release checklist
+
+- `NODE_ENV=production` is set on the Cloud Run service. `deploy_free.py` writes it. `K_SERVICE` arms the Discord webhook gate on every Cloud Run instance. `NODE_ENV=development`, `dev`, or `test` does not turn that gate off. A missing or invalid `SUPPORT_DISCORD_WEBHOOK_URL` then exits before listen and names the variable without printing the value.
+- The Firestore indexes used by the support sweep exist: `supportRequests` `notify.state` + `notify.nextAttemptAt`, `supportRequests` `notify.state` + `notify.staleDueAt`, `deletion_jobs.namesExpireAt`, and `supportRequests.expireAt`. A TTL policy may watch `supportRequests.expireAt`. Do not attach one to `deletion_jobs`.
 
 ### Review a candidate before promoting production traffic
 

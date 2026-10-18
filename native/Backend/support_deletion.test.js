@@ -5,11 +5,11 @@ const fs=require("node:fs"),os=require("node:os"),path=require("node:path");
 const {spawn}=require("node:child_process");
 const express=require("express");
 const {memoryFirestore}=require("./test_firestore");
-const {registerAccountDeletion,createDiscordNotifier,supportDiscordStartup,SUPPORT_WINDOW_MS,NAMES_TTL_MS,NOTIFY_BACKOFF_MS}=require("./account_delete");
+const {registerAccountDeletion,createDiscordNotifier,supportDiscordStartup,whenSupportSettled,SUPPORT_WINDOW_MS,NAMES_TTL_MS,NOTIFY_BACKOFF_MS}=require("./account_delete");
 const NOW=1_800_000_000_000;
 const hash=uid=>crypto.createHash("sha256").update("gd-v1:"+uid).digest("hex");
-const DOC_KEYS=["accountHash","count","createdAt","failureReason","jobId","notify","uid"];
-const WEBHOOK="https://discord.com/api/webhooks/123456789012345678/WebhookSecretMarker123";
+const DOC_KEYS=["accountHash","count","createdAt","expireAt","failureReason","jobId","notify","uid"];
+const WEBHOOK=["https:","","discord.com","api","webhooks","123456789012345678","WebhookSecretMarker123"].join("/");
 const EMAIL="person@example.com";
 const WRAPPED="super-secret-wrapped-key";
 const OBJECT_ID="11111111-1111-4111-8111-111111111111";
@@ -63,6 +63,7 @@ function world({uid="u-support",cancel,bucket,notifier,env,fetchImpl,rows=[],aut
    const res=await fetch(this.base+requestPath,{method,headers,body:body===undefined?undefined:JSON.stringify(body)});
    const text=await res.text();
    let json=null;try{json=JSON.parse(text);}catch(_){}
+   await whenSupportSettled();
    return {status:res.status,json,text,retryAfter:res.headers.get("retry-after")};
   },
  };
@@ -410,6 +411,35 @@ test("workspace names clear on done, when the post is sent, and after 30 days",a
   assert.deepEqual(job.workspaceIds,["w9"]);
   assert.equal(JSON.stringify(kept.db.rows.get("supportRequests/"+created.jobId)).includes("Kept"),false);
  }finally{kept.close();}
+});
+
+test("K_SERVICE set with NODE_ENV=test and no webhook exits 1",async()=>{
+ assert.equal(process.env.K_SERVICE,undefined);
+ const gate=supportDiscordStartup({K_SERVICE:"gendragoon-free",NODE_ENV:"test"});
+ assert.equal(gate.exit,true);
+ assert.equal(gate.code,1);
+ assert.match(gate.message,/SUPPORT_DISCORD_WEBHOOK_URL/);
+ assert.equal(gate.message.includes(WEBHOOK),false);
+ assert.equal(gate.message.includes("WebhookSecretMarker123"),false);
+ for(const mode of ["development","dev","production",""])
+  assert.equal(supportDiscordStartup({K_SERVICE:"gendragoon-free",NODE_ENV:mode}).exit,true,mode||"unset");
+ assert.equal(supportDiscordStartup({K_SERVICE:"gendragoon-free",NODE_ENV:"test",SUPPORT_DISCORD_WEBHOOK_URL:WEBHOOK}).exit,false);
+ const child=spawn(process.execPath,["-e","require('./free_server.js').start()"],{
+  cwd:__dirname,
+  env:{PATH:process.env.PATH,K_SERVICE:"gendragoon-free",NODE_ENV:"test",CUSTOMER_BUCKET:"gendragoon-test-placeholder",STORAGE_PROJECT_ID:"gendragood-ssd"},
+ });
+ let output="";
+ child.stdout.on("data",chunk=>{output+=chunk;});
+ child.stderr.on("data",chunk=>{output+=chunk;});
+ const result=await new Promise(resolve=>{
+  const timer=setTimeout(()=>{child.kill("SIGTERM");resolve({code:null,output});},4000);
+  child.on("exit",code=>{clearTimeout(timer);resolve({code,output});});
+ });
+ assert.equal(result.code,1);
+ assert.match(result.output,/SUPPORT_DISCORD_WEBHOOK_URL/);
+ assert.equal(result.output.includes("WebhookSecretMarker123"),false);
+ assert.equal(result.output.includes("API ready"),false);
+ assert.equal(process.env.K_SERVICE,undefined);
 });
 
 test("production refuses to start without logging the webhook value",async()=>{
