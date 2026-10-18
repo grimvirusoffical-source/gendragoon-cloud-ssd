@@ -135,6 +135,17 @@ describe("requestDeletionSupport uid check (ahead of the uid-check PR, cut from 
     expect(h.seen.requests).toBe(1);
     noSignOut(h.seen);
   });
+
+  it("control: currentUid set but no saved uid -> request goes out as today, store unchanged, no sign-out", async () => {
+    const store = await savedStore(null);
+    const before = await snapshot(store);
+    expect(before[UID_KEY]).toBeNull();
+    const h = harness([json(202, { status: "received", requestId: "req-1" })]);
+    expect(await callWithUid(store, h, "user-1")).toEqual({ kind: "received", requestId: "req-1" });
+    expect(h.seen.requests).toBe(1);
+    expect(await snapshot(store)).toEqual(before);
+    noSignOut(h.seen);
+  });
 });
 
 describe("requestDeletionSupport uid check: edges (uid-check PR)", () => {
