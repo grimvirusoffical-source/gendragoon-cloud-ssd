@@ -343,11 +343,12 @@ enum GDNativeHelper {
     private func kind(_ item: StoredApp) -> String { item.kind ?? "app" }
     private func category(_ item: StoredApp) -> String {
         if kind(item) == "folder" { return "folders" }
-        let ext = (item.name as NSString).pathExtension.lowercased()
-        if ["mp4", "mov", "m4v", "mkv", "avi", "webm", "mpeg", "mpg"].contains(ext) { return "videos" }
-        if ["mp3", "wav", "aiff", "flac", "aac", "m4a", "ogg"].contains(ext) { return "audio" }
-        if ["png", "jpg", "jpeg", "webp", "heic", "gif", "tif", "tiff", "svg"].contains(ext) { return "pictures" }
-        return "files"
+        switch GDExtensionMap.kind(item.name) {
+        case "videos": return "videos"
+        case "audio": return "audio"
+        case "pictures": return "pictures"
+        default: return "files"
+        }
     }
     private var items: [StoredApp] {
         library.apps.filter { item in

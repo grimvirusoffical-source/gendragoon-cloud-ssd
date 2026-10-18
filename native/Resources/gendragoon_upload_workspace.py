@@ -32,20 +32,26 @@ import uuid
 _performance_input = None
 
 DEFAULT_PREFIX = "GenDragoon-App-Library"
-DEFAULT_CATEGORIES = {
-    "pictures": "Pictures",
-    "videos": "Videos",
-    "audio": "Music/Audio",
-    "documents": "Documents",
-    "apps": "Applications",
-    "other": "Other",
-}
+
+
+def shared_extension_map():
+    here = Path(__file__).resolve()
+    for path in (
+        here.with_name("extension-map.json"),
+        here.parents[1] / "Resources" / "extension-map.json",
+        here.parents[2] / "native" / "Resources" / "extension-map.json",
+    ):
+        if path.is_file():
+            return json.loads(path.read_text())
+    raise RuntimeError("The shared extension map is missing")
+
+
+_EXTENSION_MAP = shared_extension_map()
+DEFAULT_CATEGORIES = dict(_EXTENSION_MAP["uploadFolders"])
 CATEGORY_EXTENSIONS = {
-    "pictures": {"jpg", "jpeg", "png", "gif", "webp", "heic", "tif", "tiff", "bmp"},
-    "videos": {"mp4", "mov", "mkv", "avi", "webm", "m4v"},
-    "audio": {"mp3", "m4a", "aac", "wav", "flac", "aiff", "ogg"},
-    "documents": {"pdf", "doc", "docx", "txt", "rtf", "pages", "numbers", "key", "ppt", "pptx", "xls", "xlsx", "csv", "md"},
-    "apps": {"app", "dmg", "pkg"},
+    key: set(_EXTENSION_MAP["extensions"][key])
+    for key in DEFAULT_CATEGORIES
+    if key in _EXTENSION_MAP["extensions"]
 }
 MAX_STATE_BYTES = 3 * 1024 * 1024
 MAX_RESPONSE_BYTES = 4 * 1024 * 1024
@@ -357,6 +363,45 @@ def kindof(path):
     raise WorkspaceError("invalid_source", "Choose an actual application, folder, or regular file")
 
 
+CONTENT_HASH_LIMIT = 8 * 1024 * 1024
+RECENT_CONTENT_WINDOW_NS = 5_000_000_000
+
+
+def content_digest(item, info):
+    """Hash bytes when size and mtime would not reveal a same-size edit.
+
+    The hash is recorded only if size and mtime stay unchanged while the file
+    is read. A recent timestamp also pulls in a bounded sample of a large file,
+    because that edit can share one clock tick with the previous version.
+    """
+    recent = time.time_ns() - min(info.st_mtime_ns, info.st_ctime_ns) <= RECENT_CONTENT_WINDOW_NS
+    if info.st_size > CONTENT_HASH_LIMIT and not recent:
+        return None
+    to_read = info.st_size if info.st_size <= CONTENT_HASH_LIMIT else min(info.st_size, 1024 * 1024)
+    digest = hashlib.sha256()
+    try:
+        descriptor = os.open(item, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    except OSError as exc:
+        raise WorkspaceError("invalid_source", "A source file could not be read") from exc
+    try:
+        observed = os.fstat(descriptor)
+        if not stat.S_ISREG(observed.st_mode):
+            raise WorkspaceError("source_changed", "A source changed while being selected; try again")
+        remaining = to_read
+        while remaining:
+            block = os.read(descriptor, min(remaining, 1024 * 1024))
+            if not block:
+                break
+            digest.update(block)
+            remaining -= len(block)
+        after = os.fstat(descriptor)
+    finally:
+        os.close(descriptor)
+    if (after.st_size, after.st_mtime_ns) != (info.st_size, info.st_mtime_ns):
+        raise WorkspaceError("source_changed", "A source changed while being selected; try again")
+    return digest.hexdigest()
+
+
 def source_path(value):
     original = Path(value).expanduser().absolute()
     if original.is_symlink():
@@ -374,7 +419,9 @@ def fingerprint(path):
 
     Library upload additionally hashes content manifests around backup/offload.
     This selection fingerprint catches replacements and ordinary edits between
-    selection, enqueue, and worker admission without reading big file contents.
+    selection, enqueue, and worker admission. Same-size edits that land inside
+    one timestamp tick are included by hashing file bytes. Large files are
+    hashed when that timestamp is recent; older large files stay metadata-only.
     """
     digest, count = hashlib.sha256(), 0
     first = path.lstat()
@@ -388,8 +435,10 @@ def fingerprint(path):
         count += 1
         if count > MAX_FINGERPRINT_ENTRIES:
             raise WorkspaceError("source_too_large", "This source exceeds the safe tree entry limit")
+        content = content_digest(item, info) if stat.S_ISREG(info.st_mode) and not stat.S_ISLNK(info.st_mode) else None
         record = [relative, info.st_dev, info.st_ino, info.st_mode, info.st_size,
-                  info.st_mtime_ns, info.st_ctime_ns, os.readlink(item) if stat.S_ISLNK(info.st_mode) else None]
+                  info.st_mtime_ns, info.st_ctime_ns, os.readlink(item) if stat.S_ISLNK(info.st_mode) else None,
+                  content]
         digest.update(json.dumps(record, separators=(",", ":")).encode())
     add(path, "")
     def unavailable(error):

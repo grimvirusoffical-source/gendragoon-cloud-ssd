@@ -457,11 +457,12 @@ struct GenDragoonFreeCloudPanel: View {
     private func category(_ file: GDCloudItem) -> String {
         if file.itemKind == "app" { return "applications" }
         if file.itemKind == "folder" { return "folders" }
-        let ext = (file.displayName as NSString).pathExtension.lowercased()
-        if ["mov", "mp4", "m4v", "mkv", "avi", "webm", "mpeg", "mpg", "3gp"].contains(ext) { return "videos" }
-        if ["wav", "mp3", "aiff", "aac", "m4a", "flac", "ogg", "aif"].contains(ext) { return "audio" }
-        if ["png", "jpg", "jpeg", "webp", "gif", "heic", "heif", "tif", "tiff", "svg", "raw"].contains(ext) { return "pictures" }
-        return "files"
+        switch GDExtensionMap.kind(file.displayName) {
+        case "videos": return "videos"
+        case "audio": return "audio"
+        case "pictures": return "pictures"
+        default: return "files"
+        }
     }
     private func icon(_ file: GDCloudItem) -> String {
         switch category(file) {

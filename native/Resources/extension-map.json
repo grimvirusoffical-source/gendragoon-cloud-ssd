@@ -1,0 +1,26 @@
+{
+  "extensions": {
+    "pictures": ["bmp", "gif", "heic", "heif", "jpeg", "jpg", "png", "raw", "svg", "tif", "tiff", "webp"],
+    "videos": ["3gp", "avi", "m4v", "mkv", "mov", "mp4", "mpeg", "mpg", "webm"],
+    "audio": ["aac", "aif", "aiff", "flac", "m4a", "mp3", "ogg", "opus", "wav"],
+    "documents": ["csv", "doc", "docx", "json", "key", "md", "numbers", "pages", "pdf", "ppt", "pptx", "rtf", "txt", "xls", "xlsx"],
+    "apps": ["app", "dmg", "pkg"],
+    "archives": ["7z", "aab", "apk", "gz", "ipa", "rar", "tar", "zip"]
+  },
+  "uploadFolders": {
+    "pictures": "Pictures",
+    "videos": "Videos",
+    "audio": "Music/Audio",
+    "documents": "Documents",
+    "apps": "Applications",
+    "other": "Other"
+  },
+  "driveCleanupFolders": {
+    "pictures": ["Media", "Pictures"],
+    "videos": ["Media", "Videos"],
+    "audio": ["Media", "Audio"],
+    "apps": ["Applications"],
+    "folders": ["Folders"],
+    "other": ["Files"]
+  }
+}

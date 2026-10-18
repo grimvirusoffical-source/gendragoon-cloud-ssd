@@ -138,7 +138,7 @@ class UploadWorkspaceTests(unittest.TestCase):
         command = child.call_args.args[0]
         self.assertEqual(command[command.index("--source") + 1], str(original))
         self.assertEqual(command[command.index("--project") + 1], FIRST["project"])
-        self.assertEqual(command[command.index("--folder") + 1], "bucket-one/apps/custom")
+        self.assertEqual(command[command.index("--folder") + 1], "bucket-one/apps/custom/Applications")
         self.assertNotIn("gen-dragoon-ssd", command)
 
     def test_source_change_before_enqueue_is_rejected_without_job(self):
@@ -172,16 +172,14 @@ class UploadWorkspaceTests(unittest.TestCase):
         child = folder / "nested/child.data"
         child.write_bytes(b"before")
         self.prepare([folder])
-        # Different size on purpose: a same-size edit within one timestamp tick is
-        # invisible to the size+mtime/ctime fingerprint (see the expectedFailure
-        # test below), which made this test flaky in full-suite runs.
+        # Different size on purpose: this case stays visible from metadata alone.
+        # Same-size edits with a restored mtime are covered by the test below.
         child.write_bytes(b"after, a different size")
         with self.fake_library() as helper, self.assertRaises(workspace.WorkspaceError):
             workspace.run_next(self.home)
         helper.assert_not_called()
         self.assertTrue(child.exists())
 
-    @unittest.expectedFailure  # needs content hash; size+mtime misses same-size edits
     def test_same_size_edit_with_restored_mtime_is_detected(self):
         """Deterministic: same-size rewrite, mtime restored with os.utime, and
         ctime pinned so filesystem timestamp granularity cannot hide or reveal it."""
@@ -440,6 +438,7 @@ except w.WorkspaceError as e:print(json.dumps({'ok':False,'error':e.code}))
         bundle.mkdir()
         copied = bundle / SCRIPT.name
         shutil.copyfile(SCRIPT, copied)
+        shutil.copyfile(SCRIPT.with_name("extension-map.json"), bundle / "extension-map.json")
         (bundle / "gendragoon_connect.py").write_text('''
 import argparse,json,sys
 import gendragoon_upload_workspace as w
@@ -506,6 +505,30 @@ project=a.project,bucket=a.bucket,remote=a.remote,folder=a.folder,source=str(s),
         self.assertEqual(workspace.category_key("Demo.app", "app"), "apps")
         self.assertEqual(workspace.category_key("source.dmg"), "apps")
         self.assertEqual(workspace.category_key("archive.zip"), "other")
+        # These seven extensions were classified differently across the Mac app,
+        # drive cleanup, and mobile web. They now come from one map.
+        shared = {
+            "photo.heif": "pictures", "icon.svg": "pictures", "scan.bmp": "pictures",
+            "shot.raw": "pictures", "clip.mpeg": "videos", "clip.mpg": "videos",
+            "voice.opus": "audio",
+        }
+        for name, key in shared.items():
+            self.assertEqual(workspace.category_key(name), key, name)
+        payload = json.loads((Path(__file__).resolve().parents[1] / "Resources/extension-map.json").read_text())
+        macos = Path(__file__).resolve().parents[2] / "macos/Resources/gendragoon_drive_cleanup.py"
+        native_cleanup = Path(__file__).resolve().parents[1] / "Resources/gendragoon_drive_cleanup.py"
+        for copy in (macos, native_cleanup):
+            text = copy.read_text()
+            self.assertIn("extension-map.json", text)
+        swift = (Path(__file__).resolve().parents[1] / "Sources/GDExtensionMap.swift").read_text()
+        ios = (Path(__file__).resolve().parents[1] / "Mobile/iOS/Sources/GenDragoonMobileApp.swift").read_text()
+        mobile = (Path(__file__).resolve().parents[1] / "Backend/mobile/mobile.mjs").read_text()
+        self.assertIn("extension-map.json", mobile)
+        self.assertIn("videos", mobile)
+        for ext in ("heif", "svg", "bmp", "raw", "mpeg", "mpg", "opus"):
+            self.assertIn(ext, payload["extensions"]["pictures"] + payload["extensions"]["videos"] + payload["extensions"]["audio"])
+            self.assertIn(f'"{ext}"', swift)
+            self.assertIn(f'"{ext}"', ios)
         self.assertEqual(workspace.categorized_prefix("apps/custom", "Applications"), "apps/custom/Applications")
         self.assertEqual(workspace.categorized_prefix("apps/custom/Applications", "Applications"), "apps/custom/Applications")
         self.assertEqual(workspace.categorized_prefix("library", "Music/Audio"), "library/Music/Audio")
