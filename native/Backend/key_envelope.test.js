@@ -12,9 +12,15 @@ const workspace="12345678-1234-4000-8000-000000000001";
 const foreignWorkspace="12345678-1234-4000-8000-000000000099";
 function hash(value){return crypto.createHash("sha256").update(value).digest("hex");}
 function wrapped(byte=7,length=48){return Buffer.alloc(length,byte).toString("base64");}
-const ARGON={memory:19*1024*1024,iterations:2,parallelism:1};
-function body(version,key=wrapped(),kdf="argon2id",kdfParams=kdf==="argon2id"?ARGON:{N:2**14,r:8,p:1}){
- return {version,wrappedKey:key,kdf,kdfParams};
+function b64url(length,byte=2){return Buffer.alloc(length,byte).toString("base64url");}
+function canonical(value){return Buffer.from(String(value).replace(/=+$/,"").replace(/\+/g,"-").replace(/\//g,"_"),"base64url").toString("base64url");}
+const salt=b64url(16,2),iv=b64url(12,3);
+const ARGON={alg:"argon2id",memoryKiB:19456,iterations:2,parallelism:1};
+function body(version,key=wrapped(),kdf=ARGON,saltValue=salt,ivValue=iv){
+ return {version,kdf,salt:saltValue,iv:ivValue,wrappedKey:key};
+}
+function stored(version,key=wrapped(),kdf=ARGON,saltValue=salt,ivValue=iv){
+ return {version,kdf,salt:canonical(saltValue),iv:canonical(ivValue),wrappedKey:canonical(key)};
 }
 function listen(app){
  const server=app.listen(0,"127.0.0.1");
@@ -65,20 +71,20 @@ test("key envelope: create, reject a second create, then replace only with the n
   const created=await fetch(url,{method:"PUT",headers:{...headers,"if-none-match":"*"},body:JSON.stringify(body(1))});
   assert.equal(created.status,201);
   assert.equal(created.headers.get("etag"),'"1"');
-  assert.deepEqual(await created.json(),body(1));
+  assert.deepEqual(await created.json(),stored(1));
   const again=await fetch(url,{method:"PUT",headers:{...headers,"if-none-match":"*"},body:JSON.stringify(body(1,wrapped(9)))});
   await assertError(again,409,"envelope_exists");
-  const stored=await db.collection("gd_accounts").doc(owner).collection("key_envelopes").doc(workspace).get();
-  assert.equal(stored.data().wrappedKey,wrapped());
+  const saved=await db.collection("gd_accounts").doc(owner).collection("key_envelopes").doc(workspace).get();
+  assert.equal(saved.data().wrappedKey,canonical(wrapped()));
   const wrong=await fetch(url,{method:"PUT",headers:{...headers,"if-match":'"9"'},body:JSON.stringify(body(10,wrapped(3)))});
   await assertError(wrong,412,"version_mismatch");
-  assert.equal((await db.collection("gd_accounts").doc(owner).collection("key_envelopes").doc(workspace).get()).data().wrappedKey,wrapped());
+  assert.equal((await db.collection("gd_accounts").doc(owner).collection("key_envelopes").doc(workspace).get()).data().wrappedKey,canonical(wrapped()));
   const next=await fetch(url,{method:"PUT",headers:{...headers,"if-match":'"1"'},body:JSON.stringify(body(2,wrapped(3)))});
   assert.equal(next.status,200);
-  assert.deepEqual(await next.json(),body(2,wrapped(3)));
+  assert.deepEqual(await next.json(),stored(2,wrapped(3)));
   const got=await fetch(url,{headers});
   assert.equal(got.status,200);
-  assert.deepEqual(await got.json(),body(2,wrapped(3)));
+  assert.deepEqual(await got.json(),stored(2,wrapped(3)));
   const foreign=await fetch(url,{headers:{authorization:"Bearer other"}});
   await assertError(foreign,404,"not_found");
   const hidden=await fetch(base+"/v2/workspaces/"+foreignWorkspace+"/key-envelope",{headers});
@@ -142,33 +148,63 @@ test("key envelope: bad KDF params are 422 and 64 GiB is refused",async()=>{
  const {server,base}=await listen(appFor(db));
  const url=base+"/v2/workspaces/"+workspace+"/key-envelope";
  const headers={authorization:"Bearer owner","content-type":"application/json","if-none-match":"*"};
- const put=params=>fetch(url,{method:"PUT",headers,body:JSON.stringify({version:1,wrappedKey:wrapped(),...params})});
+ const put=kdf=>fetch(url,{method:"PUT",headers,body:JSON.stringify({version:1,wrappedKey:wrapped(),salt,iv,...(kdf===undefined?{}:{kdf})})});
  try{
-  await assertError(await put({}),422,"kdf_params_invalid");
-  await assertError(await put({kdf:"pbkdf2",kdfParams:ARGON}),422,"kdf_params_invalid");
-  await assertError(await put({kdf:"argon2id",kdfParams:{memory:64*1024*1024*1024,iterations:1,parallelism:1}}),422,"kdf_params_invalid");
-  await assertError(await put({kdf:"argon2id",kdfParams:{memory:19*1024*1024-1,iterations:1,parallelism:1}}),422,"kdf_params_invalid");
-  await assertError(await put({kdf:"argon2id",kdfParams:{memory:1024*1024*1024+1,iterations:1,parallelism:1}}),422,"kdf_params_invalid");
-  await assertError(await put({kdf:"argon2id",kdfParams:{memory:19*1024*1024,iterations:0,parallelism:1}}),422,"kdf_params_invalid");
-  await assertError(await put({kdf:"argon2id",kdfParams:{memory:19*1024*1024,iterations:11,parallelism:1}}),422,"kdf_params_invalid");
-  await assertError(await put({kdf:"argon2id",kdfParams:{memory:19*1024*1024,iterations:1,parallelism:5}}),422,"kdf_params_invalid");
-  await assertError(await put({kdf:"scrypt",kdfParams:{N:2**14,r:7,p:1}}),422,"kdf_params_invalid");
-  await assertError(await put({kdf:"scrypt",kdfParams:{N:2**13,r:8,p:1}}),422,"kdf_params_invalid");
-  await assertError(await put({kdf:"scrypt",kdfParams:{N:2**21,r:8,p:1}}),422,"kdf_params_invalid");
-  await assertError(await put({kdf:"scrypt",kdfParams:{N:2**14,r:8,p:5}}),422,"kdf_params_invalid");
+  await assertError(await put(),422,"kdf_params_invalid");
+  await assertError(await put({alg:"pbkdf2",memoryKiB:19456,iterations:1,parallelism:1}),422,"kdf_params_invalid");
+  await assertError(await put({alg:"argon2id",memoryKiB:64*1024*1024,iterations:1,parallelism:1}),422,"kdf_params_invalid");
+  await assertError(await put({alg:"argon2id",memoryKiB:19455,iterations:1,parallelism:1}),422,"kdf_params_invalid");
+  await assertError(await put({alg:"argon2id",memoryKiB:1048577,iterations:1,parallelism:1}),422,"kdf_params_invalid");
+  await assertError(await put({alg:"argon2id",memoryKiB:19456,iterations:0,parallelism:1}),422,"kdf_params_invalid");
+  await assertError(await put({alg:"argon2id",memoryKiB:19456,iterations:11,parallelism:1}),422,"kdf_params_invalid");
+  await assertError(await put({alg:"argon2id",memoryKiB:19456,iterations:1,parallelism:5}),422,"kdf_params_invalid");
+  await assertError(await put({alg:"scrypt",N:2**14,r:7,p:1}),422,"kdf_params_invalid");
+  await assertError(await put({alg:"scrypt",N:2**13,r:8,p:1}),422,"kdf_params_invalid");
+  await assertError(await put({alg:"scrypt",N:2**21,r:8,p:1}),422,"kdf_params_invalid");
+  await assertError(await put({alg:"scrypt",N:2**14,r:8,p:5}),422,"kdf_params_invalid");
+  await assertError(await put({alg:"scrypt",N:49152,r:8,p:1}),422,"kdf_params_invalid");
   assert.equal((await db.collection("gd_accounts").doc(owner).collection("key_envelopes").doc(workspace).get()).exists,false);
-  const edge=await put({kdf:"argon2id",kdfParams:{memory:1024*1024*1024,iterations:10,parallelism:4}});
+  const edge=await put({alg:"argon2id",memoryKiB:1048576,iterations:10,parallelism:4});
   assert.equal(edge.status,201);
   const replaceHeaders={authorization:headers.authorization,"content-type":headers["content-type"],"if-match":'"1"'};
-  const scrypt=await fetch(url,{method:"PUT",headers:replaceHeaders,body:JSON.stringify(body(2,wrapped(2),"scrypt",{N:2**20,r:8,p:1}))});
+  const scryptKdf={alg:"scrypt",N:2**20,r:8,p:1};
+  const scrypt=await fetch(url,{method:"PUT",headers:replaceHeaders,body:JSON.stringify(body(2,wrapped(2),scryptKdf))});
   assert.equal(scrypt.status,200);
   assert.equal(scrypt.headers.get("etag"),'"2"');
   const stored=await db.collection("gd_accounts").doc(owner).collection("key_envelopes").doc(workspace).get();
   assert.equal(stored.data().version,2);
-  assert.equal(stored.data().kdf,"scrypt");
-  assert.deepEqual(stored.data().kdfParams,{N:2**20,r:8,p:1});
-  const stale=await fetch(url,{method:"PUT",headers:{...replaceHeaders,"if-match":'"1"'},body:JSON.stringify(body(2,wrapped(3),"scrypt"))});
+  assert.deepEqual(stored.data().kdf,scryptKdf);
+  const stale=await fetch(url,{method:"PUT",headers:{...replaceHeaders,"if-match":'"1"'},body:JSON.stringify(body(2,wrapped(3),scryptKdf))});
   await assertError(stale,412,"version_mismatch");
-  assert.equal((await db.collection("gd_accounts").doc(owner).collection("key_envelopes").doc(workspace).get()).data().wrappedKey,wrapped(2));
+  assert.equal((await db.collection("gd_accounts").doc(owner).collection("key_envelopes").doc(workspace).get()).data().wrappedKey,canonical(wrapped(2)));
+ }finally{server.close();}
+});
+
+test("key envelope: salt, iv, and leftover flat KDF fields are 422 envelope_invalid",async()=>{
+ const db=seed();
+ const {server,base}=await listen(appFor(db));
+ const url=base+"/v2/workspaces/"+workspace+"/key-envelope";
+ const headers={authorization:"Bearer owner","content-type":"application/json","if-none-match":"*"};
+ const put=extra=>fetch(url,{method:"PUT",headers,body:JSON.stringify({...body(1),...extra})});
+ try{
+  await assertError(await put({salt:b64url(15)}),422,"envelope_invalid");
+  await assertError(await put({salt:b64url(65)}),422,"envelope_invalid");
+  const standardSalt=Buffer.alloc(16,0xff).toString("base64");
+  const standardIv=Buffer.alloc(12,0xfb).toString("base64");
+  const standardKey=Buffer.alloc(48,0xfb).toString("base64");
+  const accepted=await put({salt:standardSalt,iv:standardIv,wrappedKey:standardKey});
+  assert.equal(accepted.status,201);
+  assert.deepEqual(await accepted.json(),stored(1,standardKey,ARGON,standardSalt,standardIv));
+  assert.equal((await db.collection("gd_accounts").doc(owner).collection("key_envelopes").doc(workspace).get()).data().wrappedKey,canonical(standardKey));
+  await db.collection("gd_accounts").doc(owner).collection("key_envelopes").doc(workspace).delete();
+  await assertError(await put({iv:b64url(11)}),422,"envelope_invalid");
+  await assertError(await put({iv:b64url(33)}),422,"envelope_invalid");
+  await assertError(await put({salt:undefined}),422,"envelope_invalid");
+  await assertError(await put({opsLimit:3}),422,"envelope_invalid");
+  await assertError(await put({memLimit:19456}),422,"envelope_invalid");
+  await assertError(await put({kdfParams:ARGON}),422,"envelope_invalid");
+  assert.equal((await db.collection("gd_accounts").doc(owner).collection("key_envelopes").doc(workspace).get()).exists,false);
+  const edges=await put({salt:b64url(64),iv:b64url(32)});
+  assert.equal(edges.status,201);
  }finally{server.close();}
 });
