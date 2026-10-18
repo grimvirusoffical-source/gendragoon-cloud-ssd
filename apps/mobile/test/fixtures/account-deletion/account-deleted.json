@@ -1,0 +1,24 @@
+Source-SHA: d788ccbf18d0399ac51f5c77dd384f1f6009eeb9
+Source-Path: fixtures/account-deletion/account-deleted.json
+
+{
+  "request": {
+    "body": {
+      "confirm": "DELETE"
+    },
+    "headers": {
+      "authorization": "<redacted>",
+      "content-type": "application/json"
+    },
+    "method": "DELETE",
+    "path": "/v2/account"
+  },
+  "response": {
+    "body": {
+      "error": "account_deleted",
+      "jobId": "00000000-0000-4000-8000-000000000005",
+      "statusToken": "<redacted>"
+    },
+    "status": 410
+  }
+}

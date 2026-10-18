@@ -4,6 +4,13 @@ import path from "node:path";
 /** gendragoon-cloud-ssd PR #5, presignedUrl-only BYO verify. */
 export const FIXTURE_SOURCE_SHA = "da3927627fee76103981714f9f8ffa954843b74b";
 
+/** Later fixture areas, keyed by the directory under fixtures/. */
+export const FIXTURE_SOURCE_SHA_BY_AREA: Record<string, string> = {
+  "account-deletion": "d788ccbf18d0399ac51f5c77dd384f1f6009eeb9",
+  "storage-urls": "6af23999cbe6c22a64c7fcab7a9e2f55710aa1c1",
+  "key-envelope": "67f799623035cedb81ac1d8d393f5c7470d9eff3",
+};
+
 export interface FixtureFile<TBody> {
   sourceSha: string;
   sourcePath: string;
@@ -29,7 +36,9 @@ export function loadFixture<TBody>(rel: string): FixtureFile<TBody> {
   const lines = text.split(/\r?\n/);
   const sha = lines[0]?.startsWith("Source-SHA: ") ? lines[0].slice("Source-SHA: ".length).trim() : "";
   const sourcePath = lines[1]?.startsWith("Source-Path: ") ? lines[1].slice("Source-Path: ".length).trim() : "";
-  if (sha !== FIXTURE_SOURCE_SHA) {
+  const area = rel.split("/")[0] ?? "";
+  const expectedSha = FIXTURE_SOURCE_SHA_BY_AREA[area] ?? FIXTURE_SOURCE_SHA;
+  if (sha !== expectedSha) {
     throw new Error(`Fixture ${rel} source SHA is ${sha || "missing"}`);
   }
   if (sourcePath !== `fixtures/${rel}`) {

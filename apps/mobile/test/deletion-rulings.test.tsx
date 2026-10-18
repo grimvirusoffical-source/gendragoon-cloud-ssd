@@ -1,11 +1,10 @@
 import {
   GenDragoonClient,
   MemorySecretStore,
-  readAccountDeletion,
   workspaceKeyId,
 } from "@gendragoon/core";
 import { fireEvent, render, waitFor } from "@testing-library/react-native";
-import { deletionSessionAction, deleteSignedInAccount } from "../src/account/deleteAccount";
+import { deletionSessionAction, deleteSignedInAccount, savedDeletionUid } from "../src/account/deleteAccount";
 import { DeleteAccountScreen } from "../src/screens";
 
 function idToken(authTimeSeconds: number): string {
@@ -50,9 +49,10 @@ describe("deletion poll rulings", () => {
       workspaceIds: ["ws-1"],
       secrets,
     }).catch((caught: unknown) => caught);
-    expect(deletionSessionAction(error)).toBe("sign-out");
+    expect(deletionSessionAction(error)).toBe("reauth");
     expect(await secrets.get(workspaceKeyId("ws-1"))).toEqual(new Uint8Array([4]));
-    expect(await readAccountDeletion(secrets)).toEqual({ jobId: "job-401", statusToken: "token-401", uid: "user-1" });
+    expect(await savedDeletionUid(secrets)).toBe("user-1");
+    expect(await secrets.get("account-deletion:job-id")).not.toBeNull();
 
     methods.length = 0;
     const again = await deleteSignedInAccount({
@@ -61,9 +61,10 @@ describe("deletion poll rulings", () => {
       workspaceIds: ["ws-1"],
       secrets,
     }).catch((caught: unknown) => caught);
-    expect(deletionSessionAction(again)).toBe("sign-out");
+    expect(deletionSessionAction(again)).toBe("reauth");
     expect(methods).toEqual(["GET"]);
-    expect(await readAccountDeletion(secrets)).toEqual({ jobId: "job-401", statusToken: "token-401", uid: "user-1" });
+    expect(await savedDeletionUid(secrets)).toBe("user-1");
+    expect(await secrets.get("account-deletion:job-id")).not.toBeNull();
     expect(await secrets.get(workspaceKeyId("ws-1"))).toEqual(new Uint8Array([4]));
   });
 
@@ -102,7 +103,8 @@ describe("deletion poll rulings", () => {
       expect(screen.queryByTestId("deletion-retry")).not.toBeNull();
     });
     expect(screen.getByTestId("deletion-error")).toBeTruthy();
-    expect(await readAccountDeletion(secrets)).toEqual({ jobId: "job-404", statusToken: "token-404", uid: "user-1" });
+    expect(await savedDeletionUid(secrets)).toBe("user-1");
+    expect(await secrets.get("account-deletion:job-id")).not.toBeNull();
     expect(await secrets.get(workspaceKeyId("ws-1"))).toEqual(new Uint8Array([6]));
 
     fireEvent.press(screen.getByTestId("deletion-retry"));
@@ -110,7 +112,8 @@ describe("deletion poll rulings", () => {
       expect(methods.filter((method) => method === "GET").length).toBe(2);
     });
     expect(methods.filter((method) => method === "DELETE")).toEqual(["DELETE"]);
-    expect(await readAccountDeletion(secrets)).toEqual({ jobId: "job-404", statusToken: "token-404", uid: "user-1" });
+    expect(await savedDeletionUid(secrets)).toBe("user-1");
+    expect(await secrets.get("account-deletion:job-id")).not.toBeNull();
     expect(await secrets.get(workspaceKeyId("ws-1"))).toEqual(new Uint8Array([6]));
   });
 
@@ -148,7 +151,8 @@ describe("deletion poll rulings", () => {
     await waitFor(() => {
       expect(screen.queryByTestId("deletion-error")).toBeNull();
     });
-    expect(await readAccountDeletion(secrets)).toBeNull();
+    expect(await savedDeletionUid(secrets)).toBeNull();
+    expect(await secrets.get("account-deletion:job-id")).toBeNull();
     expect(await secrets.get(workspaceKeyId("ws-1"))).toEqual(new Uint8Array([8]));
   });
 });

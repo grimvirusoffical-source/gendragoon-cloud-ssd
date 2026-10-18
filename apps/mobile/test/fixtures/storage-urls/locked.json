@@ -1,0 +1,25 @@
+Source-SHA: 6af23999cbe6c22a64c7fcab7a9e2f55710aa1c1
+Source-Path: fixtures/storage-urls/locked.json
+
+{
+  "request": {
+    "body": {
+      "objects": [
+        "0123456789abcdef0123456789abcdef"
+      ],
+      "op": "put"
+    },
+    "headers": {
+      "authorization": "<redacted>",
+      "content-type": "application/json"
+    },
+    "method": "POST",
+    "path": "/v2/workspaces/11111111-1111-4111-8111-000000000001/storage-urls"
+  },
+  "response": {
+    "body": {
+      "error": "workspace_lock"
+    },
+    "status": 423
+  }
+}

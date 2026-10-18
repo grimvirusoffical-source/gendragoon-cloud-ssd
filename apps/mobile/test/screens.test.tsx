@@ -6,7 +6,7 @@ import { DeleteAccountScreen, FileTree, SettingsHome, SortScreen } from "../src/
 const file = treeNode({ path: "Pictures/vacation.jpg", directory: false });
 
 describe("mobile screens", () => {
-  it("backup has no upload button", async () => {
+  it("backup lists files and does not offer encrypted upload while that flag is off", async () => {
     const screen = await render(
       <FileTree
         mode="backup"
@@ -20,8 +20,9 @@ describe("mobile screens", () => {
       />,
     );
     expect(screen.queryByTestId("upload-button")).toBeNull();
-    expect(screen.getByTestId("backup-button")).toBeTruthy();
-    expect(screen.getByText("Make secure backup")).toBeTruthy();
+    expect(screen.queryByTestId("backup-button")).toBeNull();
+    expect(screen.getByTestId("file-vacation.jpg")).toBeTruthy();
+    expect(screen.getByTestId("refresh")).toBeTruthy();
   });
 
   it("applies a sort override for .jpg", async () => {

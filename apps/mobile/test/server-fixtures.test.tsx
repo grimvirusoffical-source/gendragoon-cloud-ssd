@@ -2,14 +2,14 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 import {
   GenDragoonClient,
-  PRESIGNED_URL_REQUIRED_MESSAGE,
+  BYO_PRESIGNED_URL_MESSAGE,
   assertNoCredentialFields,
   byoErrorMessage,
   challengeObjectKey,
   type WorkspaceRecord,
 } from "@gendragoon/core";
 import { fireEvent, render } from "@testing-library/react-native";
-import { byoServerFlowReady } from "../src/byoReady";
+import { byoServerFlowReady, connectBucket } from "../src/byoReady";
 import { ConnectStorageScreen, LockScreen, SettingsHome, WorkspacesScreen } from "../src/screens";
 import { FIXTURE_SOURCE_SHA, loadFixture } from "./loadFixture";
 
@@ -132,12 +132,12 @@ function textOf(node: { props: { children?: unknown } } | null): string {
   return "";
 }
 
-const LOCK_MESSAGES: Record<(typeof LOCKS)[number], string> = {
-  "over-cap": "This account is over its workspace cap. Delete or merge a workspace to continue.",
-  lapsed: "A workspace payment has lapsed. Delete or merge that workspace to continue.",
-  "over-cap-and-lapsed": "This account is over its workspace cap and a payment has lapsed.",
-  "merge-in-progress": "A merge is in progress. Uploads stay paused until it finishes.",
-  "scope-unavailable": "This workspace is outside the current plan. Delete or merge to continue.",
+const LOCK_LEAD: Record<(typeof LOCKS)[number], string> = {
+  "over-cap": "This account is over the workspace cap.",
+  lapsed: "A workspace payment has lapsed. Pay to restore this workspace.",
+  "over-cap-and-lapsed": "This account is over the cap and a workspace payment has lapsed. Pay to restore this workspace.",
+  "merge-in-progress": "A merge is in progress.",
+  "scope-unavailable": "Workspace scope is unavailable.",
 };
 
 describe("vendored cloud-ssd fixtures", () => {
@@ -153,8 +153,8 @@ describe("vendored cloud-ssd fixtures", () => {
     const fixture = loadFixture<LockBody>(`workspace-lock/${name}.json`);
     expect(fixture.response.status).toBe(423);
     expect(fixture.response.body.error).toBe("workspace_lock");
-    const message = LOCK_MESSAGES[name];
-    const others = LOCKS.filter((item) => item !== name).map((item) => LOCK_MESSAGES[item]);
+    const message = `${LOCK_LEAD[name]} Over by ${fixture.response.body.overBy}.`;
+    const others = LOCKS.filter((item) => item !== name).map((item) => LOCK_LEAD[item]);
     expect(others).not.toContain(message);
     const onReview = jest.fn();
     const screen = await render(
@@ -237,9 +237,26 @@ describe("vendored cloud-ssd fixtures", () => {
 
   it("hides BYO while core cannot register, challenge, and verify", async () => {
     expect(byoServerFlowReady()).toBe(false);
+    const flow = readFileSync(path.join(__dirname, "../src/byoReady.ts"), "utf8");
     const screens = readFileSync(path.join(__dirname, "../src/screens.tsx"), "utf8");
     const app = readFileSync(path.join(__dirname, "../App.tsx"), "utf8");
-    expect(`${screens}\n${app}`).not.toMatch(/byoSecretId|secretAccessKey|DeviceByoCredentials/);
+    expect(flow).toMatch(/registerByo/);
+    expect(flow).toMatch(/createByoChallenge/);
+    expect(flow).toMatch(/verifyByo/);
+    expect(`${flow}\n${screens}\n${app}`).not.toMatch(/byo\/proof|challengeId|presignedGetUrl|byoSecretId|secretAccessKey|DeviceByoCredentials/);
+    const client = {
+      registerByo: jest.fn(),
+      createByoChallenge: jest.fn(),
+      verifyByo: jest.fn(),
+    };
+    await expect(connectBucket({
+      client,
+      workspaceId: "ws",
+      registration: { provider: "s3", endpoint: "https://bucket.example", bucketFingerprint: "ab" },
+      presignedUrl: "https://bucket.example/object",
+    })).rejects.toThrow(/unavailable/);
+    expect(client.registerByo).not.toHaveBeenCalled();
+    expect(client.verifyByo).not.toHaveBeenCalled();
     const register = loadFixture<RegisterBody>("byo/register.json");
     const challenge = loadFixture<ChallengeBody>("byo/challenge.json");
     const verified = loadFixture<VerifyBody>("byo/verify-success.json");
@@ -314,8 +331,8 @@ describe("vendored cloud-ssd fixtures", () => {
     expect(fixture.request.path).toContain("/byo/verify");
     const missing = await errorFromFixture("byo/verify-missing-url.json");
     const screen = await render(<ConnectStorageScreen error={missing} />);
-    expect(screen.getByText(PRESIGNED_URL_REQUIRED_MESSAGE)).toBeTruthy();
-    expect(PRESIGNED_URL_REQUIRED_MESSAGE).not.toBe("presigned_url_required");
+    expect(screen.getByText(BYO_PRESIGNED_URL_MESSAGE)).toBeTruthy();
+    expect(BYO_PRESIGNED_URL_MESSAGE).not.toBe("presigned_url_required");
     expect(screen.queryByTestId("byo-aws")).toBeNull();
   });
 });

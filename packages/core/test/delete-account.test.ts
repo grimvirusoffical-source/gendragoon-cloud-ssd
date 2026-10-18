@@ -8,7 +8,6 @@ import {
   authTimeMsFromIdToken,
   deleteAccountAndWipe,
   deletionAuthFailure,
-  readAccountDeletion,
   reauthIsRecent,
   reauthenticatedAtForDelete,
   workspaceKeyId,
@@ -254,52 +253,5 @@ describe("DELETE /v2/account contract", () => {
     });
     expect(result.status).toBe("done");
     expect(await secrets.get(workspaceKeyId("w1"))).toBeNull();
-  });
-
-  it("saves the account uid with the job and does not poll a different account", async () => {
-    const secrets = new MemorySecretStore();
-    await secrets.set(workspaceKeyId("w1"), new Uint8Array([1]));
-    const now = Math.floor(Date.now() / 1000) - 30;
-    let polls = 0;
-    const client = new GenDragoonClient({
-      baseUrl: "https://api.example.test",
-      getToken: () => "fresh-token",
-      fetch: async (_input, init) => {
-        if (init?.method === "DELETE") {
-          return jsonResponse(202, { jobId: "job-uid", statusToken: "token-uid" });
-        }
-        polls += 1;
-        return jsonResponse(401, {});
-      },
-    });
-    const error = await deleteAccountAndWipe({
-      client,
-      reauthenticatedAt: "",
-      idToken: unsignedToken({ auth_time: now, sub: "user-1" }),
-      workspaceIds: ["w1"],
-      secrets,
-    }).catch((caught: unknown) => caught);
-    expect(deletionAuthFailure(error)).toBe("sign-out");
-    expect(await readAccountDeletion(secrets)).toEqual({
-      jobId: "job-uid",
-      statusToken: "token-uid",
-      uid: "user-1",
-    });
-    expect(await secrets.get(workspaceKeyId("w1"))).not.toBeNull();
-    const pollsAfterSave = polls;
-    await expect(deleteAccountAndWipe({
-      client,
-      reauthenticatedAt: "",
-      idToken: unsignedToken({ auth_time: now, sub: "user-2" }),
-      workspaceIds: ["w1"],
-      secrets,
-    })).rejects.toMatchObject({ status: 409, code: "account_mismatch" });
-    expect(polls).toBe(pollsAfterSave);
-    expect(await readAccountDeletion(secrets)).toEqual({
-      jobId: "job-uid",
-      statusToken: "token-uid",
-      uid: "user-1",
-    });
-    expect(await secrets.get(workspaceKeyId("w1"))).not.toBeNull();
   });
 });

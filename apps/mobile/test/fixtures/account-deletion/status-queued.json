@@ -1,0 +1,21 @@
+Source-SHA: d788ccbf18d0399ac51f5c77dd384f1f6009eeb9
+Source-Path: fixtures/account-deletion/status-queued.json
+
+{
+  "request": {
+    "body": null,
+    "headers": {
+      "authorization": "<redacted>"
+    },
+    "method": "GET",
+    "path": "/v2/account/deletions/00000000-0000-4000-8000-000000000002"
+  },
+  "response": {
+    "body": {
+      "jobId": "00000000-0000-4000-8000-000000000002",
+      "retryable": true,
+      "status": "queued"
+    },
+    "status": 200
+  }
+}

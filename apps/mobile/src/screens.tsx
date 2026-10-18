@@ -10,10 +10,8 @@ import {
   byoErrorMessage,
   categorize,
   challengeObjectKey,
-  dismissAccountDeletion,
   planMerge,
   planSummary,
-  readAccountDeletion,
   type LockAssessment,
   type SecretStore,
   type SortOverrides,
@@ -23,9 +21,10 @@ import {
 import { colors, space, type as typeScale } from "@gendragoon/ui/theme";
 import { useState } from "react";
 import { StyleSheet, Text, TextInput, View } from "react-native";
+import { deletionSessionAction, deleteSignedInAccount, dismissSignedInDeletion, savedDeletionUid } from "./account/deleteAccount";
 import { SAME_ACCOUNT_MESSAGE, sessionMaySwap } from "./account/session";
-import { deletionSessionAction, deleteSignedInAccount } from "./account/deleteAccount";
 import { byoServerFlowReady } from "./byoReady";
+import { ENCRYPTED_WORKSPACE_ENABLED } from "./flags";
 import { Banner, Button, Screen, Title, cardStyle } from "./ui";
 
 export function workspacesWithUnpaid<T extends { id: string }>(
@@ -66,9 +65,10 @@ export function SignInSession(props: {
   const [token, setToken] = useState(props.sessionToken);
   const [error, setError] = useState<string | null>(null);
   async function signIn() {
-    const saved = await readAccountDeletion(props.secrets);
+    const currentUid = accountUidFromIdToken(props.sessionToken);
+    const savedUid = await savedDeletionUid(props.secrets);
     const nextUid = accountUidFromIdToken(props.nextToken);
-    if (!sessionMaySwap(saved?.uid ?? null, nextUid)) {
+    if (!sessionMaySwap(currentUid, nextUid) || !sessionMaySwap(savedUid, nextUid)) {
       setError(SAME_ACCOUNT_MESSAGE);
       return;
     }
@@ -94,22 +94,21 @@ export interface WorkspaceLockBody {
   unpaidWorkspaceIds: readonly string[];
 }
 
-/** Copy for the top-level `reason` on a 423 `workspace_lock` body. */
-export function lockReasonMessage(reason: string): string {
-  switch (reason) {
-    case "over_cap":
-      return "This account is over its workspace cap. Delete or merge a workspace to continue.";
-    case "lapsed":
-      return "A workspace payment has lapsed. Delete or merge that workspace to continue.";
-    case "over_cap_and_lapsed":
-      return "This account is over its workspace cap and a payment has lapsed.";
-    case "merge_in_progress":
-      return "A merge is in progress. Uploads stay paused until it finishes.";
-    case "scope_unavailable":
-      return "This workspace is outside the current plan. Delete or merge to continue.";
-    default:
-      return "This workspace is locked. Delete or merge to continue.";
-  }
+/**
+ * Same copy as the shared lock surface in `@gendragoon/ui`.
+ * The screen switches on the top-level `reason`.
+ */
+const LOCK_REASON: Record<string, string> = {
+  over_cap: "This account is over the workspace cap.",
+  lapsed: "A workspace payment has lapsed. Pay to restore this workspace.",
+  over_cap_and_lapsed: "This account is over the cap and a workspace payment has lapsed. Pay to restore this workspace.",
+  scope_unavailable: "Workspace scope is unavailable.",
+  merge_in_progress: "A merge is in progress.",
+};
+
+export function lockReasonMessage(reason: string, overBy = 0): string {
+  const lead = LOCK_REASON[reason] ?? "This workspace is locked.";
+  return `${lead} Over by ${overBy}.`;
 }
 
 export function LockScreen(props: {
@@ -135,7 +134,7 @@ export function LockScreen(props: {
         <Banner testID="lock-banner">Downloads stay available.</Banner>
       )}
       {props.lock ? (
-        <Text testID="lock-reason" style={styles.help}>{lockReasonMessage(props.lock.reason)}</Text>
+        <Text testID="lock-reason" style={styles.help}>{lockReasonMessage(props.lock.reason, props.lock.overBy)}</Text>
       ) : null}
       {rows.map((workspace) => (
         <Text key={workspace.id} testID={`lock-workspace-${workspace.id}`} style={styles.help}>
@@ -186,10 +185,10 @@ export function FileTree(props: {
           ))}
         </View>
       ))}
-      {actions.canUpload && props.onUpload ? (
+      {ENCRYPTED_WORKSPACE_ENABLED && actions.canUpload && props.onUpload ? (
         <Button label="Upload" testID="upload-button" onPress={props.onUpload} />
       ) : null}
-      {actions.canBackup && props.onBackup ? (
+      {ENCRYPTED_WORKSPACE_ENABLED && actions.canBackup && props.onBackup ? (
         <Button label={actions.primaryLabel ?? "Make secure backup"} testID="backup-button" onPress={props.onBackup} />
       ) : null}
     </Screen>
@@ -404,11 +403,13 @@ export function DeleteAccountScreen(props: {
       else if (action === "sign-out") props.onSignedOut();
       else if (error instanceof ApiError && error.status === 404) {
         setNotice({ message: "The deletion status could not be loaded.", retry: true });
+      } else if (error instanceof ApiError && error.status === 0) {
+        setNotice({ message: "Could not reach the server. Try again.", retry: true });
       } else props.onError(error instanceof Error ? error.message : "Account deletion failed");
     }
   }
   async function dismiss() {
-    await dismissAccountDeletion(props.secrets);
+    await dismissSignedInDeletion(props.secrets);
     setNotice(null);
   }
   return (

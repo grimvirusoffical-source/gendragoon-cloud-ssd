@@ -27,7 +27,9 @@ import {
   SortScreen,
   WorkspacesScreen,
 } from "./src/screens";
+import { sessionTokenAfterAuthFailure } from "./src/account/session";
 import { byoServerFlowReady } from "./src/byoReady";
+import { ENCRYPTED_WORKSPACE_ENABLED } from "./src/flags";
 import { createExpoSecureStore } from "./src/platform/secureStore";
 
 type RootStack = {
@@ -187,10 +189,11 @@ export function MobileRoot(props: {
           idToken={idToken}
           client={client}
           onReauth={() => {
-            setIdToken(freshPreviewToken());
+            setIdToken((token) => sessionTokenAfterAuthFailure("reauth", token));
             if (navigationRef.isReady()) navigationRef.navigate("SignIn");
           }}
           onSignedOut={() => {
+            setIdToken((token) => sessionTokenAfterAuthFailure("sign-out", token));
             if (navigationRef.isReady()) navigationRef.navigate("SignIn");
           }}
           onDone={() => {
@@ -262,9 +265,11 @@ export function MobileRoot(props: {
           />
         )}
       </Stack.Screen>
-      <Stack.Screen name="Passphrase" options={{ title: "Passphrase" }}>
-        {() => <PassphraseScreen onSubmit={() => navigationRef.navigate("Main")} />}
-      </Stack.Screen>
+      {ENCRYPTED_WORKSPACE_ENABLED ? (
+        <Stack.Screen name="Passphrase" options={{ title: "Passphrase" }}>
+          {() => <PassphraseScreen onSubmit={() => navigationRef.navigate("Main")} />}
+        </Stack.Screen>
+      ) : null}
       <Stack.Screen name="Lock" options={{ headerShown: false, gestureEnabled: false }}>
         {() => (
           <LockScreen
