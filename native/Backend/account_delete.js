@@ -593,14 +593,39 @@ function createAccountDeletion({db,stripe,bucket,auth,byoProviders,hash,now,noti
   }
   markPrefixDeleted(job,prefix);
  }
- async function deleteTree(collectionRef){
-  const snap=await collectionRef.get();
-  for(const doc of snap.docs||[]){
-   for(const name of ["files","uploads"]){
-    const children=await doc.ref.collection(name).get();
-    for(const child of children.docs||[])await ignoreMissing(()=>child.ref.delete());
+ async function releaseWorkspaces(owner){
+  const groups=[
+   db.collection("gd_accounts").doc(owner).collection("workspaces"),
+   db.collection("tenants").doc(owner).collection("workspaces"),
+  ];
+  const docs=[];
+  for(const collectionRef of groups){
+   const snap=await collectionRef.get();
+   for(const doc of snap.docs||[]){
+    for(const name of ["files","uploads"]){
+     const children=await doc.ref.collection(name).get();
+     for(const child of children.docs||[])await ignoreMissing(()=>child.ref.delete());
+    }
+    docs.push(doc);
    }
-   await ignoreMissing(()=>doc.ref.delete());
+  }
+  // Account deletion removes every workspace. The single-workspace delete
+  // transaction would move the free slot onto another row that this job is
+  // about to delete, so this transaction only clears the slot and deletes.
+  const account=db.collection("gd_accounts").doc(owner);
+  const clearAndDelete=async tx=>{
+   const accountSnap=await tx.get(account);
+   for(const doc of docs)await tx.get(doc.ref);
+   if(accountSnap.exists&&accountSnap.data()?.freeWorkspaceId)
+    tx.set(account,{freeWorkspaceId:null},{merge:true});
+   for(const doc of docs)tx.delete(doc.ref);
+  };
+  if(typeof db.runTransaction==="function")await db.runTransaction(clearAndDelete);
+  else{
+   const accountSnap=await account.get();
+   if(accountSnap.exists&&accountSnap.data()?.freeWorkspaceId)
+    await account.set({freeWorkspaceId:null},{merge:true});
+   for(const doc of docs)await ignoreMissing(()=>doc.ref.delete());
   }
  }
  async function deleteMetadata(job){
@@ -618,8 +643,7 @@ function createAccountDeletion({db,stripe,bucket,auth,byoProviders,hash,now,noti
    }
    if(paymentIds.length)await receipt.set({paymentIds},{merge:true});
   }catch(_){/* no payment ledger for this account */}
-  await deleteTree(db.collection("gd_accounts").doc(owner).collection("workspaces"));
-  await deleteTree(db.collection("tenants").doc(owner).collection("workspaces"));
+  await releaseWorkspaces(owner);
   if(db.rows instanceof Map){
    for(const key of [...db.rows.keys()]){
     if(key.includes(owner)&&key.includes("/workspaces/"))db.rows.delete(key);

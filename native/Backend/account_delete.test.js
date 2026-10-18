@@ -99,6 +99,39 @@ test("account delete: second call returns 410 after the user is gone and repeats
   });
   assert.equal(f.canceled.length,before);assert.deepEqual(f.auth.deletedUsers,[uid]);
 });
+test("account deletion removes every workspace and does not move the free slot onto one of them",async()=>{
+  const {createProjectService}=require("./projects");
+  const slotUid="slot-owner",slotOwner=crypto.createHash("sha256").update(slotUid).digest("hex");
+  const idFor=n=>"12345678-1234-4000-8000-"+String(n).padStart(12,"0");
+  const db=memoryFirestore([["gd_accounts/"+slotOwner,{stripeCustomerId:"cus_slot"}]]);
+  const price={id:"price_month",active:true,type:"recurring",recurring:{interval:"month"},currency:"usd",unit_amount:500,billing_scheme:"per_unit",livemode:false,product:{active:true}};
+  const projectStripe={prices:{retrieve:async()=>({...price})},checkout:{sessions:{create:async()=>({id:"cs_month",url:"https://checkout.stripe.com/c/pay/cs_month",status:"open"}),retrieve:async()=>{throw Error("missing");}}}};
+  const env={STRIPE_CHECKOUT_ENABLED:"true",STRIPE_WORKSPACE_MONTHLY_READY:"true",STRIPE_WORKSPACE_MONTHLY_PRICE_ID:"price_month",STRIPE_ENVIRONMENT:"test",PUBLIC_URL:"https://billing.example"};
+  const projects=createProjectService({db,stamp:()=>1_700_000_000_000,hash:()=>slotOwner,stripe:projectStripe,env,ensureCustomer:async()=>"cus_slot"});
+  const req={user:{uid:slotUid}};
+  await projects.create(req,{name:"Free",intentId:idFor(1)});
+  await projects.create(req,{name:"Paid",intentId:idFor(2)});
+  const paidKey="gd_accounts/"+slotOwner+"/workspaces/"+idFor(2);
+  assert.equal(db.rows.get("gd_accounts/"+slotOwner).freeWorkspaceId,idFor(1));
+  assert.equal(db.rows.get(paidKey).projectFeeStatus,"pending");
+  const writes=[];
+  const rawSet=db.rows.set.bind(db.rows);
+  db.rows.set=(key,value)=>{writes.push([key,structuredClone(value)]);return rawSet(key,value);};
+  const svc=load()({db,stripe:{subscriptions:{list:async()=>({has_more:false,data:[]}),cancel:async()=>({})}},
+    bucket:{deleteFiles:async()=>{},getFiles:async()=>[[]]},auth:{deleteUser:async()=>{}},byoProviders:{},
+    hash:u=>crypto.createHash("sha256").update(u).digest("hex"),now:()=>NOW});
+  const started=await svc.deleteAccount({user:{uid:slotUid,auth_time:Math.floor(NOW/1000)-30}});
+  const deadline=Date.now()+5000;let job;
+  do{job=await svc.jobStatus(started.jobId);if(job.status==="done"||job.status==="failed")break;await new Promise(r=>setTimeout(r,10));}
+  while(Date.now()<deadline);
+  assert.equal(job.status,"done");
+  assert.equal(writes.some(([key,value])=>key===paidKey&&value.projectFeeStatus==="free"),false);
+  assert.equal(writes.some(([,value])=>value&&value.freeWorkspaceId===idFor(2)),false);
+  assert.equal(db.rows.has(paidKey),false);
+  assert.equal(db.rows.has("gd_accounts/"+slotOwner+"/workspaces/"+idFor(1)),false);
+  assert.equal(db.rows.has("tenants/"+slotOwner+"/workspaces/free"),false);
+  assert.equal(db.rows.has("gd_accounts/"+slotOwner),false);
+});
 test("route: DELETE /v2/account answers 202 with a job id",async()=>{
   let register;try{({registerAccountDeletion:register}=require("./account_delete"));}catch(e){if(e.code==="MODULE_NOT_FOUND")assert.fail("account_delete.js not implemented");throw e;}
   assert.equal(typeof register,"function","registerAccountDeletion export (name TBD by Riley)");
