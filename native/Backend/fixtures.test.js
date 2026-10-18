@@ -25,18 +25,24 @@ function bodyKeys(body){
  assert.equal(typeof body,"object");
  return Object.keys(body).sort();
 }
- function assertPriceInvariant(rel,body){
- if(!body||typeof body!=="object")return;
- const items=[...(Array.isArray(body.workspaces)?body.workspaces:[]),...(Array.isArray(body.projects)?body.projects:[])];
- if(body.project&&typeof body.project==="object")items.push(body.project);
- for(const item of items){
-  if(typeof item.monthlyPriceCents!=="number")continue;
-  assert.equal(item.monthlyPriceCents===0,item.isFree===true||item.grandfathered===true,rel+" "+(item.id||"item"));
+function assertPriced(rel,node,where){
+ if(typeof node.monthlyPriceCents!=="number"&&typeof node.isFree!=="boolean")return;
+ assert.equal(typeof node.feeWaived,"boolean",rel+" "+where+" feeWaived must be present");
+ if(node.feeWaived!==true)assert.equal(node.feeWaived,false,rel+" "+where+" non-waived responses set feeWaived false");
+ if(typeof node.monthlyPriceCents==="number"){
+  const grandfathered=node.grandfathered===true;
+  assert.equal(node.monthlyPriceCents===0,node.isFree===true||grandfathered||node.feeWaived===true,rel+" "+where);
+  assert.ok(node.monthlyPriceCents===0||node.monthlyPriceCents===500,rel+" "+where+" price");
  }
- if(typeof body.monthlyPriceCents==="number"&&typeof body.isFree==="boolean"){
-  const grandfathered=body.grandfathered===true||body.project?.grandfathered===true;
-  assert.equal(body.monthlyPriceCents===0,body.isFree===true||grandfathered,rel+" response");
- }
+}
+function assertPriceInvariant(rel,body){
+ const visit=(node,where)=>{
+  if(!node||typeof node!=="object")return;
+  if(Array.isArray(node)){node.forEach((item,index)=>visit(item,where+"["+index+"]"));return;}
+  assertPriced(rel,node,where);
+  for(const [key,value] of Object.entries(node))if(value&&typeof value==="object")visit(value,where+"."+key);
+ };
+ visit(body,"response");
 }
 function assertDocumentedBody(rel,fixture,routes){
  const route=routes.find(item=>item.method===fixture.request?.method&&item.pattern.test(fixture.request?.path||""));
@@ -89,6 +95,41 @@ test("committed API fixtures match a fresh generation from the handlers",{timeou
   assert.equal(headers.includes("Bearer "),false,"request token was not redacted");
   assertDocumentedBody(rel,generated,routes);
  }
+});
+
+test("owner-fee-waived fixture is the owner price and every other priced fixture sets feeWaived false",()=>{
+ const owner=JSON.parse(fs.readFileSync(path.join(committed,"workspaces/owner-fee-waived.json"),"utf8"));
+ const project=owner.response.body?.project;
+ assert.equal(owner.response.status,201);
+ assert.deepEqual({
+  feeWaived:project?.feeWaived,isFree:project?.isFree,grandfathered:project?.grandfathered,monthlyPriceCents:project?.monthlyPriceCents
+ },{feeWaived:true,isFree:false,grandfathered:false,monthlyPriceCents:0});
+ assert.equal(owner.response.body.feeWaived,true);
+ assert.equal(owner.response.body.isFree,false);
+ assert.equal(owner.response.body.monthlyPriceCents,0);
+ const ended=JSON.parse(fs.readFileSync(path.join(committed,"workspaces/byo-register-ends-grandfathered.json"),"utf8"));
+ assert.equal(ended.response.body.grandfatheringEnded,true);
+ assert.equal(ended.response.body.grandfathered,false);
+ assert.equal(ended.response.body.monthlyPriceCents,500);
+ assert.equal(ended.response.body.feeWaived,false);
+ let priced=0,waived=0;
+ for(const file of walk(committed)){
+  const body=JSON.parse(fs.readFileSync(file,"utf8")).response?.body;
+  const visit=node=>{
+   if(!node||typeof node!=="object")return;
+   if(Array.isArray(node)){node.forEach(visit);return;}
+   if(typeof node.monthlyPriceCents==="number"||typeof node.isFree==="boolean"){
+    priced++;
+    assert.equal(typeof node.feeWaived,"boolean",path.relative(committed,file));
+    if(node.feeWaived===true)waived++;
+    else assert.equal(node.feeWaived,false,path.relative(committed,file));
+   }
+   Object.values(node).forEach(visit);
+  };
+  visit(body);
+ }
+ assert.ok(priced>10);
+ assert.ok(waived>=1);
 });
 
 test("byo/verify-missing-url is 400 when presignedUrl is omitted",()=>{

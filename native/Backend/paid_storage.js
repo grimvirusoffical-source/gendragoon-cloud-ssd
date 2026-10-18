@@ -32,8 +32,10 @@ function scopeFromWorkspace(workspace,accountHash,id,accountProjects){
   return {...base,uploadsBlocked:true,lock:merging?{error:"workspace_lock",reason:"merge_in_progress",overBy:0,unpaidWorkspaceIds:[]}:LIST_UNAVAILABLE_LOCK};
  }
  const summary=summarizeProjects(accountProjects);
- const blocked=!!summary.uploadsBlocked||merging;
- const lock=summary.uploadsBlocked?lockBody(summary):merging?{error:"workspace_lock",reason:"merge_in_progress",overBy:0,unpaidWorkspaceIds:[]}:null;
+ const selfLocked=(summary.selfLockedWorkspaceIds||[]).includes(id);
+ const blocked=!!summary.uploadsBlocked||selfLocked||merging;
+ const lock=summary.uploadsBlocked?lockBody(summary):selfLocked?{error:"workspace_lock",reason:"lapsed",overBy:0,unpaidWorkspaceIds:[id]}:
+  merging?{error:"workspace_lock",reason:"merge_in_progress",overBy:0,unpaidWorkspaceIds:[]}:null;
  return {...base,uploadsBlocked:blocked,...(lock?{lock}:{})};
 }
 function registerPaidStorage({app,db,bucket,firebaseAuth,accountKey,FieldValue,apiKeys,getAuth}){

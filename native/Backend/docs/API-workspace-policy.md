@@ -47,15 +47,18 @@ Account policy from `GET /v2/projects` and `GET /v2/workspaces` includes:
 `freeWorkspaceId(account, projects)` is the one hosted workspace that does not pay the monthly fee. The choice is made inside the Firestore transaction on create, delete, BYO registration, and merge, so two simultaneous creates cannot both be free. Deleting the free workspace while another create is in flight still leaves exactly one free workspace.
 
 - The slot is hosted storage only. A BYO workspace (S3 or any bring-your-own provider) is never free: `isFree` is false and `monthlyPriceCents` is 500 even when it is the account's only workspace.
-- Eligible rows are hosted workspaces that are not grandfathered and not archived or merged. Order is `createdAtMs` ascending (`createdAtMs`, otherwise `createdAt`; a missing time sorts last), then workspace id ascending in code-unit order.
-- Create assigns the slot when no eligible workspace holds it. Delete of that workspace assigns the oldest remaining eligible hosted workspace inside the same transaction. If none remain, the next hosted workspace created becomes free.
+- Eligible rows are hosted workspaces that are not grandfathered, archived, merged, or `deleting`. Order is `createdAtMs` ascending (`createdAtMs`, otherwise `createdAt`; a missing time sorts last), then workspace id ascending in code-unit order. List responses leave a `deleting` workspace out of that choice.
+- Create assigns the slot when no eligible workspace holds it. Delete of that workspace assigns the oldest remaining eligible hosted workspace inside the same transaction, promotes it, and queues cancellation of its workspace-fee subscription. If none remain, the next hosted workspace created becomes free.
+- Promoting a workspace (delete, BYO registration, merge, or `make-hosted`) writes `pendingSubscriptionCancels` in that transaction: `{subscriptionId, workspaceId, reason}`. After commit, a sweep calls `subscriptions.cancel` with `invoice_now`, `prorate`, and idempotency key `gd-sub-cancel-<subscriptionId>`. Success, including Stripe `resource_missing`, clears the subscription id. `authentication_error` and `permission_error` stop immediately and alert `subscription_cancel_failed`. Other transient errors (HTTP 429, 5xx, network, timeout) retry with backoff for 5 attempts, then the same alert. An open Checkout session on the promoted workspace is expired in that sweep.
+- `invoice.paid` and subscription updates for a free workspace, or for a subscription listed in `pendingSubscriptionCancels`, do not switch it back to monthly. `customer.subscription.deleted` for that subscription clears the id and does not lapse the workspace or lock the account. A webhook for a subscription whose workspace is already gone cancels the subscription instead of dropping the event.
 - Archive does not release the slot. A stored id stays while that workspace is still a non-grandfathered hosted row, including while it is archived.
-- Merge keeps the survivor's fee status. If the deleted source held the slot, the slot moves to another hosted workspace and does not rewrite the survivor. When the survivor is the only one left, the next create takes the slot.
-- Registering BYO on the free hosted workspace makes that workspace the $5 monthly fee and moves the slot to the oldest other eligible hosted workspace.
-- A workspace that goes hosted, then BYO, then back to hosted is eligible again. Ordering uses its original `createdAt`, so the older workspace takes the slot back and the workspace that held it in the meantime becomes the $5 monthly fee.
-- A BYO workspace with no active subscription is locked immediately: **423** `{error:"workspace_lock", reason:"lapsed", unpaidWorkspaceIds:[id]}`. It does not get the hosted grace period.
-- Grandfathered one-time workspaces never take the free slot and are not rewritten into the monthly fee. They report `isFree: false`, `monthlyPriceCents: 0`, and `grandfathered: true`. The slot goes to the oldest non-grandfathered hosted workspace. A stored id that points at a grandfathered workspace is ignored.
-- `monthlyPriceCents` is `0` exactly when `isFree` or `grandfathered` is true, and `500` otherwise. Each workspace list item, and the create response, includes `isFree`, `monthlyPriceCents`, and `grandfathered`.
+- Merge keeps the survivor's fee status when another hosted workspace can take the slot. That other workspace is promoted and its workspace-fee subscription is cancelled. When the survivor is the only hosted workspace left, the survivor is promoted: `freeWorkspaceId` becomes the target, its fee status becomes `free`, and its subscription is cancelled.
+- Registering BYO on the free hosted workspace makes that workspace the monthly fee and moves the slot to the oldest other eligible hosted workspace.
+- Registering BYO on a grandfathered workspace ends grandfathering, because BYO is always the monthly fee. The register response is `grandfathered: false`, `monthlyPriceCents: 500`, `grandfatheringEnded: true`. Clients must show that price before the user confirms registration.
+- A workspace that goes hosted, then BYO, then back to hosted is eligible again. `POST /v2/projects/:id/make-hosted` clears the BYO markers and orders by the original `createdAt`. The older workspace takes the slot back. The workspace that held the slot is demoted to monthly `unpaid` with `paidThroughMs` set to now + 3 days, so it stays in grace until `paidThroughMs` + the standard 3-day lapse grace, and the response includes `demoted.requiresCheckout` so the client opens Checkout. A paid BYO subscription is cancelled when that workspace becomes hosted and free.
+- An unpaid BYO workspace uses the same 3-day grace as hosted (`paidThroughMs` + 3 days). After grace it locks only itself: **423** `{error:"workspace_lock", reason:"lapsed", unpaidWorkspaceIds:[id]}` on that workspace. The free workspace and other paid workspaces keep working. A lapsed hosted workspace still locks the account.
+- Grandfathered one-time workspaces never take the free slot. They report `isFree: false`, `monthlyPriceCents: 0`, `grandfathered: true`, and `feeWaived: false`. The slot goes to the oldest non-grandfathered hosted workspace. A stored id that points at a grandfathered workspace is ignored.
+- `monthlyPriceCents` is `0` exactly when `isFree` or `grandfathered` or `feeWaived` is true, and `500` otherwise. `feeWaived` is always present on those responses: `true` for an owner-benefit workspace (`projectFeeStatus: "owner"`), which reports the price it is actually charged, and `false` otherwise, so a client can require the field. Each workspace list item and the create response includes `isFree`, `monthlyPriceCents`, `grandfathered`, and `feeWaived`. An owner benefit that does not hold the free slot is `isFree: false`, `grandfathered: false`, `feeWaived: true`, `monthlyPriceCents: 0`.
 
 ## Grandfathering
 
@@ -65,13 +68,13 @@ These workspaces keep one-time semantics. They never lapse and are never rewritt
 - `feeIsOneTime: true`
 - `projectBillingVersion: 2` with `projectFeeStatus` of `paid`, `free`, or `owner`, and no `workspaceFeeModel: "monthly"`
 
-A new monthly workspace is stored with `workspaceFeeModel: "monthly"` so it is not treated as grandfathered. Existing rows are not migrated.
+A new monthly workspace is stored with `workspaceFeeModel: "monthly"` so it is not treated as grandfathered. Existing rows are not migrated. Registering BYO sets `workspaceFeeModel: "monthly"` and `feeIsOneTime: false`, which ends grandfathering on that workspace. The register response sets `grandfatheringEnded: true` when that happens.
 
 Grandfathering also requires a creation time before `GRANDFATHER_CUTOFF_MS` (environment override, default `2026-10-17T00:00:00Z`). A missing `createdAt` is a legacy row and stays grandfathered. A numeric `createdAt` below `1e12` is Unix seconds. An unresolved server-timestamp object with no `toMillis` is treated as now, so a brand-new row is not grandfathered. `workspaceFeeModel: "monthly"` is never grandfathered.
 
 ## Lapse
 
-For a monthly workspace that is unpaid (`past_due`, `unpaid`, `canceled`, and the other non-active fee statuses), uploads lapse at `paidThroughMs + 3 days`. `paidThroughMs` is the period end of the last **paid** invoice (`invoice.lines[].period.end`, else `invoice.period_end`). It is not Stripe's `current_period_end`: a failed renewal advances that field, and using it would grant about a month of extra grace. One millisecond before `paidThroughMs + 3 days` the workspace is still inside grace. An active or paid monthly workspace does not lapse when the period ends. Grandfathered workspaces skip this clock.
+For a monthly workspace that is unpaid (`past_due`, `unpaid`, `canceled`, and the other non-active fee statuses), uploads lapse at `paidThroughMs + 3 days`. BYO registration stamps `paidThroughMs` to the registration time so a new BYO workspace gets that same grace. `paidThroughMs` on a paid subscription is the period end of the last **paid** invoice (`invoice.lines[].period.end`, else `invoice.period_end`). It is not Stripe's `current_period_end`: a failed renewal advances that field, and using it would grant about a month of extra grace. One millisecond before `paidThroughMs + 3 days` the workspace is still inside grace. An active or paid monthly workspace does not lapse when the period ends. Grandfathered workspaces skip this clock. A lapsed BYO workspace is listed in `selfLockedWorkspaceIds` and does not set account-wide `locked`.
 
 The signature-verified `POST /billing/stripe-webhook` handles, idempotently through `stripe_webhook_events`:
 
@@ -137,6 +140,7 @@ A fixture request body may contain only the fields listed for its route. `byo/ve
 | `GET /v2/workspaces` | none |
 | `GET /v2/projects/:id` | none |
 | `DELETE /v2/projects/:id` | none |
+| `POST /v2/projects/:id/make-hosted` | none |
 | `POST /v2/workspaces/:id/cloud/uploads` | `{name, sizeBytes}` |
 | `GET /v2/workspaces/:id/cloud/files` | none |
 | `POST /v2/workspaces/:sourceId/merge` | `{targetId, confirmName}` |
@@ -146,6 +150,16 @@ A fixture request body may contain only the fields listed for its route. `byo/ve
 | `POST /v2/workspaces/:id/byo/verify` | `{presignedUrl}` |
 
 The legacy `POST /v2/workspaces/:id/manual-provider` route still records a local label, and it now rejects secret fields the same way. It does not by itself verify a challenge.
+
+## Delete
+
+`DELETE /v2/projects/:id` returns **409** `{error:"workspace_busy", reason}` while work is in flight. `reason` is `merge_active`, then `uploads_pending`, then `checkout_open` when more than one applies. Checkout is not expired on delete; the caller finishes or cancels it first.
+
+Otherwise the workspace is marked `deleting` and left out of the free-slot choice. Its subscriptions are queued on `pendingSubscriptionCancels`. Objects under `customer/{accountHash}/managed/{workspaceId}/` are removed by `workspace_purge.js` (this branch has no account-deletion job; the purge uses the same 5-attempt retry and `workspace_purge_failed` alert as subscription cancellation). File and upload documents are deleted in batches. The workspace record is removed only after those steps finish. A retry resumes from the purge marker.
+
+## Make hosted
+
+`POST /v2/projects/:id/make-hosted` takes no body. It returns the workspace to hosted storage without changing `createdAt`. See the free-workspace section for the slot, the demotion grace, and BYO subscription cancellation.
 
 ## Merge
 
