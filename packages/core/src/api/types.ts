@@ -261,9 +261,12 @@ export interface DeleteAccountRequest {
   idToken?: string;
 }
 
-/** HTTP 202. Only the job id is required. */
+/** HTTP 202 `{ status: "deleting", jobId, statusToken }`. */
 export interface DeleteAccountAccepted {
   jobId: string;
+  status?: string;
+  /** Bearer token for GET /v2/account/deletions/:jobId. Not a Firebase ID token. */
+  statusToken?: string;
 }
 
 export interface AccountDeletionStatus {

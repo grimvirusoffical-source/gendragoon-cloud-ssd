@@ -56,15 +56,18 @@ export function deletionAuthFailure(error: unknown): "reauth" | "sign-out" | nul
 
 /**
  * HTTP 410 `account_deleted` on a repeat DELETE /v2/account.
- * The body carries the in-flight job id. Receiving this status does not wipe local keys.
+ * The body carries the in-flight job id and a fresh status token.
+ * Receiving this status does not wipe local keys.
  */
 export class AccountDeletedError extends ApiError {
   readonly jobId: string;
+  readonly statusToken?: string;
 
-  constructor(jobId: string) {
+  constructor(jobId: string, statusToken?: string) {
     super(410, "account_deleted", "This account is already deleted.");
     this.name = "AccountDeletedError";
     this.jobId = jobId;
+    this.statusToken = statusToken;
   }
 }
 

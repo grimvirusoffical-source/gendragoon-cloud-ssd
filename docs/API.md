@@ -225,12 +225,12 @@ A session that cannot be used returns **401** `{ "code": "invalid_token" }`. The
 Response **202**:
 
 ```json
-{ "jobId": "<id>" }
+{ "status": "deleting", "jobId": "<id>", "statusToken": "<token>" }
 ```
 
-A repeat delete can return **410** `{ "code": "account_deleted", "jobId": "<id>" }`. The client polls that job id. It does not wipe local data because of the 410 itself.
+A repeat delete returns **410** `{ "error": "account_deleted", "jobId": "<id>", "statusToken": "<token>" }`. It does not return 401. The client polls that job id with the status token from the 410. It does not wipe local data because of the 410 itself.
 
-`GET /v2/account/deletions/:jobId` is the plural path. The client polls it with backoff until the status is `done` or `failed`, or until a two-minute timeout. `accepted`, `running`, and `succeeded` are not finished. `done` cancels every Stripe subscription, deletes managed-bucket objects, deletes the Firebase user and account records, and leaves BYO buckets untouched. The client wipes local workspace keys and BYO secrets only after `done`, then signs out. Settings uses a two-step confirm before this call.
+`GET /v2/account/deletions/:jobId` is the plural path. The client sends `Authorization: Bearer <statusToken>` and does not send the Firebase ID token on that poll. The job id and status token are stored in the injected SecureStore as soon as the 202 or 410 is accepted. A later launch calls `resumeAccountDeletion` and polls the saved job. It sends DELETE again only when SecureStore has no saved job id and status token. The client polls with backoff until the status is `done` or `failed`, or until a two-minute timeout. `queued` and `running` keep polling. `done` cancels every Stripe subscription, deletes managed-bucket objects, deletes the Firebase user and account records, and leaves BYO buckets untouched. The client wipes local workspace keys and BYO secrets only after `done`, then clears the saved job id and status token and signs out. `failed` stops without a wipe and clears the saved job. Settings uses a two-step confirm before this call.
 
 ## Workspace key envelope
 

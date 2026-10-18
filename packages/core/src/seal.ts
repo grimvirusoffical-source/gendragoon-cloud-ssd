@@ -18,6 +18,9 @@ export interface SecretStore {
   delete(name: string): Promise<void>;
 }
 
+/** Same keychain contract. Deletion job id and status token use this name. */
+export type SecureStore = SecretStore;
+
 export interface SealedName {
   oid: string;
   path: string;

@@ -203,9 +203,13 @@ export class GenDragoonClient {
     return accepted;
   }
 
-  /** Plural path. Poll until `done` or `failed`. */
-  deletionStatus(jobId: string): Promise<AccountDeletionStatus> {
-    return this.request("GET", `/v2/account/deletions/${encodeURIComponent(jobId)}`);
+  /**
+   * Plural path. Poll until `done` or `failed`.
+   * A status token authenticates this GET. The Firebase ID token is not sent with it.
+   */
+  deletionStatus(jobId: string, statusToken?: string): Promise<AccountDeletionStatus> {
+    const headers = statusToken ? { Authorization: `Bearer ${statusToken}` } : undefined;
+    return this.request("GET", `/v2/account/deletions/${encodeURIComponent(jobId)}`, undefined, headers);
   }
 
   /** Server stores this envelope and nothing else about the workspace key. */
@@ -269,9 +273,22 @@ export class GenDragoonClient {
   }
 
   private async raw(method: string, path: string, body?: object | Uint8Array, extraHeaders?: Record<string, string>): Promise<Response> {
-    const headers = new Headers(extraHeaders);
-    const token = await this.getToken();
-    if (token) headers.set("Authorization", `Bearer ${token}`);
+    const headers = new Headers();
+    let authorization: string | undefined;
+    if (extraHeaders) {
+      for (const [key, value] of Object.entries(extraHeaders)) {
+        if (key.toLowerCase() === "authorization") authorization = value;
+        else headers.set(key, value);
+      }
+    }
+    // A deletion status token replaces the Firebase token. Do not call getToken:
+    // after sign-out that hook throws, and resume must still be able to poll.
+    if (authorization) {
+      headers.set("Authorization", authorization);
+    } else {
+      const token = await this.getToken();
+      if (token) headers.set("Authorization", `Bearer ${token}`);
+    }
     let payload: BodyInit | undefined;
     if (body instanceof Uint8Array) {
       payload = body;
@@ -297,10 +314,17 @@ function safeJson(text: string): unknown {
 }
 
 function toError(status: number, parsed: unknown): ApiError {
-  const record = parsed && typeof parsed === "object" ? parsed as { error?: unknown; code?: unknown; jobId?: unknown } : {};
+  const record = parsed && typeof parsed === "object"
+    ? parsed as { error?: unknown; code?: unknown; jobId?: unknown; statusToken?: unknown }
+    : {};
   const code = typeof record.code === "string" ? record.code : "";
+  const errorField = typeof record.error === "string" ? record.error : "";
   const jobId = typeof record.jobId === "string" ? record.jobId : "";
-  if (status === 410 && code === "account_deleted" && jobId) return new AccountDeletedError(jobId);
+  const statusToken = typeof record.statusToken === "string" && record.statusToken ? record.statusToken : undefined;
+  // PR #6 puts the machine code in `error` and omits `code`. Older fixtures send `code`
+  // plus a human `error` string, so account_deleted is recognized from either field.
+  const accountDeleted = code === "account_deleted" || errorField === "account_deleted";
+  if (status === 410 && accountDeleted && jobId) return new AccountDeletedError(jobId, statusToken);
   if (status === 423 || code === "workspace_lock") return new WorkspaceLockedError();
   if (status === 401 && code === "reauth_required") return new ReauthRequiredError();
   if (status === 401 && code === "invalid_token") return new InvalidTokenError();

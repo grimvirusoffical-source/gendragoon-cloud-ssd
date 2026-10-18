@@ -93,6 +93,7 @@ export {
   applyApiFailure,
   viewAfterFailure,
   deleteAccountAndWipe,
+  resumeAccountDeletion,
 } from "./account.js";
 export type { AccountPhase, AccountLockReason, AccountState, AccountEvent } from "./account.js";
 export {
@@ -130,7 +131,8 @@ export {
   assertKeyEnvelope,
   openWorkspaceKey,
 } from "./envelope.js";
-export type { SecretStore, SealedName, LibraryManifest } from "./seal.js";
+export type { SecretStore, SecureStore, SealedName, LibraryManifest } from "./seal.js";
+export { MemorySecretStore as MemorySecureStore } from "./seal.js";
 export type {
   HealthResponse,
   CapabilitiesResponse,
