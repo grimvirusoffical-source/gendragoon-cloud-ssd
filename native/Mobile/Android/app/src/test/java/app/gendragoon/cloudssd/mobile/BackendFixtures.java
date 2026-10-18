@@ -25,7 +25,7 @@ final class BackendFixtures {
     }
 
     static int responseStatus(String area,String name){
-        String file=shared(area,name);
+        String file=withoutResponseBody(shared(area,name));
         int response=keyAt(file,"response",0);
         int status=keyAt(file,"status",response);
         int end=status;
@@ -34,6 +34,18 @@ final class BackendFixtures {
         while(end<file.length()&&Character.isDigit(file.charAt(end)))end++;
         if(end==digits)throw new IllegalStateException("Missing status in "+area+"/"+name);
         return Integer.parseInt(file.substring(status,end));
+    }
+
+    /**
+     * The export sorts keys, so {@code response.body} comes before {@code response.status}. A
+     * status poll body has its own {@code "status":"done"}; drop the body so the HTTP status is read.
+     */
+    private static String withoutResponseBody(String file){
+        int response=keyAt(file,"response",0);
+        int at=file.indexOf("\"body\"",response);
+        if(at<0)return file;
+        int value=keyAt(file,"body",response);
+        return file.substring(0,value)+"null"+file.substring(value+jsonValue(file,value).length());
     }
 
     static String responseBody(String area,String name){
