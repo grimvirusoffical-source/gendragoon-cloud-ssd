@@ -1,9 +1,9 @@
 "use strict";
 // QA regression suite for the policy rules locked for docs/API.md (Oct 17 2026).
-// Tests marked {todo:...} assert the AGREED rule that current code does not yet
-// implement: they run, and a failure is reported as TODO rather than failing CI.
-// When a fix lands, its todo test should start passing; then drop the todo flag.
-// No credentials, network, Stripe or Firebase: in-memory Firestore + stub Stripe.
+// The {todo} tests below are the workspace-policy contract. They stay todo on
+// this branch because the behavior belongs to PR #5 (fix/backend-workspace-policy),
+// not to account deletion. A failure is reported as TODO rather than failing CI.
+// When that PR lands, drop the todo flag. No credentials, network, Stripe, or Firebase.
 const test=require("node:test"),assert=require("node:assert/strict"),crypto=require("node:crypto");
 const {memoryFirestore}=require("./test_firestore");
 const {createProjectService,policyFor,projectStatus,effectiveStorageQuota,validateSelection}=require("./projects");
@@ -30,7 +30,7 @@ test("ownership: a different account gets 404 on someone else's workspace",async
   const f=fixture();f.put(idFor(1));
   await assert.rejects(f.service.get({user:{uid:"other"}},idFor(1)),{status:404,code:"PROJECT_NOT_FOUND"});
 });
-test("ownership: a record with a foreign accountHash returns 404, not 403 (must not reveal existence)",{todo:"EXPECTED FAIL until Riley's fix: get() returns 403 PROJECT_FORBIDDEN today"},async()=>{
+test("ownership: a foreign accountHash returns 404 — todo, depends on PR #5 (get() still returns 403 PROJECT_FORBIDDEN)",{todo:"depends on PR #5 fix/backend-workspace-policy; get() returns 403 PROJECT_FORBIDDEN"},async()=>{
   const f=fixture();f.put(idFor(1),{accountHash:other});
   await assert.rejects(f.service.get(f.req,idFor(1)),{status:404});
 });
@@ -45,18 +45,18 @@ test("cap: after downgrade, restoring an archived project is refused",async()=>{
   const f=fixture();downgraded(f);f.put(idFor(21),{projectStatus:"archived",statusBeforeArchive:"active"});
   await assert.rejects(f.service.restore(f.req,idFor(21)),{code:"PROJECT_LIMIT_REACHED"});
 });
-test("cap: downgrade over cap puts the account in the login lock (Casey bug: projects 11-20 stay usable)",{todo:"EXPECTED FAIL until fix: cap only checked on create/checkout/restore/confirm"},async()=>{
+test("cap: downgrade over cap sets policy.locked — todo, depends on PR #5 (cap is only checked on create, checkout, restore, and confirm)",{todo:"depends on PR #5 fix/backend-workspace-policy; login lock is not built"},async()=>{
   const f=fixture();downgraded(f);
   const p=(await f.service.inventory(f.req)).policy;
   assert.equal(p.locked,true,"policy must expose a lock when usedProjectSlots > projectLimit");
 });
-test("cap: while locked, data stays readable but uploads are blocked",{todo:"lock not built: expect quota>0 for reads and an upload-blocked flag"},async()=>{
+test("cap: a locked account stays readable and blocks uploads — todo, depends on PR #5 (no uploadsBlocked flag yet)",{todo:"depends on PR #5 fix/backend-workspace-policy; lock flag is not built"},async()=>{
   const f=fixture();downgraded(f);
   assert.ok(effectiveStorageQuota(f.record(idFor(15)))>0,"data must remain readable/downloadable");
   assert.equal((await f.service.inventory(f.req)).policy.uploadsBlocked,true);
 });
 
-test("cap: paid storage route denies access to workspaces over the cap after downgrade (Casey: paid_storage.js:20-28)",{todo:"EXPECTED FAIL until fix: scopeFromWorkspace checks kind/owner/quota only, never the account cap, so workspaces 11-15 keep working"},()=>{
+test("cap: paid storage denies workspaces over the cap — todo, depends on PR #5 (scopeFromWorkspace ignores the account cap)",{todo:"depends on PR #5 fix/backend-workspace-policy; paid_storage scope ignores the cap"},()=>{
   const {scopeFromWorkspace}=require("./paid_storage");
   const f=fixture();for(let n=1;n<=15;n++)f.put(idFor(n),n===1?qualifier:{});
   f.db.rows.set(f.path(idFor(1)),{...f.record(idFor(1)),storageActive:false,performanceActive:false});
@@ -66,10 +66,10 @@ test("cap: paid storage route denies access to workspaces over the cap after dow
 });
 
 // ---- 2. Billing ($5/month, FREE_WORKSPACES) ----
-test("billing: workspace fee is $5 per month, not one-time",{todo:"EXPECTED FAIL: policyFor reports feeIsOneTime:true ($5 once)"},()=>{
+test("billing: workspace fee is $5 per month — todo, depends on PR #5 (policyFor still reports a one-time fee)",{todo:"depends on PR #5 fix/backend-workspace-policy; monthly fee is not built"},()=>{
   const p=policyFor({},[]);assert.equal(p.feeIsOneTime,false);assert.equal(p.workspaceMonthlyCents,500);
 });
-test("billing: FREE_WORKSPACES defaults to 1",{todo:"constant not exported yet"},()=>{
+test("billing: FREE_WORKSPACES defaults to 1 — todo, depends on PR #5 (projects.js does not export it)",{todo:"depends on PR #5 fix/backend-workspace-policy; FREE_WORKSPACES is not exported"},()=>{
   assert.equal(require("./projects").FREE_WORKSPACES,1);
 });
 
@@ -80,7 +80,7 @@ test("byo: BYO workspaces count toward the same 10 cap",async()=>{
   assert.equal((await f.service.inventory(f.req)).policy.usedProjectSlots,10);
   await assert.rejects(f.service.create(f.req,{name:"Eleventh",intentId:idFor(11)}),{code:"PROJECT_LIMIT_REACHED"});
 });
-test("byo: storage type does not change billing ($5/month like managed)",{todo:"monthly workspace fee not built; byo has its own byoSubscription path"},()=>{
+test("byo: storage type uses the same $5 monthly fee — todo, depends on PR #5 (monthly fee is not built)",{todo:"depends on PR #5 fix/backend-workspace-policy; monthly workspace fee is not built"},()=>{
   const managed=policyFor({},[base]),own=policyFor({},[{...base,...byo(1)}]);
   assert.equal(own.workspaceMonthlyCents,500);assert.equal(own.workspaceMonthlyCents,managed.workspaceMonthlyCents);
 });
@@ -88,20 +88,20 @@ test("byo secrets: plan-selection payload drops provider secrets",()=>{
   const out=validateSelection({storageTier:"2TB",secretAccessKey:"FAKE-NOT-A-KEY",password:"x",privateKey:"x"});
   assert.deepEqual(Object.keys(out),["storageTier"]);
 });
-test("byo secrets: server rejects any payload with provider secrets and never persists or logs them",{todo:"BYO registration endpoint (type/endpoint/bucket fingerprint only) not built"},()=>{
+test("byo secrets: registration rejects provider secrets — todo, depends on PR #5 (no fingerprint-only registration route)",{todo:"depends on PR #5 fix/backend-workspace-policy; BYO registration route is not built"},()=>{
   assert.fail("needs BYO registration handler: expect 400 on accessKey/secret/password/privateKey, no Firestore field or console output containing the value");
 });
-test("byo challenge: workspace stays inactive without a verified challenge read-back",{todo:"EXPECTED FAIL: projectStatus activates byo on byoActive+manualProviderConfigured alone"},()=>{
+test("byo challenge: workspace stays inactive until read-back — todo, depends on PR #5 (projectStatus activates without a challenge)",{todo:"depends on PR #5 fix/backend-workspace-policy; challenge read-back is not required"},()=>{
   assert.equal(projectStatus({...byo(1),projectStatus:undefined}),"pending_activation");
 });
 
 // ---- 3. Lapse ----
-test("lapse: unpaid workspace lapses at Stripe current_period_end + 3 days grace",{todo:"monthly lapse not built"},()=>{
+test("lapse: unpaid workspace lapses after period end plus 3 days — todo, depends on PR #5 (no lapse evaluator)",{todo:"depends on PR #5 fix/backend-workspace-policy; monthly lapse is not built"},()=>{
   assert.fail("needs lapse evaluator: active at period_end+3d-1s, lapsed/locked at period_end+3d");
 });
 
 // ---- 5. Merge ----
-test("merge: never overwrites; incoming copy named 'name (from <source>)', numbered on collision; source deleted only after all copies verify",{todo:"merge not implemented in backend"},()=>{
+test("merge: copies are renamed and the source waits for verification — todo, depends on PR #5 (no merge service)",{todo:"depends on PR #5 fix/backend-workspace-policy; merge is not implemented"},()=>{
   assert.fail("needs merge service");
 });
 
@@ -111,6 +111,6 @@ test("grandfathering: a one-time-$5 project and the legacy free project stay act
     assert.equal(projectStatus(w),"active");assert.equal(effectiveStorageQuota(w),2e9);
   }
 });
-test("grandfathering: grandfathered projects are never lapsed or charged by the monthly policy",{todo:"monthly policy not built; must exempt projectFeeStatus paid/free with projectBillingVersion 2"},()=>{
+test("grandfathering: one-time projects are exempt from the monthly policy — todo, depends on PR #5 (no monthly policy)",{todo:"depends on PR #5 fix/backend-workspace-policy; monthly policy is not built"},()=>{
   assert.equal(policyFor({},[base]).grandfatheredProjects,1);
 });
