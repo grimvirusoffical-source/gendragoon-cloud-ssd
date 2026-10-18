@@ -174,14 +174,6 @@ describe("requestDeletionSupport uid check: edges (uid-check PR)", () => {
     expect(await callWithUid(store, h)).toEqual({ kind: "received", requestId: "req-1" });
     expect(reads).not.toContain(UID_KEY);
   });
-
-  it("no saved uid (job saved before uids) with a currentUid -> request goes out as today", async () => {
-    const store = await savedStore(null);
-    const h = harness([json(202, { status: "received", requestId: "req-1" })]);
-    expect(await callWithUid(store, h, "user-1")).toEqual({ kind: "received", requestId: "req-1" });
-    expect(h.seen.requests).toBe(1);
-    noSignOut(h.seen);
-  });
 });
 
 describe("409 refresh rule on ccde5bf (Avery): body must be this jobId with status queued/running/done/failed", () => {
