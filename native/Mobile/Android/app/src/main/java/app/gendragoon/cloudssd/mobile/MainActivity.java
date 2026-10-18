@@ -16,6 +16,7 @@ import androidx.activity.result.ActivityResultLauncher;
 import androidx.activity.result.contract.ActivityResultContracts;
 import androidx.annotation.NonNull;
 import androidx.appcompat.app.AppCompatActivity;
+import androidx.core.content.ContextCompat;
 import androidx.core.content.FileProvider;
 import androidx.core.view.ViewCompat;
 import androidx.core.view.WindowInsetsCompat;
@@ -88,7 +89,7 @@ public final class MainActivity extends AppCompatActivity {
         if(loading)return;loading=true;say("Opening secure Google sign-in…");
         GetGoogleIdOption option=new GetGoogleIdOption.Builder().setServerClientId(getString(R.string.default_web_client_id)).setFilterByAuthorizedAccounts(false).setAutoSelectEnabled(false).build();
         GetCredentialRequest request=new GetCredentialRequest.Builder().addCredentialOption(option).build();
-        credentials.getCredentialAsync(this,request,new CancellationSignal(),getMainExecutor(),new CredentialManagerCallback<GetCredentialResponse,GetCredentialException>(){
+        credentials.getCredentialAsync(this,request,new CancellationSignal(),ContextCompat.getMainExecutor(this),new CredentialManagerCallback<GetCredentialResponse,GetCredentialException>(){
             @Override public void onResult(GetCredentialResponse result){
                 try{Credential c=result.getCredential();if(!(c instanceof CustomCredential)||!GoogleIdTokenCredential.TYPE_GOOGLE_ID_TOKEN_CREDENTIAL.equals(c.getType()))throw new IllegalStateException("Unexpected Google credential.");
                     GoogleIdTokenCredential google=GoogleIdTokenCredential.createFrom(c.getData());auth.signInWithCredential(GoogleAuthProvider.getCredential(google.getIdToken(),null)).addOnCompleteListener(MainActivity.this,task->{loading=false;if(!task.isSuccessful())say(task.getException()==null?"Sign-in failed.":task.getException().getMessage());});

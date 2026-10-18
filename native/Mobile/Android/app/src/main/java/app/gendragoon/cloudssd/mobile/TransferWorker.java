@@ -158,7 +158,7 @@ public final class TransferWorker extends Worker {
     private String download(String workspace,JSONObject item)throws Exception{return download(workspace,item,false);}
     private String download(String workspace,JSONObject item,boolean verificationOnly)throws Exception{
         String id=item.getString("id");if(!id.matches("[a-f0-9-]{36}"))throw new IOException("Invalid file.");
-        name=item.getString("name");if(name.isBlank()||name.contains("/")||name.contains("\\")||name.equals(".")||name.equals(".."))throw new IOException("Unsafe file name.");
+        name=item.getString("name");if(TextChecks.isBlank(name)||name.contains("/")||name.contains("\\")||name.equals(".")||name.equals(".."))throw new IOException("Unsafe file name.");
         long size=item.getLong("sizeBytes");if(size<=0)throw new IOException("Invalid file size.");
         String path=CloudApi.workspace(workspace),route=path+"/files/"+id+"/download";JSONObject config=api.get(path+"/config");int parallel=workers(config);
         CloudApi.Response head=api.request(route,"HEAD",(JSONObject)null);String etag=head.header("ETag");if(etag.isEmpty()||!Long.toString(size).equals(head.header("Content-Length")))throw new IOException("File metadata changed. Refresh your library.");

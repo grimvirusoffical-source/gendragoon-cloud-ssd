@@ -17,12 +17,14 @@ android {
  defaultConfig { applicationId 'app.gendragoon.cloudssd.mobile'; minSdk 26; targetSdk 36; versionCode 20; versionName '0.17.0'; testInstrumentationRunner 'androidx.test.runner.AndroidJUnitRunner' }
  compileOptions { coreLibraryDesugaringEnabled true; sourceCompatibility JavaVersion.VERSION_17; targetCompatibility JavaVersion.VERSION_17 }
  buildTypes { release { minifyEnabled false } }
+ lint { abortOnError true; error 'NewApi' }
 }
 dependencies {
  coreLibraryDesugaring 'com.android.tools:desugar_jdk_libs:2.1.5'
  implementation platform('com.google.firebase:firebase-bom:35.0.0')
  implementation 'com.google.firebase:firebase-auth'
  implementation 'androidx.appcompat:appcompat:1.7.1'
+ implementation 'androidx.core:core:1.13.0'
  implementation 'androidx.activity:activity:1.10.1'
  implementation 'androidx.credentials:credentials:1.3.0'
  implementation 'androidx.credentials:credentials-play-services-auth:1.3.0'
@@ -49,6 +51,27 @@ for source,target in [('gendragoon_terms.txt','terms.txt'),('gendragoon_privacy.
 ''')
 (main/'res/xml/file_paths.xml').write_text('<paths xmlns:android="http://schemas.android.com/apk/res/android"><files-path name="exports" path="exports/"/></paths>')
 (main/'res/drawable/ic_cloud.xml').write_text('''<vector xmlns:android="http://schemas.android.com/apk/res/android" android:width="24dp" android:height="24dp" android:viewportWidth="24" android:viewportHeight="24"><path android:fillColor="#C6A1FF" android:pathData="M19.35,10.04C18.67,6.59 15.64,4 12,4c-2.89,0 -5.4,1.64 -6.65,4.04C2.34,8.36 0,10.9 0,14c0,3.31 2.69,6 6,6h13c2.76,0 5,-2.24 5,-5 0,-2.64 -2.05,-4.78 -4.65,-4.96z"/></vector>''')
-(main/'res/values/styles.xml').write_text('''<resources><style name="Theme.GenDragoon" parent="Theme.Material3.Dark.NoActionBar"><item name="colorPrimary">#C5A0FF</item><item name="colorOnPrimary">#231333</item><item name="colorSecondary">#C5A0FF</item><item name="colorSurface">#1D1829</item><item name="android:colorBackground">#10101A</item><item name="android:windowLightStatusBar">false</item><item name="android:windowLightNavigationBar">false</item><item name="android:statusBarColor">#10101A</item><item name="android:navigationBarColor">#10101A</item><item name="android:fontFamily">sans</item></style></resources>''')
+(main/'res/values/styles.xml').write_text('''<resources>
+    <style name="Theme.GenDragoon.Base" parent="Theme.Material3.Dark.NoActionBar">
+        <item name="colorPrimary">#C5A0FF</item>
+        <item name="colorOnPrimary">#231333</item>
+        <item name="colorSecondary">#C5A0FF</item>
+        <item name="colorSurface">#1D1829</item>
+        <item name="android:colorBackground">#10101A</item>
+        <item name="android:windowLightStatusBar">false</item>
+        <item name="android:statusBarColor">#10101A</item>
+        <item name="android:navigationBarColor">#10101A</item>
+        <item name="android:fontFamily">sans</item>
+    </style>
+    <style name="Theme.GenDragoon" parent="Theme.GenDragoon.Base"/>
+</resources>
+''')
+(main/'res/values-v27').mkdir(parents=True,exist_ok=True)
+(main/'res/values-v27/styles.xml').write_text('''<resources>
+    <style name="Theme.GenDragoon" parent="Theme.GenDragoon.Base">
+        <item name="android:windowLightNavigationBar">false</item>
+    </style>
+</resources>
+''')
 (root/'.gitignore').write_text('.gradle/\nlocal.properties\n**/build/\n*.jks\n*.keystore\n')
 print('ANDROID_PROJECT_CREATED',root)

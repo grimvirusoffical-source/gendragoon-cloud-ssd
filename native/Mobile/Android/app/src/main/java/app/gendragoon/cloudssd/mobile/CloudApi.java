@@ -16,7 +16,7 @@ final class CloudApi {
     static final String ORIGIN="https://gendragoon-free-10068843866.us-central1.run.app";
     static final int CHUNK=8*1024*1024;
     final String uid;
-    CloudApi(String uid){if(uid==null||uid.isBlank())throw new IllegalArgumentException("Sign in first");this.uid=uid;}
+    CloudApi(String uid){if(uid==null||TextChecks.isBlank(uid))throw new IllegalArgumentException("Sign in first");this.uid=uid;}
     static final class Failure extends IOException {final int status;Failure(int status,String message){super(message);this.status=status;}}
     static final class Response {final int status;final byte[] body;final Map<String,List<String>> headers;
         Response(int status,byte[] body,Map<String,List<String>> headers){this.status=status;this.body=body;this.headers=headers;}
@@ -75,14 +75,14 @@ final class CloudApi {
     List<JSONObject> files(String workspace)throws Exception{
         List<JSONObject> files=new ArrayList<>();String cursor="";Set<String> seen=new HashSet<>();
         do{
-            JSONObject result=get(workspace(workspace)+"/files"+(cursor.isEmpty()?"":"?cursor="+URLEncoder.encode(cursor,StandardCharsets.UTF_8)));
+            JSONObject result=get(workspace(workspace)+"/files"+(cursor.isEmpty()?"":"?cursor="+Utf8Url.encode(cursor)));
             JSONArray rows=result.getJSONArray("files");for(int n=0;n<rows.length();n++)files.add(rows.getJSONObject(n));
             cursor=result.isNull("nextCursor")?"":result.optString("nextCursor","");
             if(!cursor.isEmpty()&&(!cursor.matches("[a-f0-9-]{36}")||!seen.add(cursor)))throw new Failure(400,"Invalid file cursor.");
         }while(!cursor.isEmpty());return files;
     }
     boolean termsAccepted()throws Exception{
-        Response response=exchange("https://firestore.googleapis.com/v1/projects/gendragoonssd/databases/(default)/documents/accepted_terms/"+URLEncoder.encode(uid,StandardCharsets.UTF_8),"GET",null,Map.of(),false);
+        Response response=exchange("https://firestore.googleapis.com/v1/projects/gendragoonssd/databases/(default)/documents/accepted_terms/"+Utf8Url.encode(uid),"GET",null,Map.of(),false);
         if(response.status==404)return false;if(response.status!=200)throw new Failure(response.status,"Terms could not be verified.");
         JSONObject f=response.json().getJSONObject("fields");
         return f.optJSONObject("termsVersion")!=null&&f.optJSONObject("readConfirmed")!=null&&f.optJSONObject("agreed")!=null&&"terms-2026-10-14-v1".equals(f.optJSONObject("termsVersion").optString("stringValue"))&&f.optJSONObject("readConfirmed").optBoolean("booleanValue")&&f.optJSONObject("agreed").optBoolean("booleanValue");
