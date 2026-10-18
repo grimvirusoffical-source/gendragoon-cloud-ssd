@@ -120,7 +120,7 @@ test("GET /v2/account/deletions/:jobId reports the polled job for the owning acc
   const deadline=Date.now()+5000;
   let status;
   do{
-   const polled=await fetch(base+"/v2/account/deletions/"+body.jobId);
+   const polled=await fetch(base+"/v2/account/deletions/"+body.jobId,{headers:{authorization:"Bearer owner"}});
    assert.equal(polled.status,200);
    status=await polled.json();
    if(status.status==="done")break;
@@ -128,7 +128,7 @@ test("GET /v2/account/deletions/:jobId reports the polled job for the owning acc
   }while(Date.now()<deadline);
   assert.equal(status.status,"done");
   assert.equal((await svc.jobStatus(body.jobId)).status,"done");
-  const missing=await fetch(base+"/v2/account/deletions/00000000-0000-4000-8000-000000000000");
+  const missing=await fetch(base+"/v2/account/deletions/00000000-0000-4000-8000-000000000000",{headers:{authorization:"Bearer owner"}});
   assert.equal(missing.status,404);
  }finally{server.close();}
 });
@@ -211,7 +211,7 @@ test("singular deletion status is not registered; plural enforces ownership",asy
   const deadline=Date.now()+5000;
   let plural;
   do{
-   plural=await fetch(base+"/v2/account/deletions/"+jobId);
+   plural=await fetch(base+"/v2/account/deletions/"+jobId,{headers:{authorization:"Bearer owner"}});
    if(plural.status===200&&(await plural.clone().json()).status==="done")break;
    await new Promise(r=>setTimeout(r,10));
   }while(Date.now()<deadline);
@@ -223,7 +223,7 @@ test("singular deletion status is not registered; plural enforces ownership",asy
   const singular=await fetch(base+"/v2/account/deletion/"+jobId);
   assert.equal(singular.status,404);
   current={uid:"other-account",auth_time:Math.floor(NOW/1000)-30};
-  const foreign=await fetch(base+"/v2/account/deletions/"+jobId);
+  const foreign=await fetch(base+"/v2/account/deletions/"+jobId,{headers:{authorization:"Bearer other"}});
   assert.equal(foreign.status,404);
   assert.deepEqual(await foreign.json(),{error:"not_found"});
   const foreignSingular=await fetch(base+"/v2/account/deletion/"+jobId);

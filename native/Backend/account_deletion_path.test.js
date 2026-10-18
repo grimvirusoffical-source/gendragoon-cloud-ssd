@@ -26,9 +26,12 @@ test("deletion status is served only at plural /v2/account/deletions/:jobId",asy
  await new Promise(r=>server.once("listening",r));
  try{
   const base="http://127.0.0.1:"+server.address().port;
-  const plural=await fetch(base+STATUS_PATH+JOB_ID);
+  const plural=await fetch(base+STATUS_PATH+JOB_ID,{headers:{authorization:"Bearer idtoken.u1"}});
   assert.equal(plural.status,200);
   assert.equal((await plural.json()).jobId,JOB_ID);
+  const missing=await fetch(base+STATUS_PATH+JOB_ID);
+  assert.equal(missing.status,401);
+  assert.deepEqual(await missing.json(),{error:"unauthorized"});
   const singular=await fetch(base+SINGULAR_PATH+JOB_ID);
   assert.equal(singular.status,404,"singular /deletion/ must not be served");
   assert.deepEqual(await singular.json(),{error:"not_found"});

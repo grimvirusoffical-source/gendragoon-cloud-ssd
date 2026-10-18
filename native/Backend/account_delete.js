@@ -512,6 +512,11 @@ function registerAccountDeletion({app,firebaseAuth,...deps}){
  app.get("/v2/account/deletions/:jobId",async(req,res)=>{
   try{
    const jobId=req.params.jobId;
+   const authorization=req.headers?.authorization;
+   if(typeof authorization!=="string"||authorization.trim()===""){
+    res.setHeader("Cache-Control","private, no-store");
+    return res.status(401).json({error:"unauthorized"});
+   }
    const job=await svc.jobStatus(jobId);
    const presented=bearerToken(req);
    if(job&&typeof svc.statusTokenMatches==="function"&&svc.statusTokenMatches(job,presented)){
@@ -556,8 +561,8 @@ function continueWithFirebase(firebaseAuth,req,res,onOk){
   json(){
    if(done||res.headersSent)return this;
    done=true;
-   // A rejected Firebase ID token is 401. A missing header, a bad status
-   // token, an expired token, and another job's token stay 404.
+   // 401 invalid_token is only a JWT-shaped bearer that fails verification.
+   // A bad, expired, unknown, or other-job status token stays 404.
    if(firebaseToken&&this.statusCode===401)return res.status(401).json({error:"invalid_token"});
    res.status(404).json({error:"not_found"});
    return this;

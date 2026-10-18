@@ -223,7 +223,7 @@ async function main(){
   if(rejected.response.status!==401||rejected.response.body?.error!=="invalid_token")throw Error("status 401 "+JSON.stringify(rejected.response));
   publish("status-invalid-token",rejected,[created.response.body.statusToken]);
   const missingHeader=await capture(polled.base,"GET","/v2/account/deletions/"+created.response.body.jobId,{token:null});
-  if(missingHeader.response.status!==404||missingHeader.response.body?.error!=="not_found")throw Error("status no header "+JSON.stringify(missingHeader.response));
+  if(missingHeader.response.status!==401||missingHeader.response.body?.error!=="unauthorized"||Object.hasOwn(missingHeader.response.body,"code"))throw Error("status no header "+JSON.stringify(missingHeader.response));
   publish("status-unauthorized",missingHeader,[created.response.body.statusToken]);
   await pollUntil(polled.base,created.response.body.jobId,created.response.body.statusToken,"done");
  }finally{await polled.close();}

@@ -196,9 +196,11 @@ test("contract 4: another job's token, an expired token and garbage tokens all g
    ["garbage",a.jobId,"garbage"],
    ["43-char random",a.jobId,crypto.randomBytes(32).toString("base64url")],
    ["hash instead of token",a.jobId,crypto.createHash("sha256").update(a.statusToken).digest("hex")],
-   ["no header",a.jobId,undefined],
    ["unknown job",crypto.randomUUID(),a.statusToken],
   ];
+  const missing=await h.poll(a.jobId,undefined);
+  assert.equal(missing.status,401,"no header");
+  assert.deepEqual(missing.json,{error:"unauthorized"});
   for(const [name,jobId,token] of cases){
    const r=await h.poll(jobId,token);
    assert.equal(r.status,404,name);
