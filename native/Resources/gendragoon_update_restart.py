@@ -248,11 +248,10 @@ def primary_mount(app):
         raise RuntimeError("The primary mount does not have its expected local NFS identity")
     executable = Path(app) / "Contents/Resources/rclone"
     found = []
-    for pid, _, uid, _ in control.processes():
-        if uid == os.getuid() and control.kernel_path(pid) == str(executable):
-            identity = control.identify(pid, executable)
-            verify_primary_arguments(process_arguments(pid), executable, control.support(), mount)
-            found.append(identity)
+    for pid in control.app_pids(executable):
+        identity = control.identify(pid, executable)
+        verify_primary_arguments(process_arguments(pid), executable, control.support(), mount)
+        found.append(identity)
     if len(found) != 1:
         raise RuntimeError("Cannot identify one exact owned primary mount process")
     return found[0]

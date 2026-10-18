@@ -1,0 +1,23 @@
+{
+  "version": "0.18.0",
+  "build": "24",
+  "sha256": "3209e0ee83590d332a01eeb255a6603f9603a77eded8a78e06034d247b7b6ffe",
+  "archiveBytes": 69715030,
+  "gatekeeperAccepted": true,
+  "stapledTicketValidated": true,
+  "candidate": true,
+  "automaticUpdateEligible": false,
+  "previewUpdateEligible": true,
+  "bundledRestartHelper": "Contents/Resources/gendragoon_update_restart.py",
+  "requiredRuntimeResources": [
+    "gendragoon_update_restart.py",
+    "gendragoon_auto_update.py",
+    "gendragoon_app_control.py",
+    "gendragoon_app_launch.py",
+    "gendragoon_library.py",
+    "gendragoon_upload_workspace.py",
+    "gendragoon_performance.py",
+    "gendragoon_performance_profiles.json",
+    "gendragoon_project_files.py"
+  ]
+}

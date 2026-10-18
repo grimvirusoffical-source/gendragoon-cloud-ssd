@@ -20,11 +20,19 @@ class UpdateActivityTests(unittest.TestCase):
         activity = updater[updater.index("final class GDUpdateActivity:"):updater.index("@MainActor final class GDUpdateCoordinator:")]
         app = (NATIVE / "Sources/GenDragoonApp.swift").read_text()
         delegate = app[app.index("@MainActor final class GDAppLifetime:"):app.index("\n@main",app.index("@MainActor final class GDAppLifetime:"))]
+        login = (NATIVE / "Sources/GenDragoonStartupRoot.swift").read_text()
+        handler = login[login.index("        out.fileHandleForReading.readabilityHandler ="):login.index("        task.terminationHandler=")]
+        eof_probe = """
+@MainActor final class LoginEOFProbe {
+    var ingested=false
+    func ingest(_ part:String) { ingested=true }
+    func connect(_ out:Pipe) {
+""" + handler + "\n    }\n}\n"
         with tempfile.TemporaryDirectory(prefix="gendragoon-update-activity-") as temporary:
             root = Path(temporary).resolve()
             source = root / "ActivitySmoke.swift"
             binary = root / "activity-smoke"
-            source.write_text(FACADES + activity + delegate + ASSERTIONS)
+            source.write_text(FACADES + activity + delegate + eof_probe + ASSERTIONS)
             compiled = subprocess.run(["/usr/bin/xcrun","swiftc","-parse-as-library",str(source),"-o",str(binary)],
                                       capture_output=True,text=True,timeout=60)
             self.assertEqual(compiled.returncode,0,compiled.stderr[-8000:])
@@ -81,6 +89,32 @@ ASSERTIONS = '''
         precondition(delegate.applicationShouldTerminate(app) == .terminateCancel)
         gate.set(cloud,key:"mounted",active:false)
         precondition(delegate.applicationShouldTerminate(app) == .terminateNow)
+        // Maintenance prevents new polling without interrupting an existing
+        // reader. Both real leases must drain before the worker can begin.
+        let first=gate.beginBackgroundInspection()!,second=gate.beginBackgroundInspection()!
+        precondition(gate.hasBackgroundInspections)
+        precondition(!gate.beginMaintenance(owner:updater))
+        precondition(gate.beginUpdateMaintenance(owner:updater))
+        precondition(gate.beginBackgroundInspection()==nil)
+        gate.endBackgroundInspection(first)
+        gate.endBackgroundInspection(first)
+        precondition(gate.hasBackgroundInspections)
+        precondition(!gate.canStart(excluding:transfer))
+        gate.endBackgroundInspection(second)
+        precondition(!gate.hasBackgroundInspections)
+        precondition(gate.beginBackgroundInspection()==nil)
+        gate.endMaintenance(owner:updater)
+        let resumed=gate.beginBackgroundInspection()!
+        gate.endBackgroundInspection(resumed)
+        // Execute the production login closure with real EOF on a local pipe.
+        let output=Pipe(),login=LoginEOFProbe()
+        login.connect(output)
+        let handler=output.fileHandleForReading.readabilityHandler!
+        output.fileHandleForWriting.closeFile()
+        handler(output.fileHandleForReading)
+        precondition(output.fileHandleForReading.readabilityHandler==nil)
+        precondition(!login.ingested)
+        output.fileHandleForReading.closeFile()
         print("update activity and ordinary-quit gates passed")
     }
 }

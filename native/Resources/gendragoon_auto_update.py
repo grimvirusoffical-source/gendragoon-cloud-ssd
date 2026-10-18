@@ -484,22 +484,10 @@ def app_executable(app=None):
     return executable
 
 def app_pids(app=None):
-    """Match kernel-reported executable paths; names/arguments are insufficient."""
-    wanted=str(app_executable(app).resolve())
+    """Narrow kernel names, then require exact path, UID and process identity."""
     if platform.system()!="Darwin":raise RuntimeError("Native process inspection requires macOS")
-    output=subprocess_ok(["/bin/ps","-axo","pid="],timeout=10)
-    library=ctypes.CDLL("/usr/lib/libproc.dylib",use_errno=True)
-    process_path=library.proc_pidpath
-    process_path.argtypes=[ctypes.c_int,ctypes.c_void_p,ctypes.c_uint32]
-    process_path.restype=ctypes.c_int
-    matches=[]
-    for line in output.splitlines():
-        if not line.strip().isdecimal():continue
-        pid=int(line.strip())
-        buffer=ctypes.create_string_buffer(4096)
-        if process_path(pid,buffer,len(buffer))>0 and os.path.realpath(os.fsdecode(buffer.value))==wanted:
-            matches.append(pid)
-    return matches
+    import gendragoon_app_control as control
+    return control.app_pids(app_executable(app).resolve())
 
 def launch_app(app=None,timeout=20):
     app=APP if app is None else Path(app)

@@ -646,6 +646,8 @@ struct GDManagedAppSession: Identifiable {
         }
     }
     private func refreshSessions() async {
+        guard let inspection = GDUpdateActivity.shared.beginBackgroundInspection() else { return }
+        defer { GDUpdateActivity.shared.endBackgroundInspection(inspection) }
         let running = NSWorkspace.shared.runningApplications.compactMap(\.bundleURL)
         manualRunningApps = manualRunningApps.filter { running.contains($0) }
         do {

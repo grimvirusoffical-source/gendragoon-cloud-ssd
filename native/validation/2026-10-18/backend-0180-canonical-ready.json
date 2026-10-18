@@ -1,0 +1,39 @@
+{
+  "timestamp": "2026-10-18T00:20:55.780472+00:00",
+  "checks": [
+    {
+      "path": "/health?deep=1",
+      "status": 200
+    },
+    {
+      "path": "/v2/billing/status",
+      "status": 200,
+      "readiness": {
+        "checkoutEnabled": true,
+        "stripeMode": "live",
+        "projectCreationEnabled": true,
+        "webhookConfigured": true,
+        "runtimeStorageVerified": true,
+        "liveStorageProvisioned": true,
+        "availableKinds": [
+          "storage",
+          "performance",
+          "bundle",
+          "bring-your-own-cloud",
+          "remove-ads",
+          "project-creation"
+        ]
+      }
+    },
+    {
+      "path": "/v2/projects",
+      "status": 401
+    },
+    {
+      "path": "/billing/stripe-webhook",
+      "status": 400
+    }
+  ],
+  "passed": true,
+  "livePaymentSubmitted": false
+}

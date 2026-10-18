@@ -176,6 +176,24 @@ class RestartWorkerTests(unittest.TestCase):
         for changed in (args+["--daemon"],args+["--cache-dir=/tmp"],args[:5]+["/another/mount"]+args[6:]):
             with self.assertRaises(RuntimeError):worker.verify_primary_arguments(changed,executable,self.support,mount)
 
+    def test_primary_mount_uses_shared_target_scanner_and_rechecks_identity(self):
+        executable = self.resources / "rclone"
+        mount = self.home / "GenDragoon Cloud SSD"
+        primary = control.ProcessIdentity(4100, str(executable), "verified start")
+        arguments = [str(executable), "--config", str(self.support / "gendragoon-rclone.conf"),
+                     "nfsmount", "gendragoon:bucket", str(mount), "--cache-dir=" + str(self.support / "Cache"),
+                     "--vfs-cache-mode=full", "--vfs-cache-min-free-space=10G", "--vfs-write-back=10s"]
+        with mock.patch.object(control, "mounted_volumes", return_value=(("localhost:/", str(mount), "nfs"),)), \
+             mock.patch.object(control, "app_pids", return_value=[4100]) as scanner, \
+             mock.patch.object(control, "identify", return_value=primary) as identify, \
+             mock.patch.object(worker, "process_arguments", return_value=arguments):
+            self.assertEqual(worker.primary_mount(self.app), primary)
+            scanner.assert_called_once_with(executable)
+            identify.assert_called_once_with(4100, executable)
+        with mock.patch.object(control, "mounted_volumes", return_value=(("localhost:/", str(mount), "nfs"),)), \
+             mock.patch.object(control, "app_pids", side_effect=control.ControlError("inspection_failed")):
+            with self.assertRaises(control.ControlError): worker.primary_mount(self.app)
+
     def test_quiesce_sends_one_normal_signal_after_three_quiet_samples(self):
         primary = control.ProcessIdentity(4100,str(self.resources/"rclone"),"original")
         calls = []
@@ -283,6 +301,7 @@ def alive(pid):
     if pid==original:return not (directory/'fixture-parent-exited').exists()
     return any(p.pid==pid and p.poll() is None for p in launched)
 w.control.kernel_path=lambda pid:str(executable) if pid in [original,*[p.pid for p in launched]] and alive(pid) else None
+w.control.kernel_name=lambda pid:executable.name if alive(pid) else None
 w.control.processes=lambda:[(pid,0,os.getuid(),'fixture app') for pid in [original,*[p.pid for p in launched]] if alive(pid)]
 w.control.identify=lambda pid,path:w.control.ProcessIdentity(pid,str(path),receipt['identity']['started'] if pid==original else 'fixture launch '+str(pid))
 w.control.require_mac=lambda:None

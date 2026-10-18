@@ -442,6 +442,8 @@ final class UploadWorkspaceModel: ObservableObject {
     func stopPolling() { pollingTask?.cancel(); pollingTask = nil }
     deinit { pollingTask?.cancel() }
     func refresh(showError: Bool = true) async {
+        guard let inspection = GDUpdateActivity.shared.beginBackgroundInspection() else { return }
+        defer { GDUpdateActivity.shared.endBackgroundInspection(inspection) }
         refreshEpoch &+= 1
         let epoch = refreshEpoch
         do {

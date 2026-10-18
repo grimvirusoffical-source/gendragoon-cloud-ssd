@@ -13,6 +13,7 @@ final class GDUpdateActivity: ObservableObject {
     private let lock = NSLock()
     private var entries: [ObjectIdentifier: Entry] = [:]
     private weak var maintenanceOwner: AnyObject?
+    private var backgroundInspections: Set<UUID> = []
     private let persistentFlags: Set<String> = ["mounted", "runningApps"]
 
     private func changed() {
@@ -68,6 +69,23 @@ final class GDUpdateActivity: ObservableObject {
         lock.lock(); defer { lock.unlock() }
         return maintenanceOwner != nil
     }
+    // Background status readers may finish normally after maintenance starts,
+    // but no new reader may race the verified restart worker's quiet checks.
+    func beginBackgroundInspection() -> UUID? {
+        lock.lock(); defer { lock.unlock() }
+        guard maintenanceOwner == nil else { return nil }
+        let token = UUID()
+        backgroundInspections.insert(token)
+        return token
+    }
+    func endBackgroundInspection(_ token: UUID) {
+        lock.lock(); defer { lock.unlock() }
+        backgroundInspections.remove(token)
+    }
+    var hasBackgroundInspections: Bool {
+        lock.lock(); defer { lock.unlock() }
+        return !backgroundInspections.isEmpty
+    }
     func canStart(excluding owner: AnyObject? = nil) -> Bool {
         lock.lock(); defer { lock.unlock() }
         return (maintenanceOwner == nil || maintenanceOwner === owner) && !busyLocked(excluding: owner, ignorePersistent: true)
@@ -75,6 +93,7 @@ final class GDUpdateActivity: ObservableObject {
     @discardableResult func beginMaintenance(owner: AnyObject) -> Bool {
         lock.lock()
         guard maintenanceOwner == nil || maintenanceOwner === owner,
+              backgroundInspections.isEmpty,
               !busyLocked(excluding: owner, ignorePersistent: false) else { lock.unlock(); return false }
         maintenanceOwner = owner
         lock.unlock(); changed(); return true
@@ -243,15 +262,33 @@ final class GDUpdateActivity: ObservableObject {
               GDUpdateActivity.shared.beginUpdateMaintenance(owner:self) else{return}
         restartRequested=true;isBusy=true;phase="handoff"
         status="Preparing the verified restart helper and checking that cloud storage is idle…"
+        beginRestartAfterBackgroundChecks(deadline:Date().addingTimeInterval(125))
+    }
+    private func postponeRestart(_ detail:String="Finish current cloud work; the app will retry."){
+        isBusy=false;restartRequested=false;phase="postponed";idleSince=nil
+        retryNotBefore=Date().addingTimeInterval(60)
+        status="Automatic restart postponed. "+GDNativeMessage.safe(detail)
+        GDUpdateActivity.shared.endMaintenance(owner:self)
+    }
+    private func beginRestartAfterBackgroundChecks(deadline:Date){
+        guard restartRequested,isBusy,acknowledgedRequest==nil else{return}
+        if GDUpdateActivity.shared.hasBackgroundInspections {
+            guard Date()<deadline else{
+                postponeRestart("A background cloud check has not finished. The app will retry safely.");return
+            }
+            status="Finishing the current cloud status check before the automatic restart…"
+            DispatchQueue.main.asyncAfter(deadline:.now()+0.1){[weak self] in
+                self?.beginRestartAfterBackgroundChecks(deadline:deadline)
+            }
+            return
+        }
+        guard !GDUpdateActivity.shared.isBusyForUpdate(excluding:self) else{postponeRestart();return}
         runHelper(["schedule-restart","--app",appPath,"--pid",String(ProcessInfo.processInfo.processIdentifier),
                    "--ui-busy","false","--channel",channel]) {[weak self] code,record in
             guard let self else{return}
             self.isBusy=false
             guard code==0,record?["state"] as? String == "scheduled",let request=record?["request_id"] as? String else{
-                self.restartRequested=false;self.phase="postponed";self.idleSince=nil
-                self.retryNotBefore=Date().addingTimeInterval(60)
-                self.status="Automatic restart postponed. Finish current cloud work; the app will retry."
-                GDUpdateActivity.shared.endMaintenance(owner:self)
+                self.postponeRestart(record?["message"] as? String ?? "Finish current cloud work; the app will retry.")
                 return
             }
             self.acknowledgedRequest=request;self.phase="restarting"

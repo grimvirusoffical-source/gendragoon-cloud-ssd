@@ -1,0 +1,223 @@
+{
+  "anonymousProtectedGETs": {
+    "/v1/files": {
+      "rejected": true,
+      "status": 401
+    },
+    "/v1/keys": {
+      "rejected": true,
+      "status": 401
+    },
+    "/v1/me": {
+      "rejected": true,
+      "status": 401
+    },
+    "/v2/account/entitlements": {
+      "rejected": true,
+      "status": 401
+    },
+    "/v2/workspaces": {
+      "rejected": true,
+      "status": 401
+    }
+  },
+  "candidate": {
+    "revision": "gendragoon-free-00026-jas",
+    "tag": "review-0180-20261018a",
+    "url": "https://review-0180-20261018a---gendragoon-free-f6kvqszh5a-uc.a.run.app"
+  },
+  "configurationComparison": {
+    "containerCountMatches": true,
+    "literalEnvironmentMatches": true,
+    "secretBindingsMatch": true,
+    "serviceIdentityMatches": true
+  },
+  "controlPlaneGETs": 4,
+  "excluded": [
+    "Stripe activation, Checkout and payments",
+    "Authenticated customer data",
+    "Production application traffic",
+    "Writes, deletes, deployment and traffic promotion",
+    "Sustained saturation testing or an independent penetration test"
+  ],
+  "limits": {
+    "applicationRequestsMaximum": 264,
+    "applicationResponseBytesMaximum": 131072,
+    "loadHardDeadlineSeconds": 45.0,
+    "loadRequests": 256,
+    "overallHardDeadlineSeconds": 180,
+    "requestTimeoutSeconds": 5.0,
+    "terminationGraceSeconds": 2,
+    "workers": 16
+  },
+  "load": {
+    "byPath": {
+      "/health": {
+        "completed": 86,
+        "deadlineExceededBeforeBody": 0,
+        "errorCounts": {},
+        "errorPhaseCounts": {},
+        "statusCounts": {
+          "200": 86
+        },
+        "successful": 86,
+        "timings": {
+          "bodyMs": {
+            "max": 2.888,
+            "p50": 0.166,
+            "p95": 0.784,
+            "samples": 86
+          },
+          "decodeMs": {
+            "max": 0.062,
+            "p50": 0.012,
+            "p95": 0.052,
+            "samples": 86
+          },
+          "elapsedMs": {
+            "max": 167.95,
+            "p50": 98.614,
+            "p95": 149.693,
+            "samples": 86
+          },
+          "headersMs": {
+            "max": 167.884,
+            "p50": 98.38,
+            "p95": 149.627,
+            "samples": 86
+          }
+        }
+      },
+      "/v2/pricing": {
+        "completed": 85,
+        "deadlineExceededBeforeBody": 0,
+        "errorCounts": {},
+        "errorPhaseCounts": {},
+        "statusCounts": {
+          "200": 85
+        },
+        "successful": 85,
+        "timings": {
+          "bodyMs": {
+            "max": 6.313,
+            "p50": 0.286,
+            "p95": 2.654,
+            "samples": 85
+          },
+          "decodeMs": {
+            "max": 0.216,
+            "p50": 0.057,
+            "p95": 0.161,
+            "samples": 85
+          },
+          "elapsedMs": {
+            "max": 309.408,
+            "p50": 99.348,
+            "p95": 140.979,
+            "samples": 85
+          },
+          "headersMs": {
+            "max": 308.995,
+            "p50": 98.906,
+            "p95": 140.626,
+            "samples": 85
+          }
+        }
+      },
+      "/v3/capabilities": {
+        "completed": 85,
+        "deadlineExceededBeforeBody": 0,
+        "errorCounts": {},
+        "errorPhaseCounts": {},
+        "statusCounts": {
+          "200": 85
+        },
+        "successful": 85,
+        "timings": {
+          "bodyMs": {
+            "max": 3.284,
+            "p50": 0.155,
+            "p95": 0.892,
+            "samples": 85
+          },
+          "decodeMs": {
+            "max": 0.219,
+            "p50": 0.017,
+            "p95": 0.066,
+            "samples": 85
+          },
+          "elapsedMs": {
+            "max": 150.638,
+            "p50": 98.388,
+            "p95": 122.389,
+            "samples": 85
+          },
+          "headersMs": {
+            "max": 150.371,
+            "p50": 98.027,
+            "p95": 122.314,
+            "samples": 85
+          }
+        }
+      }
+    },
+    "completed": 256,
+    "elapsedSeconds": 1.998,
+    "errorCounts": {},
+    "failureSamples": [],
+    "failureSamplesOmitted": 0,
+    "hardDeadlineExceeded": false,
+    "headersTimingIncludes": "DNS, TCP/TLS connection setup, request send and response headers",
+    "latencyPopulation": "all completed attempts, including HTTP and transport failures",
+    "notSuccessfulOrUncompleted": 0,
+    "observedStarted": 256,
+    "p50Ms": 98.722,
+    "p95Ms": 138.188,
+    "passed": true,
+    "percentileMethod": "nearest-rank",
+    "requested": 256,
+    "statusCounts": {
+      "200": 256
+    },
+    "successful": 256,
+    "transport": "urllib HTTPS; fresh connection per request; no retries",
+    "uncompleted": 0,
+    "workers": 16
+  },
+  "passed": true,
+  "postflight": {
+    "sameTaggedRevision": true,
+    "stillZeroProductionTraffic": true
+  },
+  "preflight": {
+    "ready": true,
+    "zeroProductionTraffic": true
+  },
+  "schemaVersion": 1,
+  "scope": "tagged candidate; read-only metadata, public endpoints and anonymous rejection checks",
+  "security": {
+    "adcUsedOnlyForCloudRunControlPlane": true,
+    "authorizationSentToApplication": false,
+    "configurationValuesPrinted": false,
+    "redirectsAllowed": false,
+    "secretManagerPayloadsFetched": false,
+    "tlsCertificateAndHostnameVerification": true
+  },
+  "smoke": {
+    "/health?deep=1": {
+      "error": null,
+      "passed": true,
+      "status": 200
+    },
+    "/v2/pricing": {
+      "error": null,
+      "passed": true,
+      "status": 200
+    },
+    "/v3/capabilities": {
+      "error": null,
+      "passed": true,
+      "status": 200
+    }
+  }
+}

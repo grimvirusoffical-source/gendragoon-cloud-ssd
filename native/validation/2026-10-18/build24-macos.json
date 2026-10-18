@@ -1,0 +1,11 @@
+{
+  "version": "0.18.0",
+  "build": "24",
+  "sourceCommit": "f3c3ea853cabfb15ebccf2cbecf99017a8998f7c",
+  "freeBeforeBytes": 18507759616,
+  "minimumFreeBytes": 10737418240,
+  "exitCode": 0,
+  "seconds": 68.326,
+  "freeAfterBytes": 18206437376,
+  "signed": true
+}

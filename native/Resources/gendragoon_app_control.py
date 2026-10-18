@@ -263,6 +263,47 @@ def trusted_bundle(app):
     return executable
 
 
+def kernel_name(pid):
+    """Read proc_name's kernel BSD name before asking for an executable path.
+
+    Apple-protected processes can expose their BSD name while refusing
+    proc_pidpath. A name only narrows candidates; it never proves identity.
+    Apple's libproc uses pbi_name[32], falling back to pbi_comm[16].
+    """
+    try:
+        library = ctypes.CDLL("/usr/lib/libproc.dylib", use_errno=True)
+        function = library.proc_name
+        function.argtypes = [ctypes.c_int, ctypes.c_void_p, ctypes.c_uint32]
+        function.restype = ctypes.c_int
+        buffer = ctypes.create_string_buffer(32)
+        ctypes.set_errno(0)
+        count = function(pid, buffer, len(buffer))
+        if count <= 0:
+            if ctypes.get_errno() == errno.ESRCH:
+                return None
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                return None
+            raise ControlError("inspection_failed")
+        if count >= len(buffer) or buffer.raw[count] != 0 or b"\0" in buffer.raw[:count]:
+            raise ControlError("inspection_failed")
+        return os.fsdecode(buffer.raw[:count])
+    except (OSError, ValueError, AttributeError):
+        raise ControlError("inspection_failed") from None
+
+
+def candidate_name(pid, executable):
+    name = kernel_name(pid)
+    if name is None:
+        return False
+    expected = os.fsencode(Path(executable).name)
+    # Both documented kernel-name fields may truncate. Every matching prefix
+    # still requires the exact kernel path, current UID and start-time check.
+    names = {expected, expected[:15], expected[:31]}
+    return os.fsencode(name) in names
+
+
 def kernel_path(pid):
     """proc_pidpath is kernel supplied; ps command text alone is not identity."""
     try:
@@ -277,6 +318,7 @@ def kernel_path(pid):
         function.argtypes = [ctypes.c_int, ctypes.c_void_p, ctypes.c_uint32]
         function.restype = ctypes.c_int
         buffer = ctypes.create_string_buffer(4096)
+        ctypes.set_errno(0)
         if function(pid, buffer, len(buffer)) <= 0:
             if ctypes.get_errno() == errno.ESRCH:
                 return None
@@ -405,8 +447,14 @@ def ensure_idle(app, ui_busy=False):
 def app_pids(executable):
     candidates = []
     for pid, _, uid, _ in processes():
-        if uid == os.getuid() and pid != os.getpid() and kernel_path(pid) == str(executable):
-            candidates.append(pid)
+        if uid != os.getuid() or pid == os.getpid() or not candidate_name(pid, executable):
+            continue
+        if kernel_path(pid) != str(executable):
+            continue
+        # Re-read UID/start and the exact path after narrowing. Inaccessible
+        # potential targets and identity changes must still block maintenance.
+        identify(pid, executable)
+        candidates.append(pid)
     return candidates
 
 

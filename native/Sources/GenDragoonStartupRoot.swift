@@ -54,7 +54,8 @@ import Foundation
         lineBuffer=""
         out.fileHandleForReading.readabilityHandler = { [weak self] handle in
             let data=handle.availableData
-            guard !data.isEmpty,let part=String(data:data,encoding:.utf8) else {return}
+            guard !data.isEmpty else {handle.readabilityHandler=nil;return}
+            guard let part=String(data:data,encoding:.utf8) else {return}
             DispatchQueue.main.async {self?.ingest(part)}
         }
         task.terminationHandler={ [weak self] _ in

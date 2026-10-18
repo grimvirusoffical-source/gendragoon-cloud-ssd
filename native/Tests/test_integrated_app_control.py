@@ -1,5 +1,6 @@
 """Local restart fixtures; no app quits, mounts, Keychain or cloud access."""
 import fcntl
+import errno
 import importlib.util
 import io
 import json
@@ -12,7 +13,7 @@ import tempfile
 import threading
 import time
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 HELPER = Path(__file__).resolve().parents[1] / "Resources/gendragoon_app_control.py"
 spec = importlib.util.spec_from_file_location("gendragoon_app_control", HELPER)
@@ -135,6 +136,61 @@ class AppControlTests(unittest.TestCase):
         result = subprocess.CompletedProcess([], 0, "99999 Sat Oct 17 10:00:00 2026\n", "")
         with patch.object(control, "kernel_path", return_value=str(self.executable)), patch.object(control, "command", return_value=result):
             self.assertCode("wrong_pid", control.identify, 1234, self.executable)
+
+    def test_protected_unrelated_names_never_require_executable_path_access(self):
+        protected = ["loginwindow", "ScreenTimeAgent", "com.apple.Safari.SafeBrowsing.S",
+                     "XProtect", "XProtectPluginService", "UsageTrackingAgent", "dmd"]
+        names = {600 + index: name for index, name in enumerate(protected)}
+        names.update({700: self.executable.name, 701: "sleep", 702: self.executable.name})
+        rows = [(pid, 1, os.getuid(), str(self.executable)) for pid in names]
+        rows.append((703, 1, os.getuid() + 1, str(self.executable)))
+        queried = []
+        def read_name(pid, buffer, size):
+            self.assertEqual(size, 32)
+            buffer.value = os.fsencode(names[pid])
+            return len(buffer.value)
+        def read_path(pid):
+            queried.append(pid)
+            if pid == 700: return str(self.executable)
+            if pid == 702: return "/another/GenDragoon Cloud SSD"
+            raise control.ControlError("inspection_failed")
+        library = Mock(proc_name=Mock(side_effect=read_name))
+        identity = subprocess.CompletedProcess([], 0, str(os.getuid()) + " Sat Oct 17 10:00:00 2026\n", "")
+        with patch.object(control, "processes", return_value=rows), \
+             patch.object(control.ctypes, "CDLL", return_value=library), \
+             patch.object(control, "kernel_path", side_effect=read_path), \
+             patch.object(control, "command", return_value=identity) as command:
+            self.assertEqual(control.app_pids(self.executable), [700])
+        self.assertEqual(queried, [700, 700, 702])
+        command.assert_called_once_with(["/bin/ps", "-p", "700", "-o", "uid=", "-o", "lstart="])
+
+    def test_potential_target_path_denial_and_identity_change_still_fail_closed(self):
+        row = [(700, 1, os.getuid(), "untrusted argv text")]
+        with patch.object(control, "processes", return_value=row), \
+             patch.object(control, "kernel_name", return_value=self.executable.name):
+            with patch.object(control, "kernel_path", side_effect=control.ControlError("inspection_failed")):
+                self.assertCode("inspection_failed", control.app_pids, self.executable)
+            with patch.object(control, "kernel_path", side_effect=[str(self.executable), "/another/executable"]):
+                self.assertCode("wrong_pid", control.app_pids, self.executable)
+
+    def test_kernel_name_exit_race_is_absent_but_live_inspection_denial_blocks(self):
+        def denied(*args):
+            control.ctypes.set_errno(errno.EPERM)
+            return 0
+        with patch.object(control.ctypes, "CDLL", return_value=Mock(proc_name=Mock(side_effect=denied))):
+            with patch.object(control.os, "kill", side_effect=ProcessLookupError):
+                self.assertIsNone(control.kernel_name(700))
+            with patch.object(control.os, "kill", return_value=None):
+                self.assertCode("inspection_failed", control.kernel_name, 700)
+
+    def test_kernel_name_truncation_only_narrows_documented_name_fields(self):
+        executable = Path("/fixture/" + "x" * 40)
+        for name in ("x" * 15, "x" * 31):
+            with patch.object(control, "kernel_name", return_value=name):
+                self.assertTrue(control.candidate_name(700, executable))
+        for name in ("x" * 14, "x" * 30, "unrelated", None):
+            with patch.object(control, "kernel_name", return_value=name):
+                self.assertFalse(control.candidate_name(700, executable))
 
     def test_wrong_bundle_identity_is_refused_before_signature_command(self):
         with (self.app / "Contents/Info.plist").open("wb") as stream:

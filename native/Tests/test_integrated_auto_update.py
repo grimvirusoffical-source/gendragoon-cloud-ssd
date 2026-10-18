@@ -409,18 +409,14 @@ class AutoUpdateTests(unittest.TestCase):
                 with updater.update_lock(timeout=0):
                     self.fail("second writer acquired lock")
 
-    def test_exact_process_path_is_required(self):
-        expected = str(updater.app_executable().resolve())
-        paths = {100: expected, 101: "/another/GenDragoon Cloud SSD", 102: "/bin/echo"}
-        def process_path(pid, buffer, length):
-            buffer.value = os.fsencode(paths[pid])
-            return len(buffer.value)
-        library = mock.Mock()
-        library.proc_pidpath = mock.Mock(side_effect=process_path)
-        with mock.patch.object(updater.platform, "system", return_value="Darwin"), \
-                mock.patch.object(updater, "subprocess_ok", return_value="100\n101\n102"), \
-                mock.patch.object(updater.ctypes, "CDLL", return_value=library):
+    def test_process_lookup_uses_shared_exact_identity_scanner_and_keeps_failures(self):
+        expected = updater.app_executable().resolve()
+        scanner = self.mount_reader.app_pids = mock.Mock(return_value=[100])
+        with mock.patch.object(updater.platform, "system", return_value="Darwin"):
             self.assertEqual(updater.app_pids(), [100])
+            scanner.assert_called_once_with(expected)
+            scanner.side_effect = RuntimeError("inspection_failed")
+            with self.assertRaisesRegex(RuntimeError, "inspection_failed"): updater.app_pids()
 
     def test_launch_timeout_reports_failure(self):
         with mock.patch.object(updater, "subprocess_ok", return_value=""), \
