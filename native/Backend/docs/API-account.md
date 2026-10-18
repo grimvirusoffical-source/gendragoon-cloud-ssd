@@ -65,6 +65,19 @@ A repeat `DELETE` with `{"confirm":"DELETE"}` on a `failed` job depends on `retr
 - `retryable: true` returns `202 {"status":"queued","jobId":"<same>","statusToken":"<new>"}`. The new token's hash joins `statusTokens`. The set still holds at most five hashes; a sixth drops the oldest. The job goes back to `queued`, takes a new lease, and keeps the per-step completion markers already on the job document. Finished steps are not run again. Two such retries in flight keep that one `jobId` and start one runner: the request that claims the lease schedules it, and the other only appends a token. If that other request reads the job after it is already `queued` or `running`, its `202` body uses `status:"deleting"`, the same as any repeat while the job is in progress.
 - `retryable: false` returns `409 {"error":"deletion_not_retryable","jobId":"<same>"}`. No new `statusToken` is issued and the job document is left as it was.
 
+`retryable` becomes false in two ways. The job document counts `attempts`. Each failed run adds one. A transient failure stays `retryable: true` through the fourth attempt. The fifth failed attempt sets `retryable: false`. These errors stay transient: HTTP 5xx, network errors, timeouts, and HTTP 429. The job document stores `failureReason` as `upstream_unavailable`, `network`, `timeout`, or `rate_limited`. On the fifth attempt `failureReason` stays that code and `attempts` is 5.
+
+Some errors cannot succeed on another try, so the first failure sets `retryable: false` and `attempts` is 1:
+
+- A GCS 403 or permission-denied while deleting this account's own `customer/{accountHash}/` or `tenants/{accountHash}/` prefix. `failureReason` is `gcs_permission_denied`.
+- A Stripe `authentication_error`. `failureReason` is `stripe_authentication_error`.
+- A Stripe `permission_error`. `failureReason` is `stripe_permission_error`.
+- A Stripe `invalid_request_error` other than `resource_missing`. `failureReason` is `stripe_invalid_request`.
+
+A Stripe `resource_missing` error is success. A missing subscription is already canceled, and a missing customer has nothing to cancel. It does not increment `attempts`. Any other failure stores `failureReason` `deletion_step_failed` and stays retryable until the fifth attempt.
+
+`failureReason` and `attempts` are stored on the job document only. `GET /v2/account/deletions/:jobId` does not return them. Its body stays `jobId`, `status`, and `retryable`. A permanent failure polls as `200 {"jobId","status":"failed","retryable":false}`.
+
 ## Job status
 
 ```http
@@ -110,7 +123,7 @@ Clients keep polling and do not have to send `DELETE` again. A status poll resta
 
 ## What the job does
 
-Steps are idempotent and stored on the job. A failed step stops the job in `failed` with `retryable: true`. A later `DELETE` with a still-fresh Firebase ID token returns the job to `queued` and resumes at the first unfinished step. Completed steps stay marked on the job and are skipped. A Stripe cancel error does not delete objects or the Firebase user. A `failed` job with `retryable: false` is `409 {"error":"deletion_not_retryable","jobId"}` and issues no token.
+Steps are idempotent and stored on the job. A failed step stops the job in `failed`. Transient failures stay `retryable: true` until `attempts` reaches 5. A GCS permission error on this account's own prefix, a Stripe `authentication_error` or `permission_error`, and a Stripe `invalid_request_error` other than `resource_missing` set `retryable: false` on that first failure. A later `DELETE` with a still-fresh Firebase ID token returns a retryable job to `queued` and resumes at the first unfinished step. Completed steps stay marked on the job and are skipped. A Stripe cancel error does not delete objects or the Firebase user. A `failed` job with `retryable: false` is `409 {"error":"deletion_not_retryable","jobId"}` and issues no token.
 
 1. **Stripe.** List the account's subscriptions (`customer` = the stored `stripeCustomerId`, status `all`, paged) and cancel every subscription id found there or on the account's workspace records, including storage, performance, BYO workspace-fee, and any other `*SubscriptionId`. Cancellation is immediate: `invoice_now: false`, `prorate: false`. Unused time is not refunded. The customer portal's `at_period_end` setting applies to self-serve cancel, not to account deletion. No invoice and no PaymentIntent is created. Already-canceled or missing subscriptions are skipped.
 2. **Managed objects.** Delete every object under `customer/{accountHash}/` and `tenants/{accountHash}/` in the configured `CUSTOMER_BUCKET`. Another account's prefix is not listed or deleted.
