@@ -10,24 +10,28 @@ No key material, customer object, or production bucket name belongs in this repo
 
 Before upload, the device encrypts the file with AES-256-GCM. The filename is inside that ciphertext. The server is given an opaque object id (32 or 64 lowercase hex characters, or a UUID) and the ciphertext bytes. It does not accept or log a filename, a plaintext title, or an encryption key.
 
+The reserved id `manifest` is the encrypted file-name list for the workspace. It is allowed for `get`, `put`, and `delete`, and it maps to `<prefix>manifest` (the prefix already ends in `/`, so the object is `<prefix>/manifest`). Every other id keeps the opaque-id check. Resumable uploads are out of scope for launch; `op:"resumable"` is `400 {"error":"invalid_op"}`.
+
 Requests that include any of these fields are rejected with `400 {"error":"plaintext_rejected"}` and are not written to logs: `name`, `filename`, `fileName`, `originalName`, `plaintext`, `key`, `encryptionKey`, `dek`, `kek`, `password`, `secret`, `secretAccessKey`, `accessKey`, `accessKeyId`, `privateKey`, `content`, `data`.
 
 ## `POST /v2/workspaces/:id/storage-urls`
 
 Firebase ID token required (Google provider, current Terms). API keys cannot call this route. The workspace is loaded only under the caller's `accountHash`. A workspace that belongs to another account is `404 {"error":"not_found"}`. The handler does not look up other accounts.
 
-```json
-{"op":"upload","objects":["0123456789abcdef0123456789abcdef"]}
-```
+The request is `{op, objects:[ids]}`. `op` is `get`, `put`, or `delete`. `objects` is 1 to 32 ids. A `put` that includes `manifest` also sends `ifGeneration`: `0` creates the object only, and any other non-negative integer is the current GCS generation.
 
-`op` is `upload` or `download`. `objects` is 1 to 32 opaque ids.
+`put`:
+
+```json
+{"op":"put","objects":["0123456789abcdef0123456789abcdef"]}
+```
 
 ```json
 {
   "bucket": "<CUSTOMER_BUCKET>",
   "prefix": "customer/<accountHash>/managed/<workspaceId>/objects/",
   "mode": "write",
-  "op": "upload",
+  "op": "put",
   "expiresAt": "<ISO-8601>",
   "urls": [
     {"object":"0123456789abcdef0123456789abcdef","method":"PUT","url":"https://storage.googleapis.com/...","expiresAt":"<ISO-8601>"}
@@ -35,7 +39,104 @@ Firebase ID token required (Google provider, current Terms). API keys cannot cal
 }
 ```
 
-`download` returns `mode:"read"` and `method:"GET"`. The legacy free workspace uses the prefix `customer/<accountHash>/free/objects/`.
+`get`:
+
+```json
+{"op":"get","objects":["0123456789abcdef0123456789abcdef"]}
+```
+
+```json
+{
+  "bucket": "<CUSTOMER_BUCKET>",
+  "prefix": "customer/<accountHash>/managed/<workspaceId>/objects/",
+  "mode": "read",
+  "op": "get",
+  "expiresAt": "<ISO-8601>",
+  "urls": [
+    {"object":"0123456789abcdef0123456789abcdef","method":"GET","url":"https://storage.googleapis.com/...","expiresAt":"<ISO-8601>"}
+  ]
+}
+```
+
+`delete`:
+
+```json
+{"op":"delete","objects":["0123456789abcdef0123456789abcdef"]}
+```
+
+```json
+{
+  "bucket": "<CUSTOMER_BUCKET>",
+  "prefix": "customer/<accountHash>/managed/<workspaceId>/objects/",
+  "mode": "delete",
+  "op": "delete",
+  "expiresAt": "<ISO-8601>",
+  "urls": [
+    {"object":"0123456789abcdef0123456789abcdef","method":"DELETE","url":"https://storage.googleapis.com/...","expiresAt":"<ISO-8601>"}
+  ]
+}
+```
+
+`manifest` put. The signed URL includes `x-goog-if-generation-match` set to `ifGeneration`. The client must send that header. GCS returns `412` when the generation does not match, so two devices cannot silently overwrite the name list.
+
+```json
+{"op":"put","objects":["manifest"],"ifGeneration":0}
+```
+
+```json
+{
+  "bucket": "<CUSTOMER_BUCKET>",
+  "prefix": "customer/<accountHash>/managed/<workspaceId>/objects/",
+  "mode": "write",
+  "op": "put",
+  "expiresAt": "<ISO-8601>",
+  "urls": [
+    {"object":"manifest","method":"PUT","url":"https://storage.googleapis.com/<bucket>/customer/<accountHash>/managed/<workspaceId>/objects/manifest?...","expiresAt":"<ISO-8601>"}
+  ]
+}
+```
+
+`manifest` get also returns the object's current `generation` from its metadata. A missing object is generation `"0"`.
+
+```json
+{"op":"get","objects":["manifest"]}
+```
+
+```json
+{
+  "bucket": "<CUSTOMER_BUCKET>",
+  "prefix": "customer/<accountHash>/managed/<workspaceId>/objects/",
+  "mode": "read",
+  "op": "get",
+  "expiresAt": "<ISO-8601>",
+  "urls": [
+    {"object":"manifest","method":"GET","url":"https://storage.googleapis.com/<bucket>/customer/<accountHash>/managed/<workspaceId>/objects/manifest?...","generation":"42","expiresAt":"<ISO-8601>"}
+  ]
+}
+```
+
+`manifest` delete:
+
+```json
+{"op":"delete","objects":["manifest"]}
+```
+
+```json
+{
+  "bucket": "<CUSTOMER_BUCKET>",
+  "prefix": "customer/<accountHash>/managed/<workspaceId>/objects/",
+  "mode": "delete",
+  "op": "delete",
+  "expiresAt": "<ISO-8601>",
+  "urls": [
+    {"object":"manifest","method":"DELETE","url":"https://storage.googleapis.com/<bucket>/customer/<accountHash>/managed/<workspaceId>/objects/manifest?...","expiresAt":"<ISO-8601>"}
+  ]
+}
+```
+
+A missing or invalid `ifGeneration` on a manifest put is `400 {"error":"manifest_generation_required"}`. The signed put URL carries `x-goog-if-generation-match` set to that generation. The client must send the header. GCS returns `412` when it does not match.
+
+The legacy free workspace uses the prefix `customer/<accountHash>/free/objects/`.
 
 Each URL is a [V4 signed URL](https://cloud.google.com/storage/docs/access-control/signed-urls) from `@google-cloud/storage` `file.getSignedUrl({version:"v4"})`. That call uses Application Default Credentials and `google-auth-library` only on the server, to sign the URL (`iamcredentials.signBlob`). The response is the URL string. `DownscopedClient` and Credential Access Boundaries are not used.
 
@@ -44,8 +145,8 @@ Expiry is 15 minutes (`expiresAt - now <= 900000` ms). Upload URLs are signed wi
 | Condition | Response |
 | --- | --- |
 | Workspace not under the caller's account | `404 not_found` |
-| Workspace locked and `op` is `upload` | `423 {"error":"workspace_lock"}` |
-| Workspace locked and `op` is `download` | `200`, read-only URL |
+| Workspace locked and `op` is `put` or `delete` | `423 {"error":"workspace_lock"}` |
+| Workspace locked and `op` is `get` | `200`, read-only URL |
 | BYO / customer-owned workspace | `409 byo_external` (this route never signs a customer bucket) |
 | Id contains a path, `.`, or a filename | `400 invalid_object_id` |
 

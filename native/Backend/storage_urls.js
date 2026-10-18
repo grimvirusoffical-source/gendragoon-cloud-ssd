@@ -23,6 +23,7 @@ function rejectPlaintext(value,depth=0){
  }
 }
 function scopedPath(prefix,objectId){
+ if(objectId==="manifest")return prefix+"manifest";
  if(typeof objectId!=="string"||!OBJECT_ID.test(objectId))throw refusal(400,"invalid_object_id");
  const path=prefix+objectId;
  if(!path.startsWith(prefix)||path.slice(prefix.length)!==objectId||path.includes("..")||path.includes("//"))
@@ -40,10 +41,13 @@ function managedBucketPosture(env=process.env){
  return {encryption:"CMEK",kmsKey,uniformBucketLevelAccess:true,publicAccessPrevention:"enforced",
   transport:"TLS",clientEncryption:"AES-256-GCM",objectNames:"opaque-ids"};
 }
-async function defaultSign({bucket,objectPath,op,expiresAt}){
+const OPS={get:{mode:"read",method:"GET",action:"read"},put:{mode:"write",method:"PUT",action:"write"},
+ delete:{mode:"delete",method:"DELETE",action:"delete"}};
+async function defaultSign({bucket,objectPath,op,expiresAt,extensionHeaders}){
  const file=bucket.file(objectPath);
- const [url]=await file.getSignedUrl({version:"v4",action:op==="upload"?"write":"read",expires:expiresAt,
-  virtualHostedStyle:false,...(op==="upload"?{contentType:"application/octet-stream"}:{})});
+ const [url]=await file.getSignedUrl({version:"v4",action:OPS[op].action,expires:expiresAt,virtualHostedStyle:false,
+  ...(op==="put"?{contentType:"application/octet-stream"}:{}),
+  ...(extensionHeaders?{extensionHeaders}:{})});
  return url;
 }
 // Lock seam. fix/backend-workspace-policy (not merged) exports summarizeProjects.
@@ -80,8 +84,15 @@ async function issueStorageUrls(deps,req){
  rejectPlaintext(req.body);
  const body=req.body;
  if(!body||typeof body!=="object"||Array.isArray(body))throw refusal(400,"invalid_request");
- if(body.op!=="upload"&&body.op!=="download")throw refusal(400,"invalid_op");
+ const spec=OPS[body.op];
+ if(!spec)throw refusal(400,"invalid_op");
  if(!Array.isArray(body.objects)||body.objects.length<1||body.objects.length>MAX_OBJECTS)throw refusal(400,"invalid_objects");
+ const wantsManifest=body.objects.includes("manifest");
+ let generationMatch=null;
+ if(body.op==="put"&&wantsManifest){
+  if(!Number.isSafeInteger(body.ifGeneration)||body.ifGeneration<0)throw refusal(400,"manifest_generation_required");
+  generationMatch=String(body.ifGeneration);
+ }
  const accountHash=deps.hash(req.user.uid);
  if(typeof accountHash!=="string"||!/^[a-f0-9]{64}$/.test(accountHash))throw refusal(400,"invalid_account");
  const workspace=await loadWorkspace(deps.db,accountHash,req.params.id);
@@ -89,7 +100,7 @@ async function issueStorageUrls(deps,req){
  if(!workspace)throw refusal(404,"not_found");
  if(workspace.data.kind==="byo")throw refusal(409,"byo_external");
  const locked=await writeLocked(deps,{db:deps.db,accountHash,workspace:workspace.data,workspaceId:workspace.id});
- if(body.op==="upload"&&locked)throw refusal(423,"workspace_lock");
+ if((body.op==="put"||body.op==="delete")&&locked)throw refusal(423,"workspace_lock");
  const name=bucketName(deps.bucket,env);
  const expiresMs=(typeof deps.now==="function"?deps.now():Date.now())+URL_TTL_MS;
  if(expiresMs-(typeof deps.now==="function"?deps.now():Date.now())>URL_TTL_MS)throw refusal(500,"signing_failed");
@@ -97,13 +108,29 @@ async function issueStorageUrls(deps,req){
  const urls=[];
  for(const objectId of body.objects){
   const objectPath=scopedPath(workspace.prefix,objectId);
-  const url=await sign({bucket:deps.bucket,bucketName:name,objectPath,op:body.op,expiresAt:expiresMs});
+  const extensionHeaders=objectId==="manifest"&&generationMatch!==null?{"x-goog-if-generation-match":generationMatch}:undefined;
+  const url=await sign({bucket:deps.bucket,bucketName:name,objectPath,op:body.op,expiresAt:expiresMs,extensionHeaders});
   if(typeof url!=="string"||!url.startsWith("https://")||url.includes("..")||!url.includes(objectPath))
    throw refusal(500,"signing_failed");
-  urls.push({object:objectId,url,method:body.op==="upload"?"PUT":"GET",expiresAt:new Date(expiresMs).toISOString()});
+  const entry={object:objectId,url,method:spec.method,expiresAt:new Date(expiresMs).toISOString()};
+  if(objectId==="manifest"&&body.op==="get")entry.generation=await manifestGeneration(deps.bucket,objectPath);
+  urls.push(entry);
  }
- return {bucket:name,prefix:workspace.prefix,mode:body.op==="upload"?"write":"read",op:body.op,
+ return {bucket:name,prefix:workspace.prefix,mode:spec.mode,op:body.op,
   expiresAt:new Date(expiresMs).toISOString(),urls};
+}
+async function manifestGeneration(bucket,objectPath){
+ const file=typeof bucket?.file==="function"?bucket.file(objectPath):null;
+ if(!file||typeof file.getMetadata!=="function")return "0";
+ try{
+  const result=await file.getMetadata();
+  const meta=Array.isArray(result)?result[0]:result;
+  if(meta?.generation===undefined||meta?.generation===null||meta.generation==="")return "0";
+  return String(meta.generation);
+ }catch(error){
+  if(error?.code===404||error?.code==="404"||error?.status===404)return "0";
+  throw error;
+ }
 }
 function registerStorageUrls(deps){
  const {app,firebaseAuth}=deps;
