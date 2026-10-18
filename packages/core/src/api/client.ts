@@ -8,6 +8,8 @@ import type {
   ByoChallengeResponse,
   ByoProofRequest,
   ByoProofResponse,
+  ByoRegisterResponse,
+  DeletionSupportResult,
   CapabilitiesResponse,
   CheckoutResponse,
   CloudFile,
@@ -106,6 +108,11 @@ export class GenDragoonClient {
     const body = await this.request<Workspace>("GET", `/v2/projects/${encodeURIComponent(id)}`);
     assertServerPrices(body);
     return body;
+  }
+
+  /** POST /v2/projects/:id/make-hosted. No body. The server returns the new hosted row. */
+  makeHosted(id: string): Promise<Record<string, unknown>> {
+    return this.request("POST", `/v2/projects/${encodeURIComponent(id)}/make-hosted`);
   }
 
   async createProject(body: { name: string; intentId: string }): Promise<Record<string, unknown>> {
@@ -269,7 +276,7 @@ export class GenDragoonClient {
   }
 
   /** POST /v2/workspaces/:id/byo/register. SFTP and the other coming-soon providers return 422. */
-  async registerByo(id: string, body: ByoRegisterRequest): Promise<Record<string, unknown>> {
+  async registerByo(id: string, body: ByoRegisterRequest): Promise<ByoRegisterResponse & Record<string, unknown>> {
     assertNoCredentialFields(body);
     const bucketFingerprint = (body.bucketFingerprint || body.hostFingerprint || "").trim();
     const payload = {
@@ -277,9 +284,47 @@ export class GenDragoonClient {
       endpoint: body.endpoint,
       ...(bucketFingerprint ? { bucketFingerprint } : {}),
     };
-    const registered = await this.request<Record<string, unknown>>("POST", `/v2/workspaces/${encodeURIComponent(id)}/byo/register`, payload);
+    const registered = await this.request<ByoRegisterResponse & Record<string, unknown>>("POST", `/v2/workspaces/${encodeURIComponent(id)}/byo/register`, payload);
     assertServerPrices(registered);
     return registered;
+  }
+
+  /**
+   * POST /v2/account/deletions/:jobId/support-request.
+   * No body. Authorization is the status token, so getToken is not called.
+   * 404, every 401, a network error, and 5xx return the email fallback.
+   * This method does not call onAuthFailure or clear a session.
+   * 409 support_not_needed refreshes GET status with the same token.
+   */
+  async postDeletionSupport(jobId: string, statusToken: string): Promise<DeletionSupportResult> {
+    const path = `/v2/account/deletions/${encodeURIComponent(jobId)}/support-request`;
+    let status: number;
+    let body: unknown;
+    try {
+      const response = await this.raw("POST", path, undefined, { Authorization: `Bearer ${statusToken}` });
+      const text = await response.text();
+      body = text ? safeJson(text) : null;
+      status = response.status;
+    } catch (error) {
+      if (error instanceof ApiError && (error.status === 0 || error.status >= 500)) return deletionSupportFallback();
+      throw error;
+    }
+    const record = body && typeof body === "object" ? body as Record<string, unknown> : {};
+    if (status === 202) {
+      const requestId = typeof record.requestId === "string" ? record.requestId : "";
+      if (record.status === "received" && requestId) return { kind: "received", requestId };
+      return deletionSupportFallback();
+    }
+    if (status === 429) {
+      const retryAfterSec = typeof record.retryAfterSec === "number" ? record.retryAfterSec : undefined;
+      return retryAfterSec === undefined ? { kind: "already_sent" } : { kind: "already_sent", retryAfterSec };
+    }
+    if (status === 409 && record.error === "support_not_needed") {
+      const refreshed = await this.deletionStatus(jobId, statusToken);
+      return { kind: "not_needed", status: refreshed };
+    }
+    if (status === 404 || status === 401 || status >= 500) return deletionSupportFallback();
+    throw toError(status, body);
   }
 
   /** POST /v2/workspaces/:id/byo/challenge. No body. Response is `{ nonce, expiresAtMs, ttlMs }`. */
@@ -451,6 +496,10 @@ function toError(status: number, parsed: unknown): ApiError {
 function machineCode(errorField: string, codeField: string): string {
   if (errorField.length > 0) return errorField;
   return codeField;
+}
+
+function deletionSupportFallback(): DeletionSupportResult {
+  return { kind: "fallback", contact: SUPPORT_CONTACT };
 }
 
 /**

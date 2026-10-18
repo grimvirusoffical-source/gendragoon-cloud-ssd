@@ -121,8 +121,17 @@ describe("423 workspace_lock maps to the delete/merge lock screen", () => {
         const err = await call(clientReturning(lock.fixture.response.status, body)).catch((e) => e);
         expect(err).toBeInstanceOf(WorkspaceLockedError);
         expect(err).toMatchObject({ reason: body.reason, overBy: body.overBy, unpaidWorkspaceIds: body.unpaidWorkspaceIds });
-        expect(applyApiFailure(ready, err).phase).toBe("delete_or_merge");
-        expect(viewAfterFailure("files", err)).toBe("workspaces");
+        if (body.reason === "lapsed") {
+          expect(applyApiFailure(ready, err)).toEqual({
+            phase: "ready",
+            reason: "unpaid",
+            lockedWorkspaceIds: body.unpaidWorkspaceIds,
+          });
+          expect(viewAfterFailure("files", err)).toBe("files");
+        } else {
+          expect(applyApiFailure(ready, err).phase).toBe("delete_or_merge");
+          expect(viewAfterFailure("files", err)).toBe("workspaces");
+        }
       });
     }
   }

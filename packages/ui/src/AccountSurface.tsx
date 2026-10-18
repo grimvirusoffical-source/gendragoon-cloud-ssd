@@ -1,6 +1,7 @@
 import type { ReactNode } from "react";
 import {
   isWorkspaceLockError,
+  isWorkspaceScopedLapse,
   type AccountPhase,
   type LockAssessment,
   type WorkspaceRecord,
@@ -19,6 +20,19 @@ export function AccountSurface(props: {
   onDelete: (id: string) => void;
   children: ReactNode;
 }) {
+  if (isWorkspaceScopedLapse(props.error)) {
+    return (
+      <>
+        <div className="banner" data-testid="workspace-lapse">
+          This workspace is unpaid. Other workspaces stay usable.
+          <ul data-testid="unpaid-workspaces">
+            {props.error.unpaidWorkspaceIds.map((id) => <li key={id}>{id}</li>)}
+          </ul>
+        </div>
+        {props.children}
+      </>
+    );
+  }
   if (props.phase === "delete_or_merge" || isWorkspaceLockError(props.error)) {
     const assessment: LockAssessment = props.assessment.locked
       ? props.assessment
