@@ -278,3 +278,40 @@ describe("PR #3 review: theme", () => {
     }
   });
 });
+
+describe("PR #3 review at cd65644: the screen's own catch", () => {
+  // Core no longer throws on odd statuses, so nothing else exercises the screen-level
+  // catch in contact(). Make core throw directly (the secret store fails) and require
+  // that the screen still mails support and never signs the user in or out.
+  it("a throw from requestDeletionSupport mails support, with no error or sign-in", async () => {
+    const openURL = jest.spyOn(Linking, "openURL").mockResolvedValue(undefined as never);
+    const broken = new MemorySecretStore();
+    broken.get = async () => { throw new Error("keychain unavailable"); };
+    const fetchImpl = jest.fn();
+    const hooks = { onReauth: jest.fn(), onSignedOut: jest.fn(), onClearSession: jest.fn(), onError: jest.fn(), onDone: jest.fn() };
+    const s = await render(
+      <DeleteAccountScreen
+        frame="not-retryable"
+        jobId={JOB}
+        supportEndpointEnabled
+        apiBase="https://api.example.test"
+        supportFetch={fetchImpl as never}
+        activeTransfers={0}
+        secrets={broken}
+        workspaceIds={["ws-1"]}
+        idToken=""
+        client={{
+          async deleteAccount() { return { jobId: JOB }; },
+          async deletionStatus() { return { jobId: JOB, status: "failed", retryable: false }; },
+        }}
+        {...hooks}
+      />,
+    );
+    await fireEvent.press(s.getByTestId("contact-support"));
+    await waitFor(() => expect(openURL).toHaveBeenCalledWith(mailto));
+    expect(fetchImpl).not.toHaveBeenCalled();
+    for (const hook of Object.values(hooks)) expect(hook).not.toHaveBeenCalled();
+    expect(s.queryByTestId("deletion-reauth")).toBeNull();
+    openURL.mockRestore();
+  });
+});
