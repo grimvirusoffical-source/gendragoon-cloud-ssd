@@ -6,5 +6,13 @@
   "commit": "d33970cbf0175a74898c37a8a624a92b1c1a5a94",
   "paths": [
     "fixtures/account-deletion"
+  ],
+  "files": [
+    {
+      "file": "fixtures/account-deletion/support-unauthorized.json",
+      "branch": "fix/account-deletion",
+      "pullRequest": 6,
+      "commit": "048641275e717e00b4031cf76ccca57cc2e1dc35"
+    }
   ]
 }

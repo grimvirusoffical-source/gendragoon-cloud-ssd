@@ -292,9 +292,10 @@ export class GenDragoonClient {
   /**
    * POST /v2/account/deletions/:jobId/support-request.
    * No body. Authorization is the status token, so getToken is not called.
-   * 404, every 401, a network error, and 5xx return the email fallback.
+   * 404, every 401, other 4xx, a network error, and 5xx return the email fallback.
    * This method does not call onAuthFailure or clear a session.
    * 409 support_not_needed refreshes GET status with the same token.
+   * A failed refresh is the same email fallback.
    */
   async postDeletionSupport(jobId: string, statusToken: string): Promise<DeletionSupportResult> {
     const path = `/v2/account/deletions/${encodeURIComponent(jobId)}/support-request`;
@@ -306,7 +307,7 @@ export class GenDragoonClient {
       body = text ? safeJson(text) : null;
       status = response.status;
     } catch (error) {
-      if (error instanceof ApiError && (error.status === 0 || error.status >= 500)) return deletionSupportFallback();
+      if (error instanceof ApiError && (error.status === 0 || error.status >= 400)) return deletionSupportFallback();
       throw error;
     }
     const record = body && typeof body === "object" ? body as Record<string, unknown> : {};
@@ -320,10 +321,14 @@ export class GenDragoonClient {
       return retryAfterSec === undefined ? { kind: "already_sent" } : { kind: "already_sent", retryAfterSec };
     }
     if (status === 409 && record.error === "support_not_needed") {
-      const refreshed = await this.deletionStatus(jobId, statusToken);
-      return { kind: "not_needed", status: refreshed };
+      try {
+        const refreshed = await this.deletionStatus(jobId, statusToken);
+        return { kind: "not_needed", status: refreshed };
+      } catch {
+        return deletionSupportFallback();
+      }
     }
-    if (status === 404 || status === 401 || status >= 500) return deletionSupportFallback();
+    if (status >= 400) return deletionSupportFallback();
     throw toError(status, body);
   }
 

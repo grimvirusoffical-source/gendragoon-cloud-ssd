@@ -7,10 +7,10 @@
  *   401  {error:"reauth_required"} | {error:"invalid_token"}   (key is `error`, there is no `code`)
  *   410  {error:"account_deleted", jobId, statusToken}    (fresh statusToken since 84f6fff)
  *   404  {error:"not_found"}
- * `it.fails` + "BUG(contract)" = core does not meet the contract today.
- * `it.fails` + "TODO(contract)" = PR #6 84f6fff ships statusToken; core does not use it yet
- *   (Avery's queued PR #1 push: statusToken polling + injected SecureStore {get,set,delete}).
- * Remove the marker when the fix lands; the test then has to pass for real.
+ * Every case here passes on core (PR #1 at 93b2fdf and later). None is marked
+ * it.fails, skip or todo; a regression must fail the suite. Earlier revisions of
+ * this file tracked core gaps as it.fails "BUG(contract)" cases with core
+ * file:line in the title; those fixes landed and the markers were removed.
  *
  * Final rulings (Avery + Riley, Oct 18): `error` wins over `code` when both are set
  * and differ, and `failed` is not terminal for the client (keep jobId+statusToken,
@@ -179,7 +179,7 @@ describe("deletion contract: terminal states read from `status` (not `state`)", 
     expect(r.keys).toBe(2);
   });
 
-  it("BUG(contract): 'completed'/unknown status fails immediately instead of polling to timeout (account.ts:80-82 treats only done|failed as terminal)", async () => {
+  it("'completed'/unknown status fails immediately instead of polling to timeout", async () => {
     const r = await run({ del: [accepted()], status: [st("completed")] }, { timeoutMs: 500 });
     expect(r.error).toBeDefined();
     expect(statusCalls(r.calls).length).toBe(1);
@@ -235,7 +235,7 @@ describe("deletion contract: 410 account_deleted", () => {
     expect(r.keys).toBe(2);
   });
 
-  it("BUG(contract): 410 {error:'account_deleted', jobId} polls that job and wipes only on done (client.ts:301,303 needs `code`, so AccountDeletedError is never built)", async () => {
+  it("410 {error:'account_deleted', jobId} polls that job and wipes only on done", async () => {
     const r = await run({ del: [{ status: 410, body: { error: "account_deleted", jobId: JOB } }], status: [st("running"), st("done")] });
     expect(statusCalls(r.calls).map((c) => c.path)).toEqual([`/v2/account/deletions/${JOB}`, `/v2/account/deletions/${JOB}`]);
     expect(r.keys).toBe(0);
@@ -572,11 +572,11 @@ describe("deletion ruling: 401 invalid_token (Firebase token -> sign-out; status
     expect(r.signals.map((s) => s.signal)).toContain("reauth_required");
   }
 
-  it("BUG(contract): status-unauthorized on a poll -> onAuthFailure('reauth_required'), polling stops, job kept, nothing wiped (account.ts:201-204 rethrows with no onAuthFailure call; client.ts:396-401 leaves 401 unauthorized a generic ApiError)", async () => {
+  it("status-unauthorized on a poll -> onAuthFailure('reauth_required'), polling stops, job kept, nothing wiped", async () => {
     await expectReauthStopKeep(await pollWith401(STATUS_UNAUTHORIZED.response.body));
   });
 
-  it("BUG(contract): bare 401 with no code on a poll (DERIVED body {}) -> onAuthFailure('reauth_required'), polling stops, job kept, nothing wiped (account.ts:201-204 rethrows with no onAuthFailure call)", async () => {
+  it("bare 401 with no code on a poll (DERIVED body {}) -> onAuthFailure('reauth_required'), polling stops, job kept, nothing wiped", async () => {
     // DERIVED: Riley has no status fixture for a 401 without a code.
     await expectReauthStopKeep(await pollWith401({}));
   });
@@ -625,9 +625,9 @@ describe("deletion ruling: 401 invalid_token (Firebase token -> sign-out; status
    *
    * The sign-out signal has to reach the shell while polling goes on, so it cannot be a thrown
    * error. Avery's core hook (PR #1): `onAuthFailure(signal, error)` with signal exactly
-   * "signed_out" or "reauth_required". Core does not accept it yet, so it is passed through a cast.
+   * "signed_out" or "reauth_required".
    */
-  it("BUG(contract): Firebase-token poll -> invalid_token (real status-invalid-token) signs out, keeps the saved job, and polling continues with Bearer statusToken through real status-running -> status-done; done wipes and clears (account.ts:197-199 polls with only one credential, the statusToken when saved; account.ts:201-204 rethrows the 401 and stops polling)", async () => {
+  it("Firebase-token poll -> invalid_token (real status-invalid-token) signs out, keeps the saved job, and polling continues with Bearer statusToken through real status-running -> status-done; done wipes and clears", async () => {
     const secrets = await seededSecrets();
     const secureStore = await savedJob(GONE_BODY.jobId, GONE_BODY.statusToken);
     const now = Date.now();
@@ -691,12 +691,11 @@ describe("deletion ruling: 401 invalid_token (Firebase token -> sign-out; status
     expect(await saved(secureStore, TOKEN_KEY)).toBe(ACCEPTED_BODY.statusToken);
   });
 
-  it("BUG(contract): poll with the statusToken -> invalid_token signals SIGN-IN ('reauth'), not sign-out (client.ts:379 maps it to InvalidTokenError; account.ts:201-204 rethrows it without the statusToken context)", async () => {
+  it("poll with the statusToken -> invalid_token signals SIGN-IN ('reauth'), not sign-out", async () => {
     const secrets = await seededSecrets();
     const secureStore = await savedJob(GONE_BODY.jobId, STALE_TOKEN);
     const srv = server({ del: [reply("account-deleted")], status: [reply("status-invalid-token")] });
     // Avery's core hook (PR #1): onAuthFailure(signal, error), signal "signed_out" | "reauth_required".
-    // Core does not accept it yet, so it is passed through a cast.
     const signals: Array<{ signal: unknown; error: unknown }> = [];
     const input = {
       client: new GenDragoonClient({ baseUrl: BASE, getToken: signedOut, fetch: srv.fetchImpl }),
@@ -717,7 +716,7 @@ describe("deletion ruling: 401 invalid_token (Firebase token -> sign-out; status
     expect(await saved(secureStore, TOKEN_KEY)).toBe(STALE_TOKEN);
   });
 
-  it("BUG(contract): after the owner signs in, a repeat DELETE gets the real 410 account_deleted, its fresh statusToken replaces the stale one, polling resumes with it, done wipes and clears (account.ts:121-122 skips DELETE when a job is saved)", async () => {
+  it("after the owner signs in, a repeat DELETE gets the real 410 account_deleted, its fresh statusToken replaces the stale one, polling resumes with it, done wipes and clears", async () => {
     // State left by the safety net: job ...0005 saved with the token the server rejected.
     const secrets = await seededSecrets();
     const secureStore = await savedJob(GONE_BODY.jobId, STALE_TOKEN);
@@ -800,7 +799,7 @@ describe("deletion ruling: 401 invalid_token (Firebase token -> sign-out; status
  * Retry entry point: core.retryDeletion if PR #1 exports it (called with the same input as
  * deleteAccountAndWipe), otherwise a second deleteAccountAndWipe() on the same SecureStore.
  * The Retry tests start from the state the ruling requires after `failed` (the job and its
- * previous token saved), so they fail only on the Retry behavior, not on the clearing bug.
+ * previous token saved), so they exercise only the Retry behavior.
  */
 describe("deletion ruling: failed is not terminal (fixtures fff0a84)", () => {
   const fx = (name: string) => loadDeletionFixture(name);
@@ -909,7 +908,7 @@ describe("deletion ruling: failed is not terminal (fixtures fff0a84)", () => {
     expect(await keysLeft(secrets)).toBe(2);
   });
 
-  it("BUG(contract): failed+retryable keeps jobId+statusToken in SecureStore (account.ts:218-219 clears the saved job on failed)", async () => {
+  it("failed+retryable keeps jobId+statusToken in SecureStore", async () => {
     const secrets = await seededSecrets();
     const secureStore = new MemorySecretStore();
     await attempt({ del: [reply("accepted")], status: [reply("status-failed")] }, secrets, secureStore);
@@ -918,7 +917,7 @@ describe("deletion ruling: failed is not terminal (fixtures fff0a84)", () => {
     expect(await saved(secureStore, TOKEN_KEY)).toBe(ACCEPTED_BODY.statusToken);
   });
 
-  it("BUG(contract): Retry on failed+retryable re-sends DELETE; real retry-after-failed 202 keeps the jobId, replaces the saved statusToken, polls with the new token, wipes and clears only on done (account.ts:121-122 skips DELETE when a job is saved; no retry path)", async () => {
+  it("Retry on failed+retryable re-sends DELETE; real retry-after-failed 202 keeps the jobId, replaces the saved statusToken, polls with the new token, wipes and clears only on done", async () => {
     const secrets = await seededSecrets();
     const secureStore = await savedFailedJob();
     const r = await retry({ del: [reply("retry-after-failed")], status: [reply("status-queued"), reply("status-running"), reply("status-done")] }, secrets, secureStore);
@@ -938,7 +937,7 @@ describe("deletion ruling: failed is not terminal (fixtures fff0a84)", () => {
     expect(await saved(secureStore, TOKEN_KEY)).toBeNull();
   });
 
-  it("BUG(contract): Retry on failed+retryable saves the NEW statusToken over the old one and keeps the jobId before polling (account.ts:121-122 skips DELETE when a job is saved; no retry path)", async () => {
+  it("Retry on failed+retryable saves the NEW statusToken over the old one and keeps the jobId before polling", async () => {
     const secrets = await seededSecrets();
     const secureStore = await savedFailedJob();
     const killed = new Error("app killed");
@@ -962,7 +961,7 @@ describe("deletion ruling: failed is not terminal (fixtures fff0a84)", () => {
 
   // Avery: the UI shows support contact + Dismiss for this 409. PR #1 will export
   // DeletionNotRetryableError carrying jobId; core has no such class yet.
-  it("BUG(contract): the client maps 409 {error:'deletion_not_retryable', jobId} (real retry-not-retryable) to DeletionNotRetryableError carrying jobId (index.ts exports no such class; client.ts toError falls through to a generic ApiError, client.ts:396-401)", async () => {
+  it("the client maps 409 {error:'deletion_not_retryable', jobId} (real retry-not-retryable) to DeletionNotRetryableError carrying jobId", async () => {
     const now = Date.now();
     const tok = idToken(Math.floor(now / 1000) - 30);
     const srv = server({ del: [reply("retry-not-retryable")] });
@@ -975,7 +974,7 @@ describe("deletion ruling: failed is not terminal (fixtures fff0a84)", () => {
     expect(error).toMatchObject({ jobId: NOT_RETRYABLE_BODY.jobId });
   });
 
-  it("BUG(contract): Retry on failed+non-retryable -> real 409 retry-not-retryable keeps the job, wipes nothing, surfaces a non-retryable error; Dismiss then clears without wiping (account.ts:121-122 skips DELETE when a job is saved; no retry path)", async () => {
+  it("Retry on failed+non-retryable -> real 409 retry-not-retryable keeps the job, wipes nothing, surfaces a non-retryable error; Dismiss then clears without wiping", async () => {
     const secrets = await seededSecrets();
     const secureStore = await savedFailedJob(NOT_RETRYABLE_BODY.jobId);
     const r = await retry({ del: [reply("retry-not-retryable")], status: [reply("status-failed")] }, secrets, secureStore);
@@ -999,7 +998,7 @@ describe("deletion ruling: failed is not terminal (fixtures fff0a84)", () => {
     expect(await keysLeft(secrets)).toBe(2);
   });
 
-  it("BUG(contract): failed+non-retryable (real status-failed-not-retryable) keeps the job until the user dismisses, then clears it without wiping (account.ts:218-219 clears on failed)", async () => {
+  it("failed+non-retryable (real status-failed-not-retryable) keeps the job until the user dismisses, then clears it without wiping", async () => {
     const secrets = await seededSecrets();
     const secureStore = new MemorySecretStore();
     const r = await attempt({ del: [reply("accepted")], status: [reply("status-failed-not-retryable")] }, secrets, secureStore);
@@ -1088,7 +1087,7 @@ describe("deletion ruling: `error` wins over `code` when they differ (contract e
     expect(r.keys).toBe(2);
   });
 
-  it("BUG(contract): {error:'invalid_token', code:'reauth_required'} -> invalid_token / sign-out (client.ts:408-411 machineCode returns `code` when they differ)", async () => {
+  it("{error:'invalid_token', code:'reauth_required'} -> invalid_token / sign-out", async () => {
     const r = await run({ del: [withCode("invalid-token", "reauth_required")] });
     expect(r.error).toBeInstanceOf(InvalidTokenError);
     expect(r.error).toMatchObject({ status: 401, code: "invalid_token" });
@@ -1096,7 +1095,7 @@ describe("deletion ruling: `error` wins over `code` when they differ (contract e
     expect(r.keys).toBe(2);
   });
 
-  it("BUG(contract): {error:'reauth_required', code:'invalid_token'} -> reauth_required / sign-in (client.ts:408-411 machineCode returns `code` when they differ)", async () => {
+  it("{error:'reauth_required', code:'invalid_token'} -> reauth_required / sign-in", async () => {
     const r = await run({ del: [withCode("reauth-required", "invalid_token")] });
     expect(r.error).toBeInstanceOf(ReauthRequiredError);
     expect(r.error).toMatchObject({ status: 401, code: "reauth_required" });
@@ -1104,7 +1103,7 @@ describe("deletion ruling: `error` wins over `code` when they differ (contract e
     expect(r.keys).toBe(2);
   });
 
-  it("BUG(contract): non-token `error` still wins: 401 {error:'Session expired', code:'invalid_token'} -> ApiError.code 'Session expired', not InvalidTokenError (client.ts:409-411 falls back to `code` when `error` is not token-shaped)", async () => {
+  it("non-token `error` still wins: 401 {error:'Session expired', code:'invalid_token'} -> ApiError.code 'Session expired', not InvalidTokenError", async () => {
     // DERIVED from the invalid-token fixture: `error` replaced by a sentence, `code` added.
     const f = loadDeletionFixture("invalid-token");
     const r = await run({ del: [{ status: f.response.status, body: { error: "Session expired", code: "invalid_token" } }] });
@@ -1113,7 +1112,7 @@ describe("deletion ruling: `error` wins over `code` when they differ (contract e
     expect(r.keys).toBe(2);
   });
 
-  it("BUG(contract): 400 {error:'confirm_required', code:'not_found'} keeps ApiError.code = confirm_required (client.ts:408-411 machineCode returns `code`)", async () => {
+  it("400 {error:'confirm_required', code:'not_found'} keeps ApiError.code = confirm_required", async () => {
     const r = await run({ del: [withCode("confirm-wrong", "not_found")] });
     expect(r.error).toMatchObject({ status: 400, code: "confirm_required" });
     expect(r.keys).toBe(2);
