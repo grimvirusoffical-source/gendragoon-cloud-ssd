@@ -207,7 +207,7 @@ final class WorkspaceFixtureContractTests: XCTestCase {
         let cap = try GDFixtureFile.load("workspaces", "cap-reached")
         XCTAssertEqual(GDServerCode.read(cap.body), "PROJECT_LIMIT_REACHED")
         let message = GDStorageContract.explainProjectWrite(status: cap.status, json: cap.body)
-        XCTAssertNotEqual(message, "PROJECT_LIMIT_REACHED")
+        XCTAssertNotEqual(message, String?("PROJECT_LIMIT_REACHED"))
         XCTAssertFalse(message?.contains("PROJECT_LIMIT_REACHED") ?? true)
     }
 

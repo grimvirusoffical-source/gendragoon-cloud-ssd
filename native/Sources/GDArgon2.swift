@@ -133,7 +133,7 @@ enum GDArgon2 {
             return data
         }
         func xored(_ other: Block) -> Block {
-            Block(words: zip(words, other.words).map { $0 &^ $1 })
+            Block(words: zip(words, other.words).map { $0 ^ $1 })
         }
     }
 
