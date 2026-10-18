@@ -1,0 +1,7 @@
+# Blob ids of packages/core/test/vectors/manifest-merge/* in gendragoon-apps (identical at ccde5bf, caf30ae, 4582ae7, 37459bb).
+7fca6ae136b29fdb8a0bcc73266906a3f20e2f72 clock-skew.json
+d5f0ed396865936572d48b14058643a033175890 concurrent-delete-vs-edit.json
+2a15e282b781236ee511cd1866e17a233fb1c8cd delete-readd-same-path.json
+6a07ee07fc349528f70620b0180e5eefdbf9416d empty-remote-higher-version.json
+8fd4f56c7ebc67b44ef72c4e472d251224f7f29a stale-device-pruned-through.json
+7dd5380c4b2d57df74842d300452f933cd016bea tombstone-pruning.json
