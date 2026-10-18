@@ -2,7 +2,7 @@
 const crypto=require("node:crypto");
 const {STORAGE,PERFORMANCE,validateWorkspaceName}=require("./catalog");
 const {GPU,GPU_READY,gpuQuote,tripleBundleQuote}=require("./gpu_catalog");
-const {createProjectService,ProjectError,projectStatus,activatedBasicProject,effectiveStorageQuota,safeProjectId,hasContinuingBilling,isGrandfathered,evaluateLapse}=require("./projects");
+const {createProjectService,ProjectError,projectStatus,activatedBasicProject,effectiveStorageQuota,safeProjectId,hasContinuingBilling,isGrandfathered,evaluateLapse,workspacePrice,byoLapsed}=require("./projects");
 const {rejectProviderSecrets}=require("./workspace_policy");
 const FREE_GB=2,FREE_WORKERS=1,REMOVE_ADS_CENTS=499;
 const VALID_INTERVALS=new Set(["month","year"]);
@@ -70,8 +70,10 @@ function effectiveWorkers(workspace){
  async function getWorkspace(req,res){
    try{return await projects.get(req,req.params.id);}catch(error){projectError(res,error);return null;}
  }
- function publicWorkspace(w){
+ function publicWorkspace(w,freeId=null){
+   const price=workspacePrice({...w.data,id:w.id},freeId);
    return {id:w.id,name:w.data.name,kind:w.data.kind,storageMode:w.data.storageMode||null,
+   isFree:price.isFree,monthlyPriceCents:price.monthlyPriceCents,
    byoActive:!!w.data.byoActive,manualProviderConfigured:!!w.data.manualProviderConfigured,
    storageTier:w.data.storageTier||null,
    storageInterval:w.data.storageInterval||null,storageBillingVersion:w.data.storageBillingVersion||1,
@@ -82,7 +84,7 @@ function effectiveWorkers(workspace){
    provisioned:w.data.provisioned===true||(w.data.kind==="free"&&w.data.provisioned!==false),
    projectStatus:projectStatus(w.data),projectBillingVersion:w.data.projectBillingVersion||1,
    projectFeeStatus:w.data.projectFeeStatus||"legacy",projectFeeCents:w.data.projectFeeCents||0,
-   grandfathered:isGrandfathered(w.data),lapsed:evaluateLapse(w.data).lapsed,
+   grandfathered:isGrandfathered(w.data),lapsed:evaluateLapse(w.data).lapsed||byoLapsed(w.data),
    workspaceFeeModel:w.data.workspaceFeeModel||(isGrandfathered(w.data)?"one_time":null),
    byoChallengeVerified:w.data.byoChallengeVerified===true,
    intendedSelection:w.data.intendedSelection||{},dataRetained:w.data.dataRetained===true,
@@ -150,12 +152,12 @@ function effectiveWorkers(workspace){
  app.get("/v2/workspaces",auth,agreed,async(req,res)=>{
    try{
      const result=await projects.inventory(req);
-     res.json({ownerBenefits:req.ownerBenefits===true,workspaces:result.records.filter(w=>projectStatus(w.data)!=="archived").map(publicWorkspace),policy:result.policy});
+     res.json({ownerBenefits:req.ownerBenefits===true,workspaces:result.records.filter(w=>projectStatus(w.data)!=="archived").map(w=>publicWorkspace(w,result.policy.freeWorkspaceId)),policy:result.policy});
    }catch(_){res.status(503).json({error:"Workspaces unavailable"})}
  });
  app.get("/v2/projects",auth,agreed,async(req,res)=>{
    try{const result=await projects.inventory(req);res.json({ownerBenefits:req.ownerBenefits===true,policy:result.policy,
-     projects:result.records.filter(w=>req.query.includeArchived==="true"||projectStatus(w.data)!=="archived").map(publicWorkspace)});}
+     projects:result.records.filter(w=>req.query.includeArchived==="true"||projectStatus(w.data)!=="archived").map(w=>publicWorkspace(w,result.policy.freeWorkspaceId))});}
    catch(error){projectError(res,error);}
  });
  app.post("/v2/projects",auth,agreed,async(req,res)=>{
@@ -163,18 +165,27 @@ function effectiveWorkers(workspace){
      const result=await projects.create(req,{name:req.body?.name,intentId:req.body?.intentId});
      let payment={};
      if(result.project.data.projectFeeStatus==="pending")payment=await projects.checkout(req,result.project.id);
-     res.status(result.resumed?200:201).json({project:publicWorkspace(result.project),workspaceId:result.project.id,
-       policy:result.policy,resumed:result.resumed,oneTimeCents:result.project.data.projectFeeStatus==="pending"?500:0,...payment});
+     const project=publicWorkspace(result.project,result.policy.freeWorkspaceId);
+     const monthly=result.project.data.workspaceFeeModel==="monthly";
+     res.status(result.resumed?200:201).json({project,workspaceId:result.project.id,isFree:project.isFree,monthlyPriceCents:project.monthlyPriceCents,
+       policy:result.policy,resumed:result.resumed,oneTimeCents:result.project.data.projectFeeStatus==="pending"&&!monthly?500:0,...payment});
    }catch(error){projectError(res,error);}
  });
  app.get("/v2/projects/:id",auth,agreed,async(req,res)=>{
-   try{res.json(publicWorkspace(await projects.get(req,req.params.id)));}catch(error){projectError(res,error);}
+   try{
+     const result=await projects.inventory(req),w=result.records.find(item=>item.id===req.params.id);
+     if(!w)return res.status(404).json({error:"PROJECT_NOT_FOUND",message:"Project not found"});
+     res.json(publicWorkspace(w,result.policy.freeWorkspaceId));
+   }catch(error){projectError(res,error);}
  });
  app.post("/v2/projects/:id/checkout",auth,agreed,async(req,res)=>{
    try{res.json(await projects.checkout(req,req.params.id));}catch(error){projectError(res,error);}
  });
  app.put("/v2/projects/:id/selection",auth,agreed,async(req,res)=>{
    try{res.json({workspaceId:req.params.id,intendedSelection:await projects.setSelection(req,req.params.id,req.body)});}catch(error){projectError(res,error);}
+ });
+ app.delete("/v2/projects/:id",auth,agreed,async(req,res)=>{
+   try{res.json(await projects.remove(req,req.params.id));}catch(error){projectError(res,error);}
  });
  app.post("/v2/projects/:id/archive",auth,agreed,async(req,res)=>{
    try{res.json(await projects.archive(req,req.params.id,req.body));}catch(error){projectError(res,error);}
@@ -237,7 +248,12 @@ function effectiveWorkers(workspace){
    }catch(error){if(error instanceof ProjectError)return projectError(res,error);res.status(400).json({error:"Invalid workspace or storage plan"})}
  });
  app.get("/v2/workspaces/:id",auth,agreed,async(req,res)=>{
-   try{const w=await getWorkspace(req,res);if(w)res.json(publicWorkspace(w))}
+   try{
+     const w=await getWorkspace(req,res);
+     if(!w)return;
+     const result=await projects.inventory(req);
+     res.json(publicWorkspace(w,result.policy.freeWorkspaceId));
+   }
    catch(_){res.status(503).json({error:"Workspace unavailable"})}
  });
  async function existingCheckout(w,kind,res,selection){

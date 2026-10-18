@@ -33,6 +33,13 @@ const wid=n=>"11111111-1111-4111-8111-"+String(n).padStart(12,"0");
 const outDir=path.resolve(process.argv[2]||path.join(__dirname,"../../../fixtures"));
 const env={STRIPE_CHECKOUT_ENABLED:"false",STRIPE_ENVIRONMENT:"test",PUBLIC_URL:"https://billing.example"};
 const stripe={customers:{create:async()=>({id:"cus_fixture"})},checkout:{sessions:{}},prices:{retrieve:async()=>{throw Error("stripe double");}}};
+const monthlyEnv={...env,STRIPE_CHECKOUT_ENABLED:"true",STRIPE_WORKSPACE_MONTHLY_READY:"true",STRIPE_WORKSPACE_MONTHLY_PRICE_ID:"price_fixturemonthly"};
+function monthlyStripe(){
+ return {customers:{create:async()=>({id:"cus_fixture"})},
+  prices:{retrieve:async id=>({id,active:true,type:"recurring",recurring:{interval:"month"},currency:"usd",unit_amount:500,billing_scheme:"per_unit",livemode:false,product:{active:true}})},
+  checkout:{sessions:{retrieve:async()=>{throw Error("missing session");},create:async()=>({id:"cs_fixture_monthly",url:"https://checkout.stripe.com/c/pay/cs_fixture_monthly",status:"open"})}}};
+}
+const byoBody={provider:"s3",endpoint:"https://bucket.s3.us-east-1.amazonaws.com",bucketFingerprint:"ab".repeat(8)};
 const SECRET_HEADERS=new Set(["authorization","cookie","set-cookie","x-api-key","stripe-signature"]);
 
 function sortValue(value){
@@ -77,7 +84,7 @@ function paid(name,extra={}){
   provisioned:true,storageActive:false,performanceActive:false,usedBytes:0,reservedBytes:0,createdAt:NOW,...extra};
 }
 function put(db,id,data,account=owner){db.rows.set("gd_accounts/"+account+"/workspaces/"+id,data);}
-async function start(db,{byoFetch=null}={}){
+async function start(db,{byoFetch=null,env:useEnv=env,stripe:useStripe=stripe}={}){
  const app=express();
  app.use(express.json({limit:"16kb"}));
  const auth=(req,res,next)=>{
@@ -85,8 +92,8 @@ async function start(db,{byoFetch=null}={}){
   if(token==="owner"||token==="other"){req.user={uid:token};return next();}
   res.status(401).json({error:"Sign in required"});
  };
- registerBillingV2({app,db,stripe,admin:{firestore:{FieldValue:{serverTimestamp:()=>NOW}}},
-  auth,agreed:(_req,_res,next)=>next(),hash,prices:{},env,byoFetch});
+ registerBillingV2({app,db,stripe:useStripe,admin:{firestore:{FieldValue:{serverTimestamp:()=>NOW}}},
+  auth,agreed:(_req,_res,next)=>next(),hash,prices:{},env:useEnv,byoFetch});
  registerPaidStorage({app,db,bucket:{file:()=>({})},accountKey:hash,
   FieldValue:{increment:n=>({increment:n}),serverTimestamp:()=>NOW},
   apiKeys:{verify:async()=>null},getAuth:()=>({}),firebaseAuth:auth});
@@ -209,6 +216,76 @@ async function byoCases(){
  }finally{await app.close();}
 }
 
+function assertPrice(record,isFree,cents,label){
+ const body=record.response.body||{};
+ if(record.response.status!==200&&record.response.status!==201)throw Error(label+" status "+JSON.stringify(record.response));
+ if(body.isFree!==isFree||body.monthlyPriceCents!==cents)throw Error(label+" price "+JSON.stringify(body));
+}
+async function freeSlotCases(){
+ const hosted=await start(memoryFirestore(),{env:monthlyEnv,stripe:monthlyStripe()});
+ try{
+  const first=await capture(hosted.base,"POST","/v2/projects",{body:{name:"Free Hosted",intentId:wid(1)}});
+  assertPrice(first,true,0,"free-first");
+  writeCase("workspaces","free-first",first);
+  const second=await capture(hosted.base,"POST","/v2/projects",{body:{name:"Second Workspace",intentId:wid(2)}});
+  assertPrice(second,false,500,"second-paid");
+  writeCase("workspaces","second-paid",second);
+  const moved=await capture(hosted.base,"POST","/v2/workspaces/"+wid(1)+"/byo/register",{body:byoBody});
+  assertPrice(moved,false,500,"free-to-byo");
+  if(moved.response.body?.freeWorkspaceId!==wid(2))throw Error("free slot did not move "+JSON.stringify(moved.response.body));
+  writeCase("workspaces","free-to-byo-billable",moved);
+  const both=await capture(hosted.base,"GET","/v2/workspaces");
+  const items=both.response.body?.workspaces||[];
+  const kept=items.find(item=>item.id===wid(2)),converted=items.find(item=>item.id===wid(1));
+  if(kept?.isFree!==true||kept?.monthlyPriceCents!==0||converted?.isFree!==false||converted?.monthlyPriceCents!==500)
+   throw Error("hosted plus byo "+JSON.stringify(items));
+  if(both.response.body?.policy?.reason!=="lapsed"||!both.response.body.policy.unpaidWorkspaceIds.includes(wid(1)))
+   throw Error("hosted plus byo lock "+JSON.stringify(both.response.body?.policy));
+  writeCase("workspaces","list-hosted-plus-byo",both);
+ }finally{await hosted.close();}
+ const only=await start(memoryFirestore(),{env:monthlyEnv,stripe:monthlyStripe()});
+ try{
+  const created=await capture(only.base,"POST","/v2/projects",{body:{name:"Only BYO",intentId:wid(3)}});
+  if(created.response.status!==201)throw Error("only byo create "+JSON.stringify(created.response));
+  const registered=await capture(only.base,"POST","/v2/workspaces/"+wid(3)+"/byo/register",{body:byoBody});
+  assertPrice(registered,false,500,"byo-first");
+  if(registered.response.body?.freeWorkspaceId!==null)throw Error("byo held the free slot "+JSON.stringify(registered.response.body));
+  writeCase("workspaces","byo-first-paid",registered);
+  const listed=await capture(only.base,"GET","/v2/workspaces");
+  const item=listed.response.body?.workspaces?.[0];
+  if(listed.response.body?.workspaces?.length!==1||item?.isFree!==false||item?.monthlyPriceCents!==500)
+   throw Error("list byo only "+JSON.stringify(listed.response.body));
+  const policy=listed.response.body?.policy;
+  if(policy?.locked!==true||policy.reason!=="lapsed"||!policy.unpaidWorkspaceIds.includes(wid(3)))
+   throw Error("list byo lock "+JSON.stringify(policy));
+  writeCase("workspaces","list-byo-only",listed);
+ }finally{await only.close();}
+ const replaced=await start(memoryFirestore(),{env:monthlyEnv,stripe:monthlyStripe()});
+ try{
+  const original=await capture(replaced.base,"POST","/v2/projects",{body:{name:"Disposable Free",intentId:wid(4)}});
+  if(original.response.body?.isFree!==true)throw Error("disposable was not free");
+  const gone=await capture(replaced.base,"DELETE","/v2/projects/"+wid(4));
+  if(gone.response.status!==200||gone.response.body?.deleted!==true||gone.response.body?.freeWorkspaceId!==null)
+   throw Error("delete "+JSON.stringify(gone.response));
+  const again=await capture(replaced.base,"POST","/v2/projects",{body:{name:"Replacement Free",intentId:wid(5)}});
+  assertPrice(again,true,0,"delete-free-then-create");
+  if(again.response.body?.policy?.usedProjectSlots!==1)throw Error("more than one workspace survived delete "+JSON.stringify(again.response.body?.policy));
+  writeCase("workspaces","delete-free-then-create",again);
+ }finally{await replaced.close();}
+ const concurrent=await start(memoryFirestore(),{env:monthlyEnv,stripe:monthlyStripe()});
+ try{
+  const created=await Promise.all([
+   capture(concurrent.base,"POST","/v2/projects",{body:{name:"Concurrent A",intentId:wid(6)}}),
+   capture(concurrent.base,"POST","/v2/projects",{body:{name:"Concurrent B",intentId:wid(7)}})
+  ]);
+  if(created.some(item=>item.response.status!==201))throw Error("concurrent create "+created.map(item=>item.response.status).join(","));
+  const listed=await capture(concurrent.base,"GET","/v2/workspaces");
+  const items=listed.response.body?.workspaces||[];
+  if(items.length!==2||items.filter(item=>item.isFree===true).length!==1||items.filter(item=>item.monthlyPriceCents===500).length!==1)
+   throw Error("concurrent list "+JSON.stringify(items.map(item=>({id:item.id,isFree:item.isFree,monthlyPriceCents:item.monthlyPriceCents}))));
+  writeCase("workspaces","concurrent-create-one-free",listed);
+ }finally{await concurrent.close();}
+}
 async function main(){
  fs.mkdirSync(outDir,{recursive:true});
  clearJson(outDir);
@@ -223,6 +300,7 @@ async function main(){
  await lockCase("merge-in-progress","merge_in_progress",db=>put(db,wid(1),paid("Merging",{mergeLock:{token:"fixture-lock",sourceId:wid(1),targetId:wid(2),expiresAtMs:NOW+120000}})));
  await mergeCases();
  await byoCases();
+ await freeSlotCases();
  const deletion=spawnSync(process.execPath,[path.join(__dirname,"export_account_deletion_fixtures.js"),outDir],{encoding:"utf8"});
  if(deletion.status!==0)throw Error((deletion.stderr||"")+(deletion.stdout||"")||"account deletion fixtures failed");
 }

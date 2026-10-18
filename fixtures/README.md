@@ -15,3 +15,5 @@ The script starts the app with test doubles for Firestore, Stripe, and Firebase,
 Error codes are in `error` (never `code`).
 
 Workspace, lock, merge, ownership, and BYO request bodies use only the fields listed for that route under Request fields in `native/Backend/docs/API-workspace-policy.md`. `byo/verify-missing-url` sends an empty body. Every other `byo/verify-*` request sends `{presignedUrl}`.
+
+Workspace list items and create responses include `isFree` and `monthlyPriceCents` (`0` or `500`).
