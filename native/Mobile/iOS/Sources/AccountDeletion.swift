@@ -154,11 +154,15 @@ struct AccountDeletion:Equatable {
         wipe=false
         plainError=false
         let polling=step == .polling || (step == .signedOut && keepsPolling())
-        if polling && (errorCode==nil || errorCode?.isEmpty==true || errorCode=="unauthorized" || errorCode=="invalid_token") {
-            // Status GET 401 unauthorized, a 401 with no code, or a rejected status token:
-            // stop polling, keep the job, and show re-sign-in on the deletion screen.
+        if polling && errorCode=="invalid_token" {
+            // A rejected status token stops polling and asks for a new DELETE.
             // Only a Firebase/owner-token invalid_token signs out and keeps polling.
             showResignIn()
+            return
+        }
+        if polling && (errorCode==nil || errorCode?.isEmpty==true || errorCode=="unauthorized" || errorCode=="reauth_required") {
+            // A status GET 401 unauthorized, or a 401 with no code, means reauth_required.
+            requireReauth()
             return
         }
         if errorCode=="invalid_token" {
@@ -175,6 +179,17 @@ struct AccountDeletion:Equatable {
         if errorCode==nil || errorCode?.isEmpty==true {
             step = .reauth;message="Sign in again to continue.";return
         }
+        step = .reauth
+        message="Sign in again. The server only accepts a sign-in from the last 5 minutes."
+    }
+    /// Status GET 401 unauthorized, or a 401 with no code. Stay on the deletion screen and re-sign-in.
+    private mutating func requireReauth(){
+        clearSession=false
+        dropReceipt=false
+        repeatDelete=false
+        showSupport=false
+        dismissible=false
+        wipe=false
         step = .reauth
         message="Sign in again. The server only accepts a sign-in from the last 5 minutes."
     }

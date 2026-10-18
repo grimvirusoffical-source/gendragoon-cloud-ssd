@@ -335,10 +335,10 @@ public final class AccountDeletionTest {
         flow.onPollHttp(401,null,null,null);
         assertEquals(AccountDeletion.Step.REAUTH,flow.step);
         assertNotEquals(AccountDeletion.Step.SIGNED_OUT,flow.step);
-        assertEquals("Sign in again to continue.",flow.message);
+        assertEquals("Sign in again. The server only accepts a sign-in from the last 5 minutes.",flow.message);
         assertFalse(flow.keepsPolling());
         assertFalse(flow.clearSession);
-        assertTrue(flow.repeatDelete);
+        assertFalse(flow.repeatDelete);
         assertEquals("job_auth",flow.jobId);
         assertEquals(TOKEN,flow.statusToken);
         assertFalse(flow.requestsWipe());
@@ -653,10 +653,10 @@ public final class AccountDeletionTest {
         AccountDeletion signIn=AccountDeletion.resume(DeletionReceipt.of("job_poll",TOKEN));
         signIn.pollThrough(new Script().respond(unauthorized));
         assertEquals(AccountDeletion.Step.REAUTH,signIn.step);
-        assertEquals("Sign in again to continue.",signIn.message);
+        assertEquals("Sign in again. The server only accepts a sign-in from the last 5 minutes.",signIn.message);
         assertFalse(signIn.keepsPolling());
         assertFalse(signIn.clearSession);
-        assertTrue(signIn.repeatDelete);
+        assertFalse(signIn.repeatDelete);
         assertEquals("job_poll",signIn.jobId);
         assertEquals(TOKEN,signIn.statusToken);
         assertFalse(signIn.dropReceipt);
@@ -665,15 +665,17 @@ public final class AccountDeletionTest {
         assertEquals(AccountDeletion.Step.REAUTH,signIn.step);
         assertFalse(signIn.requestsWipe());
         assertTrue(signIn.acceptFreshSignIn(2_000L,2_000L));
-        assertTrue(signIn.allowsDelete());
+        assertEquals(AccountDeletion.Step.POLLING,signIn.step);
+        assertFalse(signIn.allowsDelete());
 
         AccountDeletion bare=AccountDeletion.resume(DeletionReceipt.of("job_poll",TOKEN));
         bare.pollThrough(new Script().respond(AccountActions.parse(401,"")));
         assertNull(AccountActions.parse(401,"").error);
         assertEquals(AccountDeletion.Step.REAUTH,bare.step);
-        assertEquals("Sign in again to continue.",bare.message);
+        assertEquals("Sign in again. The server only accepts a sign-in from the last 5 minutes.",bare.message);
         assertFalse(bare.keepsPolling());
         assertFalse(bare.clearSession);
+        assertFalse(bare.repeatDelete);
         assertEquals("job_poll",bare.jobId);
         assertEquals(TOKEN,bare.statusToken);
         assertFalse(bare.requestsWipe());

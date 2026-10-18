@@ -196,11 +196,15 @@ final class AccountDeletion {
         wipe=false;
         plainError=false;
         boolean polling=step==Step.POLLING||(step==Step.SIGNED_OUT&&keepsPolling());
-        if(polling&&(errorCode==null||errorCode.isEmpty()||"unauthorized".equals(errorCode)||"invalid_token".equals(errorCode))){
-            // Status GET 401 unauthorized, a 401 with no code, or a rejected status token:
-            // stop polling, keep the job, and show re-sign-in on the deletion screen.
+        if(polling&&"invalid_token".equals(errorCode)){
+            // A rejected status token stops polling and asks for a new DELETE.
             // Only a Firebase/owner-token invalid_token signs out and keeps polling.
             showResignIn();
+            return;
+        }
+        if(polling&&(errorCode==null||errorCode.isEmpty()||"unauthorized".equals(errorCode)||"reauth_required".equals(errorCode))){
+            // A status GET 401 unauthorized, or a 401 with no code, means reauth_required.
+            requireReauth();
             return;
         }
         if("invalid_token".equals(errorCode)){
@@ -221,6 +225,18 @@ final class AccountDeletion {
             message="Sign in again to continue.";
             return;
         }
+        step=Step.REAUTH;
+        message="Sign in again. The server only accepts a sign-in from the last 5 minutes.";
+    }
+
+    /** Status GET 401 unauthorized, or a 401 with no code. Stay on the deletion screen and re-sign-in. */
+    private void requireReauth(){
+        clearSession=false;
+        dropReceipt=false;
+        repeatDelete=false;
+        showSupport=false;
+        dismissible=false;
+        wipe=false;
         step=Step.REAUTH;
         message="Sign in again. The server only accepts a sign-in from the last 5 minutes.";
     }

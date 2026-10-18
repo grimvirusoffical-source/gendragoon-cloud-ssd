@@ -99,7 +99,7 @@ final class CloudApi {
             Response response=exchangeAuthorized(ORIGIN+call.path,"GET",null,Map.of(),statusToken);
             return AccountActions.parse(response.status,new String(response.body,StandardCharsets.UTF_8));
         }catch(Failure error){
-            if(error.status==401)return new AccountActions.HttpBody(401,error.getMessage()==null?"":error.getMessage(),null,null,null,null,null);
+            if(error.status==401)return new AccountActions.HttpBody(401,"","reauth_required",null,null,null,null);
             throw error;
         }
     }
