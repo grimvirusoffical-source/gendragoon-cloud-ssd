@@ -1,17 +1,49 @@
 /**
  * Sentence copy around `@gendragoon/core`'s `workspacePriceLabel`.
- * The Free / Included / cents rules live in core. This file does not
- * re-read those flags to invent a label.
+ * Free, Included, and cent formatting live in core.
+ * `feeWaived` is not on core's helper yet (296cb96). Until
+ * `workspacePriceLabel` returns Included for that flag, this file does.
  */
 import { parseWorkspacePrice, workspacePriceLabel, type WorkspacePrice } from "@gendragoon/core";
 
+function feeWaived(value: unknown): boolean {
+  return !!value && typeof value === "object" && (value as { feeWaived?: unknown }).feeWaived === true;
+}
+
 export function serverPriceLabel(value: unknown): string | null {
+  const waived = feeWaived(value);
   try {
-    return workspacePriceLabel(parseWorkspacePrice(value));
+    const price = parseWorkspacePrice(value);
+    const label = workspacePriceLabel(waived ? { ...price, feeWaived: true } as WorkspacePrice : price);
+    if (price.isFree) return label;
+    if (waived && label !== "Included") return "Included";
+    return label;
   } catch (error) {
-    if (error instanceof TypeError) return null;
+    if (error instanceof TypeError) return waived ? "Included" : null;
     throw error;
   }
+}
+
+/** BYO register body that ends grandfathered included pricing. */
+export function grandfatheringEnded(value: unknown): boolean {
+  return !!value && typeof value === "object" && (value as { grandfatheringEnded?: unknown }).grandfatheringEnded === true;
+}
+
+/** Price to show once register reports `grandfatheringEnded`. Core formats the cents. */
+export function grandfatheringEndedPrice(value: unknown): string | null {
+  if (!grandfatheringEnded(value)) return null;
+  const parsed = serverPriceLabel(value);
+  if (parsed) return parsed;
+  if (!value || typeof value !== "object") return null;
+  const record = value as { grandfathered?: unknown; monthlyPriceCents?: unknown; isFree?: unknown };
+  if (record.grandfathered !== false || typeof record.monthlyPriceCents !== "number" || !Number.isInteger(record.monthlyPriceCents)) {
+    return null;
+  }
+  return workspacePriceLabel({
+    isFree: record.isFree === true,
+    grandfathered: false,
+    monthlyPriceCents: record.monthlyPriceCents,
+  });
 }
 
 /** `$5.00/mo` from core's cent formatter. Zero and missing amounts stay blank. */

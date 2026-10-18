@@ -11,56 +11,86 @@ import {
   deletionSupportRequestPath,
   requestDeletionSupport,
 } from "../src/supportRequest";
+import { SUPPORT_FIXTURE_SHA, loadFixture } from "./loadFixture";
 
-const JOB = "22222222-2222-4222-8222-000000000004";
-const TOKEN = "status-token-provisional";
-const REQUEST_ID = "req-provisional-1";
+const TOKEN = "status-token";
 
-function jsonResponse(status: number, body?: unknown): Response {
-  return new Response(body === undefined ? "" : JSON.stringify(body), {
+interface SupportBody {
+  status?: string;
+  requestId?: string;
+  error?: string;
+  retryAfterSec?: number;
+}
+
+function support(name: string) {
+  const fixture = loadFixture<SupportBody>(`account-deletion/${name}.json`);
+  expect(fixture.sourceSha).toBe(SUPPORT_FIXTURE_SHA);
+  expect(fixture.request.method).toBe("POST");
+  expect(fixture.request.body).toBeNull();
+  return fixture;
+}
+
+function jobIdOf(path: string): string {
+  const id = path.split("/")[4];
+  if (!id) throw new Error(`No job id in ${path}`);
+  return id;
+}
+
+function responseFor(status: number, body: unknown): Response {
+  return new Response(JSON.stringify(body), {
     status,
-    headers: body === undefined ? undefined : { "content-type": "application/json" },
+    headers: { "content-type": "application/json" },
   });
 }
 
-function received(requestId = REQUEST_ID): Response {
-  return jsonResponse(202, { status: "received", requestId });
-}
+describe("deletion support request", () => {
+  const received = support("support-received");
+  const repeat = support("support-repeat");
+  const missing = support("support-bad-token");
+  const limited = support("support-rate-limited");
+  const unneeded = support("support-not-needed");
+  const jobId = jobIdOf(received.request.path);
+  const requestId = received.response.body.requestId ?? "";
 
-/**
- * PROVISIONAL. The support endpoint is not shipped, so these calls use a mocked
- * transport. They are not server fixtures. The production flag stays off.
- */
-describe("provisional deletion support request", () => {
-  it("stays off until the backend endpoint ships", () => {
+  it("stays off until production has the webhook", () => {
     expect(DELETION_SUPPORT_ENDPOINT_ENABLED).toBe(false);
     expect(DELETION_SUPPORT_REQUEST_PATH).toBe("/v2/account/deletions/:jobId/support-request");
-    expect(deletionSupportRequestPath(JOB)).toBe(`/v2/account/deletions/${JOB}/support-request`);
+    expect(deletionSupportRequestPath(jobId)).toBe(`/v2/account/deletions/${jobId}/support-request`);
+    expect(received.response.status).toBe(202);
+    expect(repeat.response.status).toBe(202);
+    expect(repeat.response.body.requestId).toBe(requestId);
+    expect(repeat.request.path).toBe(received.request.path);
+    expect(missing.response).toEqual({ status: 404, body: { error: "not_found" } });
+    expect(limited.response.status).toBe(429);
+    expect(limited.response.body.error).toBe("rate_limited");
+    expect(unneeded.response).toEqual({ status: 409, body: { error: "support_not_needed" } });
+    expect(jobIdOf(unneeded.request.path)).not.toBe(jobId);
   });
 
-  it("PROVISIONAL: 202 and a repeat of the same requestId send no body and only the status token", async () => {
+  it("202 and a repeat of the same requestId send no body and only the status token", async () => {
     const seen: { url: string; init: RequestInit | undefined }[] = [];
     const fetchImpl = (async (url: string | URL | Request, init?: RequestInit) => {
       seen.push({ url: String(url), init });
-      return received();
+      const fixture = seen.length === 1 ? received : repeat;
+      return responseFor(fixture.response.status, fixture.response.body);
     }) as typeof fetch;
     const first = await requestDeletionSupport({
       baseUrl: "https://api.example.test",
-      jobId: JOB,
+      jobId,
       statusToken: TOKEN,
       fetchImpl,
     });
     const second = await requestDeletionSupport({
       baseUrl: "https://api.example.test",
-      jobId: JOB,
+      jobId,
       statusToken: TOKEN,
       fetchImpl,
     });
-    expect(first).toEqual({ kind: "sent", requestId: REQUEST_ID });
-    expect(second).toEqual({ kind: "sent", requestId: REQUEST_ID });
+    expect(first).toEqual({ kind: "sent", requestId });
+    expect(second).toEqual({ kind: "sent", requestId });
     expect(seen).toHaveLength(2);
     for (const call of seen) {
-      expect(call.url).toBe(`https://api.example.test/v2/account/deletions/${JOB}/support-request`);
+      expect(call.url).toBe(`https://api.example.test${received.request.path}`);
       expect(call.init?.method).toBe("POST");
       expect(call.init?.body).toBeUndefined();
       const headers = new Headers(call.init?.headers);
@@ -69,34 +99,34 @@ describe("provisional deletion support request", () => {
     }
   });
 
-  it("PROVISIONAL: 409 support_not_needed asks for a status refresh and 429 does not mail", async () => {
+  it("409 support_not_needed asks for a status refresh and 429 does not mail", async () => {
     const refresh = await requestDeletionSupport({
       baseUrl: "https://api.example.test",
-      jobId: JOB,
+      jobId: jobIdOf(unneeded.request.path),
       statusToken: TOKEN,
-      fetchImpl: (async () => jsonResponse(409, { error: "support_not_needed" })) as typeof fetch,
+      fetchImpl: (async () => responseFor(unneeded.response.status, unneeded.response.body)) as typeof fetch,
     });
     expect(refresh).toEqual({ kind: "refresh" });
     const already = await requestDeletionSupport({
       baseUrl: "https://api.example.test",
-      jobId: JOB,
+      jobId,
       statusToken: TOKEN,
-      fetchImpl: (async () => jsonResponse(429)) as typeof fetch,
+      fetchImpl: (async () => responseFor(limited.response.status, limited.response.body)) as typeof fetch,
     });
     expect(already).toEqual({ kind: "already" });
   });
 
-  it("PROVISIONAL: a network error or HTTP 5xx falls back, and the screen mails when the flag is off", async () => {
+  it("a network error or HTTP 5xx falls back, and the screen mails when the flag is off", async () => {
     const failed = await requestDeletionSupport({
       baseUrl: "https://api.example.test",
-      jobId: JOB,
+      jobId,
       statusToken: TOKEN,
-      fetchImpl: (async () => jsonResponse(500)) as typeof fetch,
+      fetchImpl: (async () => responseFor(500, { error: "unavailable" })) as typeof fetch,
     });
     expect(failed).toEqual({ kind: "fallback" });
     const thrown = await requestDeletionSupport({
       baseUrl: "https://api.example.test",
-      jobId: JOB,
+      jobId,
       statusToken: TOKEN,
       fetchImpl: (async () => {
         throw new Error("offline");
@@ -110,17 +140,17 @@ describe("provisional deletion support request", () => {
     const screen = await render(
       <DeleteAccountScreen
         frame="not-retryable"
-        jobId={JOB}
+        jobId={jobId}
         activeTransfers={0}
         secrets={secrets}
         workspaceIds={["ws-1"]}
         idToken=""
         client={{
           async deleteAccount() {
-            return { jobId: JOB };
+            return { jobId };
           },
           async deletionStatus() {
-            return { jobId: JOB, status: "failed" };
+            return { jobId, status: "failed" };
           },
         }}
         onReauth={() => undefined}
@@ -130,32 +160,32 @@ describe("provisional deletion support request", () => {
       />,
     );
     fireEvent.press(screen.getByTestId("contact-support"));
-    await waitFor(() => expect(openURL).toHaveBeenCalledWith(supportContactTarget(SUPPORT_CONTACT.value, JOB)));
+    await waitFor(() => expect(openURL).toHaveBeenCalledWith(supportContactTarget(SUPPORT_CONTACT.value, jobId)));
     expect(screen.queryByTestId("support-request-sent")).toBeNull();
     openURL.mockRestore();
   });
 
-  it("PROVISIONAL: with the endpoint enabled, 202 shows the sent message and does not mail", async () => {
+  it("with the endpoint enabled, 202 shows the sent message and does not mail", async () => {
     const openURL = jest.spyOn(Linking, "openURL").mockResolvedValue(undefined as never);
     const secrets = new MemorySecretStore();
     await secrets.set("account-deletion:status-token", new TextEncoder().encode(TOKEN));
     const screen = await render(
       <DeleteAccountScreen
         frame="not-retryable"
-        jobId={JOB}
+        jobId={jobId}
         supportEndpointEnabled
         apiBase="https://api.example.test"
-        supportFetch={(async () => received()) as typeof fetch}
+        supportFetch={(async () => responseFor(received.response.status, received.response.body)) as typeof fetch}
         activeTransfers={0}
         secrets={secrets}
         workspaceIds={["ws-1"]}
         idToken=""
         client={{
           async deleteAccount() {
-            return { jobId: JOB };
+            return { jobId };
           },
           async deletionStatus() {
-            return { jobId: JOB, status: "failed" };
+            return { jobId, status: "failed" };
           },
         }}
         onReauth={() => undefined}
@@ -174,9 +204,9 @@ describe("provisional deletion support request", () => {
   it("a 404 falls back to the support email and never shows sign-in", async () => {
     const missed = await requestDeletionSupport({
       baseUrl: "https://api.example.test",
-      jobId: JOB,
+      jobId,
       statusToken: TOKEN,
-      fetchImpl: (async () => jsonResponse(404, { error: "not_found" })) as typeof fetch,
+      fetchImpl: (async () => responseFor(missing.response.status, missing.response.body)) as typeof fetch,
     });
     expect(missed).toEqual({ kind: "fallback" });
 
@@ -187,20 +217,20 @@ describe("provisional deletion support request", () => {
     const screen = await render(
       <DeleteAccountScreen
         frame="not-retryable"
-        jobId={JOB}
+        jobId={jobId}
         supportEndpointEnabled
         apiBase="https://api.example.test"
-        supportFetch={(async () => jsonResponse(404, { error: "not_found" })) as typeof fetch}
+        supportFetch={(async () => responseFor(missing.response.status, missing.response.body)) as typeof fetch}
         activeTransfers={0}
         secrets={secrets}
         workspaceIds={["ws-1"]}
         idToken=""
         client={{
           async deleteAccount() {
-            return { jobId: JOB };
+            return { jobId };
           },
           async deletionStatus() {
-            return { jobId: JOB, status: "failed", retryable: false };
+            return { jobId, status: "failed", retryable: false };
           },
         }}
         onReauth={onReauth}
@@ -210,14 +240,14 @@ describe("provisional deletion support request", () => {
       />,
     );
     fireEvent.press(screen.getByTestId("contact-support"));
-    await waitFor(() => expect(openURL).toHaveBeenCalledWith(supportContactTarget(SUPPORT_CONTACT.value, JOB)));
+    await waitFor(() => expect(openURL).toHaveBeenCalledWith(supportContactTarget(SUPPORT_CONTACT.value, jobId)));
     expect(onReauth).not.toHaveBeenCalled();
     expect(screen.queryByTestId("deletion-reauth")).toBeNull();
     expect(screen.queryByText("Sign in again. Your last sign-in is older than 5 minutes.")).toBeNull();
     openURL.mockRestore();
   });
 
-  it("PROVISIONAL: 409 refreshes deletion status and 429 shows the already-sent message", async () => {
+  it("409 refreshes deletion status and 429 shows the already-sent message", async () => {
     const openURL = jest.spyOn(Linking, "openURL").mockResolvedValue(undefined as never);
     const secrets = new MemorySecretStore();
     await secrets.set("account-deletion:status-token", new TextEncoder().encode(TOKEN));
@@ -225,21 +255,21 @@ describe("provisional deletion support request", () => {
     const refresh = await render(
       <DeleteAccountScreen
         frame="not-retryable"
-        jobId={JOB}
+        jobId={jobIdOf(unneeded.request.path)}
         supportEndpointEnabled
         apiBase="https://api.example.test"
-        supportFetch={(async () => jsonResponse(409, { error: "support_not_needed" })) as typeof fetch}
+        supportFetch={(async () => responseFor(unneeded.response.status, unneeded.response.body)) as typeof fetch}
         activeTransfers={0}
         secrets={secrets}
         workspaceIds={["ws-1"]}
         idToken=""
         client={{
           async deleteAccount() {
-            return { jobId: JOB };
+            return { jobId: jobIdOf(unneeded.request.path) };
           },
           async deletionStatus() {
             statusCalls += 1;
-            return { jobId: JOB, status: "failed", retryable: true };
+            return { jobId: jobIdOf(unneeded.request.path), status: "failed", retryable: true };
           },
         }}
         onReauth={() => undefined}
@@ -256,20 +286,20 @@ describe("provisional deletion support request", () => {
     const already = await render(
       <DeleteAccountScreen
         frame="not-retryable"
-        jobId={JOB}
+        jobId={jobId}
         supportEndpointEnabled
         apiBase="https://api.example.test"
-        supportFetch={(async () => jsonResponse(429)) as typeof fetch}
+        supportFetch={(async () => responseFor(limited.response.status, limited.response.body)) as typeof fetch}
         activeTransfers={0}
         secrets={secrets}
         workspaceIds={["ws-1"]}
         idToken=""
         client={{
           async deleteAccount() {
-            return { jobId: JOB };
+            return { jobId };
           },
           async deletionStatus() {
-            return { jobId: JOB, status: "failed" };
+            return { jobId, status: "failed" };
           },
         }}
         onReauth={() => undefined}

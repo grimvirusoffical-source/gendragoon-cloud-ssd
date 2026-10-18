@@ -11,7 +11,8 @@
 export const ENCRYPTED_WORKSPACE_ENABLED = false;
 
 /**
- * POST of a deletion support request. Off until Riley's support fixtures land.
+ * POST of a deletion support request. Riley's fixtures are vendored, and the
+ * flag stays off until production has the webhook.
  * The path itself lives in `DELETION_SUPPORT_REQUEST_PATH`.
  */
 export const DELETION_SUPPORT_ENDPOINT_ENABLED = false;

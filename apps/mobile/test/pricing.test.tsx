@@ -1,8 +1,8 @@
 import { parseWorkspacePrice, workspacePriceLabel, type WorkspacePrice, type WorkspaceRecord } from "@gendragoon/core";
 import { fireEvent, render } from "@testing-library/react-native";
 import { WORKSPACE_PRICING_ENABLED } from "../src/flags";
-import { additionalWorkspaceFeeText, serverPriceLabel, workspaceQuoteExplanation } from "../src/pricing";
-import { LockScreen, NewWorkspaceScreen, WorkspacesScreen } from "../src/screens";
+import { additionalWorkspaceFeeText, grandfatheringEndedPrice, includedPricingEndsWarning, serverPriceLabel, workspaceQuoteExplanation } from "../src/pricing";
+import { ConnectStorageScreen, LockScreen, NewWorkspaceScreen, WorkspacesScreen } from "../src/screens";
 import { FIXTURE_SOURCE_SHA_BY_AREA, loadFixture } from "./loadFixture";
 
 const PRICING_SHA = "4c3dd13587fae1ddfa907ad2b84c0886d7794ade";
@@ -134,6 +134,31 @@ describe("workspace price labels", () => {
     expect(() => parseWorkspacePrice({ name: "no price" })).toThrow(TypeError);
     expect(serverPriceLabel(null)).toBeNull();
     expect(serverPriceLabel({ name: "no price" })).toBeNull();
+    expect(serverPriceLabel({ isFree: false, grandfathered: false, monthlyPriceCents: 500, feeWaived: true })).toBe("Included");
+    expect(serverPriceLabel({ isFree: true, grandfathered: false, monthlyPriceCents: 0, feeWaived: true })).toBe("Free");
+    expect(serverPriceLabel({ feeWaived: true })).toBe("Included");
+  });
+
+  it("a BYO register that ends grandfathering shows the price and warns before confirm", async () => {
+    const body = {
+      byoRegistered: true,
+      endpoint: "https://bucket.s3.us-east-1.amazonaws.com",
+      providerType: "s3",
+      grandfatheringEnded: true,
+      grandfathered: false,
+      isFree: false,
+      monthlyPriceCents: 500,
+    };
+    expect(grandfatheringEndedPrice(body)).toBe("$5.00");
+    expect(includedPricingEndsWarning(500)).toBe(
+      "Switching to your own storage ends this workspace's included pricing. It will cost $5.00/mo.",
+    );
+    const screen = await render(<ConnectStorageScreen registration={body} />);
+    expect(screen.getByTestId("byo-ended-price").props.children).toBe("$5.00");
+    expect(screen.getByTestId("byo-included-warning")).toHaveTextContent(includedPricingEndsWarning(500));
+    expect(screen.queryByTestId("byo-registered")).toBeNull();
+    await fireEvent.press(screen.getByTestId("byo-confirm-included"));
+    expect(screen.getByTestId("byo-registered")).toHaveTextContent(`s3 · ${body.endpoint}`);
   });
 
   it("labels grandfathered-plus-new from the vendored fixture", async () => {

@@ -38,6 +38,7 @@ import { byoServerFlowReady } from "./byoReady";
 import { DELETION_SUPPORT_ENDPOINT_ENABLED, ENCRYPTED_WORKSPACE_ENABLED, WORKSPACE_PRICING_ENABLED } from "./flags";
 import {
   additionalWorkspaceFeeText,
+  grandfatheringEndedPrice,
   includedPricingEndsWarning,
   serverPriceLabel,
   unpaidWorkspaceSubtitle,
@@ -532,7 +533,15 @@ export function SortScreen(props: {
 }
 
 export function ConnectStorageScreen(props: {
-  registration?: { endpoint: string; providerType: string; byoRegistered: boolean } | null;
+  registration?: {
+    endpoint: string;
+    providerType: string;
+    byoRegistered: boolean;
+    grandfatheringEnded?: boolean;
+    grandfathered?: boolean;
+    isFree?: boolean;
+    monthlyPriceCents?: number;
+  } | null;
   challengeNonce?: string | null;
   verified?: { verified: boolean; workspaceId: string } | null;
   error?: unknown;
@@ -544,11 +553,14 @@ export function ConnectStorageScreen(props: {
   endsIncludedPricingCents?: number | null;
 }) {
   const [selected, setSelected] = useState<string | null>(null);
+  const endedPrice = grandfatheringEndedPrice(props.registration);
   const [acceptedLoss, setAcceptedLoss] = useState(props.endsIncludedPricingCents == null);
+  const [confirmedEnd, setConfirmedEnd] = useState(endedPrice == null);
   const ready = byoServerFlowReady();
   const challengeKey = props.challengeNonce ? challengeObjectKey(props.challengeNonce) : null;
   const errorText = props.error ? byoErrorMessage(props.error) : null;
   const providersOpen = ready && acceptedLoss;
+  const endedCents = props.registration?.monthlyPriceCents;
   return (
     <Screen testID="connect-storage">
       <Title kicker="Settings">Connect storage</Title>
@@ -559,10 +571,20 @@ export function ConnectStorageScreen(props: {
           Bring-your-own storage is unavailable until the server can register, challenge, and verify the bucket.
         </Text>
       )}
-      {props.endsIncludedPricingCents != null ? (
+      {endedPrice ? <Text testID="byo-ended-price" style={styles.help}>{endedPrice}</Text> : null}
+      {endedPrice != null && typeof endedCents === "number" ? (
+        <Banner testID="byo-included-warning">{includedPricingEndsWarning(endedCents)}</Banner>
+      ) : props.endsIncludedPricingCents != null ? (
         <Banner testID="byo-included-warning">{includedPricingEndsWarning(props.endsIncludedPricingCents)}</Banner>
       ) : null}
-      {props.endsIncludedPricingCents != null && !acceptedLoss ? (
+      {endedPrice != null && !confirmedEnd ? (
+        <Button
+          label="Confirm"
+          testID="byo-confirm-included"
+          onPress={() => setConfirmedEnd(true)}
+        />
+      ) : null}
+      {props.endsIncludedPricingCents != null && endedPrice == null && !acceptedLoss ? (
         <Button
           label="Continue"
           testID="byo-end-included"
@@ -586,7 +608,7 @@ export function ConnectStorageScreen(props: {
       {COMING_SOON_BYO_PROVIDERS.map((provider) => (
         <Text key={provider.id} testID={`byo-soon-${provider.id}`} style={styles.soon}>{`${provider.label} · Coming soon`}</Text>
       ))}
-      {props.registration?.byoRegistered ? (
+      {props.registration?.byoRegistered && confirmedEnd ? (
         <Text testID="byo-registered" style={styles.help}>{`${props.registration.providerType} · ${props.registration.endpoint}`}</Text>
       ) : null}
       {challengeKey ? <Text testID="byo-challenge-key" style={styles.help}>{challengeKey}</Text> : null}

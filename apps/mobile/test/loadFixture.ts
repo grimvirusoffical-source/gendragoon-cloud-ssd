@@ -4,9 +4,21 @@ import path from "node:path";
 /** gendragoon-cloud-ssd PR #5 at the BYO, lock, and merge snapshot. */
 export const FIXTURE_SOURCE_SHA = "da3927627fee76103981714f9f8ffa954843b74b";
 
+/** cloud-ssd PR #6 support fixtures. The rest of account-deletion stays on fff0a84. */
+export const SUPPORT_FIXTURE_SHA = "d33970cbf0175a74898c37a8a624a92b1c1a5a94";
+
+/** Files whose source commit differs from the rest of their area. */
+export const FIXTURE_SOURCE_SHA_BY_FILE: Record<string, string> = {
+  "account-deletion/support-received.json": SUPPORT_FIXTURE_SHA,
+  "account-deletion/support-repeat.json": SUPPORT_FIXTURE_SHA,
+  "account-deletion/support-bad-token.json": SUPPORT_FIXTURE_SHA,
+  "account-deletion/support-rate-limited.json": SUPPORT_FIXTURE_SHA,
+  "account-deletion/support-not-needed.json": SUPPORT_FIXTURE_SHA,
+};
+
 /** Later fixture areas, keyed by the directory under fixtures/. */
 export const FIXTURE_SOURCE_SHA_BY_AREA: Record<string, string> = {
-  /** cloud-ssd PR #6 tip. Includes status-failed-not-retryable. */
+  /** cloud-ssd PR #6. Support cases are d33970c; see FIXTURE_SOURCE_SHA_BY_FILE. */
   "account-deletion": "fff0a84b6d75acb3a79cff7f146450c486efbe56",
   "errors": "fff0a84b6d75acb3a79cff7f146450c486efbe56",
   /** cloud-ssd PR #7, manifest ifGeneration as a decimal string. */
@@ -43,7 +55,7 @@ export function loadFixture<TBody>(rel: string): FixtureFile<TBody> {
   const sha = lines[0]?.startsWith("Source-SHA: ") ? lines[0].slice("Source-SHA: ".length).trim() : "";
   const sourcePath = lines[1]?.startsWith("Source-Path: ") ? lines[1].slice("Source-Path: ".length).trim() : "";
   const area = rel.split("/")[0] ?? "";
-  const expectedSha = FIXTURE_SOURCE_SHA_BY_AREA[area] ?? FIXTURE_SOURCE_SHA;
+  const expectedSha = FIXTURE_SOURCE_SHA_BY_FILE[rel] ?? FIXTURE_SOURCE_SHA_BY_AREA[area] ?? FIXTURE_SOURCE_SHA;
   if (sha !== expectedSha) {
     throw new Error(`Fixture ${rel} source SHA is ${sha || "missing"}`);
   }

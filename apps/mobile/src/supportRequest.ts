@@ -1,7 +1,8 @@
 /**
  * Avery's path. The status token is the only credential, and the body is empty.
- * Core will add `requestDeletionSupport()` against Riley's fixtures.
- * Swap the fetch inside `requestDeletionSupport` for that export when it lands.
+ * Core `296cb96` does not export `requestDeletionSupport()`. This fetch is the
+ * stand-in. Switch this function to that export when it lands.
+ * `DELETION_SUPPORT_ENDPOINT_ENABLED` stays false until production has the webhook.
  */
 export const DELETION_SUPPORT_REQUEST_PATH = "/v2/account/deletions/:jobId/support-request";
 

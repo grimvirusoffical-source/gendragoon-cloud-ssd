@@ -1,0 +1,19 @@
+Source-SHA: d33970cbf0175a74898c37a8a624a92b1c1a5a94
+Source-Path: fixtures/account-deletion/support-not-needed.json
+
+{
+  "request": {
+    "body": null,
+    "headers": {
+      "authorization": "<redacted>"
+    },
+    "method": "POST",
+    "path": "/v2/account/deletions/00000000-0000-4000-8000-00000000000b/support-request"
+  },
+  "response": {
+    "body": {
+      "error": "support_not_needed"
+    },
+    "status": 409
+  }
+}
