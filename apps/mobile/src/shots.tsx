@@ -125,6 +125,7 @@ export function ShotFrame(props: { id: ShotId }) {
         {frame ? (
           <DeleteAccountScreen
             frame={frame}
+            jobId={frame === "not-retryable" ? "22222222-2222-4222-8222-000000000004" : undefined}
             activeTransfers={0}
             secrets={secrets}
             workspaceIds={[WORKSPACE_ID]}
