@@ -130,6 +130,7 @@ export {
   REAUTH_WINDOW_MS,
   reauthIsRecent,
   authTimeMsFromIdToken,
+  accountUidFromIdToken,
   reauthenticatedAtForDelete,
   storageOperations,
   assertStorageUrlResponse,

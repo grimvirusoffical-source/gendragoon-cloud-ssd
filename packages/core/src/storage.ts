@@ -34,7 +34,38 @@ export function reauthenticatedAtForDelete(input: { reauthenticatedAt?: string; 
   return input.reauthenticatedAt ?? "";
 }
 
-function decodeJwtPayload(token: string): { auth_time?: unknown; iat?: unknown } | null {
+interface IdTokenClaims {
+  auth_time?: unknown;
+  iat?: unknown;
+  sub?: unknown;
+  user_id?: unknown;
+}
+
+const BASE64URL_SEGMENT = /^[A-Za-z0-9_-]+$/;
+
+/**
+ * Firebase ID token `sub`: the account uid saved with a local deletion job.
+ *
+ * The uid only ties the local deletion job to the right account. It is never
+ * used for an auth decision, because the token is not verified on the device:
+ * anyone can hand-craft a token with any `sub`. The server checks the real token.
+ *
+ * Returns null, and never throws, when the token is not three base64url parts,
+ * the payload is not a JSON object, `sub` is missing or empty, or `user_id`
+ * is present and disagrees with `sub`. `user_id` is never used as a fallback.
+ */
+export function accountUidFromIdToken(token: string): string | null {
+  if (typeof token !== "string") return null;
+  const parts = token.split(".");
+  if (parts.length !== 3 || !BASE64URL_SEGMENT.test(parts[0]!) || !BASE64URL_SEGMENT.test(parts[1]!)) return null;
+  const payload = decodeJwtPayload(token);
+  const sub = payload?.sub;
+  if (typeof sub !== "string" || sub.length === 0) return null;
+  if (payload?.user_id !== undefined && payload.user_id !== sub) return null;
+  return sub;
+}
+
+function decodeJwtPayload(token: string): IdTokenClaims | null {
   const segment = token.split(".")[1];
   if (!segment) return null;
   try {
@@ -44,7 +75,7 @@ function decodeJwtPayload(token: string): { auth_time?: unknown; iat?: unknown }
     for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
     const parsed = JSON.parse(new TextDecoder().decode(bytes)) as unknown;
     if (!parsed || typeof parsed !== "object") return null;
-    return parsed as { auth_time?: unknown; iat?: unknown };
+    return parsed as IdTokenClaims;
   } catch {
     return null;
   }
