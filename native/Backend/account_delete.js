@@ -11,6 +11,8 @@ const STATUS_TOKEN_TTL_MS=7*24*60*60*1000;
 const LEASE_MS=60*1000;
 const MAX_STATUS_TOKENS=5;
 const MAX_FAILED_ATTEMPTS=5;
+const SUPPORT_WINDOW_MS=24*60*60*1000;
+const SUPPORT_MAX_CALLS=5;
 const JOB_STATUS=new Set(["queued","running","done","failed"]);
 const SUBSCRIPTION_KEY=/SubscriptionId$/;
 
@@ -143,14 +145,35 @@ function mergeStatusTokens(stored,memory,now){
  }
  return pruneStatusTokens(merged,now);
 }
+function supportRequestId(jobId){
+ return crypto.createHash("sha256").update("gd-support-v1:"+jobId).digest("hex");
+}
+function createWebhookNotifier({env=process.env,fetchImpl=globalThis.fetch,warn=console.warn}={}){
+ return async function notify(event){
+  const url=env&&typeof env.SUPPORT_NOTIFY_WEBHOOK_URL==="string"?env.SUPPORT_NOTIFY_WEBHOOK_URL.trim():"";
+  if(!url){
+   warn("support deletion notify skipped");
+   return;
+  }
+  try{
+   const response=await fetchImpl(url,{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({
+    jobId:event.jobId,accountId:event.accountId,failureReason:event.failureReason??null,createdAt:event.createdAt,
+   })});
+   if(!response||response.ok!==true)throw Error("support webhook failed");
+  }catch(_){
+   warn("support deletion notify failed");
+  }
+ };
+}
 function bearerToken(req){
  const match=/^Bearer ([A-Za-z0-9._~-]+)$/.exec(req?.headers?.authorization||"");
  return match?match[1]:"";
 }
-function createAccountDeletion({db,stripe,bucket,auth,byoProviders,hash,now}){
+function createAccountDeletion({db,stripe,bucket,auth,byoProviders,hash,now,notifier,env}){
  // byoProviders is accepted so callers can pass the registry. Deletion must
  // never invoke it: customer-owned storage stays untouched.
  void byoProviders;
+ const notify=typeof notifier==="function"?notifier:createWebhookNotifier({env:env||process.env});
  const instanceId=crypto.randomBytes(16).toString("hex");
  const jobs=new Map();
  const clock=()=>typeof now==="function"?now():Date.now();
@@ -592,7 +615,56 @@ function createAccountDeletion({db,stripe,bucket,auth,byoProviders,hash,now}){
   schedule(job);
   return true;
  }
- return {deleteAccount,jobStatus,statusTokenMatches,resumeIfStalled};
+ function supportBody(body){
+  if(!body||typeof body!=="object"||Array.isArray(body))throw refusal(400,"invalid_body");
+  for(const key of Object.keys(body))if(key!=="jobId")throw refusal(400,"unknown_field");
+  if(typeof body.jobId!=="string"||body.jobId==="")throw refusal(400,"invalid_body");
+  return body.jobId;
+ }
+ async function requestSupport(req){
+  const jobId=supportBody(req?.body);
+  const authorization=req?.headers?.authorization;
+  if(typeof authorization!=="string"||authorization.trim()==="")throw refusal(401,"unauthorized");
+  const stored=await readJob(jobId);
+  if(!stored||!statusTokenMatches({statusTokens:stored.statusTokens},bearerToken(req)))
+   throw refusal(404,"not_found");
+  if(stored.status!=="failed")throw refusal(409,"support_not_needed");
+  const requestId=supportRequestId(jobId);
+  const accountHash=stored.accountHash;
+  const uid=typeof stored.uid==="string"?stored.uid:null;
+  const failureReason=typeof stored.failureReason==="string"?stored.failureReason:null;
+  let saved=null;
+  await db.runTransaction(async tx=>{
+   const ref=db.collection("supportRequests").doc(jobId);
+   const snap=await tx.get(ref);
+   const at=clock();
+   const existing=snap.exists?snap.data():null;
+   const start=existing?Date.parse(existing.createdAt):Number.NaN;
+   const inWindow=Number.isFinite(start)&&at-start<SUPPORT_WINDOW_MS;
+   const count=inWindow&&Number.isInteger(existing.count)?existing.count:0;
+   if(inWindow&&count>=SUPPORT_MAX_CALLS){
+    saved={limited:true,retryAfterSec:Math.max(1,Math.ceil((start+SUPPORT_WINDOW_MS-at)/1000))};
+    return;
+   }
+   const doc={
+    accountHash,uid,jobId,failureReason,
+    createdAt:inWindow?existing.createdAt:new Date(at).toISOString(),
+    count:count+1,
+   };
+   tx.set(ref,doc);
+   saved={limited:false,notify:doc.count===1,doc};
+  });
+  if(saved?.limited)throw refusal(429,"rate_limited",{retryAfterSec:saved.retryAfterSec});
+  if(saved?.notify){
+   try{
+    await notify({jobId,accountId:accountHash,failureReason,createdAt:saved.doc.createdAt});
+   }catch(_){
+    console.warn("support deletion notify failed");
+   }
+  }
+  return {status:202,requestId};
+ }
+ return {deleteAccount,jobStatus,statusTokenMatches,resumeIfStalled,requestSupport};
 }
 function deletionAuth(firebaseAuth){
  return (req,res,next)=>{
@@ -625,6 +697,24 @@ function registerAccountDeletion({app,firebaseAuth,...deps}){
    if((status===410||status===409)&&typeof error?.jobId==="string")body.jobId=error.jobId;
    if(status===410&&typeof error?.statusToken==="string")body.statusToken=error.statusToken;
    if(status>=500)console.error("account deletion request failed",code);
+   res.setHeader("Cache-Control","private, no-store");
+   res.status(status).json(body);
+  }
+ });
+ app.post("/v2/support/deletion-request",async(req,res)=>{
+  try{
+   const result=await svc.requestSupport(req);
+   res.setHeader("Cache-Control","private, no-store");
+   res.status(202).json({status:"received",requestId:result.requestId});
+  }catch(error){
+   const status=Number.isInteger(error?.status)?error.status:500;
+   const code=error?.code||"support_request_failed";
+   const body={error:code};
+   if(status===429&&Number.isInteger(error?.retryAfterSec)){
+    body.retryAfterSec=error.retryAfterSec;
+    res.setHeader("Retry-After",String(error.retryAfterSec));
+   }
+   if(status>=500)console.error("support deletion request failed",code);
    res.setHeader("Cache-Control","private, no-store");
    res.status(status).json(body);
   }
@@ -704,4 +794,4 @@ function continueWithFirebase(firebaseAuth,req,res,onOk){
   if(!done&&!res.headersSent)res.status(404).json({error:"not_found"});
  }
 }
-module.exports={createAccountDeletion,registerAccountDeletion,REAUTH_SECONDS,STATUS_TOKEN_TTL_MS,LEASE_MS};
+module.exports={createAccountDeletion,registerAccountDeletion,createWebhookNotifier,REAUTH_SECONDS,STATUS_TOKEN_TTL_MS,LEASE_MS,SUPPORT_WINDOW_MS};

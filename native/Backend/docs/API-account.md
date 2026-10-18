@@ -6,7 +6,7 @@ No Stripe secret, Firebase private key, customer payload, or user identifier bel
 
 ## Authentication
 
-`DELETE /v2/account` requires a Firebase ID token (`Authorization: Bearer <Firebase ID token>`, Google provider). It uses the production login chain with Terms acceptance turned off. Deleting the account removes `accepted_terms/{uid}`, so a Terms check on this route would reject the caller before the job could be polled. `GET /v2/account/deletions/:jobId` also skips Terms. Other `/v2` routes still require current Terms.
+`DELETE /v2/account` requires a Firebase ID token (`Authorization: Bearer <Firebase ID token>`, Google provider). It uses the production login chain with Terms acceptance turned off. Deleting the account removes `accepted_terms/{uid}`, so a Terms check on this route would reject the caller before the job could be polled. `GET /v2/account/deletions/:jobId` and `POST /v2/support/deletion-request` also skip Terms. The support route does not use a Firebase ID token at all. Other `/v2` routes still require current Terms.
 
 Checks run in this order. A later check is not used to explain an earlier failure.
 
@@ -131,6 +131,42 @@ Steps are idempotent and stored on the job. A failed step stops the job in `fail
 4. **Receipt retention.** Before those rows are removed, the server writes `billing_receipts/{anonymizedId}` where `anonymizedId` is `sha256("gd-receipt-v1:"+accountHash)`. The receipt keeps the Stripe customer id, subscription ids, and payment ids required for tax and payment records. It does not keep the Firebase uid.
 5. **Firebase last.** `revokeRefreshTokens(uid)`, then `deleteUser(uid)`. A missing user on resume is treated as already deleted. The finished job record is the deletion tombstone. A later `DELETE` looks up that tombstone before it treats a missing Firebase user as `invalid_token`, as described under Authentication.
 
+## Support request
+
+A signed-out client that still has the job's `statusToken` can ask for help when deletion has failed.
+
+```http
+POST /v2/support/deletion-request
+Authorization: Bearer <statusToken>
+Content-Type: application/json
+
+{"jobId":"<id>"}
+```
+
+The body has one field, `jobId`. Any other field, including `uid`, `email`, a file, or a key, is `400 {"error":"unknown_field"}`. A missing or empty `jobId` is `400 {"error":"invalid_body"}`. The server loads the account from the job document. It does not accept an account id from the client.
+
+The bearer must be a `statusToken` for that `jobId`. A missing `Authorization` header is `401 {"error":"unauthorized"}`. A bad token, an expired token, an unknown token, or another job's token is `404 {"error":"not_found"}`, the same as a status poll. Terms are not checked.
+
+The job must be `failed`. `retryable` may be true or false. Any other status is `409 {"error":"support_not_needed"}`.
+
+```json
+{"status":"received","requestId":"<id>"}
+```
+
+Success is `202`. `requestId` is an opaque non-empty string and is stable for that `jobId`. A repeat returns the same `requestId`. The server writes one `supportRequests/{jobId}` document and no other support document. The document contains only `accountHash`, `uid`, `jobId`, `failureReason`, `createdAt`, and `count`. It does not contain the raw `statusToken`, an email address, a file, or a key. `failureReason` is the code already stored on the job. The status poll still does not return it.
+
+`count` is the number of calls in the current 24 hour window, and `createdAt` is the start of that window. The first call in a window notifies an operator. Later calls in that window do not. After 24 hours the next call opens a new window, resets `count` to 1, and notifies again. Call number 6 in a window is `429 {"error":"rate_limited","retryAfterSec":<seconds>}`. `retryAfterSec` is the whole seconds left in the window. The `requestId` does not change.
+
+Notification goes through a notifier supplied to the server. When `SUPPORT_NOTIFY_WEBHOOK_URL` is set, the default notifier POSTs this JSON and nothing else:
+
+```json
+{"jobId":"<id>","accountId":"<accountHash>","failureReason":"<code>","createdAt":"<iso>"}
+```
+
+`accountId` is the account hash from the job, not an email and not a Firebase uid. The webhook URL is read from the environment. It is not written in the repo. If the variable is unset, or the POST fails, the support document stays saved, the response is still `202`, and the server logs a warning. The warning does not include the webhook URL or the request body.
+
+The client also shows a fallback support email from its own config. The server does not choose or return that address. Show it when this request fails, when the client has no `statusToken`, and when the person would rather write.
+
 ## Environment
 
 Uses the existing deployment environment. No new secret is introduced.
@@ -156,4 +192,4 @@ await svc.jobStatus(jobId);   // {status:"queued"|"running"|"done"|"failed"}
 registerAccountDeletion({app, firebaseAuth, db, stripe, bucket, auth, byoProviders, hash, now});
 ```
 
-`registerAccountDeletion` mounts `DELETE /v2/account` and `GET /v2/account/deletions/:jobId` only. The running service registers it from `installedBilling` so the same Stripe client used for Checkout performs the cancellations. `auth` is Firebase Admin Auth (`deleteUser`, `revokeRefreshTokens`).
+`registerAccountDeletion` mounts `DELETE /v2/account`, `GET /v2/account/deletions/:jobId`, and `POST /v2/support/deletion-request`. The running service registers it from `installedBilling` so the same Stripe client used for Checkout performs the cancellations. `auth` is Firebase Admin Auth (`deleteUser`, `revokeRefreshTokens`). Pass `notifier` to replace the webhook sender. The default reads `SUPPORT_NOTIFY_WEBHOOK_URL` from the environment.

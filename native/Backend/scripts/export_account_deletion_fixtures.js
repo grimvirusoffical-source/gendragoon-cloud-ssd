@@ -18,7 +18,7 @@ const fs=require("node:fs");
 const path=require("node:path");
 const express=require("express");
 const {memoryFirestore}=require("../test_firestore");
-const {registerAccountDeletion,STATUS_TOKEN_TTL_MS}=require("../account_delete");
+const {registerAccountDeletion,createWebhookNotifier,STATUS_TOKEN_TTL_MS}=require("../account_delete");
 const {installV2Errors}=require("../v2_errors");
 
 const NOW=1_700_000_000_000;
@@ -46,13 +46,13 @@ function redactValue(value){
  }
  return copy;
 }
-function publish(name,record,secrets){
+function publish(name,record,secrets,area="account-deletion"){
  const redacted=redactValue(record);
  const text=JSON.stringify(redacted);
  for(const secret of secrets||[]){
   if(secret&&text.includes(secret))throw Error(name+" leaked a token");
  }
- writeCase("account-deletion",name,redacted);
+ writeCase(area,name,redacted);
 }
 async function capture(base,method,requestPath,{token="owner",body}={}){
  const headers={};
@@ -98,7 +98,8 @@ async function listen({now=()=>NOW,stripe,rows=[],holdRunner=false}={}){
  app.use(express.json({limit:"16kb"}));
  const bucket={deleteFiles:async()=>{}};
  const auth={revokeRefreshTokens:async()=>{},deleteUser:async()=>{}};
- registerAccountDeletion({app,db,stripe:stripe||stripeDouble(),bucket,auth,hash,now,firebaseAuth:authFor(now)});
+ registerAccountDeletion({app,db,stripe:stripe||stripeDouble(),bucket,auth,hash,now,firebaseAuth:authFor(now),
+  notifier:createWebhookNotifier({env:{},warn(){}})});
  installV2Errors(app);
  const server=app.listen(0,"127.0.0.1");
  await new Promise(resolve=>server.once("listening",resolve));
@@ -252,5 +253,51 @@ async function main(){
    throw Error("not retryable "+JSON.stringify(denied.response));
   publish("retry-not-retryable",denied,[created.response.body.statusToken]);
  }finally{await permanent.close();}
+
+ const support=await listen({
+  rows:[["gd_accounts/"+hash("owner"),{stripeCustomerId:"cus_fixture"}]],
+  stripe:stripeDouble({cancel:async()=>{throw Object.assign(Error("stripe key rejected"),{type:"authentication_error",statusCode:401});}}),
+ });
+ try{
+  const created=await capture(support.base,"DELETE","/v2/account",{body:{confirm:"DELETE"}});
+  if(created.response.status!==202)throw Error("support create "+JSON.stringify(created.response));
+  const token=created.response.body.statusToken;
+  const jobId=created.response.body.jobId;
+  const failed=await pollUntil(support.base,jobId,token,"failed");
+  if(failed.response.body?.status!=="failed")throw Error("support failed "+JSON.stringify(failed.response));
+  const received=await capture(support.base,"POST","/v2/support/deletion-request",{token,body:{jobId}});
+  if(received.response.status!==202||received.response.body?.status!=="received"||typeof received.response.body?.requestId!=="string")
+   throw Error("support received "+JSON.stringify(received.response));
+  publish("request-received",received,[token],"support");
+  const repeat=await capture(support.base,"POST","/v2/support/deletion-request",{token,body:{jobId}});
+  if(repeat.response.status!==202||repeat.response.body?.requestId!==received.response.body.requestId)
+   throw Error("support repeat "+JSON.stringify(repeat.response));
+  publish("request-repeat",repeat,[token],"support");
+  const extra=await capture(support.base,"POST","/v2/support/deletion-request",{token,body:{jobId,email:"person@example.com"}});
+  if(extra.response.status!==400||extra.response.body?.error!=="unknown_field")throw Error("support field "+JSON.stringify(extra.response));
+  publish("request-unknown-field",extra,[token],"support");
+  const bad=await capture(support.base,"POST","/v2/support/deletion-request",{token:"not-a-token",body:{jobId}});
+  if(bad.response.status!==404||bad.response.body?.error!=="not_found")throw Error("support token "+JSON.stringify(bad.response));
+  publish("request-bad-token",bad,[token],"support");
+  for(let n=0;n<3;n++){
+   const more=await capture(support.base,"POST","/v2/support/deletion-request",{token,body:{jobId}});
+   if(more.response.status!==202)throw Error("support fill "+JSON.stringify(more.response));
+  }
+  const limited=await capture(support.base,"POST","/v2/support/deletion-request",{token,body:{jobId}});
+  if(limited.response.status!==429||limited.response.body?.error!=="rate_limited"||!Number.isInteger(limited.response.body?.retryAfterSec))
+   throw Error("support limit "+JSON.stringify(limited.response));
+  publish("request-rate-limited",limited,[token],"support");
+ }finally{await support.close();}
+
+ const finishedSupport=await listen();
+ try{
+  const created=await capture(finishedSupport.base,"DELETE","/v2/account",{body:{confirm:"DELETE"}});
+  if(created.response.status!==202)throw Error("support done create "+JSON.stringify(created.response));
+  const token=created.response.body.statusToken;
+  await pollUntil(finishedSupport.base,created.response.body.jobId,token,"done");
+  const early=await capture(finishedSupport.base,"POST","/v2/support/deletion-request",{token,body:{jobId:created.response.body.jobId}});
+  if(early.response.status!==409||early.response.body?.error!=="support_not_needed")throw Error("support early "+JSON.stringify(early.response));
+  publish("request-not-failed",early,[token],"support");
+ }finally{await finishedSupport.close();}
 }
 main().catch(error=>{console.error(error);process.exit(1);});
