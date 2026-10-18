@@ -1147,6 +1147,93 @@ final class AccountLogicTests: XCTestCase {
         }
     }
 
+    // MARK: QA (Morgan) support contract rows vs core caf30ae / 4582ae7, PR #8 at e5f1982.
+    // Mirrors Android SupportContractTest. Sender-level (GDTransferClient.once) blank-token rows are not
+    // here: the URLSession is private and ephemeral, so there is no seam to count requests without a source change.
+
+    func testSupportMalformed202OpensMailto() {
+        for body in ["{\"status\":\"received\"}","{\"status\":\"received\",\"requestId\":\"\"}","{\"requestId\":\"req-1\"}","{\"status\":\"queued\",\"requestId\":\"req-1\"}","{\"status\":\"RECEIVED\",\"requestId\":\"req-1\"}","not json",""] {
+            let result=DeletionSupport.interpret(status:202,body:body,transportFailed:false)
+            XCTAssertEqual(result.kind,.mailto,body)
+            XCTAssertTrue(result.opensMailto,body)
+        }
+        XCTAssertEqual(DeletionSupport.interpret(status:202,body:"{\"status\":\"received\",\"requestId\":\"req-1\"}",transportFailed:false).kind,.sent)
+    }
+
+    func testSupportUnexpectedSuccessRedirectAnd423StatusesOpenMailto() {
+        let received="{\"status\":\"received\",\"requestId\":\"req-1\"}"
+        for code in [200,201,204,301,302,304,307,423] {
+            XCTAssertEqual(DeletionSupport.interpret(status:code,body:received,transportFailed:false).kind,.mailto,"status \(code)")
+        }
+    }
+
+    func testSupportOnly409SupportNotNeededRefreshes() {
+        for body in ["","{}","{\"error\":\"deletion_not_retryable\"}","{\"code\":\"support_not_needed\"}","{\"error\":\"SUPPORT_NOT_NEEDED\"}"] {
+            XCTAssertEqual(DeletionSupport.interpret(status:409,body:body,transportFailed:false).kind,.mailto,body)
+        }
+        XCTAssertEqual(DeletionSupport.interpret(status:409,body:"{\"error\":\"support_not_needed\"}",transportFailed:false).kind,.refresh)
+    }
+
+    func testSupportErrorsAreNeverAlreadySentOrRefresh() {
+        let limited=BackendFixtures.responseBodyString(area:"account-deletion",name:"support-rate-limited")
+        let notNeeded=BackendFixtures.responseBodyString(area:"account-deletion",name:"support-not-needed")
+        for code in [401,404,500,502,503,504] {
+            for body in [limited,notNeeded] {
+                XCTAssertEqual(DeletionSupport.interpret(status:code,body:body,transportFailed:false).kind,.mailto,"status \(code)")
+            }
+        }
+        XCTAssertEqual(DeletionSupport.interpret(status:429,body:limited,transportFailed:true).kind,.mailto)
+        XCTAssertEqual(DeletionSupport.interpret(status:409,body:notNeeded,transportFailed:true).kind,.mailto)
+        XCTAssertEqual(DeletionSupport.interpret(status:202,body:"{\"status\":\"received\",\"requestId\":\"r\"}",transportFailed:true).kind,.mailto)
+    }
+
+    func testSupportRefreshDoneForThisJobContinuesNormally() async {
+        let dead=fixture("status-failed-not-retryable")
+        var flow=await refreshing(dead)
+        let s=ScriptedDeletionTransport();s.respond(status(dead.jobId,"done"));await flow.pollThrough(s)
+        XCTAssertFalse(flow.openSupportMailto)
+        XCTAssertFalse(flow.supportRefresh)
+        XCTAssertEqual(flow.step,.done)
+        XCTAssertTrue(flow.requestsWipe())
+        XCTAssertFalse(flow.clearSession)
+    }
+
+    func testSupportRefreshIsASingleGet() async {
+        let dead=fixture("status-failed-not-retryable")
+        var flow=await refreshing(dead)
+        let s=ScriptedDeletionTransport();s.respond(status(dead.jobId,"queued"));await flow.pollThrough(s)
+        XCTAssertEqual(s.calls.count,1)
+        XCTAssertEqual(s.calls.first?.0,"GET")
+        XCTAssertFalse(flow.supportRefresh)
+        XCTAssertEqual(flow.message,"Your deletion is still in progress.")
+    }
+
+    func testSupportEmptyTokenSendsNothing() {
+        let job=fixture("status-failed-not-retryable").jobId ?? ""
+        for value in [nil,""] as [String?] {
+            let call=DeletionSupport.call(jobId:job,savedJobId:job,statusToken:value,enabled:true)
+            XCTAssertFalse(call.send)
+            XCTAssertNil(call.authorization)
+        }
+    }
+
+    func testSupportWhitespaceTokenSendsNothing() {
+        let job=fixture("status-failed-not-retryable").jobId ?? ""
+        // Failed at e226d4e (validToken only checked isEmpty); fixed by e5f1982 validToken trim.
+        for value in [" ","   ","\t","\n"," \t\n "] {
+            let call=DeletionSupport.call(jobId:job,savedJobId:job,statusToken:value,enabled:true)
+            XCTAssertFalse(call.send,"token length \(value.count)")
+            XCTAssertNil(call.authorization)
+        }
+    }
+
+    func testSupportWhitespaceTokenRefreshFallsBack() {
+        let job=fixture("status-failed-not-retryable").jobId ?? ""
+        // Failed at e226d4e; fixed by e5f1982.
+        var flow=AccountDeletion.resume(DeletionReceipt.of(jobId:job,statusToken:"   "))
+        XCTAssertFalse(flow.refreshAfterSupport())
+    }
+
     /// Riley PR #5 at 0715b1a. Labels come from the server fields. `feeWaived` is required.
     func testWorkspacePriceUsesRileyFixturesAndNeverCounts() throws {
         XCTAssertEqual(BackendFixtures.workspacePriceSHA,"0715b1a")
