@@ -2,7 +2,11 @@ name: Native integration validation
 
 on:
   push:
-    branches: [codex/native-integration-20261017]
+    branches:
+      - codex/native-integration-20261017
+      - fix/**
+      - feat/**
+      - test/**
   pull_request:
     paths: ['native/**', 'macos/**', 'fixtures/**', '.github/workflows/native-validation.yml']
   workflow_dispatch:
