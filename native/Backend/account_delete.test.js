@@ -100,19 +100,20 @@ test("account delete: second call returns 410 after the user is gone and repeats
   assert.equal(f.canceled.length,before);assert.deepEqual(f.auth.deletedUsers,[uid]);
 });
 test("account deletion removes every workspace and does not move the free slot onto one of them",async()=>{
-  const {createProjectService}=require("./projects");
   const slotUid="slot-owner",slotOwner=crypto.createHash("sha256").update(slotUid).digest("hex");
-  const idFor=n=>"12345678-1234-4000-8000-"+String(n).padStart(12,"0");
-  const db=memoryFirestore([["gd_accounts/"+slotOwner,{stripeCustomerId:"cus_slot"}]]);
-  const price={id:"price_month",active:true,type:"recurring",recurring:{interval:"month"},currency:"usd",unit_amount:500,billing_scheme:"per_unit",livemode:false,product:{active:true}};
-  const projectStripe={prices:{retrieve:async()=>({...price})},checkout:{sessions:{create:async()=>({id:"cs_month",url:"https://checkout.stripe.com/c/pay/cs_month",status:"open"}),retrieve:async()=>{throw Error("missing");}}}};
-  const env={STRIPE_CHECKOUT_ENABLED:"true",STRIPE_WORKSPACE_MONTHLY_READY:"true",STRIPE_WORKSPACE_MONTHLY_PRICE_ID:"price_month",STRIPE_ENVIRONMENT:"test",PUBLIC_URL:"https://billing.example"};
-  const projects=createProjectService({db,stamp:()=>1_700_000_000_000,hash:()=>slotOwner,stripe:projectStripe,env,ensureCustomer:async()=>"cus_slot"});
-  const req={user:{uid:slotUid}};
-  await projects.create(req,{name:"Free",intentId:idFor(1)});
-  await projects.create(req,{name:"Paid",intentId:idFor(2)});
-  const paidKey="gd_accounts/"+slotOwner+"/workspaces/"+idFor(2);
-  assert.equal(db.rows.get("gd_accounts/"+slotOwner).freeWorkspaceId,idFor(1));
+  const freeId="12345678-1234-4000-8000-000000000001",paidId="12345678-1234-4000-8000-000000000002";
+  const paidKey="gd_accounts/"+slotOwner+"/workspaces/"+paidId;
+  const hosted=(id,name,fee)=>({kind:"paid",accountHash:slotOwner,name,projectBillingVersion:2,
+    projectStatus:fee==="free"?"active":"pending_payment",projectFeeStatus:fee,provisioned:fee==="free",
+    workspaceFeeModel:fee==="free"?null:"monthly",workspaceFeeStatus:fee==="free"?null:"pending",
+    workspaceFeeCents:fee==="free"?0:500,createdAt:fee==="free"?1_700_000_000_000:1_700_000_100_000});
+  const db=memoryFirestore([
+    ["gd_accounts/"+slotOwner,{stripeCustomerId:"cus_slot",freeWorkspaceId:freeId}],
+    ["gd_accounts/"+slotOwner+"/workspaces/"+freeId,hosted(freeId,"Free","free")],
+    [paidKey,hosted(paidId,"Paid","pending")],
+    ["tenants/"+slotOwner+"/workspaces/free",{kind:"free",accountKey:slotOwner,name:"Legacy"}],
+  ]);
+  assert.equal(db.rows.get("gd_accounts/"+slotOwner).freeWorkspaceId,freeId);
   assert.equal(db.rows.get(paidKey).projectFeeStatus,"pending");
   const writes=[];
   const rawSet=db.rows.set.bind(db.rows);
@@ -126,9 +127,10 @@ test("account deletion removes every workspace and does not move the free slot o
   while(Date.now()<deadline);
   assert.equal(job.status,"done");
   assert.equal(writes.some(([key,value])=>key===paidKey&&value.projectFeeStatus==="free"),false);
-  assert.equal(writes.some(([,value])=>value&&value.freeWorkspaceId===idFor(2)),false);
+  assert.equal(writes.some(([,value])=>value&&value.freeWorkspaceId===paidId),false);
+  assert.equal(writes.some(([key,value])=>key==="gd_accounts/"+slotOwner&&value.freeWorkspaceId===null),true);
   assert.equal(db.rows.has(paidKey),false);
-  assert.equal(db.rows.has("gd_accounts/"+slotOwner+"/workspaces/"+idFor(1)),false);
+  assert.equal(db.rows.has("gd_accounts/"+slotOwner+"/workspaces/"+freeId),false);
   assert.equal(db.rows.has("tenants/"+slotOwner+"/workspaces/free"),false);
   assert.equal(db.rows.has("gd_accounts/"+slotOwner),false);
 });
