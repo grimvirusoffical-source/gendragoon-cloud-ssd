@@ -421,9 +421,7 @@ class PreviewChannelTests(unittest.TestCase):
             with mock.patch.object(auto,"CHANNEL","stable"):self.assertIsNone(auto.latest())
             package["automaticUpdateEligible"]=True
             with mock.patch.object(auto,"CHANNEL","stable"):
-                eligible=auto.latest()
-                self.assertEqual(eligible["version"],base)
-                self.assertEqual(eligible["releaseTag"],tag)
+                self.assertIsNone(auto.latest())
             package["automaticUpdateEligible"]=False
             with mock.patch.object(auto,"CHANNEL","preview"):
                 result=auto.latest()

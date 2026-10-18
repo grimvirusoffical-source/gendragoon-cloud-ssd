@@ -97,7 +97,8 @@ enum GDNativeHelper {
                 throw GDNativeFailure(message: "The helper returned an invalid response. Check the operation status before retrying.")
             }
             guard process.terminationStatus == 0, result["ok"] as? Bool == true else {
-                throw GDNativeFailure(message: (result["message"] as? String) ?? (result["error"] as? String) ?? "The operation could not finish.")
+                let serverCode = GDServerCode.read(result)
+                throw GDNativeFailure(message: (result["message"] as? String) ?? (serverCode.isEmpty ? nil : serverCode) ?? "The operation could not finish.")
             }
             return result
         }.value

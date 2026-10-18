@@ -435,6 +435,36 @@ enum GDProjectContent: String { case files, applications }
         operation = Task { defer { finishOperation() }; do { try await client.delete(fileID: file.id, workspace: workspace); try await load() } catch { status = GDNativeMessage.safe(error.localizedDescription) } }
     }
     func pause() { operation?.cancel() }
+    func activeWorkspaces() async throws -> [GDWorkspaceChoice] {
+        guard let client else { throw GDTransferError(message: "Sign in first.", status: 401) }
+        let data = try await client.jsonData("v2/workspaces")
+        struct Response: Decodable { let workspaces: [GDWorkspaceChoice] }
+        return try JSONDecoder().decode(Response.self, from: data).workspaces
+    }
+    func archiveWorkspace(_ workspace: GDWorkspaceChoice) async throws {
+        guard let client else { throw GDTransferError(message: "Sign in first.", status: 401) }
+        let payload = try JSONSerialization.data(withJSONObject: GDStorageContract.archiveBody(confirmName: workspace.name))
+        _ = try await client.jsonData(GDStorageContract.archivePath(id: workspace.id), method: "POST", payload: payload)
+    }
+    func mergeWorkspace(source: GDWorkspaceChoice, targetId: String) async throws {
+        guard let client else { throw GDTransferError(message: "Sign in first.", status: 401) }
+        let payload = try JSONSerialization.data(withJSONObject: GDStorageContract.mergeBody(targetId: targetId, confirmName: source.name))
+        _ = try await client.jsonData(GDStorageContract.mergePath(sourceId: source.id), method: "POST", payload: payload)
+    }
+    func downloadWorkspace(_ workspace: GDWorkspaceChoice, to folder: URL) async throws -> Int {
+        guard let client else { throw GDTransferError(message: "Sign in first.", status: 401) }
+        let files = try await client.list(workspace: workspace.id)
+        var saved = 0
+        for file in files {
+            let downloaded = try await client.download(file: file, workspace: workspace.id, constrained: dataSaver) { (_: GDTransferProgress) async in }
+            defer { try? FileManager.default.removeItem(at: downloaded) }
+            let destination = folder.appendingPathComponent(file.displayName)
+            if FileManager.default.fileExists(atPath: destination.path) { continue }
+            try FileManager.default.copyItem(at: downloaded, to: destination)
+            saved += 1
+        }
+        return saved
+    }
 }
 
 struct GenDragoonFreeCloudPanel: View {

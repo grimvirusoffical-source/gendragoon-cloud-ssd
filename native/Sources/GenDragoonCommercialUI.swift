@@ -192,7 +192,8 @@ private struct GDDraftWorkspace: Identifiable, Codable {
             customer.refresh(); loginSession.checkAdEntitlement()
         }
         .sheet(isPresented: $workspaceLock.presented) {
-            GDWorkspaceLockScreen()
+            GDWorkspaceLockScreen(customer: customer)
+                .environmentObject(loginSession)
         }
     }
     private var sidebar:some View {

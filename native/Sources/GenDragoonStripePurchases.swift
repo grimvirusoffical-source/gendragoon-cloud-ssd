@@ -22,14 +22,14 @@ enum GDWorkspaceOffer {
     static let byoSummary = "Connect an S3-compatible bucket you already run: Amazon S3, Cloudflare R2, Backblaze B2, Wasabi, MinIO, or Google Cloud with S3/HMAC keys. The workspace fee is $5/month. SFTP, Azure, and WebDAV are coming soon."
     static func canConnect(_ id: String) -> Bool { providers.first { $0.id == id }?.available == true }
     static func comingSoonMessage(_ title: String) -> String { "\(title) is coming soon. There is no connect flow for it yet." }
+    static func byoFailureMessage(json: [String: Any], status: Int) -> String {
+        let code = GDServerCode.read(json)
+        if let message = GDStorageContract.byoMessage(code: code, status: status) { return message }
+        if let text = json["message"] as? String, !text.isEmpty, text != code { return text }
+        return "The bucket challenge did not complete. Check the endpoint and try again."
+    }
     static func byoFailureMessage(code: String, status: Int) -> String {
-        if status == 422 || code == "byo_provider_unsupported" {
-            return "This provider is not supported. Choose Amazon S3, Cloudflare R2, Backblaze B2, Wasabi, MinIO, or Google Cloud with an S3/HMAC key."
-        }
-        if code == "byo_unverifiable" || status == 409 {
-            return "GenDragoon could not verify the challenge object from your bucket. Check the endpoint and keys, then run the challenge again."
-        }
-        return code.isEmpty ? "Billing is temporarily unavailable. Please retry." : code
+        byoFailureMessage(json: ["error": code], status: status)
     }
 }
 
@@ -136,16 +136,13 @@ private struct GDBillingSelection: Codable, Equatable {
             if authenticated && login?.userID != expected { throw GDTransferError(message: "Your account changed. Refresh billing.", status: 401) }
             let code = (response as? HTTPURLResponse)?.statusCode ?? 0
             if authenticated && code == 401 && attempt == 0 { continue }
-            if code == 423 {
-                let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] ?? [:]
-                if object["error"] as? String == "workspace_lock" {
-                    Task { @MainActor in GDWorkspaceLock.shared.present(json: object) }
-                    throw GDTransferError(message: "This account is over its workspace limit. Delete or merge the extra workspaces. Downloads stay available.", status: 423)
-                }
+            let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] ?? [:]
+            if code == 423, GDServerCode.read(object) == "workspace_lock" {
+                Task { @MainActor in GDWorkspaceLock.shared.present(json: object) }
+                throw GDTransferError(message: "This account is over its workspace limit. Delete or merge the extra workspaces. Downloads stay available.", status: 423)
             }
             guard (200...299).contains(code) else {
-                let reason = ((try? JSONSerialization.jsonObject(with: data)) as? [String: Any])?["error"] as? String
-                throw GDTransferError(message: reason ?? "Billing is temporarily unavailable. Please retry.", status: code)
+                throw GDTransferError(message: GDWorkspaceOffer.byoFailureMessage(json: object, status: code), status: code)
             }
             return data
         }
@@ -229,20 +226,23 @@ private struct GDBillingSelection: Codable, Equatable {
     func portal(login session: GDLoginSession) {
         begin(login: session) { try self.openCheckout(await self.send("billing/customer-portal", method: "POST")) }
     }
-    func buyManualBYO(login session: GDLoginSession, workspaceID: String, remote: String, provider: String, yearly: Bool) {
+    func buyManualBYO(login session: GDLoginSession, workspaceID: String, endpoint: String, bucketFingerprint: String, provider: String, yearly: Bool) {
         guard let offer = GDWorkspaceOffer.providers.first(where: { $0.id == provider }) else {
             status = GDWorkspaceOffer.byoFailureMessage(code: "byo_provider_unsupported", status: 422)
             return
         }
         guard offer.available else { status = GDWorkspaceOffer.comingSoonMessage(offer.title); return }
         guard workspaces.contains(where: { $0.id == workspaceID && $0.isAvailable }) else { status = "Choose an active project first."; return }
-        guard remote.range(of: "^[A-Za-z0-9_-]{3,40}$", options: .regularExpression) != nil else { status = "Enter an existing remote name using 3–40 letters, numbers, dashes or underscores."; return }
+        guard let registration = GDStorageContract.byoRegisterBody(provider: provider, endpoint: endpoint, bucketFingerprint: bucketFingerprint) else {
+            status = "Enter the https bucket endpoint and its fingerprint. Keys stay in the Keychain."
+            return
+        }
         begin(login: session) {
             self.status = "Registering \(offer.title). The challenge uses keys already in the macOS Keychain."
             do {
-                _ = try await self.send("v2/workspaces/" + workspaceID + "/byo/register", method: "POST", payload: ["provider": "s3", "label": remote])
+                _ = try await self.send(GDStorageContract.byoRegisterPath(workspaceId: workspaceID), method: "POST", payload: registration.mapValues { $0 as Any })
             } catch let error as GDTransferError {
-                throw GDTransferError(message: GDWorkspaceOffer.byoFailureMessage(code: error.message, status: error.status), status: error.status)
+                throw GDTransferError(message: GDWorkspaceOffer.byoFailureMessage(json: ["error": error.message], status: error.status), status: error.status)
             }
             self.status = "Write .gendragoon-challenge/<nonce> with those keys, send only the presigned GET, and delete the object after GenDragoon confirms."
             _ = yearly
@@ -274,6 +274,8 @@ struct GenDragoonStripePurchases: View {
     @ObservedObject private var activity = GDUpdateActivity.shared
     let focus: String
     @State private var selected = GDBillingSelection()
+    @State private var byoEndpoint = ""
+    @State private var byoFingerprint = ""
     @State private var selectionAccount = ""
     private var accountScope: String { SHA256.hash(data: Data(login.userID.utf8)).map { String(format: "%02x", $0) }.joined() }
     private func persistenceKey(workspaceID: String) -> String {
@@ -414,10 +416,11 @@ struct GenDragoonStripePurchases: View {
                 Text(GDWorkspaceOffer.comingSoonMessage(provider.title)).font(.system(size: 12, weight: .semibold))
             } else {
                 Text("Keys stay in the macOS Keychain. This Mac writes .gendragoon-challenge/<nonce>, sends a presigned GET, and deletes the object only after GenDragoon confirms. Google Cloud uses S3/HMAC keys here.").font(.system(size: 11)).foregroundStyle(.secondary)
-                TextField("Existing remote name", text: $selected.remote).textFieldStyle(.roundedBorder)
+                TextField("https bucket endpoint", text: $byoEndpoint).textFieldStyle(.roundedBorder)
+                TextField("Bucket fingerprint", text: $byoFingerprint).textFieldStyle(.roundedBorder)
                 Text("Workspace fee: \(GDWorkspaceOffer.monthlyLabel), the same as a hosted workspace. Your provider's own storage and network charges stay separate. Performance features cost extra unless you stay on the free performance tier.").font(.system(size: 12, weight: .semibold))
-                Button(billing.ownerBenefits ? "Start challenge and activate — included" : "Start challenge · \(GDWorkspaceOffer.monthlyLabel)") { billing.buyManualBYO(login: login, workspaceID: selected.workspaceID, remote: selected.remote, provider: selected.provider, yearly: false) }
-                    .buttonStyle(.borderedProminent).tint(.cyan).disabled(blocked || selected.remote.isEmpty || (catalog.catalogVersion ?? 1) < 2 || !billing.workspaces.contains { $0.id == selected.workspaceID && $0.isAvailable } || !GDWorkspaceOffer.canConnect(selected.provider))
+                Button(billing.ownerBenefits ? "Start challenge and activate — included" : "Start challenge · \(GDWorkspaceOffer.monthlyLabel)") { billing.buyManualBYO(login: login, workspaceID: selected.workspaceID, endpoint: byoEndpoint, bucketFingerprint: byoFingerprint, provider: selected.provider, yearly: selected.yearly) }
+                    .buttonStyle(.borderedProminent).tint(.cyan).disabled(blocked || byoEndpoint.isEmpty || byoFingerprint.isEmpty || (catalog.catalogVersion ?? 1) < 2 || !billing.workspaces.contains { $0.id == selected.workspaceID && $0.isAvailable } || !GDWorkspaceOffer.canConnect(selected.provider))
             }
         } else if focus == "ads" {
             Text("Permanent ad removal · " + money(catalog.removeAds.oneTimeCents) + " once").font(.system(size: 16, weight: .semibold))

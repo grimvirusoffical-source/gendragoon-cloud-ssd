@@ -218,10 +218,11 @@ def request_json(url):
 def latest():
     releases=request_json("https://api.github.com/repos/"+REPO+"/releases?per_page=30")
     if not isinstance(releases,list):raise RuntimeError("Invalid release listing")
-    # Stable may take a GitHub prerelease only when package-status.json says
-    # automaticUpdateEligible. Preview can see prereleases; the flag is checked below.
+    # Stable never installs a GitHub prerelease, even when package-status says eligible.
+    # Preview can see prereleases. automaticUpdateEligible still gates stable packages.
     entries=sorted((x for x in releases if isinstance(x,dict) and not x.get("draft")
-             and RELEASE_TAG.fullmatch(str(x.get("tag_name","")))),
+             and RELEASE_TAG.fullmatch(str(x.get("tag_name","")))
+             and (CHANNEL=="preview" or (not x.get("prerelease") and TAG.fullmatch(str(x.get("tag_name","")))))),
              key=lambda x:tuple(map(int,RELEASE_TAG.fullmatch(x["tag_name"]).groups()[:3]))+
                  ((0 if x.get("prerelease") else 1),int(RELEASE_TAG.fullmatch(x["tag_name"]).group(5) or 0)),reverse=True)
     for r in entries:

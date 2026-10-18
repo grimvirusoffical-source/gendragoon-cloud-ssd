@@ -29,20 +29,29 @@ class AccountDeletionTests(unittest.TestCase):
         with self.assertRaises(account.AccountError):
             account.start_deletion(10, "delete")
 
-    def test_fresh_confirmation_starts_a_job_and_a_repeat_401_wipes(self):
+    def test_fresh_confirmation_starts_a_job_and_a_repeat_401_does_not_wipe(self):
         started = account.start_deletion(30, "DELETE")
-        self.assertEqual(started, {"action": "request", "method": "DELETE", "path": "/v2/account"})
-        job = account.accept_start(202, {"job": {"id": "job_12345678", "status": "queued", "progress": 0,
-                                                 "phase": "queued"}})
+        self.assertEqual(started["action"], "request")
+        self.assertEqual(started["method"], "DELETE")
+        self.assertEqual(started["path"], "/v2/account")
+        self.assertEqual(started["body"], {"confirm": "DELETE"})
+        job = account.accept_start(202, {"status": "deleting", "jobId": "job_12345678",
+                                         "statusToken": "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefg"})
         self.assertEqual(job["action"], "poll")
         self.assertEqual(job["path"], "/v2/account/deletions/job_12345678")
+        self.assertEqual(job["statusToken"], "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefg")
+        gone = account.accept_start(410, {"error": "account_deleted", "jobId": "job_12345678",
+                                          "statusToken": "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefg"})
+        self.assertEqual(gone["action"], "poll")
         with self.assertRaises(account.AccountError):
             account.accept_start(202, {"job": {"id": "job_12345678", "statusPath": "/v2/account/deletion/job_12345678"}})
-        done = account.accept_poll(200, {"status": "completed", "progress": 100, "phase": "completed"})
+        with self.assertRaises(account.AccountError):
+            account.accept_poll(200, {"jobId": "job_12345678", "status": "completed", "retryable": False})
+        done = account.accept_poll(200, {"jobId": "job_12345678", "status": "done", "retryable": False})
         self.assertEqual(done["action"], "wipe")
-        repeat = account.accept_start(401, {"error": "unauthorized"})
-        self.assertEqual(repeat["action"], "wipe")
-        self.assertEqual(repeat["phase"], "already-deleted")
+        repeat = account.accept_start(401, {"error": "invalid_token"})
+        self.assertEqual(repeat["action"], "reauthenticate")
+        self.assertNotEqual(repeat["action"], "wipe")
 
     def test_wipe_removes_only_app_caches_and_the_keychain_service(self):
         class Keychain:

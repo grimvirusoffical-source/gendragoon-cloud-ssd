@@ -1,0 +1,21 @@
+{
+  "request": {
+    "body": {
+      "confirm": "DELETE"
+    },
+    "headers": {
+      "authorization": "<redacted>",
+      "content-type": "application/json"
+    },
+    "method": "DELETE",
+    "path": "/v2/account"
+  },
+  "response": {
+    "body": {
+      "status": "deleting",
+      "jobId": "3f2b8c1e-6a4d-4e7b-9c2a-1d5e8f0a7b36",
+      "statusToken": "ERERERERERERERERERERERERERERERERERERERERERE"
+    },
+    "status": 202
+  }
+}

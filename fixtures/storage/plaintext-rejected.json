@@ -1,0 +1,24 @@
+{
+  "request": {
+    "body": {
+      "op": "upload",
+      "objects": [
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      ],
+      "filename": "super-secret-report.pdf",
+      "encryptionKey": "not-a-real-key"
+    },
+    "headers": {
+      "authorization": "<redacted>",
+      "content-type": "application/json"
+    },
+    "method": "POST",
+    "path": "/v2/workspaces/12345678-1234-4000-8000-000000000001/storage-urls"
+  },
+  "response": {
+    "body": {
+      "error": "plaintext_rejected"
+    },
+    "status": 400
+  }
+}

@@ -4,13 +4,13 @@ Tests marked @unittest.expectedFailure describe the fixed behaviour and fail on
 the current code. When a fix lands they start passing, unittest reports an
 "unexpected success", and the marker must be dropped.
 
-Contract sources: Riley's PR #6 (native/Backend/account_delete.js):
-- DELETE /v2/account -> 202 {"jobId": "<uuid>"}
+Contract sources: Riley's PR #6 (native/Backend/account_delete.js at 84f6fff):
+- DELETE /v2/account -> 202 {"status":"deleting","jobId","statusToken"}
 - job status is one of queued | running | done | failed
 - DELETE carries the JSON body {"confirm": "DELETE"}
 - status is polled at GET /v2/account/deletions/:jobId (plural only)
-- 401 "reauth_required" or "invalid_token" means "sign in again" (also returned for a repeat
-  DELETE after the job is done). It never proves the account is gone.
+- a repeat DELETE after done returns 410 {"error":"account_deleted","jobId","statusToken"}
+- 401 "reauth_required" or "invalid_token" means "sign in again". It never wipes.
 
 The Swift client has no Linux-runnable test target, so the Swift checks below
 read the source text. They are guards, not a substitute for XCTest on a Mac.
@@ -66,7 +66,6 @@ def wipes(result):
 
 # Blocker 1: a 401 must never wipe keys, and freshness comes from auth_time.
 class ReauthNeverWipesTests(unittest.TestCase):
-    @unittest.expectedFailure
     def test_start_401_routes_to_sign_in_without_wiping(self):
         for code in ("reauth_required", "invalid_token"):
             with self.subTest(code=code):
@@ -74,7 +73,6 @@ class ReauthNeverWipesTests(unittest.TestCase):
                 self.assertFalse(wipes(result))
                 self.assertEqual(result.get("action"), "reauthenticate")
 
-    @unittest.expectedFailure
     def test_poll_401_routes_to_sign_in_without_wiping(self):
         for code in ("reauth_required", "invalid_token"):
             with self.subTest(code=code):
@@ -82,7 +80,6 @@ class ReauthNeverWipesTests(unittest.TestCase):
                 self.assertFalse(wipes(result))
                 self.assertEqual(result.get("action"), "reauthenticate")
 
-    @unittest.expectedFailure
     def test_bare_401_never_wipes(self):
         for call in (account.accept_start, account.accept_poll):
             for body in ({}, {"error": "unauthorized"}, None):
@@ -99,7 +96,6 @@ class ReauthNeverWipesTests(unittest.TestCase):
             with self.subTest(age=age):
                 self.assertEqual(account.start_deletion(age, "DELETE")["action"], "reauthenticate")
 
-    @unittest.expectedFailure
     def test_freshness_uses_id_token_auth_time_not_refresh_time(self):
         # A silent refresh re-issues the token (new iat/exp) but keeps the
         # original auth_time. Signed in an hour ago, refreshed 10 s ago: stale.
@@ -113,13 +109,11 @@ class ReauthNeverWipesTests(unittest.TestCase):
         with self.assertRaises(account.AccountError):
             account.sign_in_age({"iat": now - 10}, now)
 
-    @unittest.expectedFailure
     def test_swift_401_branches_never_call_wipe_local(self):
         bodies = blocks_after(swift("GDAccountDeletion.swift"), r"status\s*==\s*401\s*\{")
         for body in bodies:
             self.assertNotIn("wipeLocal", body)
 
-    @unittest.expectedFailure
     def test_swift_freshness_check_is_not_based_on_last_verified(self):
         source = swift("GenDragoonStartupRoot.swift")
         bodies = blocks_after(source, r"func\s+signedInWithin\s*\([^)]*\)[^{]*\{")
@@ -130,13 +124,11 @@ class ReauthNeverWipesTests(unittest.TestCase):
 
 # Blocker 2: 202 body is {"jobId"}, terminal states are done / failed.
 class DeletionContractTests(unittest.TestCase):
-    @unittest.expectedFailure
     def test_202_reads_top_level_job_id(self):
         result = account.accept_start(202, {"jobId": JOB_ID})
         self.assertEqual(result["action"], "poll")
         self.assertEqual(result["path"], DELETION_STATUS_PREFIX + JOB_ID)
 
-    @unittest.expectedFailure
     def test_delete_request_carries_confirm_body(self):
         request = account.start_deletion(30, "DELETE")
         self.assertEqual(request["method"], "DELETE")
@@ -162,7 +154,6 @@ class DeletionContractTests(unittest.TestCase):
                 except account.AccountError:
                     pass
 
-    @unittest.expectedFailure
     def test_completed_is_not_a_contract_state(self):
         # The server only reports queued | running | done | failed.
         with self.assertRaises(account.AccountError):
@@ -172,7 +163,6 @@ class DeletionContractTests(unittest.TestCase):
         with self.assertRaises(account.AccountError):
             account.accept_start(202, {})
 
-    @unittest.expectedFailure
     def test_done_is_the_success_state(self):
         result = account.accept_poll(200, {"status": "done"})
         self.assertTrue(wipes(result))
@@ -186,7 +176,6 @@ class DeletionContractTests(unittest.TestCase):
             with self.subTest(state=state):
                 self.assertEqual(account.accept_poll(200, {"status": state})["action"], "poll")
 
-    @unittest.expectedFailure
     def test_swift_reads_job_id_and_finishes_on_done(self):
         source = swift("GDAccountDeletion.swift")
         self.assertRegex(source, r'json\["jobId"\]')
@@ -194,7 +183,6 @@ class DeletionContractTests(unittest.TestCase):
         self.assertNotRegex(source, r'json\["job"\]')
         self.assertNotRegex(source, r'==\s*"completed"')
 
-    @unittest.expectedFailure
     def test_swift_delete_sends_confirm_body(self):
         source = swift("GDAccountDeletion.swift")
         self.assertIn("httpBody", source)
@@ -231,7 +219,6 @@ class StableSkipsPrereleaseTests(unittest.TestCase):
                 mock.patch.object(updater, "request_json", side_effect=fake_json):
             return updater.latest()
 
-    @unittest.expectedFailure
     def test_stable_skips_newest_prerelease_even_when_marked_eligible(self):
         self.assertEqual(self.check("stable")["releaseTag"], "v0.17.0")
 

@@ -1,0 +1,34 @@
+{
+  "request": {
+    "body": {
+      "op": "download",
+      "objects": [
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      ]
+    },
+    "headers": {
+      "authorization": "<redacted>",
+      "content-type": "application/json"
+    },
+    "method": "POST",
+    "path": "/v2/workspaces/12345678-1234-4000-8000-000000000001/storage-urls"
+  },
+  "response": {
+    "body": {
+      "bucket": "gendragoon-managed-test",
+      "prefix": "customer/03b0e29f00a8e1a8de48b008ff390f924de48f928ae2d8a7745c72681de3f9c6/managed/12345678-1234-4000-8000-000000000001/objects/",
+      "mode": "read",
+      "op": "download",
+      "expiresAt": "2027-01-15T08:15:00.000Z",
+      "urls": [
+        {
+          "object": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "url": "https://storage.googleapis.com/gendragoon-managed-test/customer/03b0e29f00a8e1a8de48b008ff390f924de48f928ae2d8a7745c72681de3f9c6/managed/12345678-1234-4000-8000-000000000001/objects/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa?X-Goog-Algorithm=GOOG4-RSA-SHA256&X-Goog-Expires=900",
+          "method": "GET",
+          "expiresAt": "2027-01-15T08:15:00.000Z"
+        }
+      ]
+    },
+    "status": 200
+  }
+}
