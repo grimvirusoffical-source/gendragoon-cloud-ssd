@@ -11,10 +11,10 @@ export const DELETION_FIXTURE_SHA = "d33970cbf0175a74898c37a8a624a92b1c1a5a94";
 export const SUPPORT_FIXTURE_SHA = DELETION_FIXTURE_SHA;
 
 /**
- * cloud-ssd PR #6 head that adds `account-deletion/support-unauthorized.json`.
+ * cloud-ssd PR #6 head `0486412` (same file core vendors in bca9da2) that adds `account-deletion/support-unauthorized.json`.
  * The rest of account deletion stays on `DELETION_FIXTURE_SHA`.
  */
-export const SUPPORT_UNAUTHORIZED_SHA = "580e672230bf4cf458f4ec28dfcafb30860cc67f";
+export const SUPPORT_UNAUTHORIZED_SHA = "048641275e717e00b4031cf76ccca57cc2e1dc35";
 
 /** cloud-ssd PR #5 policy fixtures: fee waiver, grace, lapse, and make-hosted. */
 export const WORKSPACE_POLICY_SHA = "0715b1a933a3ee3bb489e28a6122475403bb341d";

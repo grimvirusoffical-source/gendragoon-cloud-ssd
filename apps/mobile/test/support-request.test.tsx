@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import path from "node:path";
 import { GenDragoonClient, MemorySecretStore, SUPPORT_CONTACT, requestDeletionSupport } from "@gendragoon/core";
 import { fireEvent, render, waitFor } from "@testing-library/react-native";
 import { Linking } from "react-native";
@@ -45,6 +47,7 @@ function responseFor(status: number, body: unknown): Response {
 async function ask(job: string, fetchImpl: typeof fetch) {
   const secrets = new MemorySecretStore();
   await secrets.set("account-deletion:status-token", new TextEncoder().encode(TOKEN));
+  await secrets.set("account-deletion:job-id", new TextEncoder().encode(job));
   return requestDeletionSupport(job, {
     client: new GenDragoonClient({
       baseUrl: "https://api.example.test",
@@ -128,6 +131,7 @@ describe("deletion support request", () => {
     const openURL = jest.spyOn(Linking, "openURL").mockResolvedValue(undefined as never);
     const secrets = new MemorySecretStore();
     await secrets.set("account-deletion:status-token", new TextEncoder().encode(TOKEN));
+    await secrets.set("account-deletion:job-id", new TextEncoder().encode(jobId));
     const screen = await render(
       <DeleteAccountScreen
         frame="not-retryable"
@@ -160,6 +164,7 @@ describe("deletion support request", () => {
     const openURL = jest.spyOn(Linking, "openURL").mockResolvedValue(undefined as never);
     const secrets = new MemorySecretStore();
     await secrets.set("account-deletion:status-token", new TextEncoder().encode(TOKEN));
+    await secrets.set("account-deletion:job-id", new TextEncoder().encode(jobId));
     const screen = await render(
       <DeleteAccountScreen
         frame="not-retryable"
@@ -200,6 +205,7 @@ describe("deletion support request", () => {
     const onReauth = jest.fn();
     const secrets = new MemorySecretStore();
     await secrets.set("account-deletion:status-token", new TextEncoder().encode(TOKEN));
+    await secrets.set("account-deletion:job-id", new TextEncoder().encode(jobId));
     const screen = await render(
       <DeleteAccountScreen
         frame="not-retryable"
@@ -233,6 +239,26 @@ describe("deletion support request", () => {
     openURL.mockRestore();
   });
 
+  it("a saved job id that doesn't match sends nothing and falls back to mail", async () => {
+    let calls = 0;
+    const secrets = new MemorySecretStore();
+    await secrets.set("account-deletion:status-token", new TextEncoder().encode(TOKEN));
+    await secrets.set("account-deletion:job-id", new TextEncoder().encode("00000000-0000-4000-8000-0000000000ff"));
+    const result = await requestDeletionSupport(jobId, {
+      client: new GenDragoonClient({
+        baseUrl: "https://api.example.test",
+        getToken: async () => "",
+        fetch: (async () => {
+          calls += 1;
+          return responseFor(202, received.response.body);
+        }) as typeof fetch,
+      }),
+      secureStore: secrets,
+    });
+    expect(result).toEqual({ kind: "fallback", contact: SUPPORT_CONTACT });
+    expect(calls).toBe(0);
+  });
+
   it("401 unauthorized from support-unauthorized mails and never asks for sign-in", async () => {
     const fixture = loadFixture<{ error: string }>("account-deletion/support-unauthorized.json");
     expect(fixture.sourceSha).toBe(SUPPORT_UNAUTHORIZED_SHA);
@@ -240,6 +266,14 @@ describe("deletion support request", () => {
     expect(fixture.request.method).toBe("POST");
     expect(fixture.request.body).toBeNull();
     expect(fixture.response).toEqual({ status: 401, body: { error: "unauthorized" } });
+    // Required: the mobile copy is byte-identical to the one core vendors from cloud-ssd 0486412.
+    const vendored = readFileSync(
+      path.join(__dirname, "../../../packages/core/test/fixtures/server/account-deletion/support-unauthorized.json"),
+      "utf8",
+    );
+    const mobileText = readFileSync(path.join(__dirname, "fixtures/account-deletion/support-unauthorized.json"), "utf8");
+    expect(mobileText.split("\n").slice(3).join("\n")).toBe(vendored);
+    expect(Object.keys(fixture.request.headers)).toHaveLength(0);
     const unauthorizedJob = jobIdOf(fixture.request.path);
     const unauthorized = await ask(
       unauthorizedJob,
@@ -251,6 +285,7 @@ describe("deletion support request", () => {
     const onReauth = jest.fn();
     const secrets = new MemorySecretStore();
     await secrets.set("account-deletion:status-token", new TextEncoder().encode(TOKEN));
+    await secrets.set("account-deletion:job-id", new TextEncoder().encode(unauthorizedJob));
     const mailto = supportContactTarget(SUPPORT_CONTACT.value, unauthorizedJob);
     expect(mailto).toBe(`mailto:${SUPPORT_CONTACT.value}?subject=${encodeURIComponent(`Account deletion ${unauthorizedJob}`)}`);
     const screen = await render(
@@ -292,6 +327,8 @@ describe("deletion support request", () => {
     await secrets.set("account-deletion:status-token", new TextEncoder().encode(TOKEN));
     let statusCalls = 0;
     const refreshJob = jobIdOf(unneeded.request.path);
+    // Core only posts when the saved job id matches the one on screen.
+    await secrets.set("account-deletion:job-id", new TextEncoder().encode(refreshJob));
     const refresh = await render(
       <DeleteAccountScreen
         frame="not-retryable"
@@ -328,6 +365,7 @@ describe("deletion support request", () => {
     expect(statusCalls).toBe(1);
     expect(openURL).not.toHaveBeenCalled();
 
+    await secrets.set("account-deletion:job-id", new TextEncoder().encode(jobId));
     const already = await render(
       <DeleteAccountScreen
         frame="not-retryable"
