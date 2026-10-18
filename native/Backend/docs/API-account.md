@@ -8,7 +8,11 @@ No Stripe secret, Firebase private key, customer payload, or user identifier bel
 
 `DELETE /v2/account` uses the same Firebase ID token middleware as the rest of `/v2` (`Authorization: Bearer <Firebase ID token>`, Google provider, current Terms acceptance).
 
-The token must be fresh. `auth_time` (seconds) is compared with the server clock:
+Checks run in this order. A later check is not used to explain an earlier failure.
+
+1. A missing uid, a rejected or revoked token, or a deleted or disabled Firebase user returns `401 {"error":"invalid_token"}`.
+2. A deletion tombstone for that `accountHash` (`account_deletions/{accountHash}` with `status: "done"`) returns `410 {"error":"account_deleted","jobId":"<id>"}`.
+3. Only a token that is still valid, for a Firebase user that still exists, with no tombstone, is checked for freshness. `auth_time` (seconds) is compared with the server clock:
 
 | Age of `auth_time` | Result |
 | --- | --- |
@@ -19,10 +23,10 @@ Every `401` from these routes is JSON with one of two machine-readable codes. Cl
 
 | `error` | Meaning |
 | --- | --- |
-| `reauth_required` | The token's `auth_time` is stale or missing. Sign in again. Nothing was deleted. |
-| `invalid_token` | The token is missing, rejected, or the Firebase user is already gone. |
+| `reauth_required` | The token is valid, the Firebase user still exists, no deletion tombstone exists, and `auth_time` is stale or missing. Sign in again. Nothing was deleted. |
+| `invalid_token` | The token is missing, rejected, revoked, or the Firebase user is already gone. |
 
-A stale token does not create a job and does not cancel billing, delete objects, or touch Firebase. An upstream auth middleware that would have returned a prose `401` is rewritten to `{"error":"invalid_token"}` on these routes.
+A repeat `DELETE` after the job is `done` is `401 {"error":"invalid_token"}` when the Firebase user is gone or the token is revoked, or `410 {"error":"account_deleted","jobId":"<id>"}` when the user record is still present and the tombstone exists. That repeat is never `reauth_required` and never `500`. It does not cancel billing, delete objects, or call `deleteUser` again. A stale token on an account that has not been deleted does not create a job. An upstream auth middleware that would have returned a prose `401` is rewritten to `{"error":"invalid_token"}` on these routes.
 
 When the client sends a JSON body, it must be exactly a confirmation object:
 
@@ -80,7 +84,7 @@ Steps are idempotent and stored on the job. A failed step stops the job in `fail
 2. **Managed objects.** Delete every object under `customer/{accountHash}/` and `tenants/{accountHash}/` in the configured `CUSTOMER_BUCKET`. Another account's prefix is not listed or deleted.
 3. **Metadata.** Delete workspace, file, and upload documents for `gd_accounts/{accountHash}` and the legacy `tenants/{accountHash}` free project, plus `ad_purchases/{uid}`, API keys for that `accountHash`, and `project_payments` rows for that account. **BYO:** provider clients are never called. The server only drops its record of the customer-owned bucket (provider name and endpoint). It does not send a delete to S3, R2, GCS, SFTP, or any other customer endpoint.
 4. **Receipt retention.** Before those rows are removed, the server writes `billing_receipts/{anonymizedId}` where `anonymizedId` is `sha256("gd-receipt-v1:"+accountHash)`. The receipt keeps the Stripe customer id, subscription ids, and payment ids required for tax and payment records. It does not keep the Firebase uid.
-5. **Firebase last.** `revokeRefreshTokens(uid)`, then `deleteUser(uid)`. A missing user on resume is treated as already deleted. After `done`, another `DELETE` with a still-fresh `auth_time` returns `401 {"error":"invalid_token"}` and does not cancel subscriptions again or call `deleteUser` again. A stale `auth_time` on that second call is `401 {"error":"reauth_required"}` instead, so a client is not told the user is gone until it presents a fresh token.
+5. **Firebase last.** `revokeRefreshTokens(uid)`, then `deleteUser(uid)`. A missing user on resume is treated as already deleted. The finished job record is the deletion tombstone. A later `DELETE` consults the Firebase user and that tombstone before `auth_time`, as described under Authentication.
 
 ## Environment
 

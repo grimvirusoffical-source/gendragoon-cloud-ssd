@@ -138,8 +138,39 @@ test("deletion 401s are reauth_required or invalid_token, never a bare 401",asyn
  await assert.rejects(f.svc.deleteAccount({}),{status:401,code:"invalid_token"});
  const started=await f.svc.deleteAccount(f.fresh);
  assert.equal((await untilDone(f.svc,started.jobId)).status,"done");
+ const before=f.canceled.length;
  await assert.rejects(f.svc.deleteAccount(f.fresh),{status:401,code:"invalid_token"});
- assert.equal(f.canceled.length,2);
+ const stale={user:{uid,auth_time:Math.floor(NOW/1000)-6*60}};
+ await assert.rejects(f.svc.deleteAccount(stale),(error)=>{
+  assert.equal(error.status,401);
+  assert.equal(error.code,"invalid_token");
+  assert.notEqual(error.code,"reauth_required");
+  return true;
+ });
+ assert.equal(f.canceled.length,before);
+ assert.equal(f.auth.deletedUsers.length,1);
+});
+test("account delete: a tombstone is 410 account_deleted before auth_time is considered",async()=>{
+ const users=new Set([uid]);
+ const auth={deletedUsers:[],
+  deleteUser:async u=>{auth.deletedUsers.push(u);},
+  revokeRefreshTokens:async()=>{},
+  getUser:async u=>{if(!users.has(u))throw Object.assign(Error("gone"),{code:"auth/user-not-found"});return {uid:u};}};
+ const f=world({deps:{auth}});
+ const started=await f.svc.deleteAccount({...f.fresh,body:{confirm:"DELETE"}});
+ assert.equal((await untilDone(f.svc,started.jobId)).status,"done");
+ const before=f.canceled.length;
+ const stale={user:{uid,auth_time:Math.floor(NOW/1000)-6*60},body:{confirm:"DELETE"}};
+ await assert.rejects(f.svc.deleteAccount(stale),(error)=>{
+  assert.equal(error.status,410);
+  assert.equal(error.code,"account_deleted");
+  assert.equal(error.jobId,started.jobId);
+  assert.notEqual(error.status,500);
+  assert.notEqual(error.code,"reauth_required");
+  return true;
+ });
+ await assert.rejects(f.svc.deleteAccount(f.fresh),{status:410,code:"account_deleted"});
+ assert.equal(f.canceled.length,before);
 });
 test("singular deletion status is not registered; plural enforces ownership",async()=>{
  const db=memoryFirestore([["gd_accounts/"+owner,{stripeCustomerId:"cus_del"}]]);
@@ -189,5 +220,13 @@ test("singular deletion status is not registered; plural enforces ownership",asy
   assert.deepEqual(await foreign.json(),{error:"not_found"});
   const foreignSingular=await fetch(base+"/v2/account/deletion/"+jobId);
   assert.equal(foreignSingular.status,404);
+  current={uid,auth_time:Math.floor(NOW/1000)-6*60};
+  const again=await fetch(base+"/v2/account",{method:"DELETE",headers:{"Content-Type":"application/json"},body:JSON.stringify({confirm:"DELETE"})});
+  assert.equal(again.status,410);
+  assert.deepEqual(await again.json(),{error:"account_deleted",jobId});
+  current={uid,auth_time:Math.floor(NOW/1000)-30};
+  const againFresh=await fetch(base+"/v2/account",{method:"DELETE",headers:{"Content-Type":"application/json"},body:JSON.stringify({confirm:"DELETE"})});
+  assert.equal(againFresh.status,410);
+  assert.deepEqual(await againFresh.json(),{error:"account_deleted",jobId});
  }finally{server.close();}
 });

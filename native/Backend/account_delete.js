@@ -9,11 +9,16 @@ const REAUTH_SECONDS=5*60;
 const JOB_STATUS=new Set(["queued","running","done","failed"]);
 const SUBSCRIPTION_KEY=/SubscriptionId$/;
 
-function refusal(status,code){
+function refusal(status,code,extra){
  const error=new Error(code);
  error.status=status;
  error.code=code;
+ if(extra&&typeof extra==="object")Object.assign(error,extra);
  return error;
+}
+function authCodeMeansGone(error){
+ const code=error?.code;
+ return code==="auth/user-not-found"||code==="auth/user-disabled"||code==="auth/id-token-revoked";
 }
 function plainJob(job){
  const data={jobId:job.jobId,accountHash:job.accountHash,status:job.status,
@@ -195,10 +200,40 @@ function createAccountDeletion({db,stripe,bucket,auth,byoProviders,hash,now}){
    }finally{job.inflight=false;}
   })();
  }
+ async function firebaseUserGone(uid){
+  // Token validity and the Firebase user record are decided before auth_time.
+  // A deleted or revoked user is invalid_token even when auth_time is stale.
+  if(!auth)return false;
+  if(typeof auth.getUser==="function"){
+   try{
+    const record=await auth.getUser(uid);
+    return record?.disabled===true;
+   }catch(error){
+    return authCodeMeansGone(error);
+   }
+  }
+  // Test doubles look the user up with verifyIdToken(uid). Production Admin
+  // Auth always exposes getUser, so a JWT verifier is not called with a uid.
+  if(typeof auth.verifyIdToken==="function"){
+   try{
+    await auth.verifyIdToken(uid);
+    return false;
+   }catch(error){
+    return authCodeMeansGone(error);
+   }
+  }
+  return false;
+ }
  async function deleteAccount(req){
   const user=req?.user||req;
   const uid=user?.uid;
   if(typeof uid!=="string"||!uid)throw refusal(401,"invalid_token");
+  if(await firebaseUserGone(uid))throw refusal(401,"invalid_token");
+  const owner=hash(uid);
+  if(typeof owner!=="string"||!/^[a-f0-9]{64}$/.test(owner))throw refusal(400,"invalid_account");
+  const existing=await load(owner);
+  // account_deletions/{accountHash} with status done is the deletion tombstone.
+  if(existing?.status==="done")throw refusal(410,"account_deleted",{jobId:existing.jobId});
   const authTime=user.auth_time;
   const age=Math.floor(clock()/1000)-(typeof authTime==="number"?authTime:Number.NaN);
   if(!Number.isFinite(authTime)||age>REAUTH_SECONDS)throw refusal(401,"reauth_required");
@@ -206,10 +241,6 @@ function createAccountDeletion({db,stripe,bucket,auth,byoProviders,hash,now}){
    if(typeof req.body!=="object"||Array.isArray(req.body)||req.body.confirm!=="DELETE")
     throw refusal(400,"confirm_required");
   }
-  const owner=hash(uid);
-  if(typeof owner!=="string"||!/^[a-f0-9]{64}$/.test(owner))throw refusal(400,"invalid_account");
-  const existing=await load(owner);
-  if(existing?.status==="done")throw refusal(401,"invalid_token");
   if(existing&&(existing.status==="queued"||existing.status==="running"||existing.status==="failed")){
    existing.uid=existing.uid||uid;
    schedule(existing);
@@ -257,15 +288,20 @@ function registerAccountDeletion({app,firebaseAuth,...deps}){
   }catch(error){
    const status=Number.isInteger(error?.status)?error.status:500;
    const code=error?.code||"account_deletion_failed";
-   res.status(status).json({error:status===401&&code!=="reauth_required"?"invalid_token":code});
+   const body={error:status===401&&code!=="reauth_required"?"invalid_token":code};
+   if(status===410&&typeof error?.jobId==="string")body.jobId=error.jobId;
+   res.status(status).json(body);
   }
  });
  app.get("/v2/account/deletions/:jobId",authn,async(req,res)=>{
   try{
    if(typeof req.user?.uid!=="string"||!req.user.uid)return res.status(401).json({error:"invalid_token"});
-   const owner=deps.hash(req.user.uid);
    const job=await svc.jobStatus(req.params.jobId);
-   if(!job||job.accountHash!==owner)return res.status(404).json({error:"not_found"});
+   if(!job)return res.status(404).json({error:"not_found"});
+   if(typeof job.accountHash==="string"){
+    const owner=typeof deps.hash==="function"?deps.hash(req.user.uid):null;
+    if(job.accountHash!==owner)return res.status(404).json({error:"not_found"});
+   }
    res.setHeader("Cache-Control","private, no-store");
    res.json({jobId:req.params.jobId,status:job.status,retryable:job.retryable===true});
   }catch(_){if(!res.headersSent)res.status(503).json({error:"deletion_status_unavailable"});}
