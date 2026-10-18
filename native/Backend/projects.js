@@ -9,7 +9,9 @@ const {FREE_WORKSPACES,WORKSPACE_FEE_CENTS,BASE_CAP,RAISED_CAP,QUALIFYING_STORAG
  qualifiesForRaisedCap:qualifiesForHigherLimit,summarizeProjects,lockBody,publicByoRegistration,rejectProviderSecrets,
  issueChallenge,verifyChallenge,collisionName,fileDigest,storedChecksums,checksumsAgree,invoicePaidThroughMs,isPrivateAddress,
  listAccountProjects,BYO_CHALLENGE_TTL_MS,isByoWorkspace,subscriptionActive,byoLapsed,
- chooseFreeWorkspaceId,freeWorkspaceId,workspacePrice}=policy;
+ chooseFreeWorkspaceId,freeWorkspaceId,workspacePrice,LAPSE_GRACE_MS}=policy;
+const {queueCancel,queueExpire,sweepSubscriptionCancels,classifyStripeError}=require("./billing_jobs");
+const {ACTIVE_UPLOADS,busyReason,subscriptionIdsOf,checkoutSessionIdsOf,purgeWorkspace}=require("./workspace_purge");
 const PROJECT_FEE_CENTS=WORKSPACE_FEE_CENTS,DEFAULT_PROJECT_LIMIT=BASE_CAP,QUALIFIED_PROJECT_LIMIT=RAISED_CAP;
 const BASIC_QUOTA_BYTES=2_000_000_000;
 const UUID=/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
@@ -51,7 +53,7 @@ function policyFor(account,projects,{ownerBenefits=false,paymentAvailable=false}
    archivedProjects:summary.archived,grandfatheredProjects:summary.grandfatheredProjects,
    ownerFeeWaived:ownerBenefits,paymentAvailable,
    locked:summary.locked,uploadsBlocked:summary.uploadsBlocked,overBy:summary.overBy,
-   unpaidWorkspaceIds:summary.unpaidWorkspaceIds,reason:summary.reason};
+   unpaidWorkspaceIds:summary.unpaidWorkspaceIds,selfLockedWorkspaceIds:summary.selfLockedWorkspaceIds||[],reason:summary.reason};
 }
 function validateSelection(raw){
  if(!raw||Array.isArray(raw)||typeof raw!=="object")throw new ProjectError(400,"Choose a valid plan selection","INVALID_SELECTION");
@@ -98,11 +100,62 @@ function createProjectService({db,stamp,hash,stripe,env={},prices={},ensureCusto
  }
  function projectViews(state){return state.records.map(w=>({...w.data,id:w.id}));}
  function policy(state,req){return policyFor(state.account,projectViews(state),{ownerBenefits:req.ownerBenefits===true,paymentAvailable:paymentAvailable()});}
- function assignFree(tx,record){
-  if(!record)return;
-  if(isGrandfathered(record.data)||record.data.projectFeeStatus==="owner"||record.data.projectFeeStatus==="free")return;
+ function clockMs(){
+  const raw=stamp();
+  if(typeof raw==="number"&&Number.isFinite(raw))return raw<1e12?Math.round(raw*1000):raw;
+  if(raw&&typeof raw.toMillis==="function")return raw.toMillis();
+  return Date.now();
+ }
+ function blankEffects(account){
+  return {cancels:Array.isArray(account?.pendingSubscriptionCancels)?account.pendingSubscriptionCancels.slice():[],
+   expires:Array.isArray(account?.pendingCheckoutExpires)?account.pendingCheckoutExpires.slice():[]};
+ }
+ // Promotion is recorded here. Stripe cancellation and Checkout expiry happen after commit.
+ function queuePromotion(tx,record,effects,reason="promoted_to_free"){
+  if(!record)return effects;
+  if(isGrandfathered(record.data)||record.data.projectFeeStatus==="owner"||record.data.projectFeeStatus==="free")return effects;
+  for(const subscriptionId of subscriptionIdsOf(record.data).filter(id=>id===record.data.workspaceFeeSubscriptionId))
+   effects.cancels=queueCancel(effects.cancels,{subscriptionId,workspaceId:record.id,reason});
+  for(const sessionId of checkoutSessionIdsOf(record.data))
+   effects.expires=queueExpire(effects.expires,{sessionId,workspaceId:record.id});
   tx.update(record.ref,{projectFeeStatus:"free",projectFeeCents:0,projectStatus:"active",provisioned:true,
-    workspaceFeeModel:null,workspaceFeeStatus:null,workspaceFeePaid:null,workspaceFeeCents:0,updatedAt:stamp()});
+    workspaceFeeModel:null,workspaceFeeStatus:null,workspaceFeePaid:null,workspaceFeeCents:0,
+    projectCheckoutSessionId:null,workspaceFeeCheckoutSessionId:null,storageCheckoutSessionId:null,
+    performanceCheckoutSessionId:null,byoCheckoutSessionId:null,updatedAt:stamp()});
+  return effects;
+ }
+ function effectsPatch(effects){
+  return {pendingSubscriptionCancels:effects.cancels,pendingCheckoutExpires:effects.expires};
+ }
+ function recordAlert(code,detail){
+  const entry={alert:code,...detail,at:Date.now()};
+  console.error(JSON.stringify(entry));
+  return entry;
+ }
+ async function clearSubscriptionId(owner,workspaceId,subscriptionId){
+  if(!workspaceId||!subscriptionId)return;
+  const ref=refFor(owner,workspaceId),snap=await ref.get();
+  if(!snap.exists)return;
+  const data=snap.data()||{},patch={};
+  for(const key of ["workspaceFee","storage","performance","byo"])
+   if(data[key+"SubscriptionId"]===subscriptionId)patch[key+"SubscriptionId"]=null;
+  if(Object.keys(patch).length)await ref.update({...patch,updatedAt:stamp()});
+ }
+ async function sweepAccount(owner){
+  const ref=accountRef(owner),snap=await ref.get();
+  if(!snap.exists)return;
+  const data=snap.data()||{},alerts=[];
+  const cancels=await sweepSubscriptionCancels({stripe,pending:data.pendingSubscriptionCancels||[],now:Date.now(),
+   alert:(code,detail)=>alerts.push(recordAlert(code,detail)),
+   onCleared:item=>clearSubscriptionId(owner,item.workspaceId,item.subscriptionId)});
+  const expires=[];
+  for(const item of data.pendingCheckoutExpires||[]){
+   try{if(typeof stripe?.checkout?.sessions?.expire==="function")await stripe.checkout.sessions.expire(item.sessionId);}
+   catch(error){if(classifyStripeError(error)!=="missing")expires.push(item);}
+  }
+  const patch={pendingSubscriptionCancels:cancels,pendingCheckoutExpires:expires};
+  if(alerts.length)patch.billingAlerts=[...(data.billingAlerts||[]),...alerts];
+  await ref.set(patch,{merge:true});
  }
  function touch(tx,owner,state,extra={}){
    tx.set(accountRef(owner),{freeProjectClaimed:state.account.freeProjectClaimed===true||state.records.length>0,
@@ -152,7 +205,7 @@ function createProjectService({db,stamp,hash,stripe,env={},prices={},ensureCusto
      touch(tx,owner,state,{freeProjectClaimed:true,freeWorkspaceId:assignedFree,projectsCreatedLifetime:(state.account.projectsCreatedLifetime||state.records.length)+1});
      const next={...state,account:{...state.account,freeProjectClaimed:true,freeWorkspaceId:assignedFree},records:[...state.records,{id,ref,data}]};
      const price=workspacePrice({...data,id},assignedFree);
-     return {project:{id,ref,data},policy:policy(next,req),resumed:false,isFree:price.isFree,monthlyPriceCents:price.monthlyPriceCents};
+     return {project:{id,ref,data},policy:policy(next,req),resumed:false,isFree:price.isFree,monthlyPriceCents:price.monthlyPriceCents,feeWaived:price.feeWaived};
    });
  }
  async function setSelection(req,id,raw){
@@ -379,18 +432,40 @@ function createProjectService({db,stamp,hash,stripe,env={},prices={},ensureCusto
    return snap.docs.map(d=>({id:d.id,ref:d.ref,data:d.data()}));
  }
  async function remove(req,id){
-  const owner=hash(req.user.uid);
-  return db.runTransaction(async tx=>{
+  const owner=hash(req.user.uid),ref=refFor(owner,id);
+  const outcome=await db.runTransaction(async tx=>{
     const state=await snapshot(owner,tx),current=state.records.find(w=>w.id===id);
     if(!current)throw new ProjectError(404,"Project not found","PROJECT_NOT_FOUND");
+    if(projectStatus(current.data)==="deleting")return {workspaceId:id,resume:true,freeWorkspaceId:state.account.freeWorkspaceId||null};
+    const uploads=await tx.get(current.ref.collection("uploads").where("status","in",ACTIVE_UPLOADS).limit(1));
+    const busy=busyReason(current.data,{uploadsEmpty:uploads.empty!==false&&(uploads.docs||[]).length===0});
+    if(busy){
+     const error=new ProjectError(409,"Workspace is busy","workspace_busy");
+     error.reason=busy;
+     throw error;
+    }
     const projects=projectViews(state),freeId=freeWorkspaceId(state.account,projects);
     const remaining=projects.filter(workspace=>workspace.id!==id);
     let nextFree=freeId===id?chooseFreeWorkspaceId(remaining):freeId;
-    if(freeId===id&&nextFree)assignFree(tx,state.records.find(w=>w.id===nextFree));
-    tx.delete(current.ref);
-    touch(tx,owner,state,{freeWorkspaceId:nextFree||null});
-    return {workspaceId:id,deleted:true,freeWorkspaceId:nextFree||null};
+    const effects=blankEffects(state.account);
+    if(freeId===id&&nextFree)queuePromotion(tx,state.records.find(w=>w.id===nextFree),effects,"promoted_to_free");
+    for(const subscriptionId of subscriptionIdsOf(current.data))
+     effects.cancels=queueCancel(effects.cancels,{subscriptionId,workspaceId:id,reason:"workspace_deleted"});
+    tx.update(current.ref,{projectStatus:"deleting",updatedAt:stamp()});
+    touch(tx,owner,state,{freeWorkspaceId:nextFree||null,...effectsPatch(effects)});
+    return {workspaceId:id,resume:false,freeWorkspaceId:nextFree||null};
   });
+  await sweepAccount(owner);
+  try{
+   await purgeWorkspace({db,owner,workspaceId:id,workspaceRef:ref,objectStore,now:Date.now(),
+    alert:(code,detail)=>recordAlert(code,detail)});
+  }catch(error){
+   const wrapped=new ProjectError(503,"Workspace deletion is still removing objects","WORKSPACE_PURGE_PENDING");
+   wrapped.cause=error;
+   throw wrapped;
+  }
+  const left=await ref.get();
+  return {workspaceId:id,deleted:!left.exists,freeWorkspaceId:outcome.freeWorkspaceId};
  }
  async function registerByo(req,id,body){
    let registration;
@@ -403,9 +478,10 @@ function createProjectService({db,stamp,hash,stripe,env={},prices={},ensureCusto
      throw error;
    }
    const owner=hash(req.user.uid),ref=refFor(owner,id);
-   return db.runTransaction(async tx=>{
+   const result=await db.runTransaction(async tx=>{
      const state=await snapshot(owner,tx),current=state.records.find(w=>w.id===id);
      if(!current)throw new ProjectError(404,"Project not found","PROJECT_NOT_FOUND");
+     const wasGrandfathered=isGrandfathered(current.data);
      const projects=projectViews(state),freeId=freeWorkspaceId(state.account,projects),wasFree=freeId===id;
      const patch={providerType:registration.providerType,endpoint:registration.endpoint,
        bucketFingerprint:registration.bucketFingerprint,byoRegistered:true,updatedAt:stamp()};
@@ -415,26 +491,35 @@ function createProjectService({db,stamp,hash,stripe,env={},prices={},ensureCusto
      if(changed||current.data.byoChallengeVerified===true||current.data.byoActive===true||current.data.manualProviderConfigured===true){
        patch.byoChallengeVerified=false;patch.byoActive=false;patch.manualProviderConfigured=false;patch.bucketFingerprint=null;
      }
-     // BYO is never the free slot. A hosted free workspace becomes the $5 monthly fee.
+     // BYO is never the free slot and is always the monthly fee, which ends grandfathering.
+     // The grace clock starts at registration, same as a hosted unpaid period.
      if(!subscriptionActive(current.data)){
        patch.workspaceFeeModel="monthly";patch.feeIsOneTime=false;patch.workspaceFeeCents=WORKSPACE_FEE_CENTS;
        patch.workspaceFeeStatus="unpaid";patch.workspaceFeePaid=false;
+       const now=clockMs();
+       if(typeof current.data.paidThroughMs!=="number"||current.data.paidThroughMs<now)patch.paidThroughMs=now;
      }
      if(wasFree){patch.projectFeeStatus="pending";patch.projectFeeCents=WORKSPACE_FEE_CENTS;patch.projectStatus="active";patch.provisioned=true;}
      let nextFree=freeId;
+     const effects=blankEffects(state.account);
      if(wasFree){
        nextFree=chooseFreeWorkspaceId(projects.filter(workspace=>workspace.id!==id));
-       if(nextFree)assignFree(tx,state.records.find(w=>w.id===nextFree));
+       if(nextFree)queuePromotion(tx,state.records.find(w=>w.id===nextFree),effects,"promoted_to_free");
      }
      tx.update(ref,patch);
-     touch(tx,owner,state,{freeWorkspaceId:nextFree||null});
-     const price=workspacePrice({...current.data,...patch,id,byoRegistered:true,providerType:registration.providerType},nextFree);
-     return {...patch,isFree:price.isFree,monthlyPriceCents:price.monthlyPriceCents,freeWorkspaceId:nextFree||null,lapsed:byoLapsed({...current.data,...patch,id})};
+     touch(tx,owner,state,{freeWorkspaceId:nextFree||null,...effectsPatch(effects)});
+     const merged={...current.data,...patch,id,byoRegistered:true,providerType:registration.providerType};
+     const price=workspacePrice(merged,nextFree);
+     return {...patch,isFree:price.isFree,monthlyPriceCents:price.monthlyPriceCents,feeWaived:price.feeWaived,
+       grandfathered:isGrandfathered(merged),grandfatheringEnded:wasGrandfathered&&!isGrandfathered(merged),
+       freeWorkspaceId:nextFree||null,lapsed:byoLapsed(merged)};
    });
+   await sweepAccount(owner);
+   return result;
  }
  async function makeHosted(req,id){
   const owner=hash(req.user.uid);
-  return db.runTransaction(async tx=>{
+  const result=await db.runTransaction(async tx=>{
     const state=await snapshot(owner,tx),current=state.records.find(w=>w.id===id);
     if(!current)throw new ProjectError(404,"Project not found","PROJECT_NOT_FOUND");
     const createdAt=current.data.createdAt??current.data.createdAtMs??null;
@@ -444,20 +529,37 @@ function createProjectService({db,stamp,hash,stripe,env={},prices={},ensureCusto
     const projects=projectViews(state).map(workspace=>workspace.id===id?{...workspace,...patch,providerType:null,byoRegistered:false}:workspace);
     const previous=freeWorkspaceId(state.account,projectViews(state));
     const nextFree=chooseFreeWorkspaceId(projects);
+    const effects=blankEffects(state.account);
+    let demoted=null;
     if(previous&&previous!==nextFree){
       const loser=state.records.find(w=>w.id===previous);
-      if(loser&&loser.data.projectFeeStatus==="free"&&!isGrandfathered(loser.data))
+      if(loser&&loser.data.projectFeeStatus==="free"&&!isGrandfathered(loser.data)){
+        const paidThroughMs=Date.now()+LAPSE_GRACE_MS;
+        demoted={workspaceId:previous,paidThroughMs,graceEndsAt:paidThroughMs+LAPSE_GRACE_MS,requiresCheckout:true};
         tx.update(loser.ref,{projectFeeStatus:"pending",projectFeeCents:WORKSPACE_FEE_CENTS,workspaceFeeModel:"monthly",
-          feeIsOneTime:false,workspaceFeeStatus:"unpaid",workspaceFeePaid:false,workspaceFeeCents:WORKSPACE_FEE_CENTS,updatedAt:stamp()});
+          feeIsOneTime:false,workspaceFeeStatus:"unpaid",workspaceFeePaid:false,workspaceFeeCents:WORKSPACE_FEE_CENTS,
+          paidThroughMs,updatedAt:stamp()});
+      }
     }
     if(nextFree===id){
       patch.projectFeeStatus="free";patch.projectFeeCents=0;patch.projectStatus="active";patch.provisioned=true;
       patch.workspaceFeeModel=null;patch.workspaceFeeStatus=null;patch.workspaceFeePaid=null;patch.workspaceFeeCents=0;
-    }else if(nextFree)assignFree(tx,state.records.find(w=>w.id===nextFree));
+      if(current.data.workspaceFeeSubscriptionId)
+        effects.cancels=queueCancel(effects.cancels,{subscriptionId:current.data.workspaceFeeSubscriptionId,workspaceId:id,reason:"promoted_to_free"});
+    }else if(nextFree)queuePromotion(tx,state.records.find(w=>w.id===nextFree),effects,"promoted_to_free");
     tx.update(current.ref,patch);
-    touch(tx,owner,state,{freeWorkspaceId:nextFree||null});
-    return {workspaceId:id,hosted:true,createdAt,freeWorkspaceId:nextFree||null};
+    touch(tx,owner,state,{freeWorkspaceId:nextFree||null,...effectsPatch(effects)});
+    return {workspaceId:id,hosted:true,createdAt,freeWorkspaceId:nextFree||null,demoted};
   });
+  await sweepAccount(owner);
+  if(result.demoted){
+   try{
+    const payment=await checkout(req,result.demoted.workspaceId);
+    result.demoted.checkoutUrl=payment.url||null;
+    result.demoted.workspaceMonthlyCents=WORKSPACE_FEE_CENTS;
+   }catch(_){result.demoted.checkoutUrl=null;}
+  }
+  return result;
  }
  async function issueByoChallenge(req,id){
    const owner=hash(req.user.uid),ref=refFor(owner,id),challenge=issueChallenge(Date.now());
@@ -540,11 +642,26 @@ function createProjectService({db,stamp,hash,stripe,env={},prices={},ensureCusto
    const owner=meta.accountHash,id=meta.workspaceId;
    if(!/^[a-f0-9]{64}$/.test(owner||"")||!safeProjectId(id))return false;
    const ref=refFor(owner,id),[account,workspace]=await Promise.all([accountRef(owner).get(),ref.get()]);
-   if(!account.exists||!workspace.exists||!owned(workspace.data(),owner,id))return false;
    const customer=typeof sub.customer==="string"?sub.customer:sub.customer?.id;
-   if(account.data().stripeCustomerId!==customer)return false;
-   // Grandfathered one-time and legacy free workspaces are never lapsed or rewritten.
-   if(isGrandfathered(workspace.data()))return true;
+   if(!account.exists||account.data().stripeCustomerId!==customer)return false;
+   const pending=(account.data().pendingSubscriptionCancels||[]).some(item=>item.subscriptionId===sub.id&&item.status!=="failed");
+   const workspaceMissing=!workspace.exists||!owned(workspace.data(),owner,id);
+   // A deleted workspace must not drop the event. Cancel the subscription instead.
+   if(workspaceMissing){
+    await accountRef(owner).set({pendingSubscriptionCancels:queueCancel(account.data().pendingSubscriptionCancels,{subscriptionId:sub.id,workspaceId:id,reason:"workspace_deleted"})},{merge:true});
+    await sweepAccount(owner);
+    return true;
+   }
+   const current=workspace.data();
+   const holdsFreeSlot=current.projectFeeStatus==="free"||account.data().freeWorkspaceId===id;
+   // Grandfathered rows, the free slot, and a subscription already queued for cancel
+   // are never switched back onto the monthly fee. Deletion of that subscription
+   // clears the id and does not lapse the workspace.
+   if(isGrandfathered(current)||holdsFreeSlot||pending){
+    if(eventType==="customer.subscription.deleted"&&current.workspaceFeeSubscriptionId===sub.id)
+     await ref.update({workspaceFeeSubscriptionId:null,updatedAt:stamp()});
+    return true;
+   }
    // Status comes only from the subscription retrieved for this delivery.
    // The event type must not overwrite a newer status from an older event.
    const status=sub.status||"";
@@ -552,7 +669,6 @@ function createProjectService({db,stamp,hash,stripe,env={},prices={},ensureCusto
    if(status==="active"||status==="trialing"){workspaceFeeStatus="active";workspaceFeePaid=true;}
    else if(status==="canceled"||status==="cancelled"||status==="incomplete_expired"){workspaceFeeStatus="canceled";workspaceFeePaid=false;}
    else {workspaceFeeStatus="past_due";workspaceFeePaid=false;}
-   const current=workspace.data();
    const patch={workspaceFeeModel:"monthly",workspaceFeeStatus,workspaceFeePaid,workspaceFeeSubscriptionId:sub.id,
      feeIsOneTime:false,updatedAt:stamp()};
    if(eventType==="invoice.paid"){
@@ -699,17 +815,27 @@ function createProjectService({db,stamp,hash,stripe,env={},prices={},ensureCusto
        if(!source||source.data.mergeLock?.token!==token)throw new ProjectError(409,"Merge lock lost","MERGE_LOCK_LOST");
        if(!target||!owned(target.data,owner,targetId))throw new ProjectError(404,"Project not found","PROJECT_NOT_FOUND");
        const projects=projectViews(state),freeId=freeWorkspaceId(state.account,projects);
-       // The survivor keeps its own fee status. A deleted free source moves the slot elsewhere.
-       let nextFree=freeId===sourceId?chooseFreeWorkspaceId(projects.filter(w=>w.id!==sourceId),{avoidId:targetId}):freeId;
-       if(freeId===sourceId&&nextFree)assignFree(tx,state.records.find(w=>w.id===nextFree));
+       // Another hosted workspace keeps the survivor's fee. With no other hosted
+       // workspace, the survivor is promoted and its subscription is cancelled.
+       const remaining=projects.filter(w=>w.id!==sourceId);
+       let nextFree=freeId===sourceId?chooseFreeWorkspaceId(remaining,{avoidId:targetId}):freeId;
+       const effects=blankEffects(state.account);
+       if(freeId===sourceId){
+        if(!nextFree)nextFree=chooseFreeWorkspaceId(remaining);
+        if(nextFree){
+         const record=nextFree===targetId?{id:targetId,ref:target.ref,data:target.data}:state.records.find(w=>w.id===nextFree);
+         queuePromotion(tx,record,effects,"promoted_to_free");
+        }
+       }
        const used=(targetFiles.docs||[]).reduce((sum,file)=>sum+(file.data().sizeBytes||0),0);
        tx.set(tombRef,{name:sourceName,targetId,phase:"completed",copied:copied.size,sourceObjectKeys,mergedAt:stamp()});
        tx.delete(sourceRef);
        tx.update(targetRef,{mergeLock:null,usedBytes:used,updatedAt:stamp()});
-       touch(tx,owner,state,{freeWorkspaceId:nextFree||null});
+       touch(tx,owner,state,{freeWorkspaceId:nextFree||null,...effectsPatch(effects)});
      });
      held=false;
      if(objectStore)for(const key of sourceObjectKeys)await objectStore.delete(key);
+     await sweepAccount(owner);
      return {merged:true,idempotent:false,sourceDeleted:true,sourceId,workspaceId:targetId,copied:copied.size};
    }finally{
      if(held){

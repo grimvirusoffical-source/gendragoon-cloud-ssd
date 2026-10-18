@@ -1,6 +1,6 @@
 "use strict";
 const crypto=require("node:crypto");
-const {STORAGE,PERFORMANCE,validateWorkspaceName}=require("./catalog");
+const {STORAGE,PERFORMANCE,WORKSPACE_FEE_CENTS,validateWorkspaceName}=require("./catalog");
 const {GPU,GPU_READY,gpuQuote,tripleBundleQuote}=require("./gpu_catalog");
 const {createProjectService,ProjectError,projectStatus,activatedBasicProject,effectiveStorageQuota,safeProjectId,hasContinuingBilling,isGrandfathered,evaluateLapse,workspacePrice,byoLapsed}=require("./projects");
 const {rejectProviderSecrets}=require("./workspace_policy");
@@ -12,14 +12,14 @@ function storageQuote(tier,interval,mode="standard",billingVersion=1){
  if(typeof tier!=="string"||!Object.hasOwn(STORAGE,tier)||!VALID_INTERVALS.has(interval))throw Error("Invalid storage plan");
  if(!["standard","bundle"].includes(mode))throw Error("Invalid storage mode");
  const monthly=STORAGE[tier][mode];
- const recurringFee=billingVersion>=2?0:500;
+ const recurringFee=billingVersion>=2?0:WORKSPACE_FEE_CENTS;
  return {tier,interval,mode,storageGB:STORAGE[tier].gb,storageCents:monthly*yearFactor(interval),
   workspaceFeeCents:recurringFee*yearFactor(interval),totalCents:(monthly+recurringFee)*yearFactor(interval),
   ...(billingVersion>=2?{billingVersion:2}:{})};
 }
 function byoQuote(interval){
  if(!VALID_INTERVALS.has(interval))throw Error("Invalid BYO interval");
- return {interval,kind:"byo",totalCents:500*yearFactor(interval),storageGB:0,workers:1};
+ return {interval,kind:"byo",totalCents:WORKSPACE_FEE_CENTS*yearFactor(interval),storageGB:0,workers:1};
 }
 function performanceQuote(tier,interval){
  if(typeof tier!=="string"||!Object.hasOwn(PERFORMANCE,tier)||!VALID_INTERVALS.has(interval))throw Error("Invalid performance plan");
@@ -65,6 +65,7 @@ function effectiveWorkers(workspace){
    const body={error:error.code};
    if(error.message&&error.message!==error.code)body.message=error.message;
    if(error.provider)body.provider=error.provider;
+   if(error.reason)body.reason=error.reason;
    return res.status(error.status).json(body);
  }
  async function getWorkspace(req,res){
@@ -73,7 +74,7 @@ function effectiveWorkers(workspace){
  function publicWorkspace(w,freeId=null){
    const price=workspacePrice({...w.data,id:w.id},freeId);
    return {id:w.id,name:w.data.name,kind:w.data.kind,storageMode:w.data.storageMode||null,
-   isFree:price.isFree,monthlyPriceCents:price.monthlyPriceCents,
+   isFree:price.isFree,monthlyPriceCents:price.monthlyPriceCents,feeWaived:price.feeWaived,
    byoActive:!!w.data.byoActive,manualProviderConfigured:!!w.data.manualProviderConfigured,
    storageTier:w.data.storageTier||null,
    storageInterval:w.data.storageInterval||null,storageBillingVersion:w.data.storageBillingVersion||1,
@@ -123,12 +124,12 @@ function effectiveWorkers(workspace){
  app.get("/v2/pricing",(_req,res)=>res.json({
    currency:"usd",catalogVersion:2,
    free:{storageGB:FREE_GB,workers:FREE_WORKERS,monthlyCents:0},
-   workspaceFeeMonthlyCents:0,legacyWorkspaceFeeMonthlyCents:500,
-   projects:{firstFree:true,additionalOneTimeCents:500,workspaceMonthlyCents:500,feeIsOneTime:false,freeWorkspaces:1,defaultLimit:10,qualifiedLimit:20,
+   workspaceFeeMonthlyCents:0,legacyWorkspaceFeeMonthlyCents:WORKSPACE_FEE_CENTS,
+   projects:{firstFree:true,additionalOneTimeCents:WORKSPACE_FEE_CENTS,workspaceMonthlyCents:WORKSPACE_FEE_CENTS,feeIsOneTime:false,freeWorkspaces:1,defaultLimit:10,qualifiedLimit:20,
      qualifyingStorageTier:"2TB",qualifyingPerformanceTier:"turbo",qualifyingWorkers:8,
      qualificationLabel:"2 TB storage AND Turbo (8 workers) or higher on the same active project; equivalent bundles qualify",
      paymentAvailable:projects.paymentAvailable(),archiveRetainsData:true},
-   byo:{monthlyCents:500,yearlyCents:5000,providerFeesExtra:true,manualSetupRequired:true},
+   byo:{monthlyCents:WORKSPACE_FEE_CENTS,yearlyCents:WORKSPACE_FEE_CENTS*10,providerFeesExtra:true,manualSetupRequired:true},
    purchasesEnabled:env.STRIPE_CHECKOUT_ENABLED==="true",
    storage:Object.fromEntries(Object.keys(STORAGE).map(t=>[t,{
      gb:STORAGE[t].gb,monthlyCents:STORAGE[t].standard,
@@ -167,8 +168,8 @@ function effectiveWorkers(workspace){
      if(result.project.data.projectFeeStatus==="pending")payment=await projects.checkout(req,result.project.id);
      const project=publicWorkspace(result.project,result.policy.freeWorkspaceId);
      const monthly=result.project.data.workspaceFeeModel==="monthly";
-     res.status(result.resumed?200:201).json({project,workspaceId:result.project.id,isFree:project.isFree,monthlyPriceCents:project.monthlyPriceCents,
-       policy:result.policy,resumed:result.resumed,oneTimeCents:result.project.data.projectFeeStatus==="pending"&&!monthly?500:0,...payment});
+     res.status(result.resumed?200:201).json({project,workspaceId:result.project.id,isFree:project.isFree,monthlyPriceCents:project.monthlyPriceCents,feeWaived:project.feeWaived,
+       policy:result.policy,resumed:result.resumed,oneTimeCents:result.project.data.projectFeeStatus==="pending"&&!monthly?WORKSPACE_FEE_CENTS:0,...payment});
    }catch(error){projectError(res,error);}
  });
  app.get("/v2/projects/:id",auth,agreed,async(req,res)=>{
@@ -183,6 +184,9 @@ function effectiveWorkers(workspace){
  });
  app.put("/v2/projects/:id/selection",auth,agreed,async(req,res)=>{
    try{res.json({workspaceId:req.params.id,intendedSelection:await projects.setSelection(req,req.params.id,req.body)});}catch(error){projectError(res,error);}
+ });
+ app.post("/v2/projects/:id/make-hosted",auth,agreed,async(req,res)=>{
+   try{res.json(await projects.makeHosted(req,req.params.id));}catch(error){projectError(res,error);}
  });
  app.delete("/v2/projects/:id",auth,agreed,async(req,res)=>{
    try{res.json(await projects.remove(req,req.params.id));}catch(error){projectError(res,error);}
@@ -228,7 +232,7 @@ function effectiveWorkers(workspace){
      if(intent!==undefined&&(typeof intent!=="string"||!(/^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i).test(intent)))
        return res.status(400).json({error:"Invalid checkout intent"});
      const updateRequired=()=>res.status(426).json({error:"CLIENT_UPDATE_REQUIRED",projectFlow:"/v2/projects",
-       message:"Update GenDragoon to create a project in Cloud, then choose it for storage or performance. Each new project after your first costs $5 once."});
+       message:"Update GenDragoon to create a project in Cloud, then choose it for storage or performance. Each new project after your first costs $"+(WORKSPACE_FEE_CENTS/100)+" once."});
      // Older clients cannot complete the separate project-activation flow. This
      // compatibility endpoint may resume an existing legacy intent, but never
      // creates a new project or switches a storage purchase into a project fee.

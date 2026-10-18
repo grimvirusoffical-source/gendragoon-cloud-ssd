@@ -84,6 +84,17 @@ jobs:
           cache-dependency-path: native/Backend/package-lock.json
       - run: npm ci --ignore-scripts
       - run: npm test
+      - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6
+        with:
+          distribution: temurin
+          java-version: '21'
+      - name: Firestore emulator concurrency
+        env:
+          GD_QA_ROUNDS: "2"
+        run: |
+          mkdir -p "$RUNNER_TEMP/fbemu"
+          printf '%s\n' '{"emulators":{"firestore":{"port":8080},"ui":{"enabled":false}}}' > "$RUNNER_TEMP/fbemu/firebase.json"
+          npx --yes firebase-tools@13.29.1 emulators:exec --only firestore --project demo-gendragoon-qa --config "$RUNNER_TEMP/fbemu/firebase.json" "node --test pricing_emulator_pr5.test.js"
       - run: npm audit --omit=dev --audit-level=high
       - run: python3 -m unittest discover -p 'test_*.py'
 

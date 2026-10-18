@@ -150,8 +150,8 @@ test("byo secrets: server rejects any payload with provider secrets and never pe
     f.put(idFor(1),{kind:"byo",projectStatus:"pending_activation",name:"BYO workspace"});
     const savedByo=await f.service.registerByo(f.req,idFor(1),{provider:"r2",endpoint:"https://acct.r2.cloudflarestorage.com",bucketFingerprint:"cd".repeat(8)});
     assert.deepEqual(savedByo,{providerType:"s3",endpoint:"https://acct.r2.cloudflarestorage.com",bucketFingerprint:"cd".repeat(8),byoRegistered:true,updatedAt:1,
-      workspaceFeeModel:"monthly",feeIsOneTime:false,workspaceFeeCents:500,workspaceFeeStatus:"unpaid",workspaceFeePaid:false,
-      isFree:false,monthlyPriceCents:500,freeWorkspaceId:null,lapsed:true});
+      workspaceFeeModel:"monthly",feeIsOneTime:false,workspaceFeeCents:500,workspaceFeeStatus:"unpaid",workspaceFeePaid:false,paidThroughMs:1000,
+      isFree:false,monthlyPriceCents:500,feeWaived:false,grandfathered:false,grandfatheringEnded:true,freeWorkspaceId:null,lapsed:true});
     assert.equal(f.record(idFor(1)).byoActive,undefined);assert.equal(f.record(idFor(1)).byoChallengeVerified,undefined);
     const blob=JSON.stringify([...f.db.rows])+logs.join("\n")+JSON.stringify(body);
     assert.equal(blob.includes(secret),false);

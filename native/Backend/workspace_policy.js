@@ -3,11 +3,10 @@
 // or secrets are embedded. Callers look up the recurring fee with
 // STRIPE_WORKSPACE_MONTHLY_PRICE_ID or the catalog lookup key below.
 const crypto=require("node:crypto");
-const {STORAGE,PERFORMANCE}=require("./catalog");
+const {STORAGE,PERFORMANCE,WORKSPACE_FEE_CENTS}=require("./catalog");
 
 const FREE_WORKSPACES=1;
-const WORKSPACE_FEE_USD_MONTHLY=5;
-const WORKSPACE_FEE_CENTS=WORKSPACE_FEE_USD_MONTHLY*100;
+const WORKSPACE_FEE_USD_MONTHLY=WORKSPACE_FEE_CENTS/100;
 const BASE_CAP=10;
 const RAISED_CAP=20;
 const LAPSE_GRACE_MS=3*24*60*60*1000;
@@ -107,13 +106,22 @@ function subscriptionActive(w){
  if(w?.workspaceFeePaid===true&&["active","paid","trialing"].includes(status))return true;
  return ["active","paid","trialing"].includes(status)&&w?.workspaceFeePaid!==false;
 }
-function byoLapsed(w){return isByoWorkspace(w)&&!isGrandfathered(w)&&!subscriptionActive(w);}
+function byoLapsed(w,now=Date.now()){
+ // BYO uses the hosted clock: unpaid, and now is at or past paidThroughMs + 3 days.
+ // Registration stamps paidThroughMs. A missing clock has not started, so it is not lapsed.
+ if(!isByoWorkspace(w)||isGrandfathered(w)||subscriptionActive(w))return false;
+ const clock=w.workspaceFeeModel==="monthly"?w:{...w,workspaceFeeModel:"monthly"};
+ return evaluateLapse(clock,now).lapsed;
+}
 function feeLapsed(w){return !!w&&(evaluateLapse(w).lapsed||byoLapsed(w));}
-function slotHolder(w){return !!w&&!isByoWorkspace(w)&&!isGrandfathered(w);}
+function slotHolder(w){
+ if(!w||isByoWorkspace(w)||isGrandfathered(w))return false;
+ return projectStatus(w)!=="deleting";
+}
 function hostedEligible(w){
  if(!slotHolder(w))return false;
  const status=projectStatus(w);
- return status!=="archived"&&status!=="merged";
+ return status!=="archived"&&status!=="merged"&&status!=="deleting";
 }
 function byCreated(a,b){
  const ca=createdAtMs(a),cb=createdAtMs(b);
@@ -140,11 +148,14 @@ function freeWorkspaceId(account,projects){
  }
  return chooseFreeWorkspaceId(projects);
 }
+function feeWaived(workspace){return !!workspace&&workspace.projectFeeStatus==="owner";}
 function workspacePrice(workspace,freeId){
  const grandfathered=isGrandfathered(workspace);
+ const waived=feeWaived(workspace);
  const isFree=!!workspace&&workspace.id===freeId&&!isByoWorkspace(workspace)&&!grandfathered;
- const monthlyPriceCents=isFree||grandfathered?0:WORKSPACE_FEE_CENTS;
- return {isFree,monthlyPriceCents};
+ // 0 cents exactly when the workspace is the free slot, grandfathered, or an owner benefit.
+ const monthlyPriceCents=isFree||grandfathered||waived?0:WORKSPACE_FEE_CENTS;
+ return {isFree,monthlyPriceCents,feeWaived:waived};
 }
 function countsTowardCap(w){return !["archived","merged"].includes(projectStatus(w));}
 function summarizeProjects(projects){
@@ -153,10 +164,14 @@ function summarizeProjects(projects){
  const qualified=current.some(qualifiesForRaisedCap);
  const projectLimit=qualified?RAISED_CAP:BASE_CAP;
  const overBy=Math.max(0,current.length-projectLimit);
- const unpaidWorkspaceIds=list.filter(w=>w&&w.id&&feeLapsed(w)).map(w=>w.id);
- const locked=overBy>0||unpaidWorkspaceIds.length>0;
- const reason=overBy>0&&unpaidWorkspaceIds.length?"over_cap_and_lapsed":unpaidWorkspaceIds.length?"lapsed":overBy>0?"over_cap":null;
- return {qualified,projectLimit,used:current.length,overBy,unpaidWorkspaceIds,locked,uploadsBlocked:locked,reason,
+ const lapsed=list.filter(w=>w&&w.id&&feeLapsed(w));
+ // A lapsed BYO workspace locks only itself. Hosted lapse and over-cap stay account-wide.
+ const selfLockedWorkspaceIds=lapsed.filter(isByoWorkspace).map(w=>w.id);
+ const accountLapsedIds=lapsed.filter(w=>!isByoWorkspace(w)).map(w=>w.id);
+ const unpaidWorkspaceIds=lapsed.map(w=>w.id);
+ const locked=overBy>0||accountLapsedIds.length>0;
+ const reason=overBy>0&&unpaidWorkspaceIds.length?"over_cap_and_lapsed":accountLapsedIds.length?"lapsed":overBy>0?"over_cap":null;
+ return {qualified,projectLimit,used:current.length,overBy,unpaidWorkspaceIds,selfLockedWorkspaceIds,locked,uploadsBlocked:locked,reason,
   active:current.filter(w=>projectStatus(w)==="active").length,
   pending:current.filter(w=>projectStatus(w)!=="active").length,
   archived:list.filter(w=>projectStatus(w)==="archived").length,
@@ -305,6 +320,6 @@ module.exports={FREE_WORKSPACES,WORKSPACE_FEE_USD_MONTHLY,WORKSPACE_FEE_CENTS,BA
  GRANDFATHER_CUTOFF_MS,LIST_UNAVAILABLE,LIST_UNAVAILABLE_LOCK,
  monthlyPriceId,isGrandfathered,evaluateLapse,projectStatus,activatedBasicProject,
  qualifiesForRaisedCap,summarizeProjects,lockBody,findSecretFields,rejectProviderSecrets,
- isByoWorkspace,subscriptionActive,byoLapsed,feeLapsed,chooseFreeWorkspaceId,freeWorkspaceId,workspacePrice,
+ isByoWorkspace,subscriptionActive,byoLapsed,feeLapsed,feeWaived,chooseFreeWorkspaceId,freeWorkspaceId,workspacePrice,
  publicByoRegistration,issueChallenge,verifyChallenge,collisionName,fileDigest,storedChecksums,checksumsAgree,
  invoicePaidThroughMs,isPrivateAddress,listAccountProjects,writeNeedsLock};

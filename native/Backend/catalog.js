@@ -20,7 +20,9 @@ const PERFORMANCE=Object.freeze({
   turbo:{cents:900,workers:8}, ultra:{cents:1400,workers:12},
   max:{cents:1900,workers:20}
 });
-const BUCKET_MONTHLY_CENTS=500;
+// One workspace fee for every monthly price in this package.
+const WORKSPACE_FEE_CENTS=500;
+const BUCKET_MONTHLY_CENTS=WORKSPACE_FEE_CENTS;
 function yearly(monthly){return monthly*10;}
 function buildQuote({storage,mode="bundle",interval="month",performance=null}){
  if(!Object.prototype.hasOwnProperty.call(STORAGE,storage))throw Error("Unknown storage tier");
@@ -52,4 +54,4 @@ function stripeKeys(plan){
  if(performance)items.push(`performance|${performance}|${interval}`);
  return items;
 }
-module.exports={STORAGE,PERFORMANCE,BUCKET_MONTHLY_CENTS,buildQuote,validateWorkspaceName,stripeKeys};
+module.exports={STORAGE,PERFORMANCE,WORKSPACE_FEE_CENTS,BUCKET_MONTHLY_CENTS,buildQuote,validateWorkspaceName,stripeKeys};

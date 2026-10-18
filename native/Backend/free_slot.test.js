@@ -3,7 +3,7 @@ const test=require("node:test"),assert=require("node:assert/strict"),crypto=requ
 const express=require("express");
 const {memoryFirestore}=require("./test_firestore");
 const {createProjectService,workspacePrice,freeWorkspaceId,byoLapsed,effectiveStorageQuota}=require("./projects");
-const {WORKSPACE_FEE_CENTS,isGrandfathered}=require("./workspace_policy");
+const {WORKSPACE_FEE_CENTS,isGrandfathered,LAPSE_GRACE_MS}=require("./workspace_policy");
 const {registerPaidStorage}=require("./paid_storage");
 const owner=crypto.createHash("sha256").update("free-slot-owner").digest("hex");
 const idFor=n=>"12345678-1234-4000-8000-"+String(n).padStart(12,"0");
@@ -35,8 +35,8 @@ test("freeWorkspaceId is the oldest non-grandfathered hosted workspace and never
  assert.equal(freeWorkspaceId({},[byo,newer,older]),idFor(2));
  assert.equal(workspacePrice(byo,idFor(2)).isFree,false);
  assert.equal(workspacePrice(byo,idFor(2)).monthlyPriceCents,500);
- assert.deepEqual(workspacePrice(older,idFor(2)),{isFree:true,monthlyPriceCents:0});
- assert.deepEqual(workspacePrice(newer,idFor(2)),{isFree:false,monthlyPriceCents:WORKSPACE_FEE_CENTS});
+ assert.deepEqual(workspacePrice(older,idFor(2)),{isFree:true,monthlyPriceCents:0,feeWaived:false});
+ assert.deepEqual(workspacePrice(newer,idFor(2)),{isFree:false,monthlyPriceCents:WORKSPACE_FEE_CENTS,feeWaived:false});
 });
 
 test("freeWorkspaceId breaks ties by createdAtMs then workspace id",()=>{
@@ -57,24 +57,30 @@ test("a grandfathered one-time workspace never takes the free slot",()=>{
  assert.equal(isGrandfathered(grandfathered),true);
  assert.equal(freeWorkspaceId({freeWorkspaceId:idFor(2)},[grandfathered,newer]),idFor(9));
  assert.equal(freeWorkspaceId({},[grandfathered]),null);
- assert.deepEqual(workspacePrice(grandfathered,idFor(9)),{isFree:false,monthlyPriceCents:0});
- assert.deepEqual(workspacePrice(newer,idFor(9)),{isFree:true,monthlyPriceCents:0});
+ assert.deepEqual(workspacePrice(grandfathered,idFor(9)),{isFree:false,monthlyPriceCents:0,feeWaived:false});
+ assert.deepEqual(workspacePrice(newer,idFor(9)),{isFree:true,monthlyPriceCents:0,feeWaived:false});
 });
 
-test("the first hosted workspace is free and a lone BYO workspace is $5 and lapsed",async()=>{
+test("the first hosted workspace is free and a lone BYO workspace is $5 after a 3-day grace",async()=>{
  const f=fixture();
  const first=await f.create(1,"Free Hosted");
- assert.equal(first.isFree,true);assert.equal(first.monthlyPriceCents,0);
+ assert.equal(first.isFree,true);assert.equal(first.monthlyPriceCents,0);assert.equal(first.feeWaived,false);
  assert.equal(first.project.data.projectFeeStatus,"free");
  assert.equal(f.account().freeWorkspaceId,idFor(1));
  const registered=await f.service.registerByo(f.req,idFor(1),byoBody);
- assert.equal(registered.isFree,false);assert.equal(registered.monthlyPriceCents,500);
- assert.equal(registered.freeWorkspaceId,null);assert.equal(registered.lapsed,true);
+ assert.equal(registered.isFree,false);assert.equal(registered.monthlyPriceCents,500);assert.equal(registered.feeWaived,false);
+ assert.equal(registered.freeWorkspaceId,null);assert.equal(registered.lapsed,false);
  const state=await f.service.inventory(f.req);
  assert.equal(state.policy.freeWorkspaceId,null);
- assert.equal(state.policy.locked,true);assert.equal(state.policy.reason,"lapsed");
- assert.deepEqual(state.policy.unpaidWorkspaceIds,[idFor(1)]);
+ assert.equal(state.policy.locked,false);assert.equal(state.policy.reason,null);
+ assert.deepEqual(state.policy.unpaidWorkspaceIds,[]);
+ assert.equal(byoLapsed(f.record(idFor(1))),false);
+ f.db.rows.set(f.path(idFor(1)),{...f.record(idFor(1)),paidThroughMs:Date.now()-LAPSE_GRACE_MS-1});
  assert.equal(byoLapsed(f.record(idFor(1))),true);
+ const later=await f.service.inventory(f.req);
+ assert.equal(later.policy.locked,false);
+ assert.deepEqual(later.policy.selfLockedWorkspaceIds,[idFor(1)]);
+ assert.deepEqual(later.policy.unpaidWorkspaceIds,[idFor(1)]);
 });
 
 test("the second hosted workspace is $5 per month",async()=>{
@@ -111,14 +117,19 @@ test("registering BYO on the free workspace makes it billable and moves the slot
  const f=fixture();
  await f.create(1);await f.create(2);
  const moved=await f.service.registerByo(f.req,idFor(1),byoBody);
- assert.equal(moved.isFree,false);assert.equal(moved.monthlyPriceCents,500);
+ assert.equal(moved.isFree,false);assert.equal(moved.monthlyPriceCents,500);assert.equal(moved.feeWaived,false);
  assert.equal(moved.freeWorkspaceId,idFor(2));
  assert.equal(f.record(idFor(2)).projectFeeStatus,"free");
  assert.equal(f.record(idFor(1)).projectFeeStatus,"pending");
- assert.equal(byoLapsed(f.record(idFor(1))),true);
+ assert.equal(byoLapsed(f.record(idFor(1))),false);
  const state=await f.service.inventory(f.req);
- assert.equal(state.policy.reason,"lapsed");
- assert.deepEqual(state.policy.unpaidWorkspaceIds,[idFor(1)]);
+ assert.equal(state.policy.locked,false);assert.equal(state.policy.reason,null);
+ assert.deepEqual(state.policy.unpaidWorkspaceIds,[]);
+ f.db.rows.set(f.path(idFor(1)),{...f.record(idFor(1)),paidThroughMs:Date.now()-LAPSE_GRACE_MS-1});
+ const later=await f.service.inventory(f.req);
+ assert.equal(later.policy.locked,false);
+ assert.deepEqual(later.policy.selfLockedWorkspaceIds,[idFor(1)]);
+ assert.deepEqual(later.policy.unpaidWorkspaceIds,[idFor(1)]);
 });
 
 test("two simultaneous creates produce exactly one free workspace",async()=>{
@@ -194,17 +205,20 @@ test("a grandfathered one-time workspace stays exempt from the monthly lapse",()
  const grandfathered={...base,id:idFor(1),feeIsOneTime:true,projectFeeStatus:"paid",createdAt:1_700_000_000_000};
  assert.equal(isGrandfathered(grandfathered),true);
  assert.equal(byoLapsed(grandfathered),false);
- assert.deepEqual(workspacePrice(grandfathered,idFor(1)),{isFree:false,monthlyPriceCents:0});
+ assert.deepEqual(workspacePrice(grandfathered,idFor(1)),{isFree:false,monthlyPriceCents:0,feeWaived:false});
  const byoGrand={...grandfathered,kind:"byo",byoRegistered:true,providerType:"s3",workspaceFeeModel:"monthly",workspaceFeeStatus:"unpaid",workspaceFeePaid:false};
  assert.equal(isGrandfathered(byoGrand),false);
  assert.equal(workspacePrice(byoGrand,null).monthlyPriceCents,500);
- assert.equal(byoLapsed(byoGrand),true);
+ assert.equal(workspacePrice(byoGrand,null).feeWaived,false);
+ assert.equal(byoLapsed(byoGrand),false);
+ assert.equal(byoLapsed({...byoGrand,paidThroughMs:Date.now()-LAPSE_GRACE_MS-1}),true);
 });
 
 test("an unpaid BYO workspace upload is 423 workspace_lock lapsed",async()=>{
  const f=fixture();
  await f.create(1,"Only BYO");
  await f.service.registerByo(f.req,idFor(1),byoBody);
+ f.db.rows.set(f.path(idFor(1)),{...f.record(idFor(1)),paidThroughMs:Date.now()-LAPSE_GRACE_MS-1});
  assert.ok(effectiveStorageQuota(f.record(idFor(1)))>0);
  const app=express();
  registerPaidStorage({app,db:f.db,bucket:{file:()=>({})},accountKey:()=>owner,
@@ -228,14 +242,16 @@ function assertZeroIffFreeOrGrandfathered(body,label){
  if(body.project)items.push(body.project);
  for(const item of items){
   if(typeof item.monthlyPriceCents!=="number")continue;
-  assert.equal(item.monthlyPriceCents===0,item.isFree===true||item.grandfathered===true,label+" "+(item.id||item.name));
+  assert.equal(typeof item.feeWaived,"boolean",label+" "+(item.id||item.name));
+  assert.equal(item.monthlyPriceCents===0,item.isFree===true||item.grandfathered===true||item.feeWaived===true,label+" "+(item.id||item.name));
  }
  if(typeof body.monthlyPriceCents==="number"&&typeof body.isFree==="boolean"){
+  assert.equal(typeof body.feeWaived,"boolean",label+" response feeWaived");
   const grandfathered=body.grandfathered===true||body.project?.grandfathered===true;
-  assert.equal(body.monthlyPriceCents===0,body.isFree===true||grandfathered,label+" response");
+  assert.equal(body.monthlyPriceCents===0,body.isFree===true||grandfathered||body.feeWaived===true,label+" response");
  }
 }
-test("monthlyPriceCents is 0 exactly when isFree or grandfathered on list and create responses",async()=>{
+test("monthlyPriceCents is 0 exactly when isFree, grandfathered, or feeWaived on list and create responses",async()=>{
  const {registerBillingV2}=require("./billing_v2");
  const db=memoryFirestore([["gd_accounts/"+owner,{stripeCustomerId:"cus_own"}]]);
  db.rows.set("gd_accounts/"+owner+"/workspaces/"+idFor(8),{...base,name:"One-time",feeIsOneTime:true,projectFeeStatus:"paid",createdAt:1_700_000_000_000});
