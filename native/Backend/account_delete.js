@@ -1059,11 +1059,20 @@ function createAccountDeletion({db,stripe,bucket,auth,byoProviders,hash,now,noti
     if(state!=="pending"&&state!=="failed")return;
     const created=Date.parse(data.createdAt);
     if(!Number.isFinite(created)||at-created<=SUPPORT_STALE_MS)return;
-    const alerted=Date.parse(notify.staleAlertedAt);
-    if(Number.isFinite(alerted)&&at-alerted<SUPPORT_WINDOW_MS)return;
+    if(typeof notify.staleAlertedAt==="string"&&notify.staleAlertedAt){
+     if(notify.staleDueAt){
+      const quiet={...notify};
+      delete quiet.staleDueAt;
+      data.notify=quiet;
+      tx.set(ref,data);
+     }
+     return;
+    }
     const due=Date.parse(notify.staleDueAt);
     if(!Number.isFinite(due)||due>at)return;
-    data.notify={...notify,staleAlertedAt:new Date(at).toISOString(),staleDueAt:new Date(at+SUPPORT_WINDOW_MS).toISOString()};
+    const once={...notify,staleAlertedAt:new Date(at).toISOString()};
+    delete once.staleDueAt;
+    data.notify=once;
     tx.set(ref,data);
     alert=true;
    });

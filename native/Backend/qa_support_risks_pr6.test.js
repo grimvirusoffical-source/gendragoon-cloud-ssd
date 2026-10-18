@@ -212,24 +212,26 @@ test("R10 job deleted after it failed: request -> 404, and a pending request for
  assert.ok(doc.notify.state!=="pending"||stale<=1,"orphan support request stays "+doc.notify.state+" attempts="+doc.notify.attempts+" and logged stale "+stale+"x");
 });
 
-test("R11 unsent request: support_notify_stale at most once per 24h, then again only while still unsent",async()=>{
+test("R11 unsent request: support_notify_stale fires once and never again",async()=>{
  const cap=capture();
  const w=world({env:{SUPPORT_DISCORD_WEBHOOK_URL:WEBHOOK},fetchImpl:async()=>({ok:false,status:503})});
  let j;
  try{
   j=await failedJob(w);await sup(w,j.jobId,j.statusToken);
   const stale=()=>cap.lines.filter(l=>l.includes("support_notify_stale "+j.jobId)).length;
+  const doc=()=>w.db.rows.get("supportRequests/"+j.jobId);
   w.setNow(NOW+60*60*1000);await w.svc.sweepSupportNotifications();
   assert.equal(stale(),0,"not yet more than one hour after createdAt");
   w.setNow(NOW+60*60*1000+1);await w.svc.sweepSupportNotifications();
   assert.equal(stale(),1);
-  const alerted=Date.parse(w.db.rows.get("supportRequests/"+j.jobId).notify.staleAlertedAt);
-  assert.ok(Number.isFinite(alerted));
-  w.setNow(alerted+24*60*60*1000-1);await w.svc.sweepSupportNotifications();
-  assert.equal(stale(),1,"no second log inside 24h");
-  w.setNow(alerted+24*60*60*1000);await w.svc.sweepSupportNotifications();
-  assert.equal(stale(),2,"re-alert after 24h while the request is still unsent");
-  assert.notEqual(w.db.rows.get("supportRequests/"+j.jobId).notify.state,"sent");
+  const flagged=doc().notify.staleAlertedAt;
+  assert.equal(typeof flagged,"string");
+  for(const hours of [24,48,72]){
+   w.setNow(NOW+hours*60*60*1000);await w.svc.sweepSupportNotifications();
+   assert.equal(stale(),1,"no re-alert after "+hours+"h");
+   assert.equal(doc().notify.staleAlertedAt,flagged);
+  }
+  assert.notEqual(doc().notify.state,"sent");
  }finally{cap.restore();w.close();}
 });
 
