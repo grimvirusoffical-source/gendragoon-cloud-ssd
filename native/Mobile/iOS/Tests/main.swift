@@ -1332,8 +1332,9 @@ private enum BackendFixtures {
     }
 
     static func requestBodyString(area:String,name:String)->String {
-        let body=(shared(area:area,name:name)["request"] as? [String:Any])?["body"] ?? [:]
-        guard let data=try? JSONSerialization.data(withJSONObject:body) else {return ""}
+        let body=(shared(area:area,name:name)["request"] as? [String:Any])?["body"]
+        if body == nil || body is NSNull {return ""}
+        guard let data=try? JSONSerialization.data(withJSONObject:body as Any) else {return ""}
         return String(data:data,encoding:.utf8) ?? ""
     }
 
