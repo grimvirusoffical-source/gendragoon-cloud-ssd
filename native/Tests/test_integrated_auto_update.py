@@ -527,6 +527,61 @@ class AutoUpdateTests(unittest.TestCase):
                 self.assertRaisesRegex(RuntimeError, "Download size mismatch"):
             updater.download("https://example.invalid/update.zip", self.root / "download", 1024, 0, 10, True)
 
+    # Failure injection: an interrupted or truncated download never stages,
+    # extracts, installs or relaunches, and leaves the installed app untouched.
+    def test_download_truncated_below_declared_length_fails_cleanly(self):
+        response = io.BytesIO(b"partial")
+        response.headers = {"Content-Length": "4096"}
+        with mock.patch.object(updater, "open_https", return_value=response), \
+                mock.patch.object(updater, "sufficient_space"), \
+                self.assertRaisesRegex(RuntimeError, "Download size mismatch"):
+            updater.download("https://example.invalid/update.zip", self.root / "download", 8192, 0, 10, True)
+
+    def test_interrupted_download_fails_without_staging_or_installing(self):
+        filename = updater.ZIP_PREFIX + "v0.16.2.zip"
+        release = {"version": "v0.16.2", "filename": filename,
+                   "assets": {filename: "https://example.invalid/release.zip",
+                              "sha256.txt": "https://example.invalid/sha256.txt"}}
+        def interrupted(url, path, *args):
+            if path.name == "sha256.txt":
+                path.write_text("0" * 64 + "  " + filename + "\n")
+                return
+            path.write_bytes(b"first half of the archive")
+            raise ConnectionResetError("connection reset mid-download")
+        with self.mac(), mock.patch.object(updater, "latest", return_value=release), \
+                mock.patch.object(updater, "download", side_effect=interrupted), \
+                self.assertRaises(ConnectionResetError):
+            updater.prepare(quiet=True)
+        self.assert_original()
+        self.assertFalse(self.staged.exists())
+        self.assertFalse(list(self.update_root.glob("gd-fetch-*")), "the partial download is removed")
+        self.assertFalse(any(command[0] == "/usr/bin/ditto" for command in self.calls))
+
+    def test_mismatched_release_build_is_rejected_before_staging(self):
+        source = self.root / "release-source" / updater.APP_NAME
+        write_bundle(source)
+        archive = self.root / "release-fixture.zip"
+        with zipfile.ZipFile(archive, "w") as package:
+            for path in source.rglob("*"):
+                if path.is_file():
+                    package.write(path, str(path.relative_to(source.parent)))
+        filename = updater.ZIP_PREFIX + "v0.16.2.zip"
+        checksum = hashlib.sha256(archive.read_bytes()).hexdigest()
+        release = {"version": "v0.16.2", "filename": filename, "build": 999999,
+                   "assets": {filename: "https://example.invalid/release.zip",
+                              "sha256.txt": "https://example.invalid/sha256.txt"}}
+        def download_fixture(url, path, *args):
+            if path.name == "sha256.txt":
+                path.write_text(checksum + "  " + filename + "\n")
+            else:
+                shutil.copyfile(archive, path)
+        with self.mac(), mock.patch.object(updater, "latest", return_value=release), \
+                mock.patch.object(updater, "download", side_effect=download_fixture), \
+                self.assertRaisesRegex(RuntimeError, "build does not match"):
+            updater.prepare(quiet=True)
+        self.assert_original()
+        self.assertFalse(self.staged.exists())
+
     def test_zip_traversal_and_symlinks_are_rejected(self):
         for name, mode in (("../outside", 0o100644), (updater.APP_NAME + "/link", 0o120777)):
             with self.subTest(name=name):
