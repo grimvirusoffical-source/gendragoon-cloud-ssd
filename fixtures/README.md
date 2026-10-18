@@ -8,10 +8,12 @@ From `native/Backend`:
 npm run fixtures
 ```
 
-The script starts the app with test doubles for Firestore and Stripe, sends real requests, and writes one JSON file per case as `fixtures/<area>/<case>.json`. Each file is `{request, response}`. Tokens in request headers are `<redacted>`.
+The script starts the app with test doubles for Firestore, Stripe, and Firebase, sends real requests, and writes one JSON file per case as `fixtures/<area>/<case>.json`. Each file is `{request, response}`. Tokens in request headers and response bodies are `<redacted>`.
+
+`jobId` and `statusToken` are opaque non-empty strings. Clients must not check them for length or shape. `fixtures/account-deletion/support-*` is the signed-out deletion support request. Its `requestId` is opaque the same way.
 
 Error codes are in `error` (never `code`).
 
-Request bodies use only the fields listed for that route under Request fields in `native/Backend/docs/API-workspace-policy.md`. `byo/verify-missing-url` sends an empty body. Every other `byo/verify-*` request sends `{presignedUrl}`.
+Workspace, lock, merge, ownership, and BYO request bodies use only the fields listed for that route under Request fields in `native/Backend/docs/API-workspace-policy.md`. `byo/verify-missing-url` sends an empty body. Every other `byo/verify-*` request sends `{presignedUrl}`.
 
 Workspace list items and create responses include `isFree`, `monthlyPriceCents`, and `grandfathered`. `monthlyPriceCents` is `0` exactly when `isFree` or `grandfathered` is true, and `500` otherwise. A grandfathered one-time workspace does not take the free slot (`workspaces/grandfathered-plus-new.json`).

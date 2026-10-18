@@ -78,7 +78,11 @@ data = sys.stdin.buffer.read()
 if mode in ("timeout", "delayed"):
     root = Path(sys.argv[2])
     def terminated(signum, frame):
-        (root / "terminated").write_text("SIGTERM")
+        # Publish a complete receipt: existence must not race write_text's
+        # create-then-write window on a fast observer such as the CI runner.
+        marker = root / "terminated.tmp"
+        marker.write_text("SIGTERM")
+        marker.replace(root / "terminated")
         raise SystemExit(0)
     signal.signal(signal.SIGTERM, terminated)
     (root / "started").write_text(str(os.getpid()))

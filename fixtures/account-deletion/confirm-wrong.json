@@ -1,0 +1,19 @@
+{
+  "request": {
+    "body": {
+      "confirm": "NO"
+    },
+    "headers": {
+      "authorization": "<redacted>",
+      "content-type": "application/json"
+    },
+    "method": "DELETE",
+    "path": "/v2/account"
+  },
+  "response": {
+    "body": {
+      "error": "confirm_required"
+    },
+    "status": 400
+  }
+}

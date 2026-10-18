@@ -15,6 +15,7 @@ const {createProjectService,ProjectError,listAccountProjects,summarizeProjects,l
 const {lockedWrite:lockedWriteWith}=require("./locked_write");
 const {effectiveStorageQuota,effectiveWorkers}=require("./billing_v2");
 const apiKeys=require("./api_keys");
+const {createLoginGate}=require("./login_gate");
 const required=["CUSTOMER_BUCKET","STORAGE_PROJECT_ID"];
 for(const key of required)if(!process.env[key])throw Error("Missing deployment environment variable: "+key);
 if(process.env.STORAGE_PROJECT_ID!=="gendragood-ssd")throw Error("Unexpected storage project");
@@ -45,26 +46,19 @@ function workspaceRef(uid){return db.collection("tenants").doc(accountKey(uid)).
 const freeProjectPolicy=createProjectService({db,stamp:()=>FieldValue.serverTimestamp(),hash:accountKey});
 function filePrefix(uid){return "customer/"+accountKey(uid)+"/free"}
 function accountURL(uid){return "https://firestore.googleapis.com/v1/projects/gendragoonssd/databases/(default)/documents/accepted_terms/"+encodeURIComponent(uid)}
-async function firebaseAuth(req,res,next){
- const m=/^Bearer ([a-zA-Z0-9._~-]+)$/.exec(req.headers.authorization||"");
- if(!m)return res.status(401).json({error:"Sign in with Google"});
- try{
-   req.user=await getAuth().verifyIdToken(m[1]);
-   if(req.user.firebase?.sign_in_provider!=="google.com")return res.status(403).json({error:"Google provider required"});
-   // Consent is verified against the *auth project's* Firestore rules, using the user's JWT.
-   const response=await fetch(accountURL(req.user.uid),{headers:{"Authorization":"Bearer "+m[1]},signal:AbortSignal.timeout(8000)});
-   if(!response.ok)return res.status(403).json({error:"Current Terms acceptance required"});
-   const data=await response.json(),fields=data.fields||{};
-   if(fields.termsVersion?.stringValue!=="terms-2026-10-14-v1"||
-      fields.readConfirmed?.booleanValue!==true||fields.agreed?.booleanValue!==true){
-     return res.status(403).json({error:"Current Terms acceptance required"});
-   }
-   req.workspaceRef=workspaceRef(req.user.uid);req.pathPrefix=filePrefix(req.user.uid);
-   req.authKind="firebase";
-   req.ownerBenefits=await require("./owner_benefits").grantOwnerBenefits({user:req.user,db,hash:accountKey,stamp:()=>FieldValue.serverTimestamp()});
-   next();
- }catch(_){res.status(401).json({error:"Invalid or expired Firebase login"})}
-}
+const loginGate=createLoginGate({
+ verifyIdToken:token=>getAuth().verifyIdToken(token),
+ // Consent is verified against the *auth project's* Firestore rules, using the user's JWT.
+ fetchTerms:(uid,token)=>fetch(accountURL(uid),{headers:{"Authorization":"Bearer "+token},signal:AbortSignal.timeout(8000)}),
+ async decorate(req){
+  req.workspaceRef=workspaceRef(req.user.uid);
+  req.pathPrefix=filePrefix(req.user.uid);
+  req.authKind="firebase";
+  req.ownerBenefits=await require("./owner_benefits").grantOwnerBenefits({user:req.user,db,hash:accountKey,stamp:()=>FieldValue.serverTimestamp()});
+ },
+});
+const firebaseAuth=loginGate.firebaseAuth;
+const firebaseAuthWithoutTerms=loginGate.firebaseAuthWithoutTerms;
 async function auth(req,res,next){
  const raw=(req.headers.authorization||"").replace(/^Bearer /,"");
  if(!raw.startsWith("gdsk_"))return firebaseAuth(req,res,next);
@@ -88,7 +82,7 @@ const requireWrite=apiKeys.requireScope("files:write");
 // are registered here, but charging is OFF until secrets, webhooks and
 // server-verified workspace provisioning have passed acceptance tests.
 app.use("/v2",express.json({limit:"16kb"}));
-require("./billing_bootstrap").installBillingBootstrap({app,db,bucket,admin:{firestore:{FieldValue}},firebaseAuth,accountKey});
+require("./billing_bootstrap").installBillingBootstrap({app,db,bucket,admin:{firestore:{FieldValue}},firebaseAuth,firebaseAuthWithoutTerms,accountKey,adminAuth:getAuth()});
 const paidStorage=require("./paid_storage").registerPaidStorage({app,db,bucket,firebaseAuth,accountKey,FieldValue,apiKeys,getAuth});
 require("./transfer_v3").registerTransferV3({app,db,bucket,firebaseAuth,accountKey,FieldValue,apiKeys,getAuth,freeGovernor:governor,paidGovernor:paidStorage.governor});
 
@@ -318,8 +312,20 @@ app.delete("/v1/files/:id",auth,requireWrite,async(req,res)=>{
    res.json({deleted:true});
  }catch(_){res.status(503).json({error:"Unable to remove file"})}
 });
+require("./v2_errors").installV2Errors(app);
 function start(port=Number(process.env.PORT||8080)){
+ const deletion=require("./account_delete");
+ const gate=deletion.supportDiscordStartup(process.env);
+ if(gate.exit){
+  console.error(gate.message);
+  process.exit(gate.code||1);
+ }
+ if(gate.warn)console.warn(gate.message);
  firestore();
+ const timer=setInterval(()=>{
+  Promise.resolve(deletion.sweepRegisteredSupportNotifications()).catch(()=>console.error("support_notify_sweep_failed"));
+ },deletion.SUPPORT_SWEEP_INTERVAL_MS);
+ if(typeof timer.unref==="function")timer.unref();
  return app.listen(port,()=>console.log("GenDragoon free storage API ready"));
 }
 if(require.main===module)start();

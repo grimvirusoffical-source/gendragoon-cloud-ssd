@@ -89,6 +89,8 @@ python3 native/Backend/deploy_free.py --project gendragood-ssd --region us-centr
 
 The deployment command uses the active Google application-default account through a temporary file readable only by the current user. No credential value is printed. Use `--customer-bucket` or `--service-account` only when intentionally configuring or changing those service properties. Keep real `customer-storage.json` outside version control; `customer-storage.example.json` documents its purpose without a production customer bucket name.
 
+`SUPPORT_DISCORD_WEBHOOK_URL` is loaded from Secret Manager in production and is never written in this repo. When `NODE_ENV=production`, `free_server.js` exits before it listens if that variable is missing or is not an `https://discord.com/api/webhooks/` URL. The error names the variable and does not print the value, so Cloud Run keeps serving the previous revision. `npm run predeploy:check` is an optional extra that confirms the secret exists (`gcloud secrets versions describe`) without printing it. It is not the promotion gate.
+
 ## Validation
 
 ### Review a candidate before promoting production traffic
