@@ -6,9 +6,12 @@ export const FIXTURE_SOURCE_SHA = "da3927627fee76103981714f9f8ffa954843b74b";
 
 /** Later fixture areas, keyed by the directory under fixtures/. */
 export const FIXTURE_SOURCE_SHA_BY_AREA: Record<string, string> = {
-  "account-deletion": "d788ccbf18d0399ac51f5c77dd384f1f6009eeb9",
+  /** cloud-ssd PR #6, including JSON singular-path and deletion retry. */
+  "account-deletion": "9d0f056430450fa97ae513181c9fd48852fd63bf",
+  "errors": "9d0f056430450fa97ae513181c9fd48852fd63bf",
   "storage-urls": "6af23999cbe6c22a64c7fcab7a9e2f55710aa1c1",
-  "key-envelope": "67f799623035cedb81ac1d8d393f5c7470d9eff3",
+  /** cloud-ssd PR #9, nested kdf envelope. */
+  "key-envelope": "24fba029b6674ee4410ececec11b0935ba713960",
 };
 
 export interface FixtureFile<TBody> {

@@ -1,4 +1,4 @@
-Source-SHA: d788ccbf18d0399ac51f5c77dd384f1f6009eeb9
+Source-SHA: 9d0f056430450fa97ae513181c9fd48852fd63bf
 Source-Path: fixtures/account-deletion/singular-path.json
 
 {
@@ -9,7 +9,9 @@ Source-Path: fixtures/account-deletion/singular-path.json
     "path": "/v2/account/deletion/00000000-0000-4000-8000-000000000099"
   },
   "response": {
-    "body": "<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n<title>Error</title>\n</head>\n<body>\n<pre>Cannot GET /v2/account/deletion/00000000-0000-4000-8000-000000000099</pre>\n</body>\n</html>\n",
+    "body": {
+      "error": "not_found"
+    },
     "status": 404
   }
 }

@@ -1,15 +1,17 @@
-Source-SHA: 67f799623035cedb81ac1d8d393f5c7470d9eff3
+Source-SHA: 24fba029b6674ee4410ececec11b0935ba713960
 Source-Path: fixtures/key-envelope/kdf-params-invalid.json
 
 {
   "request": {
     "body": {
-      "kdf": "argon2id",
-      "kdfParams": {
+      "iv": "AwMDAwMDAwMDAwMD",
+      "kdf": {
+        "alg": "argon2id",
         "iterations": 1,
-        "memory": 68719476736,
+        "memoryKiB": 67108864,
         "parallelism": 1
       },
+      "salt": "AgICAgICAgICAgICAgICAg",
       "version": 3,
       "wrappedKey": "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcH"
     },

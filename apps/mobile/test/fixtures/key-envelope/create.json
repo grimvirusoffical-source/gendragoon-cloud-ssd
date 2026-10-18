@@ -1,15 +1,17 @@
-Source-SHA: 67f799623035cedb81ac1d8d393f5c7470d9eff3
+Source-SHA: 24fba029b6674ee4410ececec11b0935ba713960
 Source-Path: fixtures/key-envelope/create.json
 
 {
   "request": {
     "body": {
-      "kdf": "argon2id",
-      "kdfParams": {
+      "iv": "AwMDAwMDAwMDAwMD",
+      "kdf": {
+        "alg": "argon2id",
         "iterations": 2,
-        "memory": 19922944,
+        "memoryKiB": 19456,
         "parallelism": 1
       },
+      "salt": "AgICAgICAgICAgICAgICAg",
       "version": 1,
       "wrappedKey": "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcH"
     },
@@ -23,12 +25,14 @@ Source-Path: fixtures/key-envelope/create.json
   },
   "response": {
     "body": {
-      "kdf": "argon2id",
-      "kdfParams": {
+      "iv": "AwMDAwMDAwMDAwMD",
+      "kdf": {
+        "alg": "argon2id",
         "iterations": 2,
-        "memory": 19922944,
+        "memoryKiB": 19456,
         "parallelism": 1
       },
+      "salt": "AgICAgICAgICAgICAgICAg",
       "version": 1,
       "wrappedKey": "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcH"
     },

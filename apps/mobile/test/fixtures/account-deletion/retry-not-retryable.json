@@ -1,0 +1,23 @@
+Source-SHA: 9d0f056430450fa97ae513181c9fd48852fd63bf
+Source-Path: fixtures/account-deletion/retry-not-retryable.json
+
+{
+  "request": {
+    "body": {
+      "confirm": "DELETE"
+    },
+    "headers": {
+      "authorization": "<redacted>",
+      "content-type": "application/json"
+    },
+    "method": "DELETE",
+    "path": "/v2/account"
+  },
+  "response": {
+    "body": {
+      "error": "deletion_not_retryable",
+      "jobId": "00000000-0000-4000-8000-0000000000aa"
+    },
+    "status": 409
+  }
+}

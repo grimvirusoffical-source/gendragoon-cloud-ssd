@@ -10,7 +10,7 @@ import { render } from "@testing-library/react-native";
 import { createEncryptedWorkspace, encryptedReplaceRequests } from "../src/encryptedWorkspace";
 import { ENCRYPTED_WORKSPACE_ENABLED } from "../src/flags";
 import { FileTree } from "../src/screens";
-import { loadFixture } from "./loadFixture";
+import { FIXTURE_SOURCE_SHA_BY_AREA, loadFixture } from "./loadFixture";
 
 const WORKSPACE = "11111111-1111-4111-8111-000000000001";
 
@@ -58,6 +58,19 @@ describe("encrypted workspace flag", () => {
     );
     expect(screen.queryByTestId("upload-button")).toBeNull();
     expect(screen.getByTestId("file-vacation.jpg")).toBeTruthy();
+  });
+
+  it("key-envelope fixtures from PR #9 use the nested kdf", () => {
+    const created = loadFixture<{ kdf: { alg: string; memoryKiB: number; iterations: number; parallelism: number }; iv: string; salt: string }>("key-envelope/create.json");
+    const mismatch = loadFixture<{ error: string }>("key-envelope/version-mismatch.json");
+    const tooLarge = loadFixture<{ error: string }>("key-envelope/payload-too-large.json");
+    expect(created.sourceSha).toBe(FIXTURE_SOURCE_SHA_BY_AREA["key-envelope"]);
+    expect(created.response.body.kdf).toEqual({ alg: "argon2id", memoryKiB: 19456, iterations: 2, parallelism: 1 });
+    expect(typeof created.response.body.iv).toBe("string");
+    expect(typeof created.response.body.salt).toBe("string");
+    expect(mismatch.response.status).toBe(412);
+    expect(mismatch.request.headers["if-match"]).toBe("\"1\"");
+    expect(tooLarge.response).toEqual({ status: 413, body: { error: "payload_too_large" } });
   });
 
   it.failing("a 409 on envelope create leaves no new key in SecureStore and uses the fetched key", async () => {

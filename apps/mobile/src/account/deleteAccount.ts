@@ -25,11 +25,22 @@ export function isDeletionNotRetryableError(error: unknown): error is Error & { 
 }
 
 /**
- * PR #1's polling hook is `onAuthFailure(signal, error)`.
- * Sign-out clears only the session. Polling and the progress screen stay up.
+ * PR #1 calls `onAuthFailure(signal, error)` and does not throw for these.
+ * `signed_out` carries `InvalidTokenError` from a Firebase-token `invalid_token`:
+ * clear only the session and leave the progress screen polling.
+ * `reauth_required` is the status-token safety net: show re-sign-in and keep the job.
+ * Unknown signals are ignored until that hook lands.
  */
-export function clearSessionOnPollAuthFailure(signal: string, _error: unknown, clearSession: () => void): void {
-  if (signal === "sign-out") clearSession();
+export function applyAuthFailureSignal(
+  signal: string,
+  _error: unknown,
+  actions: { clearSession: () => void; showReauth: () => void },
+): void {
+  if (signal === "signed_out") {
+    actions.clearSession();
+    return;
+  }
+  if (signal === "reauth_required") actions.showReauth();
 }
 
 export function clientRetriesDeletion(client: object): client is { retryDeletion: () => Promise<unknown> } {

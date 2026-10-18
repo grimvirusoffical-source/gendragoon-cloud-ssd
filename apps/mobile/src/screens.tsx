@@ -22,7 +22,7 @@ import { colors, space, type as typeScale } from "@gendragoon/ui/theme";
 import { useState } from "react";
 import { Linking, StyleSheet, Text, TextInput, View } from "react-native";
 import {
-  clearSessionOnPollAuthFailure,
+  applyAuthFailureSignal,
   clientRetriesDeletion,
   deletionSessionAction,
   deleteSignedInAccount,
@@ -480,7 +480,10 @@ export function DeleteAccountScreen(props: {
         workspaceIds: props.workspaceIds,
         secrets: props.secrets,
         onAuthFailure: (signal, error) => {
-          clearSessionOnPollAuthFailure(signal, error, () => props.onClearSession?.());
+          applyAuthFailureSignal(signal, error, {
+            clearSession: () => props.onClearSession?.(),
+            showReauth: () => setNotice(deletionNotice("reauth")),
+          });
         },
       });
       if (status.status === "done") {
