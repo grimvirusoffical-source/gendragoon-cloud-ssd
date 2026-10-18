@@ -226,6 +226,24 @@ struct GDSavedDeletionJob: Equatable {
         await begin(confirmation: "DELETE")
     }
 
+    /// POST .../support-request. A 401 `unauthorized` (missing Authorization) matches a 404:
+    /// show the support email and never open sign-in.
+    func requestSupport() async {
+        guard let saved = jobs.load() else {
+            statusText = GDAccountContract.supportRequestMessage(.emailFallback)
+            return
+        }
+        let path = GDAccountContract.supportRequestPath(jobId: saved.jobId)
+        do {
+            let response = try await transport.send(method: "POST", path: path,
+                                                     authorization: "Bearer " + saved.statusToken, body: nil)
+            let result = GDAccountContract.interpretSupportRequest(status: response.status, json: response.json)
+            statusText = GDAccountContract.supportRequestMessage(result)
+        } catch {
+            statusText = GDAccountContract.supportRequestMessage(.emailFallback)
+        }
+    }
+
     func dismissSavedJob() {
         let recovery = GDAccountContract.dismissRecovery()
         if !recovery.keepSavedJob { jobs.delete() }

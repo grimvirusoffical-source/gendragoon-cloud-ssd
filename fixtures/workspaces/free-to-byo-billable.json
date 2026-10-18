@@ -1,0 +1,42 @@
+{
+  "request": {
+    "body": {
+      "bucketFingerprint": "abababababababab",
+      "endpoint": "https://bucket.s3.us-east-1.amazonaws.com",
+      "provider": "s3"
+    },
+    "headers": {
+      "authorization": "<redacted>",
+      "content-type": "application/json"
+    },
+    "method": "POST",
+    "path": "/v2/workspaces/11111111-1111-4111-8111-000000000001/byo/register"
+  },
+  "response": {
+    "body": {
+      "bucketFingerprint": "abababababababab",
+      "byoRegistered": true,
+      "endpoint": "https://bucket.s3.us-east-1.amazonaws.com",
+      "feeIsOneTime": false,
+      "feeWaived": false,
+      "freeWorkspaceId": "11111111-1111-4111-8111-000000000002",
+      "grandfathered": false,
+      "grandfatheringEnded": false,
+      "isFree": false,
+      "lapsed": false,
+      "monthlyPriceCents": 500,
+      "paidThroughMs": 1792281600000,
+      "projectFeeCents": 500,
+      "projectFeeStatus": "pending",
+      "projectStatus": "active",
+      "providerType": "s3",
+      "provisioned": true,
+      "updatedAt": 1792281600000,
+      "workspaceFeeCents": 500,
+      "workspaceFeeModel": "monthly",
+      "workspaceFeePaid": false,
+      "workspaceFeeStatus": "unpaid"
+    },
+    "status": 200
+  }
+}

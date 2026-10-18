@@ -1,22 +1,82 @@
 import AppKit
 import SwiftUI
 
-/// HTTP 423 `workspace_lock` opens this screen. Uploads stay off; downloads stay available.
+struct GDWorkspaceLockNotice: Equatable {
+    var reason: String
+    var graceEndsAt: Date?
+    /// False during the demotion grace period. A 423 lapse still blocks transfers.
+    var blocksTransfers: Bool
+}
+
+/// HTTP 423 `workspace_lock` applies only to the workspace the request addressed.
 @MainActor final class GDWorkspaceLock: ObservableObject {
     static let shared = GDWorkspaceLock()
     @Published var presented = false
     @Published private(set) var reason = ""
     @Published private(set) var overBy = 0
     @Published private(set) var unpaidWorkspaceIds: [String] = []
+    @Published private(set) var locks: [String: GDWorkspaceLockNotice] = [:]
     @Published var deletionPollActive = false
     @Published var actionStatus = ""
     var message: String { GDStorageContract.lockMessage(reason: reason) }
-    func present(json: [String: Any]) {
+    func present(json: [String: Any], workspaceID: String? = nil) {
         guard let body = GDStorageContract.parseLock(json) else { return }
         reason = body.reason
         overBy = body.overBy
         unpaidWorkspaceIds = body.unpaidWorkspaceIds
-        presented = true
+        let notice = GDWorkspaceLockNotice(reason: body.reason, graceEndsAt: GDWorkspacePriceLabel.graceEnd(json), blocksTransfers: true)
+        for id in GDWorkspacePriceLabel.lockedWorkspaceIDs(requestWorkspaceID: workspaceID, reason: body.reason, unpaid: body.unpaidWorkspaceIds) {
+            locks[id] = notice
+        }
+        presented = false
+    }
+    /// A free workspace demoted by merge or make-hosted gets the grace banner on that id only.
+    func noteDemotion(_ json: [String: Any]) {
+        guard let demoted = GDWorkspacePriceLabel.demotedWorkspace(json) else { return }
+        locks[demoted.workspaceID] = GDWorkspaceLockNotice(reason: "grace", graceEndsAt: demoted.graceEndsAt, blocksTransfers: GDWorkspacePriceLabel.graceBlocksTransfers)
+        presented = false
+    }
+    func notice(for workspaceID: String) -> GDWorkspaceLockNotice? { locks[workspaceID] }
+    func clear(workspaceID: String) { locks.removeValue(forKey: workspaceID) }
+    /// A refreshed list with `lapsed: false` clears a 423. It leaves a grace banner in place.
+    func clearSettled(workspaceID: String) {
+        guard let notice = locks[workspaceID] else { return }
+        if notice.graceEndsAt != nil && notice.blocksTransfers == false { return }
+        locks.removeValue(forKey: workspaceID)
+    }
+}
+
+struct GDScopedWorkspaceLockBanner: View {
+    let workspaceID: String
+    let workspaceName: String
+    let notice: GDWorkspaceLockNotice
+    var priceLabel = ""
+    var onPay: () -> Void
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Label(GDWorkspacePriceLabel.paymentBannerTitle(workspaceName: workspaceName, graceEndsAt: notice.graceEndsAt), systemImage: "lock.fill")
+                .font(.system(size: 16, weight: .bold))
+            Text(GDWorkspacePriceLabel.transferLockMessage(reason: notice.reason, scopedWorkspace: true))
+                .font(.system(size: 12))
+            if !priceLabel.isEmpty && priceLabel != "Price pending" {
+                Text("Current price: \(priceLabel)").font(.system(size: 12, weight: .semibold))
+            }
+            if let ends = notice.graceEndsAt {
+                TimelineView(.periodic(from: .now, by: 60)) { context in
+                    if let countdown = GDWorkspacePriceLabel.graceCountdown(until: ends, now: context.date) {
+                        Text(countdown).font(.system(size: 12, weight: .semibold))
+                    }
+                }
+            }
+            Text("Free and paid workspaces stay fully usable.")
+                .font(.system(size: 12))
+                .foregroundStyle(.secondary)
+            Button(GDWorkspacePriceLabel.paymentButtonTitle(graceEndsAt: notice.graceEndsAt), action: onPay)
+                .buttonStyle(.borderedProminent)
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.orange.opacity(0.14), in: RoundedRectangle(cornerRadius: 12))
     }
 }
 
@@ -55,7 +115,8 @@ struct GDWorkspaceLockScreen: View {
                             Text(workspace.id).font(.system(size: 11, design: .monospaced)).foregroundStyle(.secondary)
                         }
                         Spacer()
-                        if unpaid { Text("Unpaid").font(.system(size: 11, weight: .bold)).foregroundStyle(.orange) }
+                        if workspace.isDeleting { Text(GDWorkspacePriceLabel.deletingTitle).font(.system(size: 11, weight: .bold)).foregroundStyle(.secondary) }
+                        else if unpaid { Text("Unpaid").font(.system(size: 11, weight: .bold)).foregroundStyle(.orange) }
                     }
                     .padding(8)
                     .background(unpaid ? Color.orange.opacity(0.16) : Color.white.opacity(0.04), in: RoundedRectangle(cornerRadius: 8))
@@ -63,7 +124,7 @@ struct GDWorkspaceLockScreen: View {
                     .onTapGesture { sourceID = workspace.id }
                 }
             }
-            Text("A merge keeps both copies. An incoming duplicate is renamed name (from <workspace>), and the source is removed only after that copy is checked. Uploads stay off until this account is within its allowance.")
+            Text("A merge keeps both copies. An incoming duplicate is renamed name (from <workspace>), and the source is removed only after that copy is checked. Uploads stay off on the locked workspace. Other workspaces stay available.")
                 .font(.system(size: 12))
                 .foregroundStyle(.secondary)
             if !lock.actionStatus.isEmpty {
@@ -75,9 +136,9 @@ struct GDWorkspaceLockScreen: View {
                 Button("Download") { downloadSelected() }
                     .disabled(busy || selected == nil)
                 Button("Merge") { mergeSelected() }
-                    .disabled(busy || selected == nil || targetID.isEmpty || targetID == sourceID || !GDStorageContract.canMergeOrDelete(reason: lock.reason))
+                    .disabled(busy || selected == nil || selected?.isDeleting == true || targetID.isEmpty || targetID == sourceID || !GDStorageContract.canMergeOrDelete(reason: lock.reason))
                 Button("Delete") { deleteSelected() }
-                    .disabled(busy || selected == nil || !GDStorageContract.canMergeOrDelete(reason: lock.reason))
+                    .disabled(busy || selected == nil || selected?.isDeleting == true || !GDStorageContract.canMergeOrDelete(reason: lock.reason))
                 Button("Review workspaces") { Task { await reload() } }
                     .buttonStyle(.borderedProminent)
                     .tint(.purple)

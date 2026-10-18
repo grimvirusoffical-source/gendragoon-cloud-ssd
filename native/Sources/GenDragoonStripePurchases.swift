@@ -5,7 +5,6 @@ import CryptoKit
 
 /// Client-facing workspace offer. Billing enforcement stays on the service.
 enum GDWorkspaceOffer {
-    static let monthlyCents = 500
     static let freePerformanceWorkers = 1
     static let providers: [GDByoProvider] = [
         GDByoProvider(id: "s3", title: "Amazon S3", available: true),
@@ -18,8 +17,7 @@ enum GDWorkspaceOffer {
         GDByoProvider(id: "azure", title: "Azure", available: false),
         GDByoProvider(id: "webdav", title: "WebDAV", available: false),
     ]
-    static var monthlyLabel: String { String(format: "$%.2f/month", Double(monthlyCents) / 100) }
-    static let byoSummary = "Connect an S3-compatible bucket you already run: Amazon S3, Cloudflare R2, Backblaze B2, Wasabi, MinIO, or Google Cloud with S3/HMAC keys. The workspace fee is $5/month. SFTP, Azure, and WebDAV are coming soon."
+    static let byoSummary = "Connect an S3-compatible bucket you already run: Amazon S3, Cloudflare R2, Backblaze B2, Wasabi, MinIO, or Google Cloud with S3/HMAC keys. The workspace fee is the monthly price returned for that workspace. SFTP, Azure, and WebDAV are coming soon."
     static func canConnect(_ id: String) -> Bool { providers.first { $0.id == id }?.available == true }
     static func comingSoonMessage(_ title: String) -> String { "\(title) is coming soon. There is no connect flow for it yet." }
     static func byoFailureMessage(json: [String: Any], status: Int) -> String {
@@ -55,8 +53,24 @@ struct GDRemoteWorkspace: Decodable, Identifiable, Equatable {
     let storageTier: String?; let storageMode: String?; let storageInterval: String?
     let performanceTier: String?; let performanceInterval: String?; let workers: Int?; let quotaGB: Int?
     let performanceActive: Bool?
-    let projectStatus: String?; let projectFeeStatus: String?; let projectBillingVersion: Int?
+    var projectStatus: String?; let projectFeeStatus: String?; let projectBillingVersion: Int?
     let intendedSelection: GDRemotePlanSelection?
+    var isFree: Bool?
+    var grandfathered: Bool?
+    var feeWaived: Bool
+    var monthlyPriceCents: Int?
+    var lapsed: Bool?
+    var priceLabel: String {
+        GDWorkspacePriceLabel.label(isFree: isFree == true, grandfathered: grandfathered == true, feeWaived: feeWaived, monthlyPriceCents: monthlyPriceCents)
+    }
+    mutating func applyPricing(_ json: [String: Any]) {
+        if let value = json["isFree"] as? Bool { isFree = value }
+        if let value = json["grandfathered"] as? Bool { grandfathered = value }
+        if let value = json["feeWaived"] as? Bool { feeWaived = value }
+        if let value = json["lapsed"] as? Bool { lapsed = value }
+        if let value = json["projectStatus"] as? String { projectStatus = value }
+        if let value = GDWorkspacePriceLabel.cents(json["monthlyPriceCents"]) { monthlyPriceCents = value }
+    }
     var isAvailable: Bool {
         if let projectStatus { return projectStatus == "active" }
         return (kind == "free" && provisioned) || (storageActive && provisioned) || (kind == "byo" && byoActive == true && manualProviderConfigured == true)
@@ -103,6 +117,8 @@ private struct GDBillingSelection: Codable, Equatable {
     @Published var status = "Loading the current billing catalog…"
     @Published var workspaces: [GDRemoteWorkspace] = []
     @Published var catalog: GDServerBillingCatalog?
+    /// Notice built from a BYO register response, shown before the user confirms.
+    @Published var byoNotice: String?
     @Published var checkoutPending = false
     private weak var login: GDLoginSession?
     private var accountID = ""
@@ -226,25 +242,40 @@ private struct GDBillingSelection: Codable, Equatable {
     func portal(login session: GDLoginSession) {
         begin(login: session) { try self.openCheckout(await self.send("billing/customer-portal", method: "POST")) }
     }
-    func buyManualBYO(login session: GDLoginSession, workspaceID: String, endpoint: String, bucketFingerprint: String, provider: String, yearly: Bool) {
+    func buyManualBYO(login session: GDLoginSession, workspaceID: String, endpoint: String, bucketFingerprint: String, provider: String, yearly: Bool, acknowledgeGrandfatheredEnd: Bool = false) {
         guard let offer = GDWorkspaceOffer.providers.first(where: { $0.id == provider }) else {
             status = GDWorkspaceOffer.byoFailureMessage(code: "byo_provider_unsupported", status: 422)
             return
         }
         guard offer.available else { status = GDWorkspaceOffer.comingSoonMessage(offer.title); return }
         guard workspaces.contains(where: { $0.id == workspaceID && $0.isAvailable }) else { status = "Choose an active project first."; return }
+        _ = acknowledgeGrandfatheredEnd
         guard let registration = GDStorageContract.byoRegisterBody(provider: provider, endpoint: endpoint, bucketFingerprint: bucketFingerprint) else {
             status = "Enter the https bucket endpoint and its fingerprint. Keys stay in the Keychain."
             return
         }
         begin(login: session) {
             self.status = "Registering \(offer.title). The challenge uses keys already in the macOS Keychain."
+            let data: Data
             do {
-                _ = try await self.send(GDStorageContract.byoRegisterPath(workspaceId: workspaceID), method: "POST", payload: registration.mapValues { $0 as Any })
+                data = try await self.send(GDStorageContract.byoRegisterPath(workspaceId: workspaceID), method: "POST", payload: registration.mapValues { $0 as Any })
             } catch let error as GDTransferError {
                 throw GDTransferError(message: GDWorkspaceOffer.byoFailureMessage(json: ["error": error.message], status: error.status), status: error.status)
             }
-            self.status = "Write .gendragoon-challenge/<nonce> with those keys, send only the presigned GET, and delete the object after GenDragoon confirms."
+            let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] ?? [:]
+            if let index = self.workspaces.firstIndex(where: { $0.id == workspaceID }) {
+                self.workspaces[index].applyPricing(object)
+            }
+            if let notice = GDWorkspacePriceLabel.grandfatheredBYONotice(response: object) {
+                self.byoNotice = notice
+                self.status = notice
+            } else {
+                self.byoNotice = nil
+                self.status = GDWorkspacePriceLabel.byoRegisteredStatus(object)
+            }
+            if object["lapsed"] as? Bool == true {
+                GDWorkspaceLock.shared.present(json: ["error": "workspace_lock", "reason": "lapsed", "unpaidWorkspaceIds": [workspaceID]], workspaceID: workspaceID)
+            }
             _ = yearly
         }
     }
@@ -276,6 +307,7 @@ struct GenDragoonStripePurchases: View {
     @State private var selected = GDBillingSelection()
     @State private var byoEndpoint = ""
     @State private var byoFingerprint = ""
+    @State private var confirmGrandfatheredBYO = false
     @State private var selectionAccount = ""
     private var accountScope: String { SHA256.hash(data: Data(login.userID.utf8)).map { String(format: "%02x", $0) }.joined() }
     private func persistenceKey(workspaceID: String) -> String {
@@ -353,7 +385,7 @@ struct GenDragoonStripePurchases: View {
                     Text("Selected project unavailable — refresh or choose a project").tag(selected.workspaceID)
                 }
                 ForEach(billing.workspaces) { project in
-                    Text(project.name + (project.isAvailable ? "" : " · activation pending")).tag(project.id)
+                    Text(project.name + (project.priceLabel == "Price pending" ? "" : " · " + project.priceLabel) + (project.isAvailable ? "" : " · activation pending")).tag(project.id)
                 }
             }.disabled(billing.busy)
             if let project = billing.workspaces.first(where: { $0.id == selected.workspaceID }) {
@@ -368,6 +400,12 @@ struct GenDragoonStripePurchases: View {
                 Text("Create or restore a project in Cloud, then choose it here. Your tier selection is saved for each project.").font(.system(size: 11)).foregroundStyle(.secondary)
             }
         }
+    }
+    private func buttonTitle(needsGrandfatheredNotice: Bool, ownerBenefits: Bool, catalog: GDServerBillingCatalog) -> String {
+        if needsGrandfatheredNotice && billing.byoNotice == nil { return "Register bucket" }
+        if needsGrandfatheredNotice { return "Confirm" }
+        if ownerBenefits { return "Start challenge and activate — included" }
+        return "Start challenge · \(GDWorkspacePriceLabel.format(catalog.byo.monthlyCents))"
     }
     @ViewBuilder private func purchaseContent(_ catalog: GDServerBillingCatalog) -> some View {
         if focus == "standard" || focus == "bundle" {
@@ -406,7 +444,7 @@ struct GenDragoonStripePurchases: View {
                     .buttonStyle(.borderedProminent).tint(.cyan).disabled(blocked || !billing.workspaces.contains { $0.id == selected.workspaceID && $0.supportsPerformance })
             }
             Text("Paid performance is separate from the workspace fee and applies to hosted and bring-your-own workspaces. The free performance tier (\(GDWorkspaceOffer.freePerformanceWorkers) transfer worker) stays included.").font(.system(size: 11)).foregroundStyle(.secondary)
-        } else if focus == "byo-hidden" {
+        } else if focus == "byo" {
             projectPicker
             Text(GDWorkspaceOffer.byoSummary).font(.system(size: 12)).foregroundStyle(.secondary)
             Picker("S3-compatible storage", selection: $selected.provider) {
@@ -418,9 +456,31 @@ struct GenDragoonStripePurchases: View {
                 Text("Keys stay in the macOS Keychain. This Mac writes .gendragoon-challenge/<nonce>, sends a presigned GET, and deletes the object only after GenDragoon confirms. Google Cloud uses S3/HMAC keys here.").font(.system(size: 11)).foregroundStyle(.secondary)
                 TextField("https bucket endpoint", text: $byoEndpoint).textFieldStyle(.roundedBorder)
                 TextField("Bucket fingerprint", text: $byoFingerprint).textFieldStyle(.roundedBorder)
-                Text("Workspace fee: \(GDWorkspaceOffer.monthlyLabel), the same as a hosted workspace. Your provider's own storage and network charges stay separate. Performance features cost extra unless you stay on the free performance tier.").font(.system(size: 12, weight: .semibold))
-                Button(billing.ownerBenefits ? "Start challenge and activate — included" : "Start challenge · \(GDWorkspaceOffer.monthlyLabel)") { billing.buyManualBYO(login: login, workspaceID: selected.workspaceID, endpoint: byoEndpoint, bucketFingerprint: byoFingerprint, provider: selected.provider, yearly: selected.yearly) }
-                    .buttonStyle(.borderedProminent).tint(.cyan).disabled(blocked || byoEndpoint.isEmpty || byoFingerprint.isEmpty || (catalog.catalogVersion ?? 1) < 2 || !billing.workspaces.contains { $0.id == selected.workspaceID && $0.isAvailable } || !GDWorkspaceOffer.canConnect(selected.provider))
+                let workspace = billing.workspaces.first { $0.id == selected.workspaceID }
+                let needsGrandfatheredNotice = GDWorkspacePriceLabel.requiresGrandfatheredBYOConfirmation(isFree: workspace?.isFree == true, grandfathered: workspace?.grandfathered == true)
+                if needsGrandfatheredNotice {
+                    if let notice = billing.byoNotice {
+                        Text(notice)
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundStyle(.orange)
+                        Toggle("I understand this workspace will no longer be Included", isOn: $confirmGrandfatheredBYO)
+                            .font(.system(size: 12))
+                    } else {
+                        Text("This workspace will no longer be Included. The monthly price is the monthlyPriceCents in the register response. Confirm after that price is shown.")
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundStyle(.orange)
+                    }
+                } else {
+                    Text("Workspace fee: \(GDWorkspacePriceLabel.format(catalog.byo.monthlyCents)). Your provider's own storage and network charges stay separate. Performance features cost extra unless you stay on the free performance tier.").font(.system(size: 12, weight: .semibold))
+                }
+                Button(buttonTitle(needsGrandfatheredNotice: needsGrandfatheredNotice, ownerBenefits: billing.ownerBenefits, catalog: catalog)) {
+                    if needsGrandfatheredNotice && billing.byoNotice != nil {
+                        confirmGrandfatheredBYO = true
+                    } else {
+                        billing.buyManualBYO(login: login, workspaceID: selected.workspaceID, endpoint: byoEndpoint, bucketFingerprint: byoFingerprint, provider: selected.provider, yearly: selected.yearly, acknowledgeGrandfatheredEnd: confirmGrandfatheredBYO)
+                    }
+                }
+                    .buttonStyle(.borderedProminent).tint(.cyan).disabled(blocked || byoEndpoint.isEmpty || byoFingerprint.isEmpty || (catalog.catalogVersion ?? 1) < 2 || !billing.workspaces.contains { $0.id == selected.workspaceID && $0.isAvailable } || !GDWorkspaceOffer.canConnect(selected.provider) || (needsGrandfatheredNotice && billing.byoNotice != nil && !confirmGrandfatheredBYO))
             }
         } else if focus == "ads" {
             Text("Permanent ad removal · " + money(catalog.removeAds.oneTimeCents) + " once").font(.system(size: 16, weight: .semibold))
@@ -437,7 +497,7 @@ struct GenDragoonStripePurchases: View {
             }
             if let catalog = billing.catalog { purchaseContent(catalog) }
             if focus != "ads", let policy = billing.catalog?.projects {
-                Text("The base workspace is free. Each additional workspace is \(money(policy.additionalMonthlyCents ?? 500))/month. If those subscriptions lapse, you keep the free workspace plus every workspace that is still paid. Up to \(policy.defaultLimit) workspaces, or \(policy.qualifiedLimit) with \(policy.qualificationLabel.lowercased()).").font(.system(size: 11)).foregroundStyle(.secondary)
+                Text(policy.additionalMonthlyCents.map { "The base workspace is free. Each additional workspace is \(money($0))/month. If those subscriptions lapse, you keep the free workspace plus every workspace that is still paid. Up to \(policy.defaultLimit) workspaces, or \(policy.qualifiedLimit) with \(policy.qualificationLabel.lowercased())." } ?? "The base workspace is free. Each additional workspace uses the monthly price returned by the server. If those subscriptions lapse, you keep the free workspace plus every workspace that is still paid. Up to \(policy.defaultLimit) workspaces, or \(policy.qualifiedLimit) with \(policy.qualificationLabel.lowercased()).").font(.system(size: 11)).foregroundStyle(.secondary)
                 Text("Existing subscriptions keep their current billing terms. Use Manage Billing to change or cancel an active subscription.").font(.system(size: 11)).foregroundStyle(.secondary)
             }
             if billing.busy { ProgressView() }
@@ -453,6 +513,7 @@ struct GenDragoonStripePurchases: View {
             .onChange(of: selected) { old, new in
                 guard selectionAccount == login.userID, !selectionAccount.isEmpty else { return }
                 if old.workspaceID != new.workspaceID {
+                    confirmGrandfatheredBYO = false
                     storeSelection(old)
                     GDProjectPreferences.select(new.workspaceID, accountID: login.userID)
                     restoreSelection(workspaceID: new.workspaceID, refresh: false)

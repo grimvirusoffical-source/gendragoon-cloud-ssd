@@ -132,6 +132,14 @@ class WorkspaceLockTests(unittest.TestCase):
         self.assertNotIn("temporarily unavailable", screen["message"].lower())
         self.assertIsNone(storage.interpret_workspace_lock(500, {"error": "workspace_lock"}))
         self.assertIsNone(storage.interpret_workspace_lock(423, {"error": "other"}))
+        scoped = storage.interpret_workspace_lock(423, {
+            "error": "workspace_lock", "reason": "lapsed", "overBy": 0,
+            "unpaidWorkspaceIds": ["ws-byo", "ws-paid"],
+        }, workspace_id="ws-byo")
+        self.assertEqual(scoped["screen"], "pay-workspace")
+        self.assertEqual(scoped["lockedWorkspaceIds"], ["ws-byo"])
+        self.assertFalse(scoped["locksEntireApp"])
+        self.assertNotIn("ws-paid", scoped["lockedWorkspaceIds"])
 
 
 if __name__ == "__main__":

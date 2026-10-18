@@ -196,6 +196,11 @@ enum GDWorkspaceKeyEnvelope {
         guard envelope.kdf == "argon2id", envelope.version >= 1, envelope.salt.count == 16 else {
             throw GDStorageContractError.message("This recovery envelope is not an Argon2id workspace key.")
         }
+        guard (GDKeyEnvelopeContract.minimumMemoryKiB...GDKeyEnvelopeContract.maxMemoryKiB).contains(envelope.memoryKiB),
+              (1...GDKeyEnvelopeContract.maxIterations).contains(envelope.iterations),
+              envelope.parallelism >= 1 else {
+            throw GDStorageContractError.message("The workspace key envelope is not valid.")
+        }
         let parameters = GDArgon2.Parameters(memoryKiB: envelope.memoryKiB, iterations: envelope.iterations,
                                              parallelism: envelope.parallelism, tagLength: 32)
         let derived = GDArgon2.derive(password: Data(passphrase.utf8), salt: envelope.salt, parameters: parameters)

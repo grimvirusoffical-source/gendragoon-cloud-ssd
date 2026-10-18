@@ -340,7 +340,7 @@ def snapshot(source):
     records=[];guards={}
     def visit(path,relative):
         before=path.lstat();kind=stat.S_IFMT(before.st_mode)
-        entry={"path":relative,"executable":before.st_mode&0o111}
+        entry={"path":relative,"executable":before.st_mode&0o111,"mode":stat.S_IMODE(before.st_mode)}
         if sys.platform=="darwin" and not stat.S_ISLNK(kind):
             # Resource forks and extended attributes may contain user data.
             # Metadata read failures abort verification and retain the original.
@@ -348,23 +348,27 @@ def snapshot(source):
         guards[relative]=_fingerprint(before)
         if stat.S_ISLNK(kind):
             target=os.readlink(path)
+            # Keep the link text. Never follow it into a nested app, framework, or outside the bundle.
+            if os.path.isabs(target):
+                raise ValueError(f"{relative}: absolute symlinks cannot be restored safely")
             try:path.resolve(strict=False).relative_to(boundary)
-            except (ValueError,RuntimeError):raise ValueError("Source contains an escaping or looping symlink") from None
-            if os.path.isabs(target):raise ValueError("Absolute source symlinks cannot be restored safely")
+            except (ValueError,RuntimeError):
+                raise ValueError(f"{relative}: symlink escapes the bundle or loops") from None
             entry.update(type="symlink",target=target,executable=0)
         elif stat.S_ISREG(kind):
             descriptor=os.open(path,os.O_RDONLY|os.O_NOFOLLOW)
             with os.fdopen(descriptor,"rb") as stream:
-                if _fingerprint(os.fstat(stream.fileno()))!=guards[relative]:raise RuntimeError("Source changed while reading; original retained")
+                if _fingerprint(os.fstat(stream.fileno()))!=guards[relative]:raise RuntimeError(f"{relative}: source changed while reading; original retained")
                 digest=hashlib.sha256();size=0
                 for block in iter(lambda:stream.read(1024*1024),b""):digest.update(block);size+=len(block)
-                if _fingerprint(os.fstat(stream.fileno()))!=guards[relative]:raise RuntimeError("Source changed while reading; original retained")
+                if _fingerprint(os.fstat(stream.fileno()))!=guards[relative]:raise RuntimeError(f"{relative}: source changed while reading; original retained")
             entry.update(type="file",size=size,sha256=digest.hexdigest())
+            note_progress(f"Reading {relative}", size, size)
         elif stat.S_ISDIR(kind):
             entry.update(type="directory")
             for child in sorted(path.iterdir(),key=lambda x:x.name):
                 check_name(child.name);visit(child,child.name if relative=="." else relative+"/"+child.name)
-        else:raise ValueError("Special devices, sockets and pipes cannot be uploaded")
+        else:raise ValueError(f"{relative}: special devices, sockets and pipes cannot be uploaded")
         if _fingerprint(path.lstat())!=guards[relative]:raise RuntimeError("Source changed while reading; original retained")
         records.append(entry)
     visit(source,".")
@@ -377,7 +381,9 @@ def verify_restored(path,manifest):
     # those backups, but enforce it whenever the original included metadata.
     expected={x["path"]:x for x in manifest}
     for entry in actual:
-        if "xattrs" not in expected.get(entry["path"],{}):entry.pop("xattrs",None)
+        recorded=expected.get(entry["path"],{})
+        if "xattrs" not in recorded:entry.pop("xattrs",None)
+        if "mode" not in recorded:entry.pop("mode",None)
     if actual!=manifest:raise RuntimeError("Restored content or metadata differs from the source; original retained")
     return verified
 def require_space(extra,root=None):
@@ -566,15 +572,15 @@ def _upload(source,remote,folder,offload=False,project=None,bucket=None):
     # Only metadata-compatible apps receive this optional streaming layout;
     # every app retains its fully verified metadata-preserving archive.
     if typ=="app" and context and total_bytes>=STREAM_MIN_BYTES:
+        # A raw rclone/NFS copy of an .app keeps only a couple of files, deletes
+        # the emptied directories, and fails exclusive creates. The verified
+        # archive is the upload. Nothing in this branch mounts or copies a tree.
         reason=stream_metadata_reason(baseline["manifest"])
-        if reason:entry["streamIneligibleReason"]=reason
-        else:
-            raw_path=folder+"/Streamable/"+key+"-"+original_hash+"/"+src.name
-            target=cloud(remote,raw_path)
-            run([RCLONE,"--config",CONFIG,"copy",src,target,"--links","--create-empty-src-dirs","--immutable"],timeout=7200)
-            run([RCLONE,"--config",CONFIG,"check",src,target,"--links","--download"],timeout=7200)
-            unchanged(src,baseline)
-            entry["streamPath"]=raw_path;entry["streamVerified"]=True
+        if not reason:
+            reason=("App bundles are uploaded as one verified archive. "
+                    "A raw cloud folder is not used, because it drops symlinks and empty directories "
+                    "and cannot create files in exclusive mode.")
+        entry["streamIneligibleReason"]=reason
     if previous:
         entry["previousVersions"]=[*previous.get("previousVersions",[]),{k:v for k,v in previous.items() if k!="previousVersions"}]
     store_revision(key,entry,previous)

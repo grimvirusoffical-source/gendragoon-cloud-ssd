@@ -183,6 +183,9 @@ enum GDStorageContract {
     }
 
     static func explainProjectWrite(status: Int, json: [String: Any]) -> String? {
+        if let blocked = GDWorkspacePriceLabel.deletionBlocked(status: status, json: json) {
+            return blocked
+        }
         switch (status, GDServerCode.read(json)) {
         case (409, "PROJECT_LIMIT_REACHED"):
             return "This account is at its workspace limit. Archive a workspace or review the ones that are over the allowance."

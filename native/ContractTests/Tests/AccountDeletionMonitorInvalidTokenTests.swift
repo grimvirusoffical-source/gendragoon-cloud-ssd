@@ -138,6 +138,31 @@ final class AccountDeletionMonitorInvalidTokenTests: XCTestCase {
         XCTAssertEqual(wiped, 0)
     }
 
+    func testSupportRequestUnauthorizedShowsTheEmailAndNeverOpensSignIn() async throws {
+        let notFound = try GDFixtureFile.load("account-deletion", "support-bad-token")
+        let transport = ScriptTransport(replies: [(401, ["error": "unauthorized"])])
+        let jobs = MemoryJobs(); jobs.job = GDSavedDeletionJob(jobId: job, statusToken: token, ownerUID: "uid-owner")
+        let session = FakeSession()
+        var wiped = 0
+        let deletion = monitor(transport, jobs, session) { wiped += 1 }
+        let signals = SignalBox()
+        deletion.onAuthFailure = { signals.values.append($0) }
+        await deletion.requestSupport()
+        XCTAssertEqual(transport.sent.map(\.method), ["POST"])
+        XCTAssertEqual(transport.sent.first?.path, GDAccountContract.supportRequestPath(jobId: job))
+        XCTAssertEqual(transport.sent.first?.authorization, "Bearer " + token)
+        XCTAssertNil(transport.sent.first?.body)
+        XCTAssertTrue(session.signInPrompts.isEmpty)
+        XCTAssertEqual(session.signOuts, 0)
+        XCTAssertTrue(signals.values.isEmpty)
+        XCTAssertEqual(wiped, 0)
+        XCTAssertEqual(jobs.job?.jobId, job)
+        XCTAssertEqual(deletion.statusText, GDAccountContract.supportRequestMessage(.emailFallback))
+        XCTAssertEqual(
+            GDAccountContract.interpretSupportRequest(status: 401, json: ["error": "unauthorized"]),
+            GDAccountContract.interpretSupportRequest(status: notFound.status, json: notFound.body))
+    }
+
     func testStatusUnauthorizedFixtureStopsAndAsksForSignIn() async throws {
         let fixture = try GDFixtureFile.load("account-deletion", "status-unauthorized")
         XCTAssertEqual(fixture.status, 401)

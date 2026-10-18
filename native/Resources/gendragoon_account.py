@@ -117,6 +117,30 @@ def accept_start(status, body):
     return _with_token({"action": "poll", "path": STATUS_PREFIX + job_id}, body)
 
 
+def interpret_support_request(status, body):
+    """POST /v2/account/deletions/:jobId/support-request.
+
+    A 401 unauthorized (missing Authorization) is the same outcome as a 404:
+    show the support email and never open sign-in. Status-poll 401 is separate
+    and still asks the user to sign in.
+    """
+    if not isinstance(body, dict):
+        body = {}
+    contact = "support@example.com"
+    if status == 202 and body.get("status") == "received" and isinstance(body.get("requestId"), str) and body["requestId"]:
+        return {"result": "received", "requestId": body["requestId"], "showSignIn": False, "message": "Request sent."}
+    if status == 429 and server_code(body) == "rate_limited":
+        retry = body.get("retryAfterSec")
+        if isinstance(retry, bool) or not isinstance(retry, int):
+            retry = 0
+        return {"result": "rate_limited", "retryAfterSec": max(0, retry), "showSignIn": False,
+                "message": f"Support requests are limited right now. Try again later. {contact}"}
+    if status == 409 and server_code(body) == "support_not_needed":
+        return {"result": "not_needed", "showSignIn": False, "message": "This deletion does not need a support request."}
+    return {"result": "email_fallback", "showSignIn": False,
+            "message": f"Email {contact}. Sign-in was not opened."}
+
+
 def accept_poll(status, body):
     if status == 401:
         return {"action": "reauthenticate",

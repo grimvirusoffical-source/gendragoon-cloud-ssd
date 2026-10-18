@@ -235,7 +235,7 @@ enum GDNativeHelper {
                 Button { showCleanup.toggle() } label: { Label("Cleanup Drive", systemImage: "folder.badge.gearshape") }
                     .disabled(native.maintenanceBusy)
             }
-            Text("Hosted workspaces use the shared customer bucket and your signed-in account. Bring-your-own storage is an S3-compatible bucket at $5/month per workspace. SFTP, Azure, and WebDAV are coming soon.")
+            Text("Hosted workspaces use the shared customer bucket and your signed-in account. Bring-your-own storage is an S3-compatible bucket at the monthly price returned for that workspace. SFTP, Azure, and WebDAV are coming soon.")
                 .font(.system(size: 11)).foregroundStyle(.secondary)
             DisclosureGroup("Connect S3-compatible storage", isExpanded: $showConnection) {
                 VStack(alignment: .leading, spacing: 12) {
@@ -415,7 +415,7 @@ enum GDNativeHelper {
     var body: some View {
         DisclosureGroup("Bring your own S3-compatible bucket") {
             VStack(alignment: .leading, spacing: 10) {
-                Text("Connect Amazon S3, Cloudflare R2, Backblaze B2, Wasabi, MinIO, or Google Cloud with S3/HMAC keys. This is $5/month per workspace. SFTP, Azure, and WebDAV are shown as coming soon and have no connect flow. Performance features cost extra unless you stay on the free performance tier.")
+                Text("Connect Amazon S3, Cloudflare R2, Backblaze B2, Wasabi, MinIO, or Google Cloud with S3/HMAC keys. The workspace fee is the monthly price returned for that workspace. SFTP, Azure, and WebDAV are shown as coming soon and have no connect flow. Performance features cost extra unless you stay on the free performance tier.")
                     .font(.caption).foregroundStyle(.secondary)
                 HStack {
                     Button("Refresh Providers") { library.refresh() }

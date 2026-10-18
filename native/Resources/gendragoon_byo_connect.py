@@ -14,7 +14,7 @@ the endpoint or registering again must run a new challenge.
 Registration of an unsupported provider, including SFTP, is 422
 byo_provider_unsupported. 409 byo_unverifiable is only the fallback when the
 server did not name that provider error.
-The workspace fee shown to the customer is $5/month.
+The customer sees the monthly price the server returns for that workspace.
 """
 import argparse
 import datetime
@@ -207,7 +207,7 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description="Activate S3-compatible bring-your-own storage.")
     parser.add_argument("action", nargs="?", choices=("show",), default="show")
     parser.parse_args(argv)
-    print("S3-compatible bring-your-own storage is $5/month. SFTP, Azure, and WebDAV are coming soon.")
+    print("S3-compatible bring-your-own storage uses the monthly price returned for that workspace. SFTP, Azure, and WebDAV are coming soon.")
     return 0
 
 

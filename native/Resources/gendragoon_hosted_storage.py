@@ -116,22 +116,41 @@ def validate_session(workspace_id, body, now=None):
     return {"prefix": prefix, "expiresAt": body["expiresAt"], "readOnly": read_only, "urls": checked}
 
 
-def interpret_workspace_lock(status, body):
-    """HTTP 423 workspace_lock opens delete-or-merge. Other errors stay ordinary."""
+def interpret_workspace_lock(status, body, workspace_id=None):
+    """HTTP 423 workspace_lock stays on the workspace it came from."""
     if status != 423 or not isinstance(body, dict) or body.get("error") != "workspace_lock":
         return None
     unpaid = body.get("unpaidWorkspaceIds") or []
     if not isinstance(unpaid, list) or any(not isinstance(item, str) or not item for item in unpaid):
         unpaid = []
+    unpaid = unpaid[:50]
     over = body.get("overBy")
     if not isinstance(over, int) or over < 0:
         over = 0
+    reason = str(body.get("reason") or "workspace_lock")[:80]
+    if isinstance(workspace_id, str) and workspace_id:
+        locked = [workspace_id]
+    elif reason in {"lapsed", "over_cap_and_lapsed"}:
+        locked = list(unpaid)
+    else:
+        locked = []
+    if locked and reason in {"lapsed", "over_cap_and_lapsed"}:
+        screen = "pay-workspace"
+        message = "This workspace needs payment before uploads can continue. This lock applies only to this workspace. Free and paid workspaces stay available. Downloads stay available."
+    elif locked:
+        screen = "delete-or-merge"
+        message = "This workspace is outside the current allowance. This lock applies only to this workspace. Free and paid workspaces stay available. Downloads stay available."
+    else:
+        screen = "delete-or-merge"
+        message = "This account is over its workspace limit. Delete or merge the extra workspaces. Downloads stay available."
     return {
-        "screen": "delete-or-merge",
-        "reason": str(body.get("reason") or "workspace_lock")[:80],
+        "screen": screen,
+        "reason": reason,
         "overBy": over,
-        "unpaidWorkspaceIds": unpaid[:50],
-        "message": "This account is over its workspace limit. Delete or merge the extra workspaces. Downloads stay available.",
+        "unpaidWorkspaceIds": unpaid,
+        "lockedWorkspaceIds": locked,
+        "locksEntireApp": False,
+        "message": message,
     }
 
 

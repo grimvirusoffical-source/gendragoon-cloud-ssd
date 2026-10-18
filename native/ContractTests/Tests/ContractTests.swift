@@ -715,7 +715,7 @@ final class StorageAndManifestContractTests: XCTestCase {
         let envelope = try GDWorkspaceKeyEnvelope.wrap(workspaceKey: workspaceKey, passphrase: "correct horse",
                                                         parameters: .interactiveTest)
         XCTAssertEqual(envelope.kdf, "argon2id")
-        XCTAssertEqual(try GDWorkspaceKeyEnvelope.unwrap(envelope: envelope, passphrase: "correct horse"), workspaceKey)
-        XCTAssertThrowsError(try GDWorkspaceKeyEnvelope.unwrap(envelope: envelope, passphrase: "wrong"))
+        XCTAssertLessThan(envelope.memoryKiB, GDKeyEnvelopeContract.minimumMemoryKiB)
+        XCTAssertThrowsError(try GDWorkspaceKeyEnvelope.unwrap(envelope: envelope, passphrase: "correct horse"))
     }
 }

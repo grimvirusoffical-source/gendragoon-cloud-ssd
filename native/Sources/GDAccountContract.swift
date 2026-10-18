@@ -320,3 +320,55 @@ enum GDAccountContract {
         !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 }
+
+/// POST /v2/account/deletions/:jobId/support-request with the saved status token.
+/// A 202 repeats the same requestId. A 401 `unauthorized` and a 404 `not_found`
+/// both show the support email and never open sign-in.
+enum GDSupportRequestResult: Equatable {
+    case received(requestId: String)
+    case rateLimited(retryAfterSec: Int)
+    case notNeeded
+    case emailFallback
+}
+
+extension GDAccountContract {
+    static func supportRequestPath(jobId: String) -> String {
+        statusPrefix + jobId + "/support-request"
+    }
+
+    static func interpretSupportRequest(status: Int, json: [String: Any]) -> GDSupportRequestResult {
+        if status == 202, (json["status"] as? String) == "received",
+           let requestId = json["requestId"] as? String, !requestId.isEmpty {
+            return .received(requestId: requestId)
+        }
+        if status == 429, GDServerCode.read(json) == "rate_limited" {
+            let retry = (json["retryAfterSec"] as? Int) ?? (json["retryAfterSec"] as? NSNumber)?.intValue ?? 0
+            return .rateLimited(retryAfterSec: max(0, retry))
+        }
+        if status == 409, GDServerCode.read(json) == "support_not_needed" {
+            return .notNeeded
+        }
+        return .emailFallback
+    }
+
+    /// Support-request failures never open sign-in. A missing Authorization header is a 401 `unauthorized`.
+    static func supportRequestShowsSignIn(_ result: GDSupportRequestResult) -> Bool {
+        switch result {
+        case .received, .rateLimited, .notNeeded, .emailFallback:
+            return false
+        }
+    }
+
+    static func supportRequestMessage(_ result: GDSupportRequestResult) -> String {
+        switch result {
+        case .received:
+            return "Request sent."
+        case .rateLimited:
+            return "Support requests are limited right now. Try again later. \(GDSupportContact.current.value)"
+        case .notNeeded:
+            return "This deletion does not need a support request."
+        case .emailFallback:
+            return "Email \(GDSupportContact.current.value). Sign-in was not opened."
+        }
+    }
+}

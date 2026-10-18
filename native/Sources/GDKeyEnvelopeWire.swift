@@ -51,6 +51,7 @@ enum GDKeyEnvelopeFollowUp: Equatable {
 }
 
 enum GDKeyEnvelopeContract {
+    static let minimumMemoryKiB = 19_456
     static let maxMemoryKiB = 1_048_576
     static let maxIterations = 10
 
@@ -144,7 +145,10 @@ enum GDKeyEnvelopeContract {
             guard wire.kdf.parallelism >= 1 else {
                 throw GDKeyEnvelopeError.message("The workspace key envelope is not valid.")
             }
-            guard wire.kdf.memoryKiB >= 1, wire.kdf.memoryKiB <= maxMemoryKiB else {
+            guard wire.kdf.memoryKiB >= minimumMemoryKiB else {
+                throw GDKeyEnvelopeError.message("The workspace key envelope is not valid.")
+            }
+            guard wire.kdf.memoryKiB <= maxMemoryKiB else {
                 throw GDKeyEnvelopeError.message("Those passphrase settings are too expensive for this Mac.")
             }
             guard wire.kdf.iterations >= 1, wire.kdf.iterations <= maxIterations else {

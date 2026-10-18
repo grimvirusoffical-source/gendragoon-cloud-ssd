@@ -686,7 +686,7 @@ struct GDManagedAppSession: Identifiable {
     @ObservedObject var library: LibraryModel
     var body: some View {
         Panel(title: "S3-compatible storage") {
-            Text("Connect Amazon S3, Cloudflare R2, Backblaze B2, Wasabi, MinIO, or Google Cloud with S3/HMAC keys. The workspace fee is $5/month. SFTP, Azure, and WebDAV are coming soon and have no connect flow. Keys stay in the macOS Keychain. The challenge sends a presigned GET, not the nonce.").font(.system(size: 12)).foregroundStyle(.gray)
+            Text("Connect Amazon S3, Cloudflare R2, Backblaze B2, Wasabi, MinIO, or Google Cloud with S3/HMAC keys. The workspace fee is the monthly price returned for that workspace. SFTP, Azure, and WebDAV are coming soon and have no connect flow. Keys stay in the macOS Keychain. The challenge sends a presigned GET, not the nonce.").font(.system(size: 12)).foregroundStyle(.gray)
             HStack {
                 ActionButton(title: "Refresh Providers", systemName: "arrow.clockwise", action: library.refresh, isDisabled: library.busy)
             }
@@ -739,7 +739,7 @@ struct GDManagedAppSession: Identifiable {
     @ObservedObject var cloud: CloudModel
     var body: some View {
         Panel(title: "Google Cloud · Browser Login") {
-                        Text("GenDragoonSSD · Personal Cloud Storage. Hosted workspaces use your signed-in account on the shared customer bucket. A bucket you connect is S3-compatible and is $5/month. Google Cloud uses S3/HMAC keys. SFTP, Azure, and WebDAV are coming soon. Customer Google sign-in uses the separate Firebase project (gendragoonssd).")
+                        Text("GenDragoonSSD · Personal Cloud Storage. Hosted workspaces use your signed-in account on the shared customer bucket. A bucket you connect is S3-compatible, and its fee is the monthly price returned for that workspace. Google Cloud uses S3/HMAC keys. SFTP, Azure, and WebDAV are coming soon. Customer Google sign-in uses the separate Firebase project (gendragoonssd).")
                             .font(.system(size: 12)).foregroundStyle(.gray)
                         Text(cloud.accountStatus).font(.system(size: 12)).foregroundStyle(.gray).textSelection(.enabled)
                         Text("Hosted storage uses your signed-in GenDragoon account and short-lived URLs. This Mac seals files before upload. Google Cloud project, bucket, and console buttons are not part of that flow.")
@@ -752,22 +752,20 @@ struct GDManagedAppSession: Identifiable {
 struct GenDragoonPlan: Identifiable {
     let id: String
     let gb: Int
-    let month: Int
     let transfer: Int
-    var yearly: Int { month * 10 }
     var capacity: String { gb >= 1000 ? "\(gb / 1000) TB" : "\(gb) GB" }
 }
 private let planCatalog: [GenDragoonPlan] = [
-    .init(id: "100GB", gb: 100, month: 5, transfer: 10),
-    .init(id: "200GB", gb: 200, month: 10, transfer: 20),
-    .init(id: "300GB", gb: 300, month: 15, transfer: 30),
-    .init(id: "500GB", gb: 500, month: 25, transfer: 50),
-    .init(id: "1TB", gb: 1000, month: 49, transfer: 100),
-    .init(id: "2TB", gb: 2000, month: 95, transfer: 200),
-    .init(id: "3TB", gb: 3000, month: 139, transfer: 300),
-    .init(id: "4TB", gb: 4000, month: 179, transfer: 400),
-    .init(id: "5TB", gb: 5000, month: 219, transfer: 500),
-    .init(id: "6TB", gb: 6000, month: 259, transfer: 600)
+    .init(id: "100GB", gb: 100, transfer: 10),
+    .init(id: "200GB", gb: 200, transfer: 20),
+    .init(id: "300GB", gb: 300, transfer: 30),
+    .init(id: "500GB", gb: 500, transfer: 50),
+    .init(id: "1TB", gb: 1000, transfer: 100),
+    .init(id: "2TB", gb: 2000, transfer: 200),
+    .init(id: "3TB", gb: 3000, transfer: 300),
+    .init(id: "4TB", gb: 4000, transfer: 400),
+    .init(id: "5TB", gb: 5000, transfer: 500),
+    .init(id: "6TB", gb: 6000, transfer: 600)
 ]
 private struct PlansPanel: View {
     @State private var annual = false
@@ -795,7 +793,7 @@ private struct PlansPanel: View {
                                 Spacer()
                                 if selected == plan.id { Image(systemName:"checkmark.circle.fill").foregroundStyle(.green) }
                             }
-                            Text(annual ? "$\(plan.yearly)/yr" : "$\(plan.month)/mo")
+                            Text("Server catalog price")
                                 .font(.system(size:18,weight:.heavy))
                             Text("\(plan.transfer) GB monthly download allowance")
                                 .font(.system(size:10)).foregroundStyle(.gray)
@@ -811,8 +809,8 @@ private struct PlansPanel: View {
             }
             HStack {
                 VStack(alignment:.leading,spacing:3) {
-                    Text("Your S3-compatible bucket · $5/month").font(.system(size:12,weight:.semibold))
-                    Text("Same workspace fee as a hosted workspace. Amazon S3, R2, B2, Wasabi, MinIO, or Google Cloud with S3/HMAC keys. SFTP, Azure, and WebDAV are coming soon. Provider charges stay with that provider.")
+                    Text("Your S3-compatible bucket").font(.system(size:12,weight:.semibold))
+                    Text("The workspace fee is the monthly price returned for that workspace. Amazon S3, R2, B2, Wasabi, MinIO, or Google Cloud with S3/HMAC keys. SFTP, Azure, and WebDAV are coming soon. Provider charges stay with that provider.")
                         .font(.system(size:11)).foregroundStyle(.gray)
                 }
                 Spacer()

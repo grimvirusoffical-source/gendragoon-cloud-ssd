@@ -39,6 +39,8 @@ extension GDLoginSession: GDDeletionSession {
                         Button("Dismiss") { monitor.dismissSavedJob() }
                             .buttonStyle(.bordered)
                         if monitor.showsSupportContact {
+                            Button("Request support") { Task { await monitor.requestSupport() } }
+                                .buttonStyle(.bordered)
                             Text(GDSupportContact.current.value)
                                 .font(.system(size: 12))
                                 .textSelection(.enabled)

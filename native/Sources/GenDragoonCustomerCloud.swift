@@ -12,9 +12,19 @@ struct GDWorkspaceChoice: Decodable, Identifiable {
     let projectStatus: String?
     let projectFeeStatus: String?
     let hasContinuingBilling: Bool?
+    let isFree: Bool?
+    let grandfathered: Bool?
+    /// Always present. False when this workspace is not an owner fee waiver.
+    let feeWaived: Bool
+    let monthlyPriceCents: Int?
+    let lapsed: Bool?
+    var priceLabel: String {
+        GDWorkspacePriceLabel.label(isFree: isFree == true, grandfathered: grandfathered == true, feeWaived: feeWaived, monthlyPriceCents: monthlyPriceCents)
+    }
     var archived: Bool { projectStatus == "archived" }
     var pendingPayment: Bool { projectStatus == "pending_payment" }
     var pendingCapacity: Bool { projectStatus == "payment_confirmed_pending_capacity" }
+    var isDeleting: Bool { !GDWorkspacePriceLabel.actionsEnabled(projectStatus: projectStatus) }
 }
 struct GDProjectFolderEntry: Decodable, Identifiable {
     let path: String
@@ -192,12 +202,25 @@ enum GDProjectContent: String { case files, applications }
             projectLimit = policy["projectLimit"] as? Int
             projectCount = policy["usedProjectSlots"] as? Int
             let free = policy["freeProjectAvailable"] as? Bool == true || policy["ownerFeeWaived"] as? Bool == true
-            nextProjectCents = free ? 0 : (policy["newProjectMonthlyCents"] as? Int ?? policy["newProjectOneTimeCents"] as? Int)
+            nextProjectCents = free ? 0 : (GDWorkspacePriceLabel.cents(policy["newProjectMonthlyCents"]) ?? GDWorkspacePriceLabel.cents(policy["newProjectOneTimeCents"]))
         }
         files = []; workspaceName = nil
         if let selected = selectedProject {
             if selected.archived { status = "This project is archived. Its cloud files are retained; restore the project to access them."; return }
-            if selected.pendingPayment { status = "This extra workspace is awaiting its $5/month subscription. The free workspace stays available."; return }
+            if selected.pendingPayment {
+                let price = selected.priceLabel
+                if price == "Free" || price == "Included" || price == "Price pending" {
+                    status = "This extra workspace is awaiting the subscription the server quoted. The free workspace stays available."
+                } else {
+                    status = "This extra workspace is awaiting its \(price) subscription. The free workspace stays available."
+                }
+                return
+            }
+            if selected.isDeleting {
+                status = GDWorkspacePriceLabel.deletingTitle
+                return
+            }
+            if selected.lapsed == false { GDWorkspaceLock.shared.clearSettled(workspaceID: selectedWorkspace) }
             if selected.pendingCapacity { status = "Payment is confirmed. Free a project slot, then activate this project; no new project fee is required."; return }
             if !selected.provisioned { status = "This project is being prepared. Refresh to check its storage activation."; return }
         } else if selectedWorkspace != "free" {
@@ -242,7 +265,7 @@ enum GDProjectContent: String { case files, applications }
         } catch { status = GDNativeMessage.safe(error.localizedDescription) } }
     }
     func archiveSelected() {
-        guard !busy, GDUpdateActivity.shared.canStart(excluding: self), let client, let project = selectedProject, !project.archived else { return }
+        guard !busy, GDUpdateActivity.shared.canStart(excluding: self), let client, let project = selectedProject, !project.archived, !project.isDeleting else { return }
         let alert = NSAlert(); alert.messageText = "Archive \(project.name)?"
         alert.informativeText = "The project will leave your active projects. Its files and Google Cloud resources are retained. " + (project.hasContinuingBilling == true ? "Its paid subscriptions continue until cancelled through billing. " : "") + "Type the project name to confirm."
         let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 330, height: 24)); field.placeholderString = project.name; alert.accessoryView = field
@@ -438,13 +461,37 @@ enum GDProjectContent: String { case files, applications }
     }
     func archiveWorkspace(_ workspace: GDWorkspaceChoice) async throws {
         guard let client else { throw GDTransferError(message: "Sign in first.", status: 401) }
+        guard !workspace.isDeleting else { throw GDTransferError(message: GDWorkspacePriceLabel.deletingTitle, status: 409) }
         let payload = try JSONSerialization.data(withJSONObject: GDStorageContract.archiveBody(confirmName: workspace.name))
         _ = try await client.jsonData(GDStorageContract.archivePath(id: workspace.id), method: "POST", payload: payload)
     }
     func mergeWorkspace(source: GDWorkspaceChoice, targetId: String) async throws {
         guard let client else { throw GDTransferError(message: "Sign in first.", status: 401) }
+        guard !source.isDeleting else { throw GDTransferError(message: GDWorkspacePriceLabel.deletingTitle, status: 409) }
         let payload = try JSONSerialization.data(withJSONObject: GDStorageContract.mergeBody(targetId: targetId, confirmName: source.name))
-        _ = try await client.jsonData(GDStorageContract.mergePath(sourceId: source.id), method: "POST", payload: payload)
+        let data = try await client.jsonData(GDStorageContract.mergePath(sourceId: source.id), method: "POST", payload: payload)
+        if let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] {
+            GDWorkspaceLock.shared.noteDemotion(object)
+        }
+    }
+    func makeHosted() {
+        guard !busy, GDUpdateActivity.shared.canStart(excluding: self), let client, let project = selectedProject,
+              project.kind == "byo", !project.isDeleting, !project.archived else { return }
+        busy = true
+        activityTitle = "Switching to hosted storage"
+        canPause = false
+        operation = Task { defer { finishOperation() }; do {
+            let data = try await client.jsonData("v2/projects/" + project.id + "/make-hosted", method: "POST")
+            let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] ?? [:]
+            GDWorkspaceLock.shared.noteDemotion(object)
+            if let demoted = GDWorkspacePriceLabel.demotedWorkspace(object), let url = demoted.checkoutURL {
+                NSWorkspace.shared.open(url)
+            }
+            try await load()
+            if GDWorkspacePriceLabel.demotedWorkspace(object) != nil {
+                status = "Payment due on the workspace that is no longer free. It stays usable during the grace period."
+            }
+        } catch { status = GDNativeMessage.safe(error.localizedDescription) } }
     }
     func downloadWorkspace(_ workspace: GDWorkspaceChoice, to folder: URL) async throws -> Int {
         guard let client else { throw GDTransferError(message: "Sign in first.", status: 401) }
@@ -469,6 +516,7 @@ struct GenDragoonFreeCloudPanel: View {
     var showProjectControls = true
     var onStorage: () -> Void
     @ObservedObject private var activity = GDUpdateActivity.shared
+    @ObservedObject private var workspaceLock = GDWorkspaceLock.shared
     @State private var search = ""
     @State private var dropTarget = false
     @State private var showCreate = false
@@ -526,21 +574,45 @@ struct GenDragoonFreeCloudPanel: View {
             HStack {
                 Picker("Project", selection: Binding(get: { customer.selectedWorkspace }, set: { customer.select($0) })) {
                     if !customer.choices.contains(where: { $0.id == customer.selectedWorkspace }) { Text(customer.selectedWorkspace == "free" ? "First project" : "Saved project unavailable").tag(customer.selectedWorkspace) }
-                    ForEach(customer.choices) { project in Text(project.name + (project.archived ? " · Archived" : project.pendingPayment ? " · Awaiting payment" : "")).tag(project.id) }
+                    ForEach(customer.choices) { project in Text(projectMenuTitle(project)).tag(project.id) }
                 }.controlSize(.large).disabled(customer.busy)
                 Spacer()
                 if showProjectControls, customer.selectedProject != nil, customer.selectedProject?.archived != true {
-                    Menu { Button("Storage & plans", action: onStorage); Button("Archive project…", role: .destructive) { customer.archiveSelected() } } label: { Image(systemName: "ellipsis.circle") }.disabled(locked)
+                    Menu {
+                        Button("Storage & plans", action: onStorage)
+                        if customer.selectedProject?.kind == "byo" {
+                            Button("Use hosted storage") { customer.makeHosted() }
+                        }
+                        Button("Archive project…", role: .destructive) { customer.archiveSelected() }
+                    } label: { Image(systemName: "ellipsis.circle") }
+                    .disabled(locked || customer.selectedProject?.isDeleting == true)
                 }
             }
             Text("Project ID: " + customer.selectedWorkspace).font(.system(size: 10, design: .monospaced)).foregroundStyle(.secondary).textSelection(.enabled)
+            if let notice = workspaceLock.notice(for: customer.selectedWorkspace) {
+                GDScopedWorkspaceLockBanner(
+                    workspaceID: customer.selectedWorkspace,
+                    workspaceName: customer.selectedProject?.name ?? customer.selectedWorkspace,
+                    notice: notice,
+                    priceLabel: customer.selectedProject?.priceLabel ?? "",
+                    onPay: onStorage)
+            }
         }
     }
+    private func projectMenuTitle(_ project: GDWorkspaceChoice) -> String {
+        var title = project.name
+        if project.priceLabel != "Price pending" { title += " · " + project.priceLabel }
+        if project.isDeleting { title += " · " + GDWorkspacePriceLabel.deletingTitle }
+        else if project.archived { title += " · Archived" }
+        else if project.pendingPayment { title += " · Awaiting payment" }
+        return title
+    }
+    private var paymentLocked: Bool { workspaceLock.notice(for: customer.selectedWorkspace)?.blocksTransfers == true }
     private var uploadControls: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack(spacing: 12) {
                 Button { customer.chooseUpload(content: content) } label: { Label(content == .applications ? "Upload Applications" : "Upload Files or Folders", systemImage: "plus") }
-                    .buttonStyle(.borderedProminent).tint(accent).controlSize(.large).disabled(locked)
+                    .buttonStyle(.borderedProminent).tint(accent).controlSize(.large).disabled(locked || paymentLocked)
                 Text(content == .applications ? "or drop complete .app bundles" : "or drop any files and complete folders").font(.system(size: 11)).foregroundStyle(.secondary)
                 Spacer()
                 Toggle("Data saver", isOn: $customer.dataSaver).toggleStyle(.switch).font(.system(size: 11)).disabled(customer.busy)
@@ -613,7 +685,10 @@ struct GenDragoonFreeCloudPanel: View {
     private var unavailable: some View {
         VStack(spacing: 14) {
             Image(systemName: "cloud.badge.plus").font(.system(size: 38, weight: .light)).foregroundStyle(accent)
-            if let project = customer.selectedProject, project.archived {
+            if customer.selectedProject?.isDeleting == true {
+                Text(GDWorkspacePriceLabel.deletingTitle).font(.system(size: 18, weight: .semibold))
+                Text("This workspace's actions stay off until deletion finishes.").font(.system(size: 12)).foregroundStyle(.secondary)
+            } else if let project = customer.selectedProject, project.archived {
                 Text("Your project and files are retained.").font(.system(size: 18, weight: .semibold))
                 Button("Restore Project") { customer.restoreProject(project) }.buttonStyle(.borderedProminent).tint(accent).disabled(locked)
             } else if let project = customer.selectedProject, project.pendingCapacity {
@@ -637,9 +712,9 @@ struct GenDragoonFreeCloudPanel: View {
             Text("New project").font(.system(size: 24, weight: .bold, design: .rounded))
             TextField("Project name", text: $projectName).textFieldStyle(.roundedBorder)
             if let fee = customer.nextProjectCents {
-                Text(fee == 0 ? "Your first workspace is free." : String(format: "This additional workspace is $%.2f per month. The free workspace is not replaced.", Double(fee) / 100)).font(.system(size: 12)).foregroundStyle(.secondary)
-            } else { Text("Your first workspace is free. Each additional workspace is a $5/month subscription.").font(.system(size: 12)).foregroundStyle(.secondary) }
-            Text("An S3-compatible bucket you connect is also $5/month per workspace. SFTP, Azure, and WebDAV are coming soon. Performance features cost extra unless you stay on the free performance tier.").font(.system(size: 12)).foregroundStyle(.secondary)
+                Text(fee == 0 ? "Your first workspace is free." : "This additional workspace is \(GDWorkspacePriceLabel.format(fee)). The free workspace is not replaced.").font(.system(size: 12)).foregroundStyle(.secondary)
+            } else { Text("The price for another workspace appears when the server returns it. The free workspace is not replaced.").font(.system(size: 12)).foregroundStyle(.secondary) }
+            Text("A bucket you connect uses the monthly price returned for that workspace. Connecting one on an Included workspace ends Included access. SFTP, Azure, and WebDAV are coming soon. Performance features cost extra unless you stay on the free performance tier.").font(.system(size: 12)).foregroundStyle(.secondary)
             if let limit = customer.projectLimit { Text("\(customer.projectCount ?? customer.activeProjects.count) of \(limit) project slots used.").font(.caption).foregroundStyle(.secondary) }
             HStack { Button("Cancel") { showCreate = false }; Spacer(); Button("Create Project") { customer.create(name: projectName); showCreate = false; projectName = "" }.buttonStyle(.borderedProminent).disabled(projectName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty) }
         }.padding(28).frame(width: 440)
@@ -672,7 +747,7 @@ struct GenDragoonFreeCloudPanel: View {
         }.padding(24).background(.white.opacity(0.035), in: RoundedRectangle(cornerRadius: 21))
             .overlay(RoundedRectangle(cornerRadius: 21).stroke(dropTarget ? accent : .white.opacity(0.08), lineWidth: dropTarget ? 2 : 1))
             .dropDestination(for: URL.self) { urls, _ in
-                guard !locked, customer.available else { return false }
+                guard !locked, !paymentLocked, customer.available else { return false }
                 customer.uploadFiles(urls, content: content); return true
             } isTargeted: { dropTarget = $0 }
             .sheet(isPresented: $showCreate) { createSheet }
