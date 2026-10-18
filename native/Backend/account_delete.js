@@ -1,6 +1,7 @@
 "use strict";
 // In-app account deletion (Apple App Store guideline 5.1.1(v)).
-// One resumable job per accountHash. Stripe subscriptions are cancelled
+// One resumable job per accountHash. A 60s lease in the job document keeps
+// two instances from running the same job. Stripe subscriptions are cancelled
 // immediately with no proration invoice. Managed objects are removed.
 // Customer-owned (BYO) buckets are never called; only our record of them is
 // dropped. Firebase refresh tokens are revoked and the user is deleted last.
@@ -8,6 +9,9 @@ const crypto=require("node:crypto");
 const {deleteAccountKeyEnvelopes}=require("./key_envelope");
 const REAUTH_SECONDS=5*60;
 const STATUS_TOKEN_TTL_MS=7*24*60*60*1000;
+const LEASE_MS=60*1000;
+const MAX_STATUS_TOKENS=5;
+const MAX_FAILED_ATTEMPTS=5;
 const JOB_STATUS=new Set(["queued","running","done","failed"]);
 const SUBSCRIPTION_KEY=/SubscriptionId$/;
 
@@ -22,15 +26,123 @@ function authCodeMeansGone(error){
  const code=error?.code;
  return code==="auth/user-not-found"||code==="auth/user-disabled"||code==="auth/id-token-revoked";
 }
+function isMissing(error){
+ const code=error?.code;
+ return code==="auth/user-not-found"||code==="resource_missing"||code===5||code===404||code==="404"||code==="ENOENT"||code==="storage/object-not-found"||error?.status===404||error?.statusCode===404;
+}
+async function ignoreMissing(work){
+ try{return await work();}
+ catch(error){if(!isMissing(error))throw error;}
+}
+const STRIPE_TYPE={
+ StripeAuthenticationError:"authentication_error",
+ StripePermissionError:"permission_error",
+ StripeInvalidRequestError:"invalid_request_error",
+ StripeRateLimitError:"rate_limit_error",
+ StripeAPIError:"api_error",
+ StripeConnectionError:"api_connection_error",
+ StripeIdempotencyError:"idempotency_error",
+};
+function errorChain(error){
+ const list=[];
+ let current=error;
+ for(let depth=0;depth<4&&current;depth++){
+  list.push(current);
+  current=current.cause;
+ }
+ return list;
+}
+function stripeType(error){
+ const raw=error?.rawType||error?.raw?.type;
+ if(typeof raw==="string"&&raw)return raw;
+ const type=error?.type;
+ if(typeof type!=="string"||!type)return "";
+ return STRIPE_TYPE[type]||type;
+}
+function httpStatus(error){
+ const value=error?.statusCode??(typeof error?.status==="number"||typeof error?.status==="string"?error.status:undefined);
+ if(typeof value==="number"&&Number.isInteger(value))return value;
+ if(typeof value==="string"&&/^\d+$/.test(value))return Number(value);
+ return null;
+}
+function isTimeoutError(error){
+ const code=String(error?.code||error?.errno||"");
+ if(/^(ETIMEDOUT|ESOCKETTIMEDOUT|UND_ERR_CONNECT_TIMEOUT|UND_ERR_HEADERS_TIMEOUT|UND_ERR_BODY_TIMEOUT|ETIME)$/.test(code))return true;
+ return /timeout/i.test(code);
+}
+function isNetworkError(error){
+ const code=String(error?.code||error?.errno||"");
+ if(/^(ECONNRESET|ECONNREFUSED|ENOTFOUND|EAI_AGAIN|ECONNABORTED|EHOSTUNREACH|ENETUNREACH|EPIPE)$/.test(code))return true;
+ return code==="api_connection_error"||stripeType(error)==="api_connection_error";
+}
+function isGcsPermission(error){
+ const code=error?.code??error?.statusCode??error?.status;
+ if(code===403||code==="403")return true;
+ const reason=[error?.code,error?.reason,error?.errors?.[0]?.reason].filter(item=>typeof item==="string").join(" ");
+ return /permission[-_ ]?denied|^forbidden$|storage\/unauthorized/i.test(reason);
+}
+// Permanent classes cannot succeed on another try. Everything else stays
+// retryable until the attempt cap: 5xx, network, timeouts, and 429.
+function classifyDeletionError(error){
+ const items=errorChain(error);
+ for(const item of items){
+  // resource_missing is success at the call site. If it still arrives here, it is
+  // not an invalid_request failure and must not become permanent.
+  if(item?.code==="resource_missing"||item?.raw?.code==="resource_missing")continue;
+  const type=stripeType(item);
+  if(type==="authentication_error")return {permanent:true,failureReason:"stripe_authentication_error"};
+  if(type==="permission_error")return {permanent:true,failureReason:"stripe_permission_error"};
+  if(type==="invalid_request_error")return {permanent:true,failureReason:"stripe_invalid_request"};
+ }
+ if(items.some(item=>item?.ownPrefix===true)&&items.some(isGcsPermission))
+  return {permanent:true,failureReason:"gcs_permission_denied"};
+ for(const item of items){
+  const status=httpStatus(item);
+  if(stripeType(item)==="rate_limit_error"||status===429||item?.code==="rate_limit_error")
+   return {permanent:false,failureReason:"rate_limited"};
+ }
+ if(items.some(isTimeoutError))return {permanent:false,failureReason:"timeout"};
+ if(items.some(isNetworkError))return {permanent:false,failureReason:"network"};
+ for(const item of items){
+  const status=httpStatus(item);
+  if(stripeType(item)==="api_error"||(status>=500&&status<=599))
+   return {permanent:false,failureReason:"upstream_unavailable"};
+ }
+ return {permanent:false,failureReason:"deletion_step_failed"};
+}
 function plainJob(job){
- const data={jobId:job.jobId,accountHash:job.accountHash,status:job.status,
-  steps:{...job.steps},canceledIds:[...(job.canceledIds||[])],
-  subscriptionIds:[...(job.subscriptionIds||[])],customerId:job.customerId||null,
-  retryable:job.retryable===true,failure:job.failure||null};
- if(typeof job.statusTokenHash==="string")data.statusTokenHash=job.statusTokenHash;
- if(typeof job.statusTokenExpiresAt==="number")data.statusTokenExpiresAt=job.statusTokenExpiresAt;
- if(job.status!=="done")data.uid=job.uid;
+ const steps={...(job.steps||{})};
+ if(steps.prefixes)steps.prefixes={...steps.prefixes};
+ const data={jobId:job.jobId,accountHash:job.accountHash,status:job.status,steps,
+  canceledIds:[...(job.canceledIds||[])],subscriptionIds:[...(job.subscriptionIds||[])],
+  customerId:job.customerId||null,retryable:job.retryable===true,failure:job.failure||null,
+  failureReason:typeof job.failureReason==="string"?job.failureReason:null,
+  attempts:Number.isInteger(job.attempts)&&job.attempts>0?job.attempts:0,
+  statusTokens:(job.statusTokens||[]).map(item=>({hash:item.hash,expiresAtMs:item.expiresAtMs}))};
+ if(job.lease&&typeof job.lease.owner==="string"&&typeof job.lease.expiresAtMs==="number")
+  data.lease={owner:job.lease.owner,expiresAtMs:job.lease.expiresAtMs};
+ if(job.status!=="done"&&job.uid)data.uid=job.uid;
  return data;
+}
+function pruneStatusTokens(list,now){
+ const live=[];
+ for(const item of list||[]){
+  if(!item||typeof item.hash!=="string"||!/^[a-f0-9]{64}$/.test(item.hash))continue;
+  if(typeof item.expiresAtMs!=="number"||now>item.expiresAtMs)continue;
+  live.push({hash:item.hash,expiresAtMs:item.expiresAtMs});
+ }
+ // Oldest first. A sixth unexpired hash drops the oldest.
+ return live.slice(-MAX_STATUS_TOKENS);
+}
+function mergeStatusTokens(stored,memory,now){
+ const merged=[];
+ const seen=new Set();
+ for(const item of [...(stored||[]),...(memory||[])]){
+  if(!item||typeof item.hash!=="string"||seen.has(item.hash))continue;
+  seen.add(item.hash);
+  merged.push(item);
+ }
+ return pruneStatusTokens(merged,now);
 }
 function bearerToken(req){
  const match=/^Bearer ([A-Za-z0-9._~-]+)$/.exec(req?.headers?.authorization||"");
@@ -40,34 +152,62 @@ function createAccountDeletion({db,stripe,bucket,auth,byoProviders,hash,now}){
  // byoProviders is accepted so callers can pass the registry. Deletion must
  // never invoke it: customer-owned storage stays untouched.
  void byoProviders;
+ const instanceId=crypto.randomBytes(16).toString("hex");
  const jobs=new Map();
  const clock=()=>typeof now==="function"?now():Date.now();
  function accountRef(owner){return db.collection("account_deletions").doc(owner)}
  function jobRef(jobId){return db.collection("deletion_jobs").doc(jobId)}
- async function save(job){
-  const data=plainJob(job);
-  await Promise.all([
-   jobRef(job.jobId).set(data),
-   accountRef(job.accountHash).set(data),
-  ]);
+ function heldByOther(lease,at){
+  return !!(lease&&lease.owner!==instanceId&&typeof lease.expiresAtMs==="number"&&at<=lease.expiresAtMs);
  }
- function issueStatusToken(job){
-  const statusToken=crypto.randomBytes(32).toString("base64url");
-  job.statusTokenHash=crypto.createHash("sha256").update(statusToken).digest("hex");
-  job.statusTokenExpiresAt=clock()+STATUS_TOKEN_TTL_MS;
-  return statusToken;
+ function absorb(job,stored){
+  if(!stored)return;
+  const steps={...(stored.steps||{}),...(job.steps||{})};
+  steps.prefixes={...(stored.steps?.prefixes||{}),...(job.steps?.prefixes||{})};
+  for(const key of ["stripe","stripeListed","objects","metadata","firebase"])
+   if(stored.steps?.[key]||job.steps?.[key])steps[key]=true;
+  job.steps=steps;
+  job.canceledIds=[...new Set([...(stored.canceledIds||[]),...(job.canceledIds||[])])];
+  job.subscriptionIds=[...new Set([...(stored.subscriptionIds||[]),...(job.subscriptionIds||[])])];
+  if(!job.customerId&&stored.customerId)job.customerId=stored.customerId;
+  const storedAttempts=Number.isInteger(stored.attempts)?stored.attempts:0;
+  const liveAttempts=Number.isInteger(job.attempts)?job.attempts:0;
+  job.attempts=Math.max(storedAttempts,liveAttempts);
+  if(!job.uid&&stored.uid)job.uid=stored.uid;
+  if(stored.accountHash)job.accountHash=stored.accountHash;
+  if(stored.jobId)job.jobId=stored.jobId;
+ }
+ function writeBoth(tx,job){
+  const data=plainJob(job);
+  tx.set(jobRef(job.jobId),data);
+  tx.set(accountRef(job.accountHash),data);
+  return data;
  }
  function statusTokenMatches(job,token){
   if(!job||typeof token!=="string"||!/^[A-Za-z0-9_-]{43}$/.test(token))return false;
-  if(typeof job.statusTokenExpiresAt!=="number"||clock()>job.statusTokenExpiresAt)return false;
   const actual=Buffer.from(crypto.createHash("sha256").update(token).digest("hex"),"hex");
-  const expected=Buffer.from(String(job.statusTokenHash||""),"hex");
-  if(actual.length!==expected.length||expected.length!==32)return false;
-  return crypto.timingSafeEqual(actual,expected);
+  if(actual.length!==32)return false;
+  const at=clock();
+  for(const item of job.statusTokens||[]){
+   if(typeof item?.expiresAtMs!=="number"||at>item.expiresAtMs)continue;
+   const expected=Buffer.from(String(item.hash||""),"hex");
+   if(expected.length===actual.length&&crypto.timingSafeEqual(actual,expected))return true;
+  }
+  return false;
  }
  function remembered(owner){
   for(const job of jobs.values())if(job.accountHash===owner)return job;
   return null;
+ }
+ function hydrate(data){
+  return {jobId:data.jobId,accountHash:data.accountHash,uid:data.uid,status:data.status,
+   steps:{...(data.steps||{}),prefixes:{...(data.steps?.prefixes||{})}},
+   canceledIds:[...(data.canceledIds||[])],subscriptionIds:[...(data.subscriptionIds||[])],
+   customerId:data.customerId||null,retryable:data.retryable===true,failure:data.failure||null,
+   failureReason:typeof data.failureReason==="string"?data.failureReason:null,
+   attempts:Number.isInteger(data.attempts)&&data.attempts>0?data.attempts:0,
+   statusTokens:(data.statusTokens||[]).map(item=>({hash:item.hash,expiresAtMs:item.expiresAtMs})),
+   lease:data.lease?{owner:data.lease.owner,expiresAtMs:data.lease.expiresAtMs}:null,inflight:false};
  }
  async function load(owner){
   const live=remembered(owner);
@@ -76,11 +216,88 @@ function createAccountDeletion({db,stripe,bucket,auth,byoProviders,hash,now}){
   if(!snap.exists)return null;
   const data=snap.data();
   if(!data?.jobId||!JOB_STATUS.has(data.status))return null;
-  const job={...data,steps:data.steps||{},canceledIds:data.canceledIds||[],subscriptionIds:data.subscriptionIds||[],inflight:false};
+  const job=hydrate(data);
   jobs.set(job.jobId,job);
   return job;
  }
- async function cancelStripe(job){
+ async function readJob(jobId){
+  const snap=await jobRef(jobId).get();
+  return snap.exists?snap.data():null;
+ }
+ // Extend our lease, or take an absent/expired one. A live lease owned by
+ // another instance is left untouched and this instance does not become the runner.
+ async function renewLease(job){
+  let ok=false;
+  await db.runTransaction(async tx=>{
+   const snap=await tx.get(jobRef(job.jobId));
+   const stored=snap.exists?snap.data():null;
+   const at=clock();
+   if(stored?.status==="done"){absorb(job,stored);job.status="done";job.statusTokens=mergeStatusTokens(stored.statusTokens,job.statusTokens,at);ok=false;return;}
+   if(heldByOther(stored?.lease,at)){absorb(job,stored);job.lease=stored.lease;job.statusTokens=mergeStatusTokens(stored.statusTokens,job.statusTokens,at);ok=false;return;}
+   if(stored)absorb(job,stored);
+   job.lease={owner:instanceId,expiresAtMs:at+LEASE_MS};
+   if(job.status!=="done")job.status="running";
+   job.failure=null;
+   job.statusTokens=mergeStatusTokens(stored?.statusTokens,job.statusTokens,at);
+   writeBoth(tx,job);
+   ok=true;
+  });
+  return ok;
+ }
+ // Checkpoint write. A holder whose lease expired, or was taken, stops here
+ // without writing the in-memory batch.
+ async function commitCheckpoint(job){
+  let ok=false;
+  await db.runTransaction(async tx=>{
+   const snap=await tx.get(jobRef(job.jobId));
+   const stored=snap.exists?snap.data():null;
+   const at=clock();
+   const own=stored?.lease?.owner===instanceId&&typeof stored?.lease?.expiresAtMs==="number"&&at<=stored.lease.expiresAtMs;
+   if(!own||(stored?.status==="done"&&job.status!=="done")){
+    if(stored){absorb(job,stored);job.lease=stored.lease||null;if(stored.status==="done")job.status="done";
+     job.statusTokens=mergeStatusTokens(stored.statusTokens,job.statusTokens,at);}
+    ok=false;return;
+   }
+   job.lease={owner:instanceId,expiresAtMs:stored.lease.expiresAtMs};
+   job.statusTokens=mergeStatusTokens(stored.statusTokens,job.statusTokens,at);
+   writeBoth(tx,job);
+   ok=true;
+  });
+  return ok;
+ }
+ async function issueStatusToken(job,{claim}){
+  const statusToken=crypto.randomBytes(32).toString("base64url");
+  const extra={hash:crypto.createHash("sha256").update(statusToken).digest("hex"),expiresAtMs:clock()+STATUS_TOKEN_TTL_MS};
+  let claimed=false;
+  await db.runTransaction(async tx=>{
+   const snap=await tx.get(jobRef(job.jobId));
+   const stored=snap.exists?snap.data():null;
+   const at=clock();
+   const tokens=mergeStatusTokens(stored?.statusTokens,[...(job.statusTokens||[]),extra],at);
+   const finished=stored?.status==="done"||job.status==="done";
+   if(claim&&!finished&&!heldByOther(stored?.lease,at)){
+    if(stored)absorb(job,stored);
+    job.lease={owner:instanceId,expiresAtMs:at+LEASE_MS};
+    job.statusTokens=tokens;
+    // Stay queued until the runner renews the lease. That renewal is what
+    // clients observe as running, including a failed job that DELETE just requeued.
+    if(job.status!=="done"&&job.status!=="queued")job.status="running";
+    writeBoth(tx,job);
+    claimed=true;
+    return;
+   }
+   const base=stored?{...stored,statusTokens:tokens}:{...plainJob(job),statusTokens:tokens};
+   if(stored?.lease)base.lease={owner:stored.lease.owner,expiresAtMs:stored.lease.expiresAtMs};
+   tx.set(jobRef(job.jobId),base);
+   tx.set(accountRef(job.accountHash),base);
+   job.statusTokens=tokens;
+   if(stored?.lease)job.lease={owner:stored.lease.owner,expiresAtMs:stored.lease.expiresAtMs};
+  });
+  jobs.set(job.jobId,job);
+  return {statusToken,claimed};
+ }
+ async function ensureSubscriptions(job){
+  if(job.steps?.stripeListed)return;
   const owner=job.accountHash;
   const account=await db.collection("gd_accounts").doc(owner).get();
   const customer=account.exists?account.data()?.stripeCustomerId:job.customerId;
@@ -96,8 +313,15 @@ function createAccountDeletion({db,stripe,bucket,auth,byoProviders,hash,now}){
   if(job.customerId&&typeof stripe?.subscriptions?.list==="function"){
    let startingAfter;
    do{
-    const page=await stripe.subscriptions.list({customer:job.customerId,status:"all",limit:100,
-     ...(startingAfter?{starting_after:startingAfter}:{})});
+    let page;
+    try{
+     page=await stripe.subscriptions.list({customer:job.customerId,status:"all",limit:100,
+      ...(startingAfter?{starting_after:startingAfter}:{})});
+    }catch(error){
+     // A missing customer has nothing to cancel. Other invalid requests fail the job.
+     if(isMissing(error))break;
+     throw error;
+    }
     const rows=page?.data||[];
     for(const sub of rows){
      const subCustomer=typeof sub?.customer==="string"?sub.customer:sub?.customer?.id;
@@ -109,36 +333,47 @@ function createAccountDeletion({db,stripe,bucket,auth,byoProviders,hash,now}){
    }while(startingAfter);
   }
   job.subscriptionIds=[...ids];
-  const done=new Set(job.canceledIds||[]);
-  for(const id of ids){
-   if(done.has(id))continue;
-   try{
-    // Immediate cancellation. prorate and invoice_now stay false so unused
-    // time is not refunded; the billing portal's at-period-end setting does
-    // not apply once the account itself is being deleted.
-    await stripe.subscriptions.cancel(id,{invoice_now:false,prorate:false});
-   }catch(error){
-    if(error?.code==="resource_missing"){done.add(id);continue;}
-    job.canceledIds=[...done];
-    const wrapped=refusal(503,"stripe_cancel_failed");
-    wrapped.cause=error;
-    throw wrapped;
-   }
-   done.add(id);
-   job.canceledIds=[...done];
+  job.steps={...job.steps,stripeListed:true};
+ }
+ async function cancelOne(id){
+  try{
+   // Immediate cancellation. prorate and invoice_now stay false so unused
+   // time is not refunded; the billing portal's at-period-end setting does
+   // not apply once the account itself is being deleted.
+   await stripe.subscriptions.cancel(id,{invoice_now:false,prorate:false});
+  }catch(error){
+   if(isMissing(error))return;
+   const wrapped=refusal(503,"stripe_cancel_failed");
+   wrapped.cause=error;
+   throw wrapped;
   }
  }
  async function deletePrefix(prefix){
-  if(typeof bucket?.deleteFiles==="function"){
-   await bucket.deleteFiles({prefix,force:true});
-   return;
-  }
-  if(typeof bucket?.getFiles!=="function")return;
-  const listed=await bucket.getFiles({prefix});
-  const files=listed?.[0]||[];
-  for(const file of files){
-   if(typeof file?.delete==="function")await file.delete({ignoreNotFound:true});
-   else if(file?.name&&typeof bucket.file==="function")await bucket.file(file.name).delete({ignoreNotFound:true});
+  try{
+   await ignoreMissing(async()=>{
+    if(typeof bucket?.deleteFiles==="function"){
+     await bucket.deleteFiles({prefix,force:true});
+     return;
+    }
+    if(typeof bucket?.getFiles!=="function")return;
+    const listed=await bucket.getFiles({prefix});
+    const files=listed?.[0]||[];
+    for(const file of files){
+     if(typeof file?.delete==="function")await ignoreMissing(()=>file.delete({ignoreNotFound:true}));
+     else if(file?.name&&typeof bucket.file==="function")await ignoreMissing(()=>bucket.file(file.name).delete({ignoreNotFound:true}));
+    }
+   });
+  }catch(error){
+   // deletePrefix is only called for this account's customer/ and tenants/ folders.
+   if(isGcsPermission(error)){
+    try{error.ownPrefix=true;}catch(_){/* frozen */}
+    if(error.ownPrefix===true)throw error;
+    const wrapped=refusal(403,"gcs_permission_denied");
+    wrapped.cause=error;
+    wrapped.ownPrefix=true;
+    throw wrapped;
+   }
+   throw error;
   }
  }
  async function deleteTree(collectionRef){
@@ -146,9 +381,9 @@ function createAccountDeletion({db,stripe,bucket,auth,byoProviders,hash,now}){
   for(const doc of snap.docs||[]){
    for(const name of ["files","uploads"]){
     const children=await doc.ref.collection(name).get();
-    for(const child of children.docs||[])await child.ref.delete();
+    for(const child of children.docs||[])await ignoreMissing(()=>child.ref.delete());
    }
-   await doc.ref.delete();
+   await ignoreMissing(()=>doc.ref.delete());
   }
  }
  async function deleteMetadata(job){
@@ -163,7 +398,7 @@ function createAccountDeletion({db,stripe,bucket,auth,byoProviders,hash,now}){
    const paymentIds=[];
    for(const doc of payments.docs||[]){
     paymentIds.push(doc.id);
-    await doc.ref.delete();
+    await ignoreMissing(()=>doc.ref.delete());
    }
    if(paymentIds.length)await receipt.set({paymentIds},{merge:true});
   }catch(_){/* no payment ledger for this account */}
@@ -174,58 +409,100 @@ function createAccountDeletion({db,stripe,bucket,auth,byoProviders,hash,now}){
     if(key.includes(owner)&&key.includes("/workspaces/"))db.rows.delete(key);
    }
   }
-  await db.collection("gd_accounts").doc(owner).delete();
-  await db.collection("tenants").doc(owner).delete();
-  if(job.uid)await db.collection("ad_purchases").doc(job.uid).delete();
+  await ignoreMissing(()=>db.collection("gd_accounts").doc(owner).delete());
+  await ignoreMissing(()=>db.collection("tenants").doc(owner).delete());
+  if(job.uid)await ignoreMissing(()=>db.collection("ad_purchases").doc(job.uid).delete());
   try{
    const keys=await db.collection("gd_api_keys").where("ownerHash","==",owner).get();
-   for(const doc of keys.docs||[])await doc.ref.delete();
+   for(const doc of keys.docs||[])await ignoreMissing(()=>doc.ref.delete());
   }catch(_){/* key registry absent */}
   await db.collection("accepted_terms").doc(job.uid).delete().catch?.(()=>{});
  }
  async function deleteFirebase(job){
-  if(typeof auth?.revokeRefreshTokens==="function"){
-   try{await auth.revokeRefreshTokens(job.uid);}
-   catch(error){if(error?.code!=="auth/user-not-found")throw error;}
+  if(typeof auth?.revokeRefreshTokens==="function")
+   await ignoreMissing(()=>auth.revokeRefreshTokens(job.uid));
+  await ignoreMissing(()=>auth.deleteUser(job.uid));
+ }
+ function nextBatch(job){
+  if(!job.steps?.stripe)return "stripe";
+  const owner=job.accountHash;
+  const customer="customer/"+owner+"/";
+  const tenants="tenants/"+owner+"/";
+  if(!job.steps?.prefixes?.[customer])return "customer";
+  if(!job.steps?.prefixes?.[tenants])return "tenants";
+  if(!job.steps?.metadata)return "metadata";
+  if(!job.steps?.firebase)return "firebase";
+  return "done";
+ }
+ async function performBatch(job,kind){
+  if(kind==="stripe"){
+   await ensureSubscriptions(job);
+   const pending=(job.subscriptionIds||[]).filter(id=>!(job.canceledIds||[]).includes(id));
+   if(!pending.length){job.steps={...job.steps,stripe:true};return;}
+   await cancelOne(pending[0]);
+   job.canceledIds=[...(job.canceledIds||[]),pending[0]];
+   if(pending.length===1)job.steps={...job.steps,stripe:true};
+   return;
   }
-  try{await auth.deleteUser(job.uid);}
-  catch(error){if(error?.code!=="auth/user-not-found")throw error;}
+  if(kind==="customer"||kind==="tenants"){
+   const prefix=(kind==="customer"?"customer/":"tenants/")+job.accountHash+"/";
+   await deletePrefix(prefix);
+   job.steps={...job.steps,prefixes:{...(job.steps?.prefixes||{}),[prefix]:true}};
+   const customer="customer/"+job.accountHash+"/";
+   const tenants="tenants/"+job.accountHash+"/";
+   if(job.steps.prefixes[customer]&&job.steps.prefixes[tenants])job.steps={...job.steps,objects:true};
+   return;
+  }
+  if(kind==="metadata"){await deleteMetadata(job);job.steps={...job.steps,metadata:true};return;}
+  if(kind==="firebase"){await deleteFirebase(job);job.steps={...job.steps,firebase:true};}
  }
  async function runJob(job){
-  job.status="running";
-  job.failure=null;
-  await save(job);
-  if(!job.steps.stripe){await cancelStripe(job);job.steps.stripe=true;await save(job);}
-  if(!job.steps.objects){
-   const owner=job.accountHash;
-   await deletePrefix("customer/"+owner+"/");
-   await deletePrefix("tenants/"+owner+"/");
-   job.steps.objects=true;await save(job);
+  for(;;){
+   if(!(await renewLease(job)))return;
+   if(job.status==="done")return;
+   const kind=nextBatch(job);
+   if(kind==="done"){
+    job.status="done";
+    job.retryable=false;
+    job.failure=null;
+    job.failureReason=null;
+    await commitCheckpoint(job);
+    return;
+   }
+   try{await performBatch(job,kind);}
+   catch(error){
+    await failJob(job,error);
+    return;
+   }
+   if(!(await commitCheckpoint(job)))return;
   }
-  if(!job.steps.metadata){await deleteMetadata(job);job.steps.metadata=true;await save(job);}
-  if(!job.steps.firebase){await deleteFirebase(job);job.steps.firebase=true;await save(job);}
-  job.status="done";
-  job.retryable=false;
-  await save(job);
+ }
+ async function failJob(job,error){
+  const stored=await readJob(job.jobId);
+  const at=clock();
+  const own=stored?.lease?.owner===instanceId&&typeof stored?.lease?.expiresAtMs==="number"&&at<=stored.lease.expiresAtMs;
+  if(!own)return;
+  const classified=classifyDeletionError(error);
+  const prior=Math.max(Number.isInteger(job.attempts)?job.attempts:0,Number.isInteger(stored?.attempts)?stored.attempts:0);
+  job.attempts=prior+1;
+  job.status="failed";
+  job.failureReason=classified.failureReason;
+  job.failure=classified.failureReason;
+  job.retryable=classified.permanent!==true&&job.attempts<MAX_FAILED_ATTEMPTS;
+  try{await commitCheckpoint(job);}catch(_){/* status remains failed in memory */}
+  console.error("account deletion job failed",job.jobId,job.failureReason);
  }
  function schedule(job){
   if(job.inflight||job.status==="done")return;
   job.inflight=true;
-  if(job.status!=="running")job.status="queued";
   job.promise=(async()=>{
    try{await runJob(job);}
-   catch(error){
-    job.status="failed";
-    job.retryable=true;
-    job.failure=error?.code||"deletion_step_failed";
-    try{await save(job);}catch(_){/* status remains failed in memory */}
-    console.error("account deletion job failed",job.jobId,job.failure);
-   }finally{job.inflight=false;}
+   catch(error){await failJob(job,error);}
+   finally{job.inflight=false;}
   })();
  }
  async function firebaseUserGone(uid){
-  // Token validity and the Firebase user record are decided before auth_time.
-  // A deleted or revoked user is invalid_token even when auth_time is stale.
+  // Used only when no deletion record exists. A tombstone is decided first.
   if(!auth)return false;
   if(typeof auth.getUser==="function"){
    try{
@@ -238,12 +515,8 @@ function createAccountDeletion({db,stripe,bucket,auth,byoProviders,hash,now}){
   // Test doubles look the user up with verifyIdToken(uid). Production Admin
   // Auth always exposes getUser, so a JWT verifier is not called with a uid.
   if(typeof auth.verifyIdToken==="function"){
-   try{
-    await auth.verifyIdToken(uid);
-    return false;
-   }catch(error){
-    return authCodeMeansGone(error);
-   }
+   try{await auth.verifyIdToken(uid);return false;}
+   catch(error){return authCodeMeansGone(error);}
   }
   return false;
  }
@@ -251,16 +524,16 @@ function createAccountDeletion({db,stripe,bucket,auth,byoProviders,hash,now}){
   const user=req?.user||req;
   const uid=user?.uid;
   if(typeof uid!=="string"||!uid)throw refusal(401,"invalid_token");
-  if(await firebaseUserGone(uid))throw refusal(401,"invalid_token");
   const owner=hash(uid);
   if(typeof owner!=="string"||!/^[a-f0-9]{64}$/.test(owner))throw refusal(400,"invalid_account");
+  // The token's signature and claims already verified. A tombstone wins over
+  // a missing Firebase user: repeat DELETE after done is 410, not 401.
   const existing=await load(owner);
-  // account_deletions/{accountHash} with status done is the deletion tombstone.
   if(existing?.status==="done"){
-   const statusToken=issueStatusToken(existing);
-   await save(existing);
+   const {statusToken}=await issueStatusToken(existing,{claim:false});
    throw refusal(410,"account_deleted",{jobId:existing.jobId,statusToken});
   }
+  if(!existing&&await firebaseUserGone(uid))throw refusal(401,"invalid_token");
   const authTime=user.auth_time;
   const age=Math.floor(clock()/1000)-(typeof authTime==="number"?authTime:Number.NaN);
   if(!Number.isFinite(authTime)||age>REAUTH_SECONDS)throw refusal(401,"reauth_required");
@@ -268,32 +541,60 @@ function createAccountDeletion({db,stripe,bucket,auth,byoProviders,hash,now}){
    if(typeof req.body!=="object"||Array.isArray(req.body)||req.body.confirm!=="DELETE")
     throw refusal(400,"confirm_required");
   }
-  if(existing&&(existing.status==="queued"||existing.status==="running"||existing.status==="failed")){
+  if(existing?.status==="failed"&&existing.retryable!==true){
+   throw refusal(409,"deletion_not_retryable",{jobId:existing.jobId});
+  }
+  if(existing?.status==="failed"){
    existing.uid=existing.uid||uid;
-   const statusToken=issueStatusToken(existing);
-   schedule(existing);
+   existing.status="queued";
+   existing.failure=null;
+   existing.failureReason=null;
+   const {statusToken,claimed}=await issueStatusToken(existing,{claim:true});
+   if(claimed)schedule(existing);
+   return {status:202,jobId:existing.jobId,statusToken,httpStatus:"queued"};
+  }
+  if(existing&&(existing.status==="queued"||existing.status==="running")){
+   existing.uid=existing.uid||uid;
+   const {statusToken,claimed}=await issueStatusToken(existing,{claim:true});
+   if(claimed)schedule(existing);
    return {status:202,jobId:existing.jobId,statusToken};
   }
   const job={jobId:crypto.randomUUID(),accountHash:owner,uid,status:"queued",steps:{},
-   canceledIds:[],subscriptionIds:[],customerId:null,retryable:true,failure:null,inflight:false};
-  const statusToken=issueStatusToken(job);
+   canceledIds:[],subscriptionIds:[],customerId:null,retryable:true,failure:null,failureReason:null,
+   attempts:0,inflight:false,statusTokens:[]};
   jobs.set(job.jobId,job);
-  schedule(job);
+  const {statusToken,claimed}=await issueStatusToken(job,{claim:true});
+  if(claimed)schedule(job);
   return {status:202,jobId:job.jobId,statusToken};
  }
  async function jobStatus(jobId){
   if(typeof jobId!=="string"||!jobId)return null;
+  const stored=await readJob(jobId);
   const live=jobs.get(jobId);
-  if(live)return {status:live.status,accountHash:live.accountHash,retryable:live.retryable===true,failure:live.failure||null,
-   statusTokenHash:live.statusTokenHash||null,statusTokenExpiresAt:live.statusTokenExpiresAt||null};
-  const snap=await jobRef(jobId).get();
-  if(!snap.exists)return null;
-  const data=snap.data();
-  if(!JOB_STATUS.has(data?.status))return null;
-  return {status:data.status,accountHash:data.accountHash,retryable:data.retryable===true,failure:data.failure||null,
-   statusTokenHash:data.statusTokenHash||null,statusTokenExpiresAt:data.statusTokenExpiresAt||null};
+  // Firestore is the status clients observe. Memory can move ahead of the
+  // checkpoint write; reporting it early would claim done before the commit.
+  const source=stored&&JOB_STATUS.has(stored.status)?stored:live;
+  if(!source||!JOB_STATUS.has(source.status))return null;
+  const statusTokens=mergeStatusTokens(stored?.statusTokens,live?.statusTokens,clock());
+  return {status:source.status,accountHash:source.accountHash||live?.accountHash,retryable:source.retryable===true,failure:source.failure||null,statusTokens};
  }
- return {deleteAccount,jobStatus,statusTokenMatches};
+ // A poll restarts a queued or running job whose lease is missing or expired.
+ // Failed jobs wait for DELETE. The holder that still has the job in flight is
+ // left alone so a poll on that process does not start a second runner.
+ async function resumeIfStalled(jobId){
+  const stored=await readJob(jobId);
+  if(!stored||stored.status==="done"||stored.status==="failed"||!JOB_STATUS.has(stored.status))return false;
+  if(heldByOther(stored.lease,clock()))return false;
+  const live=jobs.get(jobId);
+  if(live?.inflight)return false;
+  const job=live||hydrate(stored);
+  absorb(job,stored);
+  jobs.set(job.jobId,job);
+  if(!(await renewLease(job)))return false;
+  schedule(job);
+  return true;
+ }
+ return {deleteAccount,jobStatus,statusTokenMatches,resumeIfStalled};
 }
 function deletionAuth(firebaseAuth){
  return (req,res,next)=>{
@@ -316,14 +617,14 @@ function registerAccountDeletion({app,firebaseAuth,...deps}){
   try{
    const result=await svc.deleteAccount(req);
    res.setHeader("Cache-Control","private, no-store");
-   const body={status:"deleting",jobId:result.jobId};
+   const body={status:result.httpStatus==="queued"?"queued":"deleting",jobId:result.jobId};
    if(typeof result.statusToken==="string")body.statusToken=result.statusToken;
    res.status(202).json(body);
   }catch(error){
    const status=Number.isInteger(error?.status)?error.status:500;
    const code=error?.code||"account_deletion_failed";
    const body={error:status===401&&code!=="reauth_required"?"invalid_token":code};
-   if(status===410&&typeof error?.jobId==="string")body.jobId=error.jobId;
+   if((status===410||status===409)&&typeof error?.jobId==="string")body.jobId=error.jobId;
    if(status===410&&typeof error?.statusToken==="string")body.statusToken=error.statusToken;
    if(status>=500)console.error("account deletion request failed",code);
    res.setHeader("Cache-Control","private, no-store");
@@ -333,29 +634,47 @@ function registerAccountDeletion({app,firebaseAuth,...deps}){
  app.get("/v2/account/deletions/:jobId",async(req,res)=>{
   try{
    const jobId=req.params.jobId;
+   const authorization=req.headers?.authorization;
+   if(typeof authorization!=="string"||authorization.trim()===""){
+    res.setHeader("Cache-Control","private, no-store");
+    return res.status(401).json({error:"unauthorized"});
+   }
    const job=await svc.jobStatus(jobId);
    const presented=bearerToken(req);
    if(job&&typeof svc.statusTokenMatches==="function"&&svc.statusTokenMatches(job,presented)){
+    if(typeof svc.resumeIfStalled==="function")await svc.resumeIfStalled(jobId);
+    const fresh=await svc.jobStatus(jobId)||job;
     res.setHeader("Cache-Control","private, no-store");
-    return res.json({jobId,status:job.status,retryable:job.retryable===true});
+    return res.json({jobId,status:fresh.status,retryable:fresh.retryable===true});
    }
-   continueWithFirebase(firebaseAuth,req,res,()=>finishStatus(req,res,job,jobId));
+   continueWithFirebase(firebaseAuth,req,res,()=>{
+    Promise.resolve(finishStatus(req,res,job,jobId)).catch(()=>{
+     if(!res.headersSent)res.status(503).json({error:"deletion_status_unavailable"});
+    });
+   });
   }catch(_){if(!res.headersSent)res.status(503).json({error:"deletion_status_unavailable"});}
  });
  return svc;
- function finishStatus(req,res,job,jobId){
+ async function finishStatus(req,res,job,jobId){
   if(res.headersSent)return;
   if(typeof req.user?.uid!=="string"||!req.user.uid||!job)return res.status(404).json({error:"not_found"});
   if(typeof job.accountHash==="string"){
    const owner=typeof deps.hash==="function"?deps.hash(req.user.uid):null;
    if(job.accountHash!==owner)return res.status(404).json({error:"not_found"});
   }
+  if(typeof svc.resumeIfStalled==="function")await svc.resumeIfStalled(jobId);
+  const fresh=await svc.jobStatus(jobId)||job;
   res.setHeader("Cache-Control","private, no-store");
-  res.json({jobId,status:job.status,retryable:job.retryable===true});
+  res.json({jobId,status:fresh.status,retryable:fresh.retryable===true});
  }
+}
+function jwtBearer(req){
+ const bearer=(req?.headers?.authorization||"").replace(/^Bearer /,"");
+ return /^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(bearer);
 }
 function continueWithFirebase(firebaseAuth,req,res,onOk){
  let done=false;
+ const firebaseToken=jwtBearer(req);
  const probe={
   statusCode:200,
   status(code){this.statusCode=code;return this;},
@@ -364,6 +683,9 @@ function continueWithFirebase(firebaseAuth,req,res,onOk){
   json(){
    if(done||res.headersSent)return this;
    done=true;
+   // 401 invalid_token is only a JWT-shaped bearer that fails verification.
+   // A bad, expired, unknown, or other-job status token stays 404.
+   if(firebaseToken&&this.statusCode===401)return res.status(401).json({error:"invalid_token"});
    res.status(404).json({error:"not_found"});
    return this;
   },
@@ -384,4 +706,4 @@ function continueWithFirebase(firebaseAuth,req,res,onOk){
   if(!done&&!res.headersSent)res.status(404).json({error:"not_found"});
  }
 }
-module.exports={createAccountDeletion,registerAccountDeletion,REAUTH_SECONDS,STATUS_TOKEN_TTL_MS};
+module.exports={createAccountDeletion,registerAccountDeletion,REAUTH_SECONDS,STATUS_TOKEN_TTL_MS,LEASE_MS};

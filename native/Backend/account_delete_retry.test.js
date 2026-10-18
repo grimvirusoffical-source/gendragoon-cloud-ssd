@@ -120,7 +120,7 @@ test("GET /v2/account/deletions/:jobId reports the polled job for the owning acc
   const deadline=Date.now()+5000;
   let status;
   do{
-   const polled=await fetch(base+"/v2/account/deletions/"+body.jobId);
+   const polled=await fetch(base+"/v2/account/deletions/"+body.jobId,{headers:{authorization:"Bearer owner"}});
    assert.equal(polled.status,200);
    status=await polled.json();
    if(status.status==="done")break;
@@ -128,7 +128,7 @@ test("GET /v2/account/deletions/:jobId reports the polled job for the owning acc
   }while(Date.now()<deadline);
   assert.equal(status.status,"done");
   assert.equal((await svc.jobStatus(body.jobId)).status,"done");
-  const missing=await fetch(base+"/v2/account/deletions/00000000-0000-4000-8000-000000000000");
+  const missing=await fetch(base+"/v2/account/deletions/00000000-0000-4000-8000-000000000000",{headers:{authorization:"Bearer owner"}});
   assert.equal(missing.status,404);
  }finally{server.close();}
 });
@@ -138,15 +138,23 @@ test("deletion 401s are reauth_required or invalid_token, never a bare 401",asyn
  await assert.rejects(f.svc.deleteAccount({}),{status:401,code:"invalid_token"});
  const started=await f.svc.deleteAccount(f.fresh);
  assert.equal((await untilDone(f.svc,started.jobId)).status,"done");
- const before=f.canceled.length;
- await assert.rejects(f.svc.deleteAccount(f.fresh),{status:401,code:"invalid_token"});
- const stale={user:{uid,auth_time:Math.floor(NOW/1000)-6*60}};
- await assert.rejects(f.svc.deleteAccount(stale),(error)=>{
-  assert.equal(error.status,401);
-  assert.equal(error.code,"invalid_token");
-  assert.notEqual(error.code,"reauth_required");
-  return true;
- });
+  const before=f.canceled.length;
+  await assert.rejects(f.svc.deleteAccount(f.fresh),error=>{
+   assert.equal(error.status,410);
+   assert.equal(error.code,"account_deleted");
+   assert.equal(error.jobId,started.jobId);
+   assert.match(error.statusToken,/^[A-Za-z0-9_-]{43}$/);
+   return true;
+  });
+  const stale={user:{uid,auth_time:Math.floor(NOW/1000)-6*60}};
+  await assert.rejects(f.svc.deleteAccount(stale),error=>{
+   assert.equal(error.status,410);
+   assert.equal(error.code,"account_deleted");
+   assert.equal(error.jobId,started.jobId);
+   assert.match(error.statusToken,/^[A-Za-z0-9_-]{43}$/);
+   assert.notEqual(error.code,"reauth_required");
+   return true;
+  });
  assert.equal(f.canceled.length,before);
  assert.equal(f.auth.deletedUsers.length,1);
 });
@@ -203,7 +211,7 @@ test("singular deletion status is not registered; plural enforces ownership",asy
   const deadline=Date.now()+5000;
   let plural;
   do{
-   plural=await fetch(base+"/v2/account/deletions/"+jobId);
+   plural=await fetch(base+"/v2/account/deletions/"+jobId,{headers:{authorization:"Bearer owner"}});
    if(plural.status===200&&(await plural.clone().json()).status==="done")break;
    await new Promise(r=>setTimeout(r,10));
   }while(Date.now()<deadline);
@@ -215,7 +223,7 @@ test("singular deletion status is not registered; plural enforces ownership",asy
   const singular=await fetch(base+"/v2/account/deletion/"+jobId);
   assert.equal(singular.status,404);
   current={uid:"other-account",auth_time:Math.floor(NOW/1000)-30};
-  const foreign=await fetch(base+"/v2/account/deletions/"+jobId);
+  const foreign=await fetch(base+"/v2/account/deletions/"+jobId,{headers:{authorization:"Bearer other"}});
   assert.equal(foreign.status,404);
   assert.deepEqual(await foreign.json(),{error:"not_found"});
   const foreignSingular=await fetch(base+"/v2/account/deletion/"+jobId);
