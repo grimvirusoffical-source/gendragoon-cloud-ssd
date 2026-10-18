@@ -64,6 +64,19 @@ export function deletionAuthFailure(error: unknown): "reauth" | "sign-out" | nul
 }
 
 /**
+ * HTTP 404 while polling GET /v2/account/deletions/:jobId.
+ * The saved job id and status token stay. The caller retries, or the user dismisses.
+ */
+export class DeletionNotFoundError extends ApiError {
+  readonly retryable = true;
+
+  constructor() {
+    super(404, "not_found", "Account deletion status was not found. Try again.");
+    this.name = "DeletionNotFoundError";
+  }
+}
+
+/**
  * HTTP 410 `account_deleted` on a repeat DELETE /v2/account.
  * The body carries the in-flight job id and a fresh status token.
  * Receiving this status does not wipe local keys.

@@ -1,6 +1,6 @@
 # Server API fixtures
 
-Vendored from `grimvirusoffical-source/gendragoon-cloud-ssd`, branch `fix/backend-workspace-policy`, commit `4dfde4b7e8d3e7860f2200898dff4ac8670657b6`.
+Vendored from `grimvirusoffical-source/gendragoon-cloud-ssd`, branch `fix/backend-workspace-policy`, commit `da3927627fee76103981714f9f8ffa954843b74b`.
 
 The source files live at `fixtures/<area>/<case>.json` in that repo (not under `native/Backend/fixtures`). Each file is `{ request, response: { status, body } }`. Error codes are in `error`. There is no `code` field.
 
@@ -17,5 +17,5 @@ pnpm --filter @gendragoon/core sync-fixtures
 Pass a commit to pin a different revision:
 
 ```
-pnpm --filter @gendragoon/core sync-fixtures -- 4dfde4b7e8d3e7860f2200898dff4ac8670657b6
+pnpm --filter @gendragoon/core sync-fixtures -- da3927627fee76103981714f9f8ffa954843b74b
 ```

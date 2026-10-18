@@ -34,7 +34,7 @@ The Windows shell includes that setup inside Workspaces. The request bodies are 
 
 The device does not hold a GCP credential. Firebase sign-in, an `accountHash` check, and `POST /v2/workspaces/:id/storage-urls` produce V4 or resumable URLs of at most 15 minutes, scoped to that workspace prefix. File bytes and names are AES-256-GCM on the device before upload. The creating device generates one 256-bit workspace key, wraps it with a recovery passphrase (Argon2id, scrypt fallback), and stores only that envelope at `PUT /v2/workspaces/:id/key-envelope`. A new device unwraps it once and caches the key in the OS keychain. Per-file keys are wrapped by that workspace key. Chunk indexes are bound as GCM additional data. See `docs/SECURITY.md`.
 
-`DELETE /v2/account` sends `{ "confirm": "DELETE" }` and polls `GET /v2/account/deletions/:jobId` until `done` or `failed`. Local keys are wiped only after `done`. A 401 `reauth_required` asks the user to sign in again. A 401 `invalid_token` signs out and keeps the keys. A 410 `account_deleted` is polled by its `jobId` and does not wipe by itself.
+`DELETE /v2/account` sends `{ "confirm": "DELETE" }` and polls `GET /v2/account/deletions/:jobId` until `done` or `failed`. Local keys are wiped only after `done`. A 401 `reauth_required` asks the user to sign in again. A 401 with no error code does the same and keeps any saved job id and status token. A 401 `invalid_token` signs out and keeps the keys. A 404 while polling is retryable and keeps the saved job until `done` or `dismissAccountDeletion`. A 410 `account_deleted` is polled by its `jobId` and does not wipe by itself.
 
 ## Updater
 

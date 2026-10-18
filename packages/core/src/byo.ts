@@ -45,6 +45,10 @@ export const BYO_UNSUPPORTED_MESSAGE =
 export const BYO_UNVERIFIABLE_MESSAGE =
   "GenDragoon could not verify that you control this bucket.";
 
+/** HTTP 400 `{ "error": "presigned_url_required" }` when verify has no presignedUrl. */
+export const BYO_PRESIGNED_URL_MESSAGE =
+  "A presigned URL is required to verify this bucket.";
+
 export interface StorageProviderManaged {
   kind: "gendragoon";
   storageTier: string | null;
@@ -134,6 +138,7 @@ export function byoErrorMessage(error: unknown): string {
   const code = error instanceof ApiError ? error.code : "";
   if (code === "byo_provider_unsupported") return BYO_UNSUPPORTED_MESSAGE;
   if (code === "byo_unverifiable") return BYO_UNVERIFIABLE_MESSAGE;
+  if (code === "presigned_url_required") return BYO_PRESIGNED_URL_MESSAGE;
   if (error instanceof Error && error.message) return error.message;
   return "Storage setup failed";
 }

@@ -1,6 +1,6 @@
 /**
  * Drives GenDragoonClient with Riley's vendored fixtures
- * (gendragoon-cloud-ssd fix/backend-workspace-policy @ 4dfde4b).
+ * (gendragoon-cloud-ssd fix/backend-workspace-policy @ da392762).
  * Deletion, storage-urls, and key-envelope are not in this export.
  */
 import { readFileSync } from "node:fs";
@@ -66,7 +66,7 @@ async function invoke(client: GenDragoonClient, fixture: ServerFixture): Promise
 describe("vendored server fixtures", () => {
   it("records the source repo and commit", () => {
     expect(source.repository).toBe("grimvirusoffical-source/gendragoon-cloud-ssd");
-    expect(source.commit).toBe("4dfde4b7e8d3e7860f2200898dff4ac8670657b6");
+    expect(source.commit).toBe("da3927627fee76103981714f9f8ffa954843b74b");
   });
 
   const cases = listServerFixtures();
@@ -80,22 +80,19 @@ describe("vendored server fixtures", () => {
     ]));
   });
 
+  it("verify drops readBack and a missing URL is presigned_url_required", async () => {
+    const fixture = loadServerFixture("byo", "verify-missing-url");
+    const { client, seen } = clientFor(fixture);
+    const id = fixture.request.path.split("/")[3] ?? "";
+    const error = await client.verifyByo(id, { readBack: "nonce" } as unknown as { presignedUrl: string }).catch((caught: unknown) => caught);
+    expect(seen[0]?.body).toEqual({});
+    expect(seen[0]?.body).not.toHaveProperty("readBack");
+    expect(error).toMatchObject({ status: 400, code: "presigned_url_required" });
+    expect(byoErrorMessage(error)).toMatch(/presigned URL/i);
+  });
+
   for (const { area, name, fixture } of cases) {
     it(`${area}/${name} is sent and read as the fixture`, async () => {
-      // The server rejects `{ readBack }` with BYO_CHALLENGE_PROOF_REQUIRED.
-      // A correct client sends `{ presignedUrl }` and never echoes readBack.
-      if (name === "verify-proof-required") {
-        const proof = loadServerFixture("byo", "verify-success");
-        const { client, seen } = clientFor(fixture);
-        const id = fixture.request.path.split("/")[3] ?? "";
-        const error = await client.verifyByo(id, proof.request.body as { presignedUrl: string }).catch((caught: unknown) => caught);
-        expect(seen[0]?.method).toBe("POST");
-        expect(seen[0]?.url).toBe(`https://api.example.test${fixture.request.path}`);
-        expect(seen[0]?.body).toEqual(proof.request.body);
-        expect(seen[0]?.body).not.toHaveProperty("readBack");
-        expect(error).toMatchObject({ status: fixture.response.status, code: "BYO_CHALLENGE_PROOF_REQUIRED" });
-        return;
-      }
       const { client, seen } = clientFor(fixture);
       let result: unknown;
       let error: unknown;

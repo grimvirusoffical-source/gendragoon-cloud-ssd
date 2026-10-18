@@ -17,11 +17,13 @@
  */
 import { describe, expect, it } from "vitest";
 import {
+  DeletionNotFoundError,
   GenDragoonClient,
   MemorySecretStore,
   ReauthRequiredError,
   deleteAccountAndWipe,
   deletionAuthFailure,
+  dismissAccountDeletion,
   isWorkspaceLockError,
   workspaceKeyId,
 } from "../src/index.js";
@@ -351,5 +353,78 @@ describe("deletion contract: re-auth window and workspace lock", () => {
     const r = await run({ del: [{ status: lock.response.status, body: lock.response.body }] });
     expect(isWorkspaceLockError(r.error)).toBe(true);
     expect(r.keys).toBe(2);
+  });
+});
+
+describe("deletion rulings: bare 401 and poll 404", () => {
+  const TOKEN = "C".repeat(43);
+
+  async function savedText(store: MemorySecretStore, name: string): Promise<string | null> {
+    const bytes = await store.get(name);
+    return bytes ? new TextDecoder().decode(bytes) : null;
+  }
+
+  it("401 with no error code sends the user to sign-in and keeps the saved job", async () => {
+    const now = Date.now();
+    const tok = idToken(Math.floor(now / 1000) - 30);
+    const srv = server({
+      del: [accepted({ statusToken: TOKEN })],
+      status: [{ status: 401, body: {} }],
+    });
+    const secrets = await seededSecrets();
+    const secureStore = new MemorySecretStore();
+    const error = await deleteAccountAndWipe({
+      client: new GenDragoonClient({ baseUrl: BASE, getToken: () => tok, fetch: srv.fetchImpl }),
+      reauthenticatedAt: "",
+      idToken: tok,
+      workspaceIds: WS,
+      secrets,
+      secureStore,
+      now,
+      sleep: async () => {},
+      timeoutMs: 60_000,
+      backoffMs: [1],
+    }).catch((caught: unknown) => caught);
+
+    expect(error).toBeInstanceOf(ReauthRequiredError);
+    expect(deletionAuthFailure(error)).toBe("reauth");
+    expect(await keysLeft(secrets)).toBe(2);
+    expect(await savedText(secureStore, "account-deletion:job-id")).toBe(JOB);
+    expect(await savedText(secureStore, "account-deletion:status-token")).toBe(TOKEN);
+    expect(statusCalls(srv.calls)).toHaveLength(1);
+  });
+
+  it("404 while polling is retryable and keeps the saved job until the user dismisses it", async () => {
+    const now = Date.now();
+    const tok = idToken(Math.floor(now / 1000) - 30);
+    const srv = server({
+      del: [accepted({ statusToken: TOKEN })],
+      status: [{ status: 404, body: { error: "not_found" } }],
+    });
+    const secrets = await seededSecrets();
+    const secureStore = new MemorySecretStore();
+    const error = await deleteAccountAndWipe({
+      client: new GenDragoonClient({ baseUrl: BASE, getToken: () => tok, fetch: srv.fetchImpl }),
+      reauthenticatedAt: "",
+      idToken: tok,
+      workspaceIds: WS,
+      secrets,
+      secureStore,
+      now,
+      sleep: async () => {},
+      timeoutMs: 60_000,
+      backoffMs: [1],
+    }).catch((caught: unknown) => caught);
+
+    expect(error).toBeInstanceOf(DeletionNotFoundError);
+    expect(error).toMatchObject({ status: 404, code: "not_found", retryable: true });
+    expect(await keysLeft(secrets)).toBe(2);
+    expect(await savedText(secureStore, "account-deletion:job-id")).toBe(JOB);
+    expect(await savedText(secureStore, "account-deletion:status-token")).toBe(TOKEN);
+
+    await dismissAccountDeletion(secureStore);
+    expect(await savedText(secureStore, "account-deletion:job-id")).toBeNull();
+    expect(await savedText(secureStore, "account-deletion:status-token")).toBeNull();
+    expect(await keysLeft(secrets)).toBe(2);
   });
 });

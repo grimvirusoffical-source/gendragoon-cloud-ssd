@@ -20,6 +20,7 @@ export {
   CHALLENGE_URL_MAX_MS,
   BYO_UNSUPPORTED_MESSAGE,
   BYO_UNVERIFIABLE_MESSAGE,
+  BYO_PRESIGNED_URL_MESSAGE,
   isLaunchProvider,
   byoErrorMessage,
   assertNoCredentialFields,
@@ -76,6 +77,7 @@ export type { LibraryDestination } from "./library.js";
 export {
   AccountDeletedError,
   ApiError,
+  DeletionNotFoundError,
   InvalidTokenError,
   ReauthRequiredError,
   WorkspaceLockedError,
@@ -93,6 +95,7 @@ export {
   applyApiFailure,
   viewAfterFailure,
   deleteAccountAndWipe,
+  dismissAccountDeletion,
   resumeAccountDeletion,
 } from "./account.js";
 export type { AccountPhase, AccountLockReason, AccountState, AccountEvent } from "./account.js";

@@ -1,6 +1,6 @@
-import { assertNoCredentialFields, BYO_UNSUPPORTED_MESSAGE, BYO_UNVERIFIABLE_MESSAGE } from "../byo.js";
+import { assertNoCredentialFields, BYO_PRESIGNED_URL_MESSAGE, BYO_UNSUPPORTED_MESSAGE, BYO_UNVERIFIABLE_MESSAGE } from "../byo.js";
 import { assertKeyEnvelope } from "../envelope.js";
-import { AccountDeletedError, ApiError, InvalidTokenError, ReauthRequiredError, WorkspaceLockedError, deletionAuthFailure, isAccountDeleted, isInvalidToken, isReauthRequired } from "./errors.js";
+import { AccountDeletedError, ApiError, DeletionNotFoundError, InvalidTokenError, ReauthRequiredError, WorkspaceLockedError, deletionAuthFailure, isAccountDeleted, isInvalidToken, isReauthRequired } from "./errors.js";
 import { assertStorageUrlResponse, reauthIsRecent, reauthenticatedAtForDelete } from "../storage.js";
 import type {
   AccessResponse,
@@ -35,6 +35,7 @@ import type {
 export {
   AccountDeletedError,
   ApiError,
+  DeletionNotFoundError,
   InvalidTokenError,
   ReauthRequiredError,
   WorkspaceLockedError,
@@ -258,16 +259,21 @@ export class GenDragoonClient {
     return this.request("POST", `/v2/workspaces/${encodeURIComponent(id)}/byo/challenge`);
   }
 
-  /** POST /v2/workspaces/:id/byo/verify with `{ presignedUrl }`. `readBack` is not a proof. */
+  /**
+   * POST /v2/workspaces/:id/byo/verify.
+   * The body is `{ presignedUrl }` when a URL is present, otherwise `{}`.
+   * `readBack` is never sent. A missing URL is 400 `presigned_url_required`.
+   */
   async verifyByo(id: string, body: ByoProofRequest): Promise<ByoProofResponse> {
-    if (!body?.presignedUrl) throw new Error("presignedUrl is required");
-    assertNoCredentialFields(body);
-    return this.request("POST", `/v2/workspaces/${encodeURIComponent(id)}/byo/verify`, { presignedUrl: body.presignedUrl });
+    const record = body && typeof body === "object" ? body as ByoProofRequest & { readBack?: unknown } : undefined;
+    const presignedUrl = typeof record?.presignedUrl === "string" ? record.presignedUrl : "";
+    const payload = presignedUrl ? { presignedUrl } : {};
+    assertNoCredentialFields(payload);
+    return this.request("POST", `/v2/workspaces/${encodeURIComponent(id)}/byo/verify`, payload);
   }
 
-  async submitByoProof(id: string, body: { presignedUrl?: string; presignedGetUrl?: string }): Promise<ByoProofResponse> {
-    const presignedUrl = body.presignedUrl ?? body.presignedGetUrl;
-    if (!presignedUrl) throw new Error("presignedUrl is required");
+  async submitByoProof(id: string, body: { presignedUrl?: string; presignedGetUrl?: string; readBack?: unknown }): Promise<ByoProofResponse> {
+    const presignedUrl = body?.presignedUrl ?? body?.presignedGetUrl ?? "";
     return this.verifyByo(id, { presignedUrl });
   }
 
@@ -366,8 +372,13 @@ function toError(status: number, parsed: unknown): ApiError {
   }
   if (status === 401 && machine === "reauth_required") return new ReauthRequiredError();
   if (status === 401 && machine === "invalid_token") return new InvalidTokenError();
+  // A 401 with no machine code follows the same path as reauth_required.
+  if (status === 401 && !machine) return new ReauthRequiredError();
   if (status === 422 && machine === "byo_provider_unsupported") {
     return new ApiError(422, "byo_provider_unsupported", BYO_UNSUPPORTED_MESSAGE);
+  }
+  if (machine === "presigned_url_required") {
+    return new ApiError(status || 400, "presigned_url_required", BYO_PRESIGNED_URL_MESSAGE);
   }
   // Fallback only. Riley's BYO fixtures do not include 409 byo_unverifiable.
   if (status === 409 && machine === "byo_unverifiable") {

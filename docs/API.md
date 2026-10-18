@@ -164,7 +164,7 @@ The client writes `nonce` to `.gendragoon-challenge/<nonce>` with credentials th
 { "presignedUrl": "https://…" }
 ```
 
-Do not send stored credentials, access keys, or a read-back of the object. Registering the same storage again runs a new challenge. The previous proof is not reused. Activate the workspace only when the server can GET that URL and the challenge has not expired. Persist `provider`, `endpoint`, and `bucketFingerprint` only. Reject any body that contains credential fields (`secretAccessKey`, `password`, `privateKey`, `token`, and the rest listed in `assertNoCredentialFields`).
+Do not send stored credentials, access keys, or `readBack`. A body without `presignedUrl` is **400** `{ "error": "presigned_url_required" }` (`byo/verify-missing-url`). Registering the same storage again runs a new challenge. The previous proof is not reused. Activate the workspace only when the server can GET that URL and the challenge has not expired. Persist `provider`, `endpoint`, and `bucketFingerprint` only. Reject any body that contains credential fields (`secretAccessKey`, `password`, `privateKey`, `token`, and the rest listed in `assertNoCredentialFields`).
 
 `POST /v2/workspaces/:id/manual-provider` can stay as a label, but `connectionTested: true` is not this proof.
 
@@ -215,7 +215,7 @@ Body, exactly:
 { "confirm": "DELETE" }
 ```
 
-The client does not send `reauthenticatedAt` or the ID token in that body. It still requires a Firebase sign-in whose `auth_time` claim is newer than 5 minutes. A refreshed token's `iat` does not count. If the last sign-in is older, the server returns **401** `{ "code": "reauth_required" }`. The client sends the user to sign in again and retries. It does not wipe local keys.
+The client does not send `reauthenticatedAt` or the ID token in that body. It still requires a Firebase sign-in whose `auth_time` claim is newer than 5 minutes. A refreshed token's `iat` does not count. If the last sign-in is older, the server returns **401** `{ "code": "reauth_required" }`. The client sends the user to sign in again and retries. It does not wipe local keys. A **401** with no error code follows that same path: the user goes to sign-in, any saved job id and status token stay in SecureStore, and local keys stay.
 
 A session that cannot be used returns **401** `{ "code": "invalid_token" }`. The client signs out and leaves local keys in place.
 
@@ -227,7 +227,7 @@ Response **202**:
 
 A repeat delete returns **410** `{ "error": "account_deleted", "jobId": "<id>", "statusToken": "<token>" }`. It does not return 401. The client polls that job id with the status token from the 410. It does not wipe local data because of the 410 itself.
 
-`GET /v2/account/deletions/:jobId` is the plural path. The client sends `Authorization: Bearer <statusToken>` and does not send the Firebase ID token on that poll. The job id and status token are stored in the injected SecureStore as soon as the 202 or 410 is accepted. A later launch calls `resumeAccountDeletion` and polls the saved job. It sends DELETE again only when SecureStore has no saved job id and status token. The client polls with backoff until the status is `done` or `failed`, or until a two-minute timeout. `queued` and `running` keep polling. `done` cancels every Stripe subscription, deletes managed-bucket objects, deletes the Firebase user and account records, and leaves BYO buckets untouched. The client wipes local workspace keys and BYO secrets only after `done`, then clears the saved job id and status token and signs out. `failed` stops without a wipe and clears the saved job. Settings uses a two-step confirm before this call.
+`GET /v2/account/deletions/:jobId` is the plural path. The client sends `Authorization: Bearer <statusToken>` and does not send the Firebase ID token on that poll. The job id and status token are stored in the injected SecureStore as soon as the 202 or 410 is accepted. A later launch calls `resumeAccountDeletion` and polls the saved job. It sends DELETE again only when SecureStore has no saved job id and status token. The client polls with backoff until the status is `done` or `failed`, or until a two-minute timeout. `queued` and `running` keep polling. `done` cancels every Stripe subscription, deletes managed-bucket objects, deletes the Firebase user and account records, and leaves BYO buckets untouched. The client wipes local workspace keys and BYO secrets only after `done`, then clears the saved job id and status token and signs out. `failed` stops without a wipe and clears the saved job. A **404** `{ "error": "not_found" }` while polling is a retryable error (`DeletionNotFoundError`). The saved job id and status token stay. They are cleared after `done` (which also wipes local keys) or when the user dismisses the job with `dismissAccountDeletion`. Settings uses a two-step confirm before this call.
 
 ## Workspace key envelope
 

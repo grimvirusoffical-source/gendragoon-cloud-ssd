@@ -1,4 +1,4 @@
-import { AccountDeletedError, ApiError, ReauthRequiredError, WorkspaceLockedError } from "./api/errors.js";
+import { AccountDeletedError, ApiError, DeletionNotFoundError, ReauthRequiredError, WorkspaceLockedError } from "./api/errors.js";
 import type { AccountDeletionStatus } from "./api/types.js";
 import type { LockAssessment } from "./policy.js";
 import { wipeWorkspaceKeys, type SecretStore, type SecureStore } from "./seal.js";
@@ -94,10 +94,15 @@ interface DeletionJob {
 /**
  * Accepts DELETE /v2/account, then polls GET /v2/account/deletions/:jobId
  * until the job is `done` or `failed`, or the timeout is reached.
- * Local keys are removed only after `done`. A 401 (`reauth_required` or
- * `invalid_token`) leaves them in place. A repeat delete that returns 410
- * `account_deleted` is polled by the job id in that body and does not wipe
- * on the 410 itself.
+ * Local keys are removed only after `done`. A 401 (`reauth_required`,
+ * `invalid_token`, or a 401 with no error code) leaves them in place and
+ * leaves any saved job id and status token in SecureStore. A 401 with no
+ * error code sends the user to sign in, the same as `reauth_required`.
+ * A 404 while polling surfaces `DeletionNotFoundError` (`retryable`) and
+ * keeps the saved job. The saved job is cleared after `done`, after
+ * `failed`, or when the user calls `dismissAccountDeletion`.
+ * A repeat delete that returns 410 `account_deleted` is polled by the job
+ * id in that body and does not wipe on the 410 itself.
  * When SecureStore already has a job id and status token, that job is polled
  * and DELETE is not sent again. A repeat DELETE returns 410, never 401.
  */
@@ -189,9 +194,15 @@ async function pollDeletion(input: {
   let attempt = 0;
   let latest: AccountDeletionStatus;
   for (;;) {
-    latest = input.job.statusToken
-      ? await input.client.deletionStatus(input.job.jobId, input.job.statusToken)
-      : await input.client.deletionStatus(input.job.jobId);
+    try {
+      latest = input.job.statusToken
+        ? await input.client.deletionStatus(input.job.jobId, input.job.statusToken)
+        : await input.client.deletionStatus(input.job.jobId);
+    } catch (error) {
+      // 404 keeps the saved job. 401 (including a body with no error code) does too.
+      if (error instanceof ApiError && error.status === 404) throw new DeletionNotFoundError();
+      throw error;
+    }
     if (deletionFinished(latest.status)) break;
     const wait = input.backoffMs[Math.min(attempt, input.backoffMs.length - 1)] ?? input.backoffMs[input.backoffMs.length - 1] ?? 8000;
     attempt += 1;
@@ -244,6 +255,14 @@ async function clearDeletionJob(store?: SecureStore): Promise<void> {
   if (!store) return;
   await store.delete(DELETION_JOB_KEY);
   await store.delete(DELETION_TOKEN_KEY);
+}
+
+/**
+ * Forget a saved deletion job without wiping workspace keys or BYO secrets.
+ * Used when the user dismisses a retryable poll failure such as HTTP 404.
+ */
+export async function dismissAccountDeletion(store: SecureStore): Promise<void> {
+  await clearDeletionJob(store);
 }
 
 function decodeSecret(value: unknown): string | null {

@@ -1,8 +1,8 @@
 {
   "request": {
     "body": {
+      "bucketFingerprint": "abababababababababababababababab",
       "endpoint": "sftp.example.com:22",
-      "hostFingerprint": "abababababababababababababababab",
       "provider": "sftp"
     },
     "headers": {
