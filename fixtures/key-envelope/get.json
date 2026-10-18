@@ -9,14 +9,16 @@
   },
   "response": {
     "body": {
-      "kdf": "argon2id",
-      "kdfParams": {
+      "iv": "-_v7-_v7-_v7-_v7",
+      "kdf": {
+        "alg": "argon2id",
         "iterations": 2,
-        "memory": 19922944,
+        "memoryKiB": 19456,
         "parallelism": 1
       },
+      "salt": "_____________________w",
       "version": 2,
-      "wrappedKey": "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcH"
+      "wrappedKey": "-_v7-_v7-_v7-_v7-_v7-_v7-_v7-_v7-_v7-_v7-_v7-_v7-_v7-_v7-_v7-_v7"
     },
     "status": 200
   }
