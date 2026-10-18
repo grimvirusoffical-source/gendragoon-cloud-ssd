@@ -1,0 +1,43 @@
+{
+  "timestamp": "2026-10-18T01:05:35.542252+00:00",
+  "scope": "redundant generated staging app bundles only",
+  "retainedCurrentBuild": "23",
+  "currentStillPresent": true,
+  "removed": [
+    {
+      "path": "~/Downloads/GenDragoon-Validation-0.17.0/MacBuild7-0.18.0-build23/GenDragoon Cloud SSD.app",
+      "version": "0.18.0",
+      "build": "23",
+      "signatureBeforeRemoval": "passed",
+      "runningBundleHelpers": false,
+      "removed": true
+    },
+    {
+      "path": "~/Downloads/GenDragoon-Validation-0.17.0/MacBuild8-0.18.0-build24/GenDragoon Cloud SSD.app",
+      "version": "0.18.0",
+      "build": "24",
+      "signatureBeforeRemoval": "passed",
+      "runningBundleHelpers": false,
+      "removed": true
+    },
+    {
+      "path": "~/Downloads/GenDragoon-Validation-0.17.0/MacBuild9-0.18.0-build25/GenDragoon Cloud SSD.app",
+      "version": "0.18.0",
+      "build": "25",
+      "signatureBeforeRemoval": "passed",
+      "runningBundleHelpers": false,
+      "removed": true
+    },
+    {
+      "path": "~/Downloads/GenDragoon-Validation-0.17.0/MacBuild10-0.18.0-build26/GenDragoon Cloud SSD.app",
+      "version": "0.18.0",
+      "build": "26",
+      "signatureBeforeRemoval": "passed",
+      "runningBundleHelpers": false,
+      "removed": true
+    }
+  ],
+  "freeBeforeBytes": 13499707392,
+  "freeAfterBytes": 14348816384,
+  "cloudOrUserDataRemoved": false
+}

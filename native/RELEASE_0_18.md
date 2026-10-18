@@ -1,6 +1,13 @@
-# GenDragoon 0.18 — source review notes
+# GenDragoon 0.18 — release and validation notes
 
-**Status:** source candidate. Build 24 signing, installation, and installed automatic-update acceptance are still pending. These notes describe implemented code and completed component checks; they do not certify a finished deployment or purchase flow.
+**Status: 0.18.0 build 29 is installed and running on the Mac.** Its actual
+automatic 27→29 update passed in **58.795 seconds**. Apple trust checks,
+settings preservation and old-installation cleanup passed. The newest public
+preview is [v0.18.0-rc.3](https://github.com/grimvirusoffical-source/gendragoon-cloud-ssd/releases/tag/v0.18.0-rc.3).
+The Firestore upload-receipt fix is live on backend revision
+`gendragoon-free-00028-rey`. Full authenticated native transfer, paid Stripe,
+commercial-game and cross-platform acceptance remain incomplete.
+[Detailed current evidence](VALIDATION.md)
 
 ## Files and Applications
 
@@ -32,12 +39,30 @@ The updater checks at startup and every 20 minutes. Stable is the default channe
 
 Primary sources: `Sources/GDTransferClient.swift`, `Sources/GDTransferBudget.swift`, `Sources/GDNativePerformance.swift`, `Resources/gendragoon_performance.py`, and `Sources/GenDragoonAutoUpdate.swift`.
 
+## Live upload-receipt repair
+
+The chunk handler previously wrote nested completion arrays that Firestore
+rejected after a chunk reached cloud storage. Commit
+`b0a50bd8d6b220edbb891d849601c2f18f4c0d76` stores map receipts, preserves the
+pair-array HTTP protocol and legacy resume, and rejects invalid stored ranges.
+The original 503 was reproduced before the repair; 171 backend tests and all
+seven source-linked CI jobs then passed, with zero production dependency audit
+vulnerabilities. A real Firestore fixture confirmed map writes/readback and
+exactly-once retry accounting. The temporary fixture was deleted.
+
+The candidate passed 256 bounded public requests and configuration/access checks
+before promotion. Backend `gendragoon-free-00028-rey` now serves all production
+traffic and existing aliases. Initial cold-start readiness failed; a later
+recorded check passed. No live payment was submitted. Native picker automation
+did not complete an authenticated fixture transfer, which remains unverified.
+[Current validation and limitations](VALIDATION.md)
+
 ## Completed validation
 
 - Project-package regressions: **16 passed**. Coverage includes complete-folder roundtrip, empty files, source mutation, corrupt readback, offload authorization, destination protection, manifest/header validation, private-path exclusion and changed-cache retention.
 - Metadata regressions: **21 passed**, including opening every ZIP member to validate its local header before native extraction.
 - Actual macOS project-envelope gate: **4 cases passed in 0.381 seconds** — folder, empty file, metadata-bearing file and application bundle. Production preparation, separate readback, verification and restoration preserved attributes, executable bits and relative links; source mutation blocked offload.
-- Actual Swift transfer-budget checks: **6 passed in 1.669 seconds**. The initial 40-file Swift source snapshot compiled successfully; the final signed build still needs its release gate.
+- Actual Swift transfer-budget checks: **6 passed in 1.669 seconds**. The final build 29 passed real Mac compilation, Apple notarization, installed trust checks and automatic-update acceptance.
 - Real GCS fixture measurement: **168 SHA-256-verified roundtrips** across 7 worker settings. All generated cloud objects were removed. Observed throughput varied by setting; it did not increase monotonically.
 
 ## Remaining acceptance and limits
@@ -46,4 +71,4 @@ Higher concurrency can improve throughput, but it does not guarantee a fixed spe
 
 The new project-envelope gate proves the local production archive pipeline; it does not replace an authenticated full-app upload/download acceptance test against the deployed candidate. Project application backups restore complete bundles. Managed application launch/streaming uses the connected native Google library and has not been proven for every application or platform. A large commercial application's streamed launch and full lifecycle acceptance remain incomplete.
 
-Paid Stripe sandbox purchase acceptance remains incomplete. Neither billing implementation nor component tests should be presented as a completed paid checkout. Build 24 installation and the signed build-to-build automatic update/restart acceptance also remain pending.
+Paid Stripe sandbox purchase acceptance remains incomplete. Neither billing implementation nor component tests should be presented as a completed paid checkout. The real 27→29 automatic installation and restart passed; this does not complete native Files, paid purchase or game acceptance.

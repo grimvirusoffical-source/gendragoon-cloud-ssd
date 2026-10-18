@@ -1,0 +1,43 @@
+{
+  "runId": 39089772493,
+  "head": "b0a50bd8d6b220edbb891d849601c2f18f4c0d76",
+  "status": "completed",
+  "conclusion": "success",
+  "jobs": [
+    {
+      "name": "android",
+      "status": "completed",
+      "conclusion": "success"
+    },
+    {
+      "name": "desktop (ubuntu-latest)",
+      "status": "completed",
+      "conclusion": "success"
+    },
+    {
+      "name": "desktop (windows-latest)",
+      "status": "completed",
+      "conclusion": "success"
+    },
+    {
+      "name": "native-helpers",
+      "status": "completed",
+      "conclusion": "success"
+    },
+    {
+      "name": "macos-compile",
+      "status": "completed",
+      "conclusion": "success"
+    },
+    {
+      "name": "backend",
+      "status": "completed",
+      "conclusion": "success"
+    },
+    {
+      "name": "ios",
+      "status": "completed",
+      "conclusion": "success"
+    }
+  ]
+}

@@ -1,0 +1,119 @@
+{
+  "timestamp": "2026-10-18T02:03:31.488837+00:00",
+  "currentVersion": "0.18.0",
+  "currentBuild": "29",
+  "currentApp": "~/Applications/GenDragoon Cloud SSD.app",
+  "currentExactExecutablePids": [
+    65660
+  ],
+  "removedAppBundles": [
+    {
+      "path": "~/Applications/GenDragoon Cloud SSD.previous-33b5b2f726584b42840ef64b15355f6a.app",
+      "version": "0.18.0",
+      "build": "27",
+      "stoppedBeforeRemoval": true,
+      "signatureVerified": true,
+      "removed": true
+    },
+    {
+      "path": "~/Applications/GenDragoon Cloud SSD.previous-e6797227620c4cb7976483264389eac4.app",
+      "version": "0.18.0",
+      "build": "23",
+      "stoppedBeforeRemoval": true,
+      "signatureVerified": true,
+      "removed": true
+    },
+    {
+      "path": "~/Downloads/GenDragoon-Validation-0.17.0/MacBuild13-0.18.0-build29/GenDragoon Cloud SSD.app",
+      "version": "0.18.0",
+      "build": "29",
+      "stoppedBeforeRemoval": true,
+      "signatureVerified": true,
+      "removed": true
+    },
+    {
+      "path": "~/Downloads/GenDragoon-Validation-0.17.0/MacBuild11-0.18.0-build27/GenDragoon Cloud SSD.app",
+      "version": "0.18.0",
+      "build": "27",
+      "stoppedBeforeRemoval": true,
+      "signatureVerified": true,
+      "removed": true
+    },
+    {
+      "path": "~/Library/Application Support/GenDragoon Cloud SSD/AutoUpdates/pending/GenDragoon Cloud SSD.app",
+      "version": "0.18.0",
+      "build": "29",
+      "stoppedBeforeRemoval": true,
+      "signatureVerified": true,
+      "removed": true
+    },
+    {
+      "path": "~/Library/Application Support/GenDragoon Cloud SSD/AutoUpdates/pending-retained-f3fdb15cfa0345afbf48dda35abc2d59/GenDragoon Cloud SSD.app",
+      "version": "0.18.0",
+      "build": "24",
+      "stoppedBeforeRemoval": true,
+      "signatureVerified": true,
+      "removed": true
+    }
+  ],
+  "removedInstallerAssets": [
+    {
+      "path": "~/Downloads/GenDragoon-Validation-0.17.0/ReleasePackage-0.18.0-build27/GenDragoon-Cloud-SSD-Mac-v0.18.0.zip",
+      "bytes": 69722430,
+      "build": "27",
+      "removed": true
+    },
+    {
+      "path": "~/Downloads/GenDragoon-Validation-0.17.0/ReleasePackage-0.18.0-build27/install-macos.py",
+      "bytes": 28569,
+      "build": "27",
+      "removed": true
+    },
+    {
+      "path": "~/Downloads/GenDragoon-Validation-0.17.0/ReleasePackage-0.18.0-build27/Install.command",
+      "bytes": 476,
+      "build": "27",
+      "removed": true
+    },
+    {
+      "path": "~/Downloads/GenDragoon-Validation-0.17.0/ReleasePackage-0.18.0-build29/GenDragoon-Cloud-SSD-Mac-v0.18.0.zip",
+      "bytes": 69722465,
+      "build": "29",
+      "removed": true
+    },
+    {
+      "path": "~/Downloads/GenDragoon-Validation-0.17.0/ReleasePackage-0.18.0-build29/install-macos.py",
+      "bytes": 28569,
+      "build": "29",
+      "removed": true
+    },
+    {
+      "path": "~/Downloads/GenDragoon-Validation-0.17.0/ReleasePackage-0.18.0-build29/Install.command",
+      "bytes": 476,
+      "build": "29",
+      "removed": true
+    }
+  ],
+  "remainingMatchedAppBundlesInScannedLocations": [
+    {
+      "path": "~/Applications/GenDragoon Cloud SSD.app",
+      "version": "0.18.0",
+      "build": "29"
+    }
+  ],
+  "scanRoots": [
+    "/Applications",
+    "~/Applications",
+    "~/Downloads",
+    "~/Desktop",
+    "~/Library/Application Support/GenDragoon Cloud SSD/AutoUpdates"
+  ],
+  "scanErrors": [],
+  "spotlightUnscannedPaths": [],
+  "spotlightExitCode": 0,
+  "freeBeforeBytes": 12577599488,
+  "freeAfterBytes": 13805379584,
+  "cloudFilesSettingsLibraryAndSourceArchivesPreserved": true,
+  "latestDownloadRetained": "~/Downloads/GenDragoon-Validation-0.17.0/Downloaded-0.18.0-build29",
+  "passed": true
+}

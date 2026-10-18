@@ -1,0 +1,11 @@
+{
+  "build": "29",
+  "gatekeeperAccepted": true,
+  "notarized": true,
+  "receipt": "~/Downloads/GenDragoon-Validation-0.17.0/MacBuild13-0.18.0-build29/gendragoon-notarization-receipt.json",
+  "signed": true,
+  "stapled": true,
+  "status": "complete",
+  "submissionId": "216852fa-1dd6-48b5-a75a-af2dcc6f0af4",
+  "version": "0.18.0"
+}
