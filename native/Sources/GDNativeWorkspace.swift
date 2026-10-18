@@ -85,7 +85,10 @@ enum GDNativeHelper {
                 }
                 try await Task.sleep(nanoseconds: 50_000_000)
             }
-            process.waitUntilExit()
+            // isRunning is already false: the child has terminated and its
+            // terminationStatus is available. A second, synchronous wait can
+            // strand a Swift cooperative thread in Foundation's run loop and
+            // bypass the deadline above, leaving the UI permanently busy.
             let reader = try FileHandle(forReadingFrom: outputURL)
             defer { try? reader.close() }
             let data = try reader.read(upToCount: 8 * 1024 * 1024 + 1) ?? Data()

@@ -96,6 +96,8 @@ jobs:
         run: xcrun swiftc -parse-as-library -target arm64-apple-macosx14.0 -framework SwiftUI -framework AppKit -o "$RUNNER_TEMP/GenDragoon" native/Sources/*.swift
       - name: Execute native update activity and shared transfer budget regressions
         run: python3 -B -m unittest native.Tests.test_integrated_update_activity native.Tests.test_integrated_transfer_budget -v
+      - name: Exercise actual Swift helper completion, failure, timeout and caller cancellation
+        run: python3 -B -m unittest native.Tests.test_integrated_native_helper -v
 
   android:
     runs-on: ubuntu-latest
