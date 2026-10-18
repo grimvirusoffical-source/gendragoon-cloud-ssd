@@ -13,8 +13,18 @@ const MAX_STATUS_TOKENS=5;
 const MAX_FAILED_ATTEMPTS=5;
 const SUPPORT_WINDOW_MS=24*60*60*1000;
 const SUPPORT_MAX_CALLS=5;
+const NOTIFY_BACKOFF_MS=[60*1000,5*60*1000,30*60*1000,2*60*60*1000,6*60*60*1000];
+const NOTIFY_MAX_ATTEMPTS=5;
+const SUPPORT_STALE_MS=60*60*1000;
+const NAMES_TTL_MS=30*24*60*60*1000;
+const SUPPORT_SWEEP_INTERVAL_MS=60*1000;
+const CONTENT_LIMIT=1800;
 const JOB_STATUS=new Set(["queued","running","done","failed"]);
 const SUBSCRIPTION_KEY=/SubscriptionId$/;
+const SUB_STATUS=new Set(["incomplete","incomplete_expired","trialing","active","past_due","canceled","unpaid","paused","unknown"]);
+const FIREBASE_STATUS=new Set(["active","disabled","missing","deleted","unknown"]);
+const DISCORD_CONFIG_MESSAGE="support_notify_unconfigured: SUPPORT_DISCORD_WEBHOOK_URL must be an https://discord.com/api/webhooks/ URL";
+let registeredSweep=null;
 
 function refusal(status,code,extra){
  const error=new Error(code);
@@ -123,6 +133,24 @@ function plainJob(job){
  if(job.lease&&typeof job.lease.owner==="string"&&typeof job.lease.expiresAtMs==="number")
   data.lease={owner:job.lease.owner,expiresAtMs:job.lease.expiresAtMs};
  if(job.status!=="done"&&job.uid)data.uid=job.uid;
+ if(Array.isArray(job.workspaceIds))data.workspaceIds=[...job.workspaceIds];
+ if(!job.namesCleared&&job.workspaceNames&&typeof job.workspaceNames==="object"){
+  const names={};
+  for(const [id,value] of Object.entries(job.workspaceNames)){
+   const plain=plaintextWorkspaceName(value);
+   if(plain)names[id]=plain;
+  }
+  if(Object.keys(names).length)data.workspaceNames=names;
+ }
+ if(job.namesExpireAt){
+  const stamp=new Date(job.namesExpireAt);
+  if(!Number.isNaN(stamp.getTime()))data.namesExpireAt=stamp;
+ }
+ if(Number.isInteger(job.startedAtMs))data.startedAtMs=job.startedAtMs;
+ if(job.prefixProgress&&typeof job.prefixProgress==="object")data.prefixProgress=structuredClone(job.prefixProgress);
+ if(Array.isArray(job.subscriptionStatuses))
+  data.subscriptionStatuses=job.subscriptionStatuses.filter(row=>row&&typeof row.id==="string").map(row=>({id:row.id,status:safeSubscriptionStatus(row.status)}));
+ if(typeof job.firebaseStatus==="string"&&FIREBASE_STATUS.has(job.firebaseStatus))data.firebaseStatus=job.firebaseStatus;
  return data;
 }
 function pruneStatusTokens(list,now){
@@ -148,22 +176,147 @@ function mergeStatusTokens(stored,memory,now){
 function supportRequestId(jobId){
  return crypto.createHash("sha256").update("gd-support-v1:"+jobId).digest("hex");
 }
-function createWebhookNotifier({env=process.env,fetchImpl=globalThis.fetch,warn=console.warn}={}){
+function plaintextWorkspaceName(value){
+ if(typeof value!=="string")return "";
+ const name=value.trim().normalize("NFC");
+ if(!name||name.length>150||/[\u0000-\u001f]/.test(name))return "";
+ return name;
+}
+function safeSubscriptionStatus(status){
+ return SUB_STATUS.has(status)?status:"unknown";
+}
+function workspacePlace(accountHash,objectName){
+ if(typeof objectName!=="string"||typeof accountHash!=="string")return null;
+ for(const root of ["customer/"+accountHash+"/","tenants/"+accountHash+"/"]){
+  if(!objectName.startsWith(root))continue;
+  const parts=objectName.slice(root.length).split("/").filter(Boolean);
+  if(parts[0]==="managed"&&parts[1])return {id:parts[1],prefix:root+"managed/"+parts[1]+"/"};
+  if(parts[0])return {id:parts[0],prefix:root+parts[0]+"/"};
+ }
+ return null;
+}
+function opaqueObjectId(objectName){
+ const leaf=String(objectName||"").split("/").filter(Boolean).pop()||"";
+ return /^[A-Za-z0-9_-]{16,}$/.test(leaf)?leaf:"";
+}
+function ingestObjects(job,names,replaceUnder){
+ if(!job.prefixProgress||typeof job.prefixProgress!=="object")job.prefixProgress={};
+ if(replaceUnder){
+  for(const rows of Object.values(job.prefixProgress)){
+   for(const [prefix,row] of Object.entries(rows)){
+    if(prefix.startsWith(replaceUnder)){row.remaining=0;row.remainingIds=[];}
+   }
+  }
+ }
+ for(const name of names||[]){
+  const place=workspacePlace(job.accountHash,name);
+  if(!place)continue;
+  const rows=job.prefixProgress[place.id]||(job.prefixProgress[place.id]={});
+  const row=rows[place.prefix]||(rows[place.prefix]={deleted:0,remaining:0,remainingIds:[]});
+  row.remaining+=1;
+  const opaque=opaqueObjectId(name);
+  if(opaque&&row.remainingIds.length<200&&!row.remainingIds.includes(opaque))row.remainingIds.push(opaque);
+ }
+}
+function markPrefixDeleted(job,accountPrefix){
+ for(const rows of Object.values(job.prefixProgress||{})){
+  for(const [prefix,row] of Object.entries(rows)){
+   if(!prefix.startsWith(accountPrefix))continue;
+   row.deleted=(row.deleted||0)+(row.remaining||0);
+   row.remaining=0;
+   row.remainingIds=[];
+  }
+ }
+}
+function discordWebhookUrl(env){
+ const raw=env&&typeof env.SUPPORT_DISCORD_WEBHOOK_URL==="string"?env.SUPPORT_DISCORD_WEBHOOK_URL.trim():"";
+ if(!raw)return {valid:false,url:""};
+ let parsed;
+ try{parsed=new URL(raw);}catch{return {valid:false,url:""};}
+ if(parsed.protocol!=="https:"||parsed.username||parsed.password||parsed.search||parsed.hash)return {valid:false,url:""};
+ const host=parsed.hostname.toLowerCase();
+ if(host!=="discord.com"&&!host.endsWith(".discord.com"))return {valid:false,url:""};
+ if(!/^\/api\/webhooks\/\d+\/[A-Za-z0-9_-]{8,}\/?$/.test(parsed.pathname))return {valid:false,url:""};
+ return {valid:true,url:"https://"+host+parsed.pathname.replace(/\/$/,"")};
+}
+function supportDiscordStartup(env=process.env){
+ const valid=discordWebhookUrl(env).valid;
+ if(env&&env.NODE_ENV==="production")return valid?{exit:false}:{exit:true,code:1,message:DISCORD_CONFIG_MESSAGE};
+ if(!valid)return {exit:false,warn:true,message:DISCORD_CONFIG_MESSAGE};
+ return {exit:false};
+}
+function discordContent(job){
+ const names=job?.workspaceNames&&typeof job.workspaceNames==="object"?job.workspaceNames:{};
+ const ids=Array.isArray(job?.workspaceIds)?job.workspaceIds:Object.keys(job?.prefixProgress||{});
+ const listed=ids.map(id=>{
+  const name=plaintextWorkspaceName(names[id]).replaceAll("@everyone","everyone").replaceAll("@here","here").replaceAll("<@","<");
+  return name?id+" "+name:id;
+ }).join(", ");
+ const content=["uid: "+(typeof job?.uid==="string"?job.uid:""),"jobId: "+(job?.jobId||""),
+  "failureReason: "+(typeof job?.failureReason==="string"?job.failureReason:""),
+  "attempts: "+(Number.isInteger(job?.attempts)?job.attempts:0),"workspaces: "+listed].join("\n");
+ return content.length>CONTENT_LIMIT?content.slice(0,CONTENT_LIMIT):content;
+}
+function discordFile(job){
+ const names=job?.workspaceNames&&typeof job.workspaceNames==="object"?job.workspaceNames:{};
+ const ids=[...new Set([...(job?.workspaceIds||[]),...Object.keys(job?.prefixProgress||{})])];
+ return {workspaces:ids.map(id=>{
+  const row={id};
+  const name=plaintextWorkspaceName(names[id]);
+  if(name)row.name=name;
+  const prefixes=job?.prefixProgress?.[id]||{};
+  row.prefixes=Object.keys(prefixes).sort().map(prefix=>({prefix,deleted:prefixes[prefix].deleted||0,
+   remaining:prefixes[prefix].remaining||0,remainingIds:[...(prefixes[prefix].remainingIds||[])]}));
+  return row;
+ }),subscriptions:(job?.subscriptionStatuses||[]).filter(row=>row&&typeof row.id==="string"&&!row.id.includes("@"))
+  .map(row=>({id:row.id,status:safeSubscriptionStatus(row.status)})),
+ firebase:{status:FIREBASE_STATUS.has(job?.firebaseStatus)?job.firebaseStatus:"unknown"}};
+}
+function multipartBody(boundary,payloadJson,filename,fileJson){
+ const chunks=[];
+ const add=value=>chunks.push(Buffer.from(value));
+ add("--"+boundary+"\r\nContent-Disposition: form-data; name=\"payload_json\"\r\n\r\n"+payloadJson+"\r\n");
+ add("--"+boundary+"\r\nContent-Disposition: form-data; name=\"files[0]\"; filename=\""+filename+"\"\r\nContent-Type: application/json\r\n\r\n"+fileJson+"\r\n");
+ add("--"+boundary+"--\r\n");
+ return Buffer.concat(chunks);
+}
+function safeNotifyError(){
+ const failure=new Error("support deletion notify failed");
+ failure.code="support_notify_failed";
+ failure.stack="Error: support deletion notify failed";
+ return failure;
+}
+function createDiscordNotifier({env=process.env,fetchImpl=globalThis.fetch,warn=console.warn}={}){
  return async function notify(event){
-  const url=env&&typeof env.SUPPORT_NOTIFY_WEBHOOK_URL==="string"?env.SUPPORT_NOTIFY_WEBHOOK_URL.trim():"";
-  if(!url){
-   warn("support deletion notify skipped");
-   return;
+  const target=discordWebhookUrl(env);
+  if(!target.valid){
+   warn("support_notify_unconfigured");
+   throw Object.assign(new Error("support_notify_unconfigured"),{code:"support_notify_unconfigured"});
   }
+  const boundary="gdsupport"+crypto.randomBytes(12).toString("hex");
+  const payload=JSON.stringify({content:typeof event?.content==="string"?event.content:"",allowed_mentions:{parse:[]}});
+  const filename=typeof event?.filename==="string"&&event.filename?event.filename:"deletion.json";
+  const body=multipartBody(boundary,payload,filename,JSON.stringify(event?.file||{}));
+  let response;
   try{
-   const response=await fetchImpl(url,{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({
-    jobId:event.jobId,accountId:event.accountId,failureReason:event.failureReason??null,createdAt:event.createdAt,
-   })});
-   if(!response||response.ok!==true)throw Error("support webhook failed");
+   response=await fetchImpl(target.url,{method:"POST",headers:{"content-type":"multipart/form-data; boundary="+boundary},body,
+    signal:typeof AbortSignal!=="undefined"&&typeof AbortSignal.timeout==="function"?AbortSignal.timeout(10000):undefined});
   }catch(_){
-   warn("support deletion notify failed");
+   throw safeNotifyError();
   }
+  if(!response||response.ok!==true)throw safeNotifyError();
  };
+}
+function freshNotify(at){
+ return {state:"pending",attempts:0,nextAttemptAt:new Date(at).toISOString()};
+}
+function rememberSubscription(job,id,status){
+ if(typeof id!=="string"||!id||id.includes("@"))return;
+ if(!Array.isArray(job.subscriptionStatuses))job.subscriptionStatuses=[];
+ const safe=safeSubscriptionStatus(status);
+ const row=job.subscriptionStatuses.find(item=>item.id===id);
+ if(row)row.status=safe;
+ else job.subscriptionStatuses.push({id,status:safe});
 }
 function bearerToken(req){
  const match=/^Bearer ([A-Za-z0-9._~-]+)$/.exec(req?.headers?.authorization||"");
@@ -173,7 +326,9 @@ function createAccountDeletion({db,stripe,bucket,auth,byoProviders,hash,now,noti
  // byoProviders is accepted so callers can pass the registry. Deletion must
  // never invoke it: customer-owned storage stays untouched.
  void byoProviders;
- const notify=typeof notifier==="function"?notifier:createWebhookNotifier({env:env||process.env});
+ const runtimeEnv=env||process.env;
+ const notify=typeof notifier==="function"?notifier:createDiscordNotifier({env:runtimeEnv});
+ function webhookReady(){return typeof notifier==="function"||discordWebhookUrl(runtimeEnv).valid;}
  const instanceId=crypto.randomBytes(16).toString("hex");
  const jobs=new Map();
  const clock=()=>typeof now==="function"?now():Date.now();
@@ -198,6 +353,21 @@ function createAccountDeletion({db,stripe,bucket,auth,byoProviders,hash,now,noti
   if(!job.uid&&stored.uid)job.uid=stored.uid;
   if(stored.accountHash)job.accountHash=stored.accountHash;
   if(stored.jobId)job.jobId=stored.jobId;
+  if(!Array.isArray(job.workspaceIds)&&Array.isArray(stored.workspaceIds))job.workspaceIds=[...stored.workspaceIds];
+  if(!job.namesCleared&&job.workspaceNames==null&&stored.workspaceNames&&typeof stored.workspaceNames==="object")
+   job.workspaceNames={...stored.workspaceNames};
+  if(!job.namesExpireAt&&stored.namesExpireAt)job.namesExpireAt=stored.namesExpireAt;
+  if(Number.isInteger(stored.startedAtMs)&&(!Number.isInteger(job.startedAtMs)||stored.startedAtMs<job.startedAtMs))
+   job.startedAtMs=stored.startedAtMs;
+  const progress=structuredClone(stored.prefixProgress||{});
+  for(const [id,rows] of Object.entries(job.prefixProgress||{}))progress[id]={...(progress[id]||{}),...structuredClone(rows)};
+  job.prefixProgress=progress;
+  const statuses=new Map();
+  for(const row of [...(stored.subscriptionStatuses||[]),...(job.subscriptionStatuses||[])]){
+   if(row&&typeof row.id==="string")statuses.set(row.id,{id:row.id,status:safeSubscriptionStatus(row.status)});
+  }
+  job.subscriptionStatuses=[...statuses.values()];
+  if(!job.firebaseStatus&&typeof stored.firebaseStatus==="string")job.firebaseStatus=stored.firebaseStatus;
  }
  function writeBoth(tx,job){
   const data=plainJob(job);
@@ -229,6 +399,13 @@ function createAccountDeletion({db,stripe,bucket,auth,byoProviders,hash,now,noti
    failureReason:typeof data.failureReason==="string"?data.failureReason:null,
    attempts:Number.isInteger(data.attempts)&&data.attempts>0?data.attempts:0,
    statusTokens:(data.statusTokens||[]).map(item=>({hash:item.hash,expiresAtMs:item.expiresAtMs})),
+   workspaceIds:Array.isArray(data.workspaceIds)?[...data.workspaceIds]:null,
+   workspaceNames:data.workspaceNames&&typeof data.workspaceNames==="object"?{...data.workspaceNames}:null,
+   namesExpireAt:data.namesExpireAt?new Date(data.namesExpireAt):null,
+   startedAtMs:Number.isInteger(data.startedAtMs)?data.startedAtMs:null,
+   prefixProgress:data.prefixProgress?structuredClone(data.prefixProgress):null,
+   subscriptionStatuses:Array.isArray(data.subscriptionStatuses)?data.subscriptionStatuses.map(row=>({id:row.id,status:safeSubscriptionStatus(row.status)})):[],
+   firebaseStatus:typeof data.firebaseStatus==="string"?data.firebaseStatus:null,
    lease:data.lease?{owner:data.lease.owner,expiresAtMs:data.lease.expiresAtMs}:null,inflight:false};
  }
  async function load(owner){
@@ -329,7 +506,10 @@ function createAccountDeletion({db,stripe,bucket,auth,byoProviders,hash,now,noti
   for(const doc of workspaces.docs||[]){
    const data=doc.data()||{};
    for(const [key,value] of Object.entries(data)){
-    if(SUBSCRIPTION_KEY.test(key)&&typeof value==="string"&&value)ids.add(value);
+    if(SUBSCRIPTION_KEY.test(key)&&typeof value==="string"&&value&&!value.includes("@")){
+     ids.add(value);
+     rememberSubscription(job,value,"unknown");
+    }
    }
   }
   if(job.customerId&&typeof stripe?.subscriptions?.list==="function"){
@@ -348,7 +528,9 @@ function createAccountDeletion({db,stripe,bucket,auth,byoProviders,hash,now,noti
     for(const sub of rows){
      const subCustomer=typeof sub?.customer==="string"?sub.customer:sub?.customer?.id;
      if(subCustomer&&subCustomer!==job.customerId)continue;
-     if(!sub?.id||sub.status==="canceled"||sub.status==="incomplete_expired")continue;
+     if(!sub?.id||typeof sub.id!=="string"||sub.id.includes("@"))continue;
+     rememberSubscription(job,sub.id,sub.status);
+     if(sub.status==="canceled"||sub.status==="incomplete_expired")continue;
      ids.add(sub.id);
     }
     startingAfter=page?.has_more&&rows.length?rows[rows.length-1].id:undefined;
@@ -370,7 +552,17 @@ function createAccountDeletion({db,stripe,bucket,auth,byoProviders,hash,now,noti
    throw wrapped;
   }
  }
- async function deletePrefix(prefix){
+ async function listObjectNames(prefix){
+  if(typeof bucket?.getFiles!=="function")return null;
+  try{
+   const listed=await bucket.getFiles({prefix});
+   const files=listed?.[0]||[];
+   return files.map(file=>typeof file==="string"?file:file?.name).filter(name=>typeof name==="string");
+  }catch{return null;}
+ }
+ async function deletePrefix(job,prefix){
+  const before=await listObjectNames(prefix);
+  if(before)ingestObjects(job,before,prefix);
   try{
    await ignoreMissing(async()=>{
     if(typeof bucket?.deleteFiles==="function"){
@@ -395,8 +587,11 @@ function createAccountDeletion({db,stripe,bucket,auth,byoProviders,hash,now,noti
     wrapped.ownPrefix=true;
     throw wrapped;
    }
+   const after=await listObjectNames(prefix);
+   if(after)ingestObjects(job,after,prefix);
    throw error;
   }
+  markPrefixDeleted(job,prefix);
  }
  async function deleteTree(collectionRef){
   const snap=await collectionRef.get();
@@ -439,10 +634,22 @@ function createAccountDeletion({db,stripe,bucket,auth,byoProviders,hash,now,noti
   }catch(_){/* key registry absent */}
   await db.collection("accepted_terms").doc(job.uid).delete().catch?.(()=>{});
  }
+ async function probeFirebase(uid){
+  if(typeof uid!=="string"||!uid||typeof auth?.getUser!=="function")return "unknown";
+  try{
+   const record=await auth.getUser(uid);
+   if(!record)return "missing";
+   return record.disabled===true?"disabled":"active";
+  }catch(error){
+   return authCodeMeansGone(error)?"missing":"unknown";
+  }
+ }
  async function deleteFirebase(job){
+  job.firebaseStatus=await probeFirebase(job.uid);
   if(typeof auth?.revokeRefreshTokens==="function")
    await ignoreMissing(()=>auth.revokeRefreshTokens(job.uid));
   await ignoreMissing(()=>auth.deleteUser(job.uid));
+  job.firebaseStatus="deleted";
  }
  function nextBatch(job){
   if(!job.steps?.stripe)return "stripe";
@@ -461,13 +668,14 @@ function createAccountDeletion({db,stripe,bucket,auth,byoProviders,hash,now,noti
    const pending=(job.subscriptionIds||[]).filter(id=>!(job.canceledIds||[]).includes(id));
    if(!pending.length){job.steps={...job.steps,stripe:true};return;}
    await cancelOne(pending[0]);
+   rememberSubscription(job,pending[0],"canceled");
    job.canceledIds=[...(job.canceledIds||[]),pending[0]];
    if(pending.length===1)job.steps={...job.steps,stripe:true};
    return;
   }
   if(kind==="customer"||kind==="tenants"){
    const prefix=(kind==="customer"?"customer/":"tenants/")+job.accountHash+"/";
-   await deletePrefix(prefix);
+   await deletePrefix(job,prefix);
    job.steps={...job.steps,prefixes:{...(job.steps?.prefixes||{}),[prefix]:true}};
    const customer="customer/"+job.accountHash+"/";
    const tenants="tenants/"+job.accountHash+"/";
@@ -487,6 +695,8 @@ function createAccountDeletion({db,stripe,bucket,auth,byoProviders,hash,now,noti
     job.retryable=false;
     job.failure=null;
     job.failureReason=null;
+    job.namesCleared=true;
+    job.workspaceNames=null;
     await commitCheckpoint(job);
     return;
    }
@@ -567,6 +777,9 @@ function createAccountDeletion({db,stripe,bucket,auth,byoProviders,hash,now,noti
   }
   if(existing?.status==="failed"){
    existing.uid=existing.uid||uid;
+   const latest=await readJob(existing.jobId);
+   if(latest&&!latest.workspaceNames){existing.namesCleared=true;existing.workspaceNames=null;}
+   if(!Array.isArray(existing.workspaceIds))await captureDeletionContext(existing);
    existing.status="queued";
    existing.failure=null;
    existing.failureReason=null;
@@ -576,13 +789,16 @@ function createAccountDeletion({db,stripe,bucket,auth,byoProviders,hash,now,noti
   }
   if(existing&&(existing.status==="queued"||existing.status==="running")){
    existing.uid=existing.uid||uid;
+   if(!Array.isArray(existing.workspaceIds))await captureDeletionContext(existing);
    const {statusToken,claimed}=await issueStatusToken(existing,{claim:true});
    if(claimed)schedule(existing);
    return {status:202,jobId:existing.jobId,statusToken};
   }
   const job={jobId:crypto.randomUUID(),accountHash:owner,uid,status:"queued",steps:{},
    canceledIds:[],subscriptionIds:[],customerId:null,retryable:true,failure:null,failureReason:null,
-   attempts:0,inflight:false,statusTokens:[]};
+   attempts:0,inflight:false,statusTokens:[],workspaceIds:null,workspaceNames:null,prefixProgress:null,
+   subscriptionStatuses:[],firebaseStatus:null,startedAtMs:null,namesExpireAt:null};
+  await captureDeletionContext(job);
   jobs.set(job.jobId,job);
   const {statusToken,claimed}=await issueStatusToken(job,{claim:true});
   if(claimed)schedule(job);
@@ -615,14 +831,148 @@ function createAccountDeletion({db,stripe,bucket,auth,byoProviders,hash,now,noti
   schedule(job);
   return true;
  }
- function supportBody(body){
-  if(!body||typeof body!=="object"||Array.isArray(body))throw refusal(400,"invalid_body");
-  for(const key of Object.keys(body))if(key!=="jobId")throw refusal(400,"unknown_field");
-  if(typeof body.jobId!=="string"||body.jobId==="")throw refusal(400,"invalid_body");
-  return body.jobId;
+ async function captureDeletionContext(job){
+  if(!Number.isInteger(job.startedAtMs))job.startedAtMs=clock();
+  if(!job.namesExpireAt)job.namesExpireAt=new Date(job.startedAtMs+NAMES_TTL_MS);
+  if(!Array.isArray(job.workspaceIds)){
+   const ids=[];
+   const names={};
+   for(const base of ["gd_accounts/"+job.accountHash+"/workspaces","tenants/"+job.accountHash+"/workspaces"]){
+    let snap;
+    try{snap=await db.collection(base).get();}catch{continue;}
+    for(const doc of snap.docs||[]){
+     if(!ids.includes(doc.id))ids.push(doc.id);
+     const plain=plaintextWorkspaceName((doc.data()||{}).name);
+     if(plain&&!names[doc.id])names[doc.id]=plain;
+    }
+   }
+   job.workspaceIds=ids;
+   job.workspaceNames=names;
+  }
+  if(!job.prefixProgress){
+   job.prefixProgress={};
+   for(const prefix of ["customer/"+job.accountHash+"/","tenants/"+job.accountHash+"/"]){
+    const names=await listObjectNames(prefix);
+    if(names)ingestObjects(job,names,prefix);
+   }
+  }
+  if(!job.firebaseStatus)job.firebaseStatus=await probeFirebase(job.uid);
+  if(!Array.isArray(job.subscriptionStatuses))job.subscriptionStatuses=[];
+ }
+ async function clearWorkspaceNames(jobId){
+  const live=jobs.get(jobId);
+  if(live){live.namesCleared=true;live.workspaceNames=null;}
+  await db.runTransaction(async tx=>{
+   const ref=jobRef(jobId);
+   const snap=await tx.get(ref);
+   if(!snap.exists)return;
+   const data={...snap.data()};
+   if(!data.workspaceNames)return;
+   delete data.workspaceNames;
+   const account=accountRef(data.accountHash);
+   const accountSnap=await tx.get(account);
+   tx.set(ref,data);
+   if(accountSnap.exists&&accountSnap.data()?.jobId===jobId)tx.set(account,data);
+  });
+ }
+ async function claimNotify(jobId){
+  let claimed=false;
+  await db.runTransaction(async tx=>{
+   const ref=db.collection("supportRequests").doc(jobId);
+   const snap=await tx.get(ref);
+   if(!snap.exists)return;
+   const data=snap.data();
+   const current=data.notify;
+   if(!current||current.state!=="pending")return;
+   const due=Date.parse(current.nextAttemptAt);
+   const at=clock();
+   if(Number.isFinite(due)&&due>at)return;
+   tx.set(ref,{...data,notify:{...current,nextAttemptAt:new Date(at+60*1000).toISOString()}});
+   claimed=true;
+  });
+  return claimed;
+ }
+ async function markNotify(jobId,outcome){
+  let terminal=false;
+  await db.runTransaction(async tx=>{
+   const ref=db.collection("supportRequests").doc(jobId);
+   const snap=await tx.get(ref);
+   if(!snap.exists)return;
+   const data=snap.data();
+   const current=data.notify||freshNotify(clock());
+   const at=clock();
+   if(outcome==="sent")data.notify={state:"sent",attempts:Number.isInteger(current.attempts)?current.attempts:0,nextAttemptAt:null};
+   else{
+    const attempts=(Number.isInteger(current.attempts)?current.attempts:0)+1;
+    if(attempts>=NOTIFY_MAX_ATTEMPTS){
+     data.notify={state:"failed",attempts,nextAttemptAt:new Date(at+NOTIFY_BACKOFF_MS[NOTIFY_BACKOFF_MS.length-1]).toISOString()};
+     terminal=true;
+    }else data.notify={state:"pending",attempts,nextAttemptAt:new Date(at+NOTIFY_BACKOFF_MS[attempts-1]).toISOString()};
+   }
+   tx.set(ref,data);
+  });
+  if(terminal)console.error("support_notify_failed "+jobId);
+ }
+ async function deliver(jobId,reason){
+  if(!webhookReady()){
+   if(reason==="request")console.warn("support_notify_unconfigured");
+   return;
+  }
+  if(!(await claimNotify(jobId)))return;
+  const stored=await readJob(jobId);
+  if(!stored)return;
+  const filename="deletion-"+String(stored.jobId||jobId).replace(/[^A-Za-z0-9_-]/g,"")+".json";
+  try{
+   await notify({content:discordContent(stored),filename,file:discordFile(stored),jobId:stored.jobId||jobId});
+  }catch(error){
+   if(error?.code==="support_notify_unconfigured")return;
+   await markNotify(jobId,"failed");
+   console.warn("support deletion notify failed");
+   return;
+  }
+  await markNotify(jobId,"sent");
+  await clearWorkspaceNames(jobId);
+ }
+ async function expireWorkspaceNames(at){
+  let snap;
+  try{snap=await db.collection("deletion_jobs").get();}catch{return;}
+  for(const doc of snap.docs||[]){
+   const data=doc.data()||{};
+   if(!data.workspaceNames||typeof data.jobId!=="string")continue;
+   const expire=data.namesExpireAt?new Date(data.namesExpireAt).getTime():Number.NaN;
+   let sent=false;
+   try{
+    const support=await db.collection("supportRequests").doc(data.jobId).get();
+    sent=support.exists&&support.data()?.notify?.state==="sent";
+   }catch{sent=false;}
+   if(data.status==="done"||sent||(Number.isFinite(expire)&&at>=expire))await clearWorkspaceNames(data.jobId);
+  }
+ }
+ async function sweepSupportNotifications(){
+  const at=clock();
+  let snap;
+  try{snap=await db.collection("supportRequests").get();}catch{snap={docs:[]};}
+  let delivered=0,failed=0;
+  for(const doc of snap.docs||[]){
+   const data=doc.data()||{};
+   const state=data.notify?.state;
+   const created=Date.parse(data.createdAt);
+   if((state==="pending"||state==="failed")&&Number.isFinite(created)&&at-created>SUPPORT_STALE_MS)
+    console.error("support_notify_stale "+data.jobId);
+   if(state!=="pending"||typeof data.jobId!=="string")continue;
+   const before=Number.isInteger(data.notify?.attempts)?data.notify.attempts:0;
+   await deliver(data.jobId,"sweep");
+   const after=await db.collection("supportRequests").doc(data.jobId).get();
+   const next=after.exists?after.data()?.notify:null;
+   if(next?.state==="sent")delivered+=1;
+   else if((next?.attempts||0)>before)failed+=1;
+  }
+  await expireWorkspaceNames(at);
+  return {delivered,failed};
  }
  async function requestSupport(req){
-  const jobId=supportBody(req?.body);
+  const jobId=req?.params?.jobId;
+  if(typeof jobId!=="string"||jobId==="")throw refusal(404,"not_found");
   const authorization=req?.headers?.authorization;
   if(typeof authorization!=="string"||authorization.trim()==="")throw refusal(401,"unauthorized");
   const stored=await readJob(jobId);
@@ -641,30 +991,21 @@ function createAccountDeletion({db,stripe,bucket,auth,byoProviders,hash,now,noti
    const existing=snap.exists?snap.data():null;
    const start=existing?Date.parse(existing.createdAt):Number.NaN;
    const inWindow=Number.isFinite(start)&&at-start<SUPPORT_WINDOW_MS;
-   const count=inWindow&&Number.isInteger(existing.count)?existing.count:0;
+   const count=inWindow&&Number.isInteger(existing?.count)?existing.count:0;
    if(inWindow&&count>=SUPPORT_MAX_CALLS){
     saved={limited:true,retryAfterSec:Math.max(1,Math.ceil((start+SUPPORT_WINDOW_MS-at)/1000))};
     return;
    }
-   const doc={
-    accountHash,uid,jobId,failureReason,
-    createdAt:inWindow?existing.createdAt:new Date(at).toISOString(),
-    count:count+1,
-   };
+   const doc={accountHash,uid,jobId,failureReason,createdAt:inWindow?existing.createdAt:new Date(at).toISOString(),
+    count:count+1,notify:inWindow&&existing?.notify?existing.notify:freshNotify(at)};
    tx.set(ref,doc);
-   saved={limited:false,notify:doc.count===1,doc};
+   saved={limited:false,notify:doc.count===1};
   });
   if(saved?.limited)throw refusal(429,"rate_limited",{retryAfterSec:saved.retryAfterSec});
-  if(saved?.notify){
-   try{
-    await notify({jobId,accountId:accountHash,failureReason,createdAt:saved.doc.createdAt});
-   }catch(_){
-    console.warn("support deletion notify failed");
-   }
-  }
+  if(saved?.notify)await deliver(jobId,"request");
   return {status:202,requestId};
  }
- return {deleteAccount,jobStatus,statusTokenMatches,resumeIfStalled,requestSupport};
+ return {deleteAccount,jobStatus,statusTokenMatches,resumeIfStalled,requestSupport,sweepSupportNotifications};
 }
 function deletionAuth(firebaseAuth){
  return (req,res,next)=>{
@@ -701,7 +1042,7 @@ function registerAccountDeletion({app,firebaseAuth,...deps}){
    res.status(status).json(body);
   }
  });
- app.post("/v2/support/deletion-request",async(req,res)=>{
+ app.post("/v2/account/deletions/:jobId/support-request",async(req,res)=>{
   try{
    const result=await svc.requestSupport(req);
    res.setHeader("Cache-Control","private, no-store");
@@ -719,6 +1060,24 @@ function registerAccountDeletion({app,firebaseAuth,...deps}){
    res.status(status).json(body);
   }
  });
+ app.post("/internal/support-notifications/sweep",async(req,res)=>{
+  const expected=typeof (deps.env||process.env).SUPPORT_SWEEP_TOKEN==="string"?(deps.env||process.env).SUPPORT_SWEEP_TOKEN:"";
+  const presented=bearerToken(req);
+  const match=expected.length>=16&&presented.length===expected.length&&
+   crypto.timingSafeEqual(crypto.createHash("sha256").update(expected).digest(),crypto.createHash("sha256").update(presented).digest());
+  if(!match){
+   res.setHeader("Cache-Control","private, no-store");
+   return res.status(401).json({error:"unauthorized"});
+  }
+  try{
+   const result=await svc.sweepSupportNotifications();
+   res.setHeader("Cache-Control","private, no-store");
+   res.json({ok:true,delivered:result.delivered,failed:result.failed});
+  }catch(_){
+   res.status(500).json({error:"internal"});
+  }
+ });
+ registeredSweep=()=>svc.sweepSupportNotifications();
  app.get("/v2/account/deletions/:jobId",async(req,res)=>{
   try{
    const jobId=req.params.jobId;
@@ -794,4 +1153,7 @@ function continueWithFirebase(firebaseAuth,req,res,onOk){
   if(!done&&!res.headersSent)res.status(404).json({error:"not_found"});
  }
 }
-module.exports={createAccountDeletion,registerAccountDeletion,createWebhookNotifier,REAUTH_SECONDS,STATUS_TOKEN_TTL_MS,LEASE_MS,SUPPORT_WINDOW_MS};
+function sweepRegisteredSupportNotifications(){
+ return typeof registeredSweep==="function"?registeredSweep():Promise.resolve({delivered:0,failed:0});
+}
+module.exports={createAccountDeletion,registerAccountDeletion,createDiscordNotifier,supportDiscordStartup,sweepRegisteredSupportNotifications,REAUTH_SECONDS,STATUS_TOKEN_TTL_MS,LEASE_MS,SUPPORT_WINDOW_MS,SUPPORT_SWEEP_INTERVAL_MS,NAMES_TTL_MS,NOTIFY_BACKOFF_MS};

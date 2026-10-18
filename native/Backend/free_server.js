@@ -314,7 +314,18 @@ app.delete("/v1/files/:id",auth,requireWrite,async(req,res)=>{
 });
 require("./v2_errors").installV2Errors(app);
 function start(port=Number(process.env.PORT||8080)){
+ const deletion=require("./account_delete");
+ const gate=deletion.supportDiscordStartup(process.env);
+ if(gate.exit){
+  console.error(gate.message);
+  process.exit(gate.code||1);
+ }
+ if(gate.warn)console.warn(gate.message);
  firestore();
+ const timer=setInterval(()=>{
+  Promise.resolve(deletion.sweepRegisteredSupportNotifications()).catch(()=>console.error("support_notify_sweep_failed"));
+ },deletion.SUPPORT_SWEEP_INTERVAL_MS);
+ if(typeof timer.unref==="function")timer.unref();
  return app.listen(port,()=>console.log("GenDragoon free storage API ready"));
 }
 if(require.main===module)start();

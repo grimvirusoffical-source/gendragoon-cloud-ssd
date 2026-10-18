@@ -1,14 +1,11 @@
 {
   "request": {
-    "body": {
-      "jobId": "00000000-0000-4000-8000-00000000000a"
-    },
+    "body": null,
     "headers": {
-      "authorization": "<redacted>",
-      "content-type": "application/json"
+      "authorization": "<redacted>"
     },
     "method": "POST",
-    "path": "/v2/support/deletion-request"
+    "path": "/v2/account/deletions/00000000-0000-4000-8000-00000000000a/support-request"
   },
   "response": {
     "body": {
