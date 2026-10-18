@@ -106,18 +106,70 @@ describe("deletion support request", () => {
 
   it("409 support_not_needed asks for a status refresh and 429 does not mail", async () => {
     const refreshJob = jobIdOf(unneeded.request.path);
-    const refresh = await ask(refreshJob, (async (url: string | URL | Request, init?: RequestInit) => {
-      if (init?.method === "GET") {
-        return responseFor(200, { jobId: refreshJob, status: "failed", retryable: true });
-      }
+    const on409 = (status: number, body: unknown) => (async (_url: string | URL | Request, init?: RequestInit) => {
+      if (init?.method === "GET") return responseFor(status, body);
       return responseFor(unneeded.response.status, unneeded.response.body);
-    }) as typeof fetch);
-    expect(refresh).toEqual({
-      kind: "not_needed",
-      status: { jobId: refreshJob, status: "failed", retryable: true },
-    });
+    }) as typeof fetch;
+    // Core rule (ccde5bf): the refresh must be for this jobId with status
+    // queued, running, done or failed. failed, any other status, or a
+    // mismatched body is `fallback`.
+    for (const state of ["queued", "running", "done"]) {
+      expect(await ask(refreshJob, on409(200, { jobId: refreshJob, status: state }))).toEqual({
+        kind: "not_needed",
+        status: { jobId: refreshJob, status: state },
+      });
+    }
+    for (const body of [
+      { jobId: refreshJob, status: "failed", retryable: true },
+      { jobId: refreshJob, status: "cancelled" },
+      { jobId: "00000000-0000-4000-8000-0000000000ff", status: "running" },
+      { status: "running" },
+    ]) {
+      expect(await ask(refreshJob, on409(200, body))).toEqual({ kind: "fallback", contact: SUPPORT_CONTACT });
+    }
     const already = await ask(jobId, (async () => responseFor(limited.response.status, limited.response.body)) as typeof fetch);
     expect(already).toEqual({ kind: "already_sent", retryAfterSec: limited.response.body.retryAfterSec });
+  });
+
+  it("409 whose refresh is for a different jobId opens the support email on screen", async () => {
+    const refreshJob = jobIdOf(unneeded.request.path);
+    const openURL = jest.spyOn(Linking, "openURL").mockResolvedValue(undefined as never);
+    openURL.mockClear();
+    const secrets = new MemorySecretStore();
+    await secrets.set("account-deletion:status-token", new TextEncoder().encode(TOKEN));
+    await secrets.set("account-deletion:job-id", new TextEncoder().encode(refreshJob));
+    const onReauth = jest.fn();
+    const onError = jest.fn();
+    const screen = await render(
+      <DeleteAccountScreen
+        frame="not-retryable"
+        jobId={refreshJob}
+        supportEndpointEnabled
+        apiBase="https://api.example.test"
+        supportFetch={(async (_url: string | URL | Request, init?: RequestInit) =>
+          init?.method === "GET"
+            ? responseFor(200, { jobId: "00000000-0000-4000-8000-0000000000ff", status: "running" })
+            : responseFor(unneeded.response.status, unneeded.response.body)) as typeof fetch}
+        activeTransfers={0}
+        secrets={secrets}
+        workspaceIds={["ws-1"]}
+        idToken=""
+        client={{
+          async deleteAccount() { return { jobId: refreshJob }; },
+          async deletionStatus() { return { jobId: refreshJob, status: "failed" }; },
+        }}
+        onReauth={onReauth}
+        onSignedOut={() => undefined}
+        onDone={() => undefined}
+        onError={onError}
+      />,
+    );
+    fireEvent.press(screen.getByTestId("contact-support"));
+    await waitFor(() => expect(openURL).toHaveBeenCalledWith(supportContactTarget(SUPPORT_CONTACT.value, refreshJob)));
+    expect(screen.queryByTestId("support-deletion-running")).toBeNull();
+    expect(onReauth).not.toHaveBeenCalled();
+    expect(onError).not.toHaveBeenCalled();
+    openURL.mockRestore();
   });
 
   it("a network error or HTTP 5xx falls back, and the screen mails when the flag is off", async () => {
