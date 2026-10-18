@@ -212,7 +212,7 @@ describe("vendored cloud-ssd fixtures", () => {
       <WorkspacesScreen
         workspaces={listedWorkspaces()}
         unpaidIds={[]}
-        monthlyCents={list.response.body.policy.workspaceMonthlyCents}
+        additionalMonthlyCents={list.response.body.policy.workspaceMonthlyCents}
         capMessage={capped.response.body.message}
         onDelete={() => undefined}
         onMerge={() => undefined}
@@ -221,9 +221,7 @@ describe("vendored cloud-ssd fixtures", () => {
     const listed = list.response.body.workspaces[0];
     expect(listed).toBeTruthy();
     expect(textOf(screen.getByTestId(`workspace-name-${listed!.id}`))).toBe(listed!.name);
-    expect(screen.getByText(
-      `An additional workspace is $${list.response.body.policy.workspaceMonthlyCents / 100} per month.`,
-    )).toBeTruthy();
+    expect(screen.getByText("An additional workspace is $5.00/mo.")).toBeTruthy();
     expect(screen.getByText(capped.response.body.message)).toBeTruthy();
     expect(created.response.body.project.name).toBe(listed!.name);
     expect(created.response.body.policy.workspaceMonthlyCents).toBe(list.response.body.policy.workspaceMonthlyCents);
@@ -242,7 +240,7 @@ describe("vendored cloud-ssd fixtures", () => {
       <WorkspacesScreen
         workspaces={listedWorkspaces()}
         unpaidIds={[]}
-        monthlyCents={list.response.body.policy.workspaceMonthlyCents}
+        additionalMonthlyCents={list.response.body.policy.workspaceMonthlyCents}
         serverPreview={preview.response.body}
         mergeError={denied.response.body.message}
         mergeResult={completed.response.body}
@@ -260,6 +258,14 @@ describe("vendored cloud-ssd fixtures", () => {
     for (const entry of renamed.response.body.files) {
       expect(textOf(screen.getByTestId(`merged-file-${entry.id}`))).toBe(entry.name);
     }
+  });
+
+  it("keeps BYO connect off the encrypted key and manifest path", () => {
+    const flow = readFileSync(path.join(__dirname, "../src/byoReady.ts"), "utf8");
+    expect(byoServerFlowReady()).toBe(true);
+    expect(flow).not.toMatch(/establishWorkspaceKey|openWorkspaceKey|commitManifest|mergeSealedManifest|putKeyEnvelope|getKeyEnvelope/);
+    expect(flow).toMatch(/registerByo/);
+    expect(flow).toMatch(/verifyByo/);
   });
 
   it("shows S3 launch providers and keeps SFTP, Azure, and WebDAV as coming soon", async () => {

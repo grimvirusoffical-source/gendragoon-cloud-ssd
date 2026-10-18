@@ -1,7 +1,7 @@
 import type { WorkspaceRecord } from "@gendragoon/core";
-import { render } from "@testing-library/react-native";
+import { fireEvent, render } from "@testing-library/react-native";
 import { WORKSPACE_PRICING_ENABLED } from "../src/flags";
-import { readWorkspacePrice, workspacePriceLabel, type WorkspacePriceInput } from "../src/pricing";
+import { additionalWorkspaceFeeText, readWorkspacePrice, workspacePriceLabel, workspaceQuoteExplanation, type WorkspacePriceInput } from "../src/pricing";
 import { LockScreen, NewWorkspaceScreen, WorkspacesScreen } from "../src/screens";
 import { FIXTURE_SOURCE_SHA_BY_AREA, loadFixture } from "./loadFixture";
 
@@ -76,7 +76,7 @@ describe("workspace price labels", () => {
       <WorkspacesScreen
         workspaces={body.workspaces}
         unpaidIds={[]}
-        monthlyCents={body.policy.workspaceMonthlyCents}
+        additionalMonthlyCents={body.policy.workspaceMonthlyCents}
         onDelete={() => undefined}
         onMerge={() => undefined}
       />,
@@ -94,7 +94,7 @@ describe("workspace price labels", () => {
       <WorkspacesScreen
         workspaces={body.workspaces}
         unpaidIds={[]}
-        monthlyCents={body.policy.workspaceMonthlyCents}
+        additionalMonthlyCents={body.policy.workspaceMonthlyCents}
         onDelete={() => undefined}
         onMerge={() => undefined}
       />,
@@ -104,21 +104,33 @@ describe("workspace price labels", () => {
     expect(screen.queryByText("$0.00/mo")).toBeNull();
   });
 
-  it("shows the create quote before the confirm button", async () => {
+  it("shows the create quote before the confirm button and waits for a name", async () => {
     const free = loadFixture<CreatedBody>("workspaces/free-first.json");
     const paid = loadFixture<CreatedBody>("workspaces/second-paid.json");
     const replaced = loadFixture<CreatedBody>("workspaces/delete-free-then-create.json");
+    const byo = loadFixture<{ isFree: boolean; monthlyPriceCents: number }>("workspaces/byo-first-paid.json");
     expect(workspacePriceLabel(free.response.body.project)).toBe("Free");
     expect(workspacePriceLabel(replaced.response.body.project)).toBe("Free");
     expect(workspacePriceLabel(paid.response.body.project)).toBe("$5.00/mo");
+    expect(workspaceQuoteExplanation("hosted", free.response.body.project)).toBe("Your first hosted workspace is free");
+    expect(workspaceQuoteExplanation("hosted", paid.response.body.project)).toBe("Additional workspaces are $5.00/mo");
+    expect(workspaceQuoteExplanation("byo", byo.response.body)).toBe("Bring-your-own storage is $5.00/mo");
     const screen = await render(
-      <NewWorkspaceScreen quote={free.response.body.project} onCreate={() => undefined} />,
+      <NewWorkspaceScreen quote={free.response.body.project} byoQuote={byo.response.body} onCreate={() => undefined} />,
     );
+    expect(screen.getByTestId("new-workspace-explain").props.children).toBe("Your first hosted workspace is free");
     expect(screen.getByTestId("new-workspace-price").props.children).toBe("Free");
-    expect(screen.getByTestId("create-workspace")).toBeTruthy();
+    expect(screen.getByTestId("create-workspace")).toBeDisabled();
+    await fireEvent.changeText(screen.getByTestId("workspace-name"), "Vacation photos");
+    expect(screen.getByTestId("create-workspace")).not.toBeDisabled();
+    await fireEvent.press(screen.getByTestId("storage-byo"));
+    expect(screen.getByTestId("new-workspace-explain").props.children).toBe("Bring-your-own storage is $5.00/mo");
+    expect(screen.getByTestId("create-byo-aws")).toBeTruthy();
+    expect(screen.getByText("SFTP · Coming soon")).toBeTruthy();
     const second = await render(
       <NewWorkspaceScreen quote={paid.response.body.project} onCreate={() => undefined} />,
     );
+    expect(second.getByTestId("new-workspace-explain").props.children).toBe("Additional workspaces are $5.00/mo");
     expect(second.getByTestId("new-workspace-price").props.children).toBe("$5.00/mo");
   });
 
@@ -148,7 +160,7 @@ describe("workspace price labels", () => {
       <WorkspacesScreen
         workspaces={PROVISIONAL_GRANDFATHERED_PLUS_NEW}
         unpaidIds={[]}
-        monthlyCents={500}
+        additionalMonthlyCents={500}
         onDelete={() => undefined}
         onMerge={() => undefined}
       />,
@@ -156,6 +168,33 @@ describe("workspace price labels", () => {
     expect(screen.getByTestId("workspace-price-grandfathered").props.children).toBe("Included");
     expect(screen.getByTestId("workspace-price-new-paid").props.children).toBe("$5.00/mo");
     expect(screen.queryByText("$0.00/mo")).toBeNull();
+  });
+
+  it("an unpaid card uses monthlyPriceCents and the lapsed pay action", async () => {
+    const body = listed("workspaces/list-hosted-plus-byo.json");
+    const onPay = jest.fn();
+    const onDelete = jest.fn();
+    const screen = await render(
+      <WorkspacesScreen
+        workspaces={body.workspaces}
+        unpaidIds={["11111111-1111-4111-8111-000000000001"]}
+        additionalMonthlyCents={body.policy.workspaceMonthlyCents}
+        onDelete={onDelete}
+        onMerge={() => undefined}
+        onPay={onPay}
+      />,
+    );
+    expect(additionalWorkspaceFeeText(body.policy.workspaceMonthlyCents)).toBe("An additional workspace is $5.00/mo.");
+    expect(screen.getByTestId("workspace-fee")).toHaveTextContent("An additional workspace is $5.00/mo.");
+    expect(screen.getByTestId("workspace-price-11111111-1111-4111-8111-000000000001").props.children).toBe("$5.00/mo · Payment needed");
+    expect(screen.getByLabelText("Merge source Free Hosted")).toBeTruthy();
+    expect(screen.getByLabelText("Merge target Second Workspace")).toBeTruthy();
+    await fireEvent.press(screen.getByTestId("pay-to-restore-11111111-1111-4111-8111-000000000001"));
+    expect(onPay).toHaveBeenCalledWith("11111111-1111-4111-8111-000000000001");
+    await fireEvent.press(screen.getByLabelText("Delete Free Hosted"));
+    expect(onDelete).not.toHaveBeenCalled();
+    await fireEvent.press(screen.getByLabelText("Confirm delete Free Hosted"));
+    expect(onDelete).toHaveBeenCalledWith("11111111-1111-4111-8111-000000000001");
   });
 
   it("an unpaid BYO 423 lapsed uses the existing lapsed lock screen", async () => {

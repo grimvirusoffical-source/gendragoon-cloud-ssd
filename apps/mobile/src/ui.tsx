@@ -1,12 +1,17 @@
 import { colors, radii, space, tapTarget, type as typeScale } from "@gendragoon/ui/theme";
 import type { ReactNode } from "react";
-import { Pressable, StyleSheet, Text, View, type PressableProps, type StyleProp, type ViewStyle } from "react-native";
+import { Pressable, ScrollView, StyleSheet, Text, View, type PressableProps, type StyleProp, type ViewStyle } from "react-native";
 
 export function Screen(props: { children: ReactNode; testID?: string }) {
   return (
-    <View style={styles.screen} testID={props.testID}>
+    <ScrollView
+      style={styles.screenScroll}
+      contentContainerStyle={styles.screen}
+      testID={props.testID}
+      keyboardShouldPersistTaps="handled"
+    >
       {props.children}
-    </View>
+    </ScrollView>
   );
 }
 
@@ -26,8 +31,17 @@ export function Button(props: {
   tone?: "primary" | "danger" | "ghost";
   disabled?: boolean;
   accessibilityLabel?: string;
+  /** Shrinks the control to its label so a destructive action is not full width. */
+  compact?: boolean;
+  /** Ghost or danger text in the danger color. */
+  destructive?: boolean;
 } & Pick<PressableProps, "accessibilityHint">) {
   const tone = props.tone ?? "primary";
+  const textStyle = props.destructive || tone === "danger"
+    ? styles.dangerText
+    : tone === "ghost"
+      ? styles.ghostText
+      : styles.buttonText;
   return (
     <Pressable
       accessibilityRole="button"
@@ -39,11 +53,12 @@ export function Button(props: {
       style={({ pressed }) => [
         styles.button,
         tone === "danger" ? styles.danger : tone === "ghost" ? styles.ghost : styles.primary,
+        props.compact ? styles.compact : null,
         props.disabled ? styles.disabled : null,
         pressed && !props.disabled ? styles.pressed : null,
       ]}
     >
-      <Text style={tone === "ghost" ? styles.ghostText : tone === "danger" ? styles.dangerText : styles.buttonText}>{props.label}</Text>
+      <Text style={textStyle}>{props.label}</Text>
     </Pressable>
   );
 }
@@ -61,8 +76,9 @@ export function cardStyle(extra?: StyleProp<ViewStyle>): StyleProp<ViewStyle> {
 }
 
 const styles = StyleSheet.create({
+  screenScroll: { flex: 1, backgroundColor: colors.bg },
   screen: {
-    flex: 1,
+    flexGrow: 1,
     backgroundColor: colors.bg,
     padding: space.xl,
     gap: space.lg,
@@ -96,6 +112,7 @@ const styles = StyleSheet.create({
   buttonText: { color: colors.white, fontSize: typeScale.bodySize },
   dangerText: { color: colors.dangerText, fontSize: typeScale.bodySize },
   ghostText: { color: colors.text, fontSize: typeScale.bodySize },
+  compact: { alignSelf: "flex-start", minWidth: tapTarget, paddingHorizontal: space.md },
   banner: {
     backgroundColor: "rgba(255, 176, 32, 0.08)",
     borderWidth: 1,

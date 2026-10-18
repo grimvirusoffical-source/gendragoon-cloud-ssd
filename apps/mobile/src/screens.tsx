@@ -21,7 +21,7 @@ import {
 } from "@gendragoon/core";
 import { colors, space, type as typeScale } from "@gendragoon/ui/theme";
 import { useState } from "react";
-import { Linking, StyleSheet, Text, TextInput, View } from "react-native";
+import { Linking, Pressable, StyleSheet, Text, TextInput, View } from "react-native";
 import {
   applyAuthFailureSignal,
   deletionSessionAction,
@@ -36,7 +36,13 @@ import {
 import { SAME_ACCOUNT_MESSAGE, sessionMaySwap } from "./account/session";
 import { byoServerFlowReady } from "./byoReady";
 import { DELETION_SUPPORT_ENDPOINT_ENABLED, ENCRYPTED_WORKSPACE_ENABLED, WORKSPACE_PRICING_ENABLED } from "./flags";
-import { workspacePriceLabel, type WorkspacePriceInput } from "./pricing";
+import {
+  additionalWorkspaceFeeText,
+  unpaidWorkspaceSubtitle,
+  workspacePriceLabel,
+  workspaceQuoteExplanation,
+  type WorkspacePriceInput,
+} from "./pricing";
 import { SUPPORT_REQUEST_ALREADY, SUPPORT_REQUEST_SENT, requestDeletionSupport } from "./supportRequest";
 import { supportContactTarget } from "./supportContact";
 import { Banner, Button, Screen, Title, cardStyle } from "./ui";
@@ -237,18 +243,78 @@ export interface ServerMergeResult {
 export type ListedWorkspace = WorkspaceRecord & WorkspacePriceInput;
 
 export function NewWorkspaceScreen(props: {
-  /** Server quote for the workspace about to be created. Not a client-side count. */
+  /** Server quote for a hosted workspace. Not a client-side count. */
   quote: WorkspacePriceInput;
-  onCreate: () => void;
+  /** Server quote for bring-your-own storage. Falls back to rule text when the amount is missing. */
+  byoQuote?: WorkspacePriceInput;
+  onCreate: (input: { name: string; storage: "hosted" | "byo"; providerId: string | null }) => void;
   /** Overrides `WORKSPACE_PRICING_ENABLED` in tests. */
   pricingEnabled?: boolean;
+  initialName?: string;
+  initialStorage?: "hosted" | "byo";
+  initialProviderId?: string | null;
 }) {
-  const label = (props.pricingEnabled ?? WORKSPACE_PRICING_ENABLED) ? workspacePriceLabel(props.quote) : null;
+  const [name, setName] = useState(props.initialName ?? "");
+  const [storage, setStorage] = useState<"hosted" | "byo">(props.initialStorage ?? "hosted");
+  const [providerId, setProviderId] = useState<string | null>(props.initialProviderId ?? LAUNCH_BYO_PROVIDERS[0]?.id ?? null);
+  const showPrice = props.pricingEnabled ?? WORKSPACE_PRICING_ENABLED;
+  const quote = storage === "byo" ? (props.byoQuote ?? props.quote) : props.quote;
+  const label = showPrice ? workspacePriceLabel(quote) : null;
+  const explanation = showPrice ? workspaceQuoteExplanation(storage, quote) : null;
+  const ready = name.trim().length > 0;
   return (
     <Screen testID="new-workspace-screen">
       <Title kicker="Workspaces">New workspace</Title>
+      <Text style={styles.label}>Workspace name</Text>
+      <TextInput
+        accessibilityLabel="Workspace name"
+        placeholder="Workspace name"
+        placeholderTextColor={colors.muted}
+        style={styles.input}
+        value={name}
+        onChangeText={setName}
+        testID="workspace-name"
+      />
+      <Text style={styles.label}>Storage</Text>
+      <Button
+        label="Hosted"
+        tone={storage === "hosted" ? "primary" : "ghost"}
+        testID="storage-hosted"
+        accessibilityLabel="Hosted storage"
+        onPress={() => setStorage("hosted")}
+      />
+      <Button
+        label="Bring your own storage"
+        tone={storage === "byo" ? "primary" : "ghost"}
+        testID="storage-byo"
+        accessibilityLabel="Bring your own storage"
+        onPress={() => setStorage("byo")}
+      />
+      {storage === "byo" ? (
+        <View testID="create-byo-providers">
+          {LAUNCH_BYO_PROVIDERS.map((provider) => (
+            <Button
+              key={provider.id}
+              label={provider.label}
+              tone={providerId === provider.id ? "primary" : "ghost"}
+              testID={`create-byo-${provider.id}`}
+              accessibilityLabel={provider.label}
+              onPress={() => setProviderId(provider.id)}
+            />
+          ))}
+          {COMING_SOON_BYO_PROVIDERS.map((provider) => (
+            <Text key={provider.id} testID={`create-byo-soon-${provider.id}`} style={styles.soon}>{`${provider.label} · Coming soon`}</Text>
+          ))}
+        </View>
+      ) : null}
+      {explanation ? <Text testID="new-workspace-explain" style={styles.help}>{explanation}</Text> : null}
       {label ? <Text testID="new-workspace-price" style={styles.help}>{label}</Text> : null}
-      <Button label="Create workspace" testID="create-workspace" onPress={props.onCreate} />
+      <Button
+        label="Create workspace"
+        testID="create-workspace"
+        disabled={!ready}
+        onPress={() => props.onCreate({ name: name.trim(), storage, providerId: storage === "byo" ? providerId : null })}
+      />
     </Screen>
   );
 }
@@ -256,7 +322,8 @@ export function NewWorkspaceScreen(props: {
 export function WorkspacesScreen(props: {
   workspaces: readonly ListedWorkspace[];
   unpaidIds: readonly string[];
-  monthlyCents: number;
+  /** Server `workspaceMonthlyCents`. The fee banner is omitted when this is missing. */
+  additionalMonthlyCents?: number;
   capMessage?: string | null;
   serverPreview?: ServerMergePreview | null;
   mergeError?: string | null;
@@ -264,30 +331,78 @@ export function WorkspacesScreen(props: {
   mergedFiles?: readonly { id: string; name: string }[] | null;
   onDelete: (id: string) => void;
   onMerge: (sourceId: string, targetId: string) => void;
+  /** Same checkout path as the lapsed lock screen, for one unpaid workspace. */
+  onPay?: (workspaceId: string) => void;
   /** Overrides `WORKSPACE_PRICING_ENABLED` in tests. */
   pricingEnabled?: boolean;
 }) {
   const showPrice = props.pricingEnabled ?? WORKSPACE_PRICING_ENABLED;
+  const feeText = additionalWorkspaceFeeText(props.additionalMonthlyCents);
   const rows = workspacesWithUnpaid(props.workspaces, props.unpaidIds);
-  const [sourceId, setSourceId] = useState(rows[1]?.id ?? rows[0]?.id ?? "");
-  const [targetId, setTargetId] = useState(rows[0]?.id ?? "");
+  const [sourceId, setSourceId] = useState(rows[0]?.id ?? "");
+  const [targetId, setTargetId] = useState(rows[1]?.id ?? rows[0]?.id ?? "");
+  const [pendingDeleteId, setPendingDeleteId] = useState<string | null>(null);
   const localPreview = props.serverPreview || !sourceId || !targetId || sourceId === targetId
     ? []
     : planMerge([{ path: "Photos/cat.jpg" }], rows.find((row) => row.id === sourceId)?.name ?? "source", ["Photos/cat.jpg"]);
   return (
     <Screen testID="workspaces-screen">
       <Title kicker="Workspaces">Your spaces</Title>
-      <Banner testID="workspace-fee">{`An additional workspace is $${props.monthlyCents / 100} per month.`}</Banner>
+      {feeText ? <Banner testID="workspace-fee">{feeText}</Banner> : null}
       {props.capMessage ? <Banner testID="workspace-cap">{props.capMessage}</Banner> : null}
-      {rows.map((workspace) => (
-        <View key={workspace.id} style={cardStyle()}>
-          <Text testID={`workspace-name-${workspace.id}`} style={styles.category}>{workspace.name}{workspace.unpaid ? " · unpaid" : ""}</Text>
-          {showPrice && workspacePriceLabel(workspace) ? (
-            <Text testID={`workspace-price-${workspace.id}`} style={styles.help}>{workspacePriceLabel(workspace)}</Text>
-          ) : null}
-          <Button label="Delete" tone="danger" testID={`delete-${workspace.id}`} onPress={() => props.onDelete(workspace.id)} />
-        </View>
-      ))}
+      {rows.map((workspace) => {
+        const price = workspace.unpaid
+          ? unpaidWorkspaceSubtitle(workspace.monthlyPriceCents)
+          : showPrice ? workspacePriceLabel(workspace) : null;
+        const confirming = pendingDeleteId === workspace.id;
+        return (
+          <View key={workspace.id} style={cardStyle()}>
+            <Text testID={`workspace-name-${workspace.id}`} style={styles.category}>{workspace.name}</Text>
+            {price ? <Text testID={`workspace-price-${workspace.id}`} style={styles.help}>{price}</Text> : null}
+            {workspace.unpaid ? (
+              <Button
+                label="Pay to restore"
+                testID={`pay-to-restore-${workspace.id}`}
+                accessibilityLabel={`Pay to restore ${workspace.name}`}
+                onPress={() => props.onPay?.(workspace.id)}
+              />
+            ) : null}
+            {confirming ? (
+              <View>
+                <Text style={styles.help}>{`Delete ${workspace.name}?`}</Text>
+                <Button
+                  label="Delete workspace"
+                  tone="danger"
+                  compact
+                  testID={`confirm-delete-${workspace.id}`}
+                  accessibilityLabel={`Confirm delete ${workspace.name}`}
+                  onPress={() => {
+                    setPendingDeleteId(null);
+                    props.onDelete(workspace.id);
+                  }}
+                />
+                <Button
+                  label="Cancel"
+                  tone="ghost"
+                  compact
+                  testID={`cancel-delete-${workspace.id}`}
+                  onPress={() => setPendingDeleteId(null)}
+                />
+              </View>
+            ) : (
+              <Button
+                label="Delete"
+                tone="ghost"
+                destructive
+                compact
+                testID={`delete-${workspace.id}`}
+                accessibilityLabel={`Delete ${workspace.name}`}
+                onPress={() => setPendingDeleteId(workspace.id)}
+              />
+            )}
+          </View>
+        );
+      })}
       {props.serverPreview ? (
         <View testID="merge-preview">
           {props.serverPreview.files.map((file) => (
@@ -306,8 +421,32 @@ export function WorkspacesScreen(props: {
       {props.mergedFiles?.map((file) => (
         <Text key={file.id} testID={`merged-file-${file.id}`} style={styles.help}>{file.name}</Text>
       ))}
-      <Button label="Use first as source" tone="ghost" onPress={() => setSourceId(rows[0]?.id ?? "")} testID="merge-source" />
-      <Button label="Use second as target" tone="ghost" onPress={() => setTargetId(rows[1]?.id ?? "")} testID="merge-target" />
+      <Text style={styles.label}>Source</Text>
+      <View testID="merge-source">
+        {rows.map((workspace) => (
+          <Button
+            key={`source-${workspace.id}`}
+            label={workspace.name}
+            tone={sourceId === workspace.id ? "primary" : "ghost"}
+            testID={`merge-source-${workspace.id}`}
+            accessibilityLabel={`Merge source ${workspace.name}`}
+            onPress={() => setSourceId(workspace.id)}
+          />
+        ))}
+      </View>
+      <Text style={styles.label}>Target</Text>
+      <View testID="merge-target">
+        {rows.map((workspace) => (
+          <Button
+            key={`target-${workspace.id}`}
+            label={workspace.name}
+            tone={targetId === workspace.id ? "primary" : "ghost"}
+            testID={`merge-target-${workspace.id}`}
+            accessibilityLabel={`Merge target ${workspace.name}`}
+            onPress={() => setTargetId(workspace.id)}
+          />
+        ))}
+      </View>
       <Button
         label="Merge"
         testID="merge-workspaces"
@@ -391,32 +530,71 @@ export function ConnectStorageScreen(props: {
   );
 }
 
-export function PassphraseScreen(props: { onSubmit: (passphrase: string) => void }) {
-  const [value, setValue] = useState("");
-  const [again, setAgain] = useState("");
-  const [ack, setAck] = useState(false);
-  const ready = value.length >= 8 && value === again && ack;
+const PASSPHRASE_MIN = 8;
+
+export function PassphraseScreen(props: {
+  onSubmit: (passphrase: string) => void;
+  initialPassphrase?: string;
+  initialConfirm?: string;
+  initialChecked?: boolean;
+  initialRevealed?: boolean;
+}) {
+  const [value, setValue] = useState(props.initialPassphrase ?? "");
+  const [again, setAgain] = useState(props.initialConfirm ?? "");
+  const [ack, setAck] = useState(props.initialChecked ?? false);
+  const [revealed, setRevealed] = useState(props.initialRevealed ?? false);
+  const longEnough = value.length >= PASSPHRASE_MIN;
+  const mismatch = again.length > 0 && again !== value;
+  const ready = longEnough && value === again && ack;
   return (
     <Screen testID="passphrase-screen">
       <Title kicker="Recovery">Set a passphrase</Title>
       <Banner>{PASSPHRASE_LOSS_WARNING}</Banner>
+      <Text style={styles.label}>Passphrase</Text>
       <TextInput
         accessibilityLabel="Passphrase"
-        secureTextEntry
+        placeholder="Passphrase"
+        placeholderTextColor={colors.muted}
+        secureTextEntry={!revealed}
         style={styles.input}
         value={value}
         onChangeText={setValue}
         testID="passphrase"
       />
+      <Text style={styles.label}>Confirm passphrase</Text>
       <TextInput
         accessibilityLabel="Confirm passphrase"
-        secureTextEntry
+        placeholder="Confirm passphrase"
+        placeholderTextColor={colors.muted}
+        secureTextEntry={!revealed}
         style={styles.input}
         value={again}
         onChangeText={setAgain}
         testID="passphrase-confirm"
       />
-      <Button label={ack ? "Acknowledged" : "I understand I can lose my files"} tone="ghost" testID="passphrase-ack" onPress={() => setAck(true)} />
+      <Button
+        label={revealed ? "Hide passphrase" : "Show passphrase"}
+        tone="ghost"
+        compact
+        testID="passphrase-visibility"
+        accessibilityLabel={revealed ? "Hide passphrase" : "Show passphrase"}
+        onPress={() => setRevealed((shown) => !shown)}
+      />
+      <Text testID="passphrase-hint" style={styles.help}>
+        {longEnough ? "At least 8 characters." : "Use at least 8 characters."}
+      </Text>
+      {mismatch ? <Text testID="passphrase-mismatch" style={styles.error}>Passphrases don't match</Text> : null}
+      <Pressable
+        accessibilityRole="checkbox"
+        accessibilityLabel="I understand I can lose my files"
+        accessibilityState={{ checked: ack }}
+        testID="passphrase-ack"
+        onPress={() => setAck((checked) => !checked)}
+        style={styles.checkRow}
+      >
+        <Text style={styles.category}>{ack ? "☑" : "☐"}</Text>
+        <Text style={styles.help}>I understand I can lose my files</Text>
+      </Pressable>
       <Button label="Save passphrase" testID="passphrase-save" disabled={!ready} onPress={() => props.onSubmit(value)} />
     </Screen>
   );
@@ -672,6 +850,9 @@ export function SettingsHome(props: {
 
 const styles = StyleSheet.create({
   help: { color: colors.muted, fontSize: typeScale.helpSize },
+  label: { color: colors.text, fontSize: typeScale.bodySize },
+  error: { color: colors.dangerText, fontSize: typeScale.helpSize },
+  checkRow: { flexDirection: "row", alignItems: "center", gap: space.sm, minHeight: 44 },
   devNote: { color: colors.muted, fontSize: 12 },
   category: { color: colors.text, fontSize: typeScale.bodySize },
   soon: { color: colors.muted, fontSize: typeScale.helpSize },

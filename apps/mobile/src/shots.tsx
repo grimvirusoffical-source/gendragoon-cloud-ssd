@@ -34,6 +34,7 @@ export const SHOTS = [
   "byo-s3",
   "pricing-free-first",
   "pricing-hosted-plus-byo",
+  "pricing-create-byo",
 ] as const;
 
 export type ShotId = (typeof SHOTS)[number];
@@ -105,7 +106,6 @@ export function ShotFrame(props: { id: ShotId }) {
           <WorkspacesScreen
             workspaces={[WORKSPACE]}
             unpaidIds={[]}
-            monthlyCents={500}
             onDelete={() => undefined}
             onMerge={() => undefined}
           />
@@ -121,7 +121,15 @@ export function ShotFrame(props: { id: ShotId }) {
             onUpload={() => undefined}
           />
         ) : null}
-        {props.id === "passphrase" ? <PassphraseScreen onSubmit={() => undefined} /> : null}
+        {props.id === "passphrase" ? (
+          <PassphraseScreen
+            initialPassphrase="correct horse"
+            initialConfirm="correct horse"
+            initialChecked
+            initialRevealed
+            onSubmit={() => undefined}
+          />
+        ) : null}
         {lock ? (
           <LockScreen
             workspaces={[WORKSPACE]}
@@ -148,6 +156,17 @@ export function ShotFrame(props: { id: ShotId }) {
         {props.id === "pricing-free-first" ? (
           <NewWorkspaceScreen
             quote={{ isFree: true, grandfathered: true, monthlyPriceCents: 0 }}
+            byoQuote={{ isFree: false, grandfathered: false, monthlyPriceCents: 500 }}
+            onCreate={() => undefined}
+          />
+        ) : null}
+        {props.id === "pricing-create-byo" ? (
+          <NewWorkspaceScreen
+            quote={{ isFree: true, grandfathered: true, monthlyPriceCents: 0 }}
+            byoQuote={{ isFree: false, grandfathered: false, monthlyPriceCents: 500 }}
+            initialName="Vacation photos"
+            initialStorage="byo"
+            initialProviderId="aws"
             onCreate={() => undefined}
           />
         ) : null}
@@ -172,9 +191,10 @@ export function ShotFrame(props: { id: ShotId }) {
               },
             ]}
             unpaidIds={["11111111-1111-4111-8111-000000000001"]}
-            monthlyCents={500}
+            additionalMonthlyCents={500}
             onDelete={() => undefined}
             onMerge={() => undefined}
+            onPay={() => undefined}
           />
         ) : null}
       </View>

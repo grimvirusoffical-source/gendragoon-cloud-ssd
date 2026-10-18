@@ -168,7 +168,16 @@ export function MobileRoot(props: {
       <WorkspacesScreen
         workspaces={workspaces}
         unpaidIds={access.unpaidIds}
-        monthlyCents={500}
+        onPay={(id) => {
+          const checkout = "checkoutWorkspaceFee" in client
+            ? (workspaceId: string) => client.checkoutWorkspaceFee(workspaceId)
+            : undefined;
+          void payToRestore({
+            unpaidWorkspaceIds: [id],
+            checkoutWorkspaceFee: checkout,
+            openUrl: (url) => Linking.openURL(url),
+          }).catch(() => undefined);
+        }}
         onDelete={(id) => {
           const next = workspaces.filter((workspace) => workspace.id !== id);
           setWorkspaces(next);

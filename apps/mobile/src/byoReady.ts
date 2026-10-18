@@ -8,6 +8,8 @@ import {
 /**
  * Register, challenge, SigV4 PUT, and verify `{ presignedUrl }` are all present.
  * SFTP, Azure Blob, and WebDAV stay on the coming-soon list.
+ * This path does not open a key envelope and does not merge a manifest.
+ * `ENCRYPTED_WORKSPACE_ENABLED` does not gate it.
  */
 export function byoServerFlowReady(): boolean {
   const client = GenDragoonClient.prototype as unknown as {

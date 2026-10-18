@@ -61,6 +61,22 @@ try {
     await page.goto(`http://127.0.0.1:${port}/index.html?shot=${encodeURIComponent(shot)}`, { waitUntil: "networkidle" });
     const frame = page.getByTestId("shot-ready");
     await frame.waitFor({ timeout: 15000 });
+    await page.evaluate(() => {
+      const root = document.querySelector("[data-testid='shot-ready']");
+      if (!root) return;
+      const nodes = [root, ...root.querySelectorAll("*")];
+      for (let pass = 0; pass < 6; pass += 1) {
+        for (const el of nodes) {
+          if (!(el instanceof HTMLElement)) continue;
+          if (el.scrollHeight > el.clientHeight + 2) {
+            el.style.overflow = "visible";
+            el.style.height = "auto";
+            el.style.maxHeight = "none";
+            el.style.flex = "none";
+          }
+        }
+      }
+    });
     const file = path.join(outDir, `${shot}.png`);
     await frame.screenshot({ path: file });
     written.push(file);
