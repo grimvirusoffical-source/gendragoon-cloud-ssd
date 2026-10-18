@@ -426,3 +426,122 @@ describe("requestDeletionSupport never throws on an unexpected status or body er
     await expectNoSignInAndJobKept(t, deps.secureStore, jobId);
   });
 });
+
+/**
+ * Morgan's fuzz findings on 3c78d74. Each case gives the email fallback (or a
+ * sane already_sent) without throwing, never signs in, and keeps the saved job.
+ */
+describe("requestDeletionSupport fuzz gaps on 3c78d74", () => {
+  const settle = (fn: CoreSupport, jobId: string, deps: Parameters<CoreSupport>[1]) =>
+    fn(jobId, deps).then(
+      (r): SupportResult | { threw: string } => r,
+      (e: unknown) => ({ threw: `${(e as Error)?.name}: ${(e as Error)?.message}` }),
+    );
+
+  it("a SecureStore read that rejects (locked keychain) -> fallback SUPPORT_CONTACT, no throw, zero requests", async () => {
+    const jobId = jobOf("support-received");
+    const t = setup(jobId, { support: [reply("support-received")] });
+    const deps = await t.deps();
+    const locked = {
+      get: async () => { throw new Error("keychain locked"); },
+      set: async () => { throw new Error("keychain locked"); },
+      delete: async () => { throw new Error("keychain locked"); },
+    } as unknown as MemorySecretStore;
+    const result = await settle(requestDeletionSupport(), jobId, { ...deps, secureStore: locked });
+    expect(result).toEqual({ kind: "fallback", contact: SUPPORT_CONTACT });
+    expect(t.srv.calls).toEqual([]);
+    expect(t.signals).toEqual([]);
+    expect(t.sessionCleared).toBe(0);
+    expect(t.firebaseCalls).toBe(0);
+  });
+
+  it("a lone-surrogate jobId (encodeURIComponent URIError) -> fallback SUPPORT_CONTACT, no throw, zero requests", async () => {
+    const badJob = "00000000-0000-4000-8000-00000000000a\uD800";
+    expect(() => encodeURIComponent(badJob)).toThrow(URIError);
+    const t = setup(badJob, { support: [reply("support-received")] });
+    const deps = await t.deps();
+    // A store that hands back the raw string, so the saved id matches and core reaches the client.
+    const raw = new Map<string, string>([[JOB_KEY, badJob], [TOKEN_KEY, STATUS_TOKEN]]);
+    const store = { get: async (k: string) => raw.get(k) ?? null, set: async () => undefined, delete: async () => undefined } as unknown as MemorySecretStore;
+    const result = await settle(requestDeletionSupport(), badJob, { ...deps, secureStore: store });
+    expect(result).toEqual({ kind: "fallback", contact: SUPPORT_CONTACT });
+    const direct = await t.client.postDeletionSupport(badJob, STATUS_TOKEN).then((r) => r, (e: unknown) => ({ threw: String(e) }));
+    expect(direct).toEqual({ kind: "fallback", contact: SUPPORT_CONTACT });
+    expect(t.srv.calls).toEqual([]);
+    expect(t.signals).toEqual([]);
+    expect(t.sessionCleared).toBe(0);
+    expect(t.firebaseCalls).toBe(0);
+  });
+
+  it("429 retryAfterSec: missing, -5, 0 and Infinity -> 60; 999999 -> 86400 (DERIVED bodies)", async () => {
+    const jobId = jobOf("support-rate-limited");
+    const cases: Array<[string, Record<string, unknown>, number]> = [
+      ["-5", { error: "rate_limited", retryAfterSec: -5 }, 60],
+      ["0", { error: "rate_limited", retryAfterSec: 0 }, 60],
+      // JSON cannot carry Infinity; 1e999 parses to Infinity.
+      ["Infinity", { error: "rate_limited", retryAfterSec: "__INF__" }, 60],
+      ["missing", { error: "rate_limited" }, 60],
+      ["999999", { error: "rate_limited", retryAfterSec: 999999 }, 86400],
+    ];
+    for (const [label, body, expected] of cases) {
+      const t = setup(jobId, { support: [{ status: 500 }] });
+      const client = new GenDragoonClient({
+        baseUrl: BASE,
+        getToken: () => { throw new Error("signed out"); },
+        fetch: async (input, init) => {
+          await t.srv.fetchImpl(input, init);
+          return new Response(JSON.stringify(body).replace('"__INF__"', "1e999"), { status: 429, headers: { "content-type": "application/json" } });
+        },
+      });
+      const deps = { ...(await t.deps()), client };
+      const result = await settle(requestDeletionSupport(), jobId, deps);
+      expect(result, label).toEqual({ kind: "already_sent", retryAfterSec: expected });
+      expect(t.srv.calls, label).toHaveLength(1);
+      await expectNoSignInAndJobKept(t, deps.secureStore, jobId);
+    }
+  });
+
+  it("409 support_not_needed with an unrecognizable refresh body -> fallback SUPPORT_CONTACT (DERIVED bodies)", async () => {
+    const jobId = jobOf("support-not-needed");
+    const running = fx("status-running").response.body as Record<string, unknown>;
+    const bodies: unknown[] = [
+      null,
+      [],
+      "running",
+      {},
+      { ...running, jobId, status: 7 },
+      { ...running, jobId, status: "exploded" },
+      { ...running, jobId: "00000000-0000-4000-8000-0000000000ff" },
+      { ...running, jobId: undefined },
+    ];
+    for (const body of bodies) {
+      const t = setup(jobId, { support: [reply("support-not-needed")], status: [{ status: 200, body }] });
+      const deps = await t.deps();
+      const result = await settle(requestDeletionSupport(), jobId, deps);
+      expect(result, JSON.stringify(body)).toEqual({ kind: "fallback", contact: SUPPORT_CONTACT });
+      expect(t.srv.calls.map((c) => c.method)).toEqual(["POST", "GET"]);
+      await expectNoSignInAndJobKept(t, deps.secureStore, jobId);
+    }
+  });
+
+  it("ruling: 409 then a refresh showing the job failed -> fallback; queued, running and done stay not_needed", async () => {
+    const jobId = jobOf("support-not-needed");
+    const withJob = (name: string) => ({ ...(fx(name).response.body as object), jobId });
+    for (const name of ["status-failed", "status-failed-not-retryable"]) {
+      const t = setup(jobId, { support: [reply("support-not-needed")], status: [{ status: 200, body: withJob(name) }] });
+      const deps = await t.deps();
+      const result = await settle(requestDeletionSupport(), jobId, deps);
+      expect(result, name).toEqual({ kind: "fallback", contact: SUPPORT_CONTACT });
+      expect(t.srv.calls.map((c) => c.method)).toEqual(["POST", "GET"]);
+      await expectNoSignInAndJobKept(t, deps.secureStore, jobId);
+    }
+    for (const name of ["status-queued", "status-running", "status-done"]) {
+      const body = withJob(name);
+      const t = setup(jobId, { support: [reply("support-not-needed")], status: [{ status: 200, body }] });
+      const deps = await t.deps();
+      const result = await settle(requestDeletionSupport(), jobId, deps);
+      expect(result, name).toEqual({ kind: "not_needed", status: body });
+      await expectNoSignInAndJobKept(t, deps.secureStore, jobId);
+    }
+  });
+});
