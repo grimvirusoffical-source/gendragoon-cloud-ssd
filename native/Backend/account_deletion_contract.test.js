@@ -958,6 +958,30 @@ test("contract 19: the 5 support fixtures match the spec and regenerate byte-for
  }finally{fs.rmSync(out,{recursive:true,force:true});}
 });
 
+test("contract 19b: support-unauthorized.json - no Authorization header at all, 401 {error:'unauthorized'}, nothing token-shaped, regenerates byte-for-byte",()=>{
+ const name="support-unauthorized";
+ const file=path.join(REPO,"fixtures/account-deletion",name+".json");
+ const raw=fs.readFileSync(file,"utf8");
+ const f=JSON.parse(raw);
+ assert.equal(f.request.method,"POST");
+ assert.match(f.request.path,/^\/v2\/account\/deletions\/[0-9a-f-]{36}\/support-request$/);
+ assert.equal(f.request.body,null,"the client sends no body");
+ assert.deepEqual(Object.keys(f.request.headers),[],"no authorization header, not even <redacted>");
+ assert.equal(f.response.status,401);
+ assert.deepEqual(f.response.body,{error:"unauthorized"});
+ assert.equal(/[A-Za-z0-9_-]{43}/.test(raw),false,"no statusToken-shaped string anywhere in the fixture");
+ assert.equal(/idtoken/i.test(raw),false,"no Firebase ID token");
+ assert.equal(/bearer/i.test(raw),false,"no Bearer credential");
+ assert.equal(/authorization/i.test(raw),false,"no authorization key anywhere");
+ const out=fs.mkdtempSync(path.join(os.tmpdir(),"gd-support-unauth-fx-"));
+ try{
+  const run=spawnSync(process.execPath,[path.join(__dirname,"scripts/export_account_deletion_fixtures.js"),out],{encoding:"utf8"});
+  assert.equal(run.status,0,run.stderr);
+  const fresh=fs.readFileSync(path.join(out,"account-deletion",name+".json"));
+  assert.ok(fresh.equals(fs.readFileSync(file)),name+".json does not regenerate byte-for-byte");
+ }finally{fs.rmSync(out,{recursive:true,force:true});}
+});
+
 test("contract 20: 202 {status:'received', requestId} for a failed job; a repeat is 202 with the same requestId",async()=>{
  const {h,jobId,statusToken}=await failedJob();
  try{
@@ -1167,6 +1191,28 @@ test("contract 27: production refuses to start without a valid Discord webhook U
   assert.equal(output.includes("API ready"),false);
   assert.equal(output.includes(FAKE_HOOK_SECRET),false);
   assert.equal(output.includes("evil.example"),false);
+ }
+});
+
+test("contract 27b: on Cloud Run (K_SERVICE) with NODE_ENV=test, an invalid webhook URL stops the real server without printing it",()=>{
+ const marker="InvalidHookMarker_"+"q".repeat(10);
+ const invalid=[
+  ["non-https",["http:","","discord.com","api","webhooks",FAKE_HOOK_ID,marker].join("/")],
+  ["wrong host",["https:","","evil.example","api","webhooks",FAKE_HOOK_ID,marker].join("/")],
+  ["query",["https:","","discord.com","api","webhooks",FAKE_HOOK_ID,FAKE_HOOK_SECRET].join("/")+"?wait="+marker],
+ ];
+ for(const [label,value] of invalid){
+  const env={PATH:process.env.PATH,K_SERVICE:"gendragoon-free",NODE_ENV:"test",PORT:"0",
+   CUSTOMER_BUCKET:"gendragoon-test-placeholder",STORAGE_PROJECT_ID:"gendragood-ssd",SUPPORT_DISCORD_WEBHOOK_URL:value};
+  const run=spawnSync(process.execPath,["-e","require('./free_server.js').start()"],{cwd:__dirname,env,encoding:"utf8",timeout:8000});
+  const output=(run.stdout||"")+(run.stderr||"");
+  assert.equal(run.status,1,label+": exits 1 before listening");
+  assert.match(output,/SUPPORT_DISCORD_WEBHOOK_URL/,label+": names the variable");
+  assert.equal(output.includes(value),false,label+": never prints the value");
+  assert.equal(output.includes(marker),false,label);
+  assert.equal(output.includes(FAKE_HOOK_SECRET),false,label);
+  assert.equal(output.includes("evil.example"),false,label);
+  assert.equal(output.includes("API ready"),false,label+": never listens");
  }
 });
 
