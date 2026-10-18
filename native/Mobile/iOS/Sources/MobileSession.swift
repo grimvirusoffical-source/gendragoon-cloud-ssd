@@ -5,6 +5,27 @@ import Security
 import GoogleSignIn
 
 private struct StoredSession:Codable {let uid:String;let email:String;let refreshToken:String}
+private enum ByoVault {
+    static func clear(){
+        let query:[String:Any]=[kSecClass as String:kSecClassGenericPassword,kSecAttrService as String:LocalWipePlan.byoService]
+        SecItemDelete(query as CFDictionary)
+    }
+    /// S3-compatible keys stay in the keychain. They are never sent to the server.
+    static func save(endpoint:String,bucket:String,access:String,secret:String) throws {
+        guard !endpoint.isEmpty,!bucket.isEmpty,!access.isEmpty,!secret.isEmpty else {
+            throw GDTransferError(message:"Endpoint, bucket, and keys are required.",status:0)
+        }
+        let data=try JSONSerialization.data(withJSONObject:["endpoint":endpoint,"bucket":bucket,"accessKey":access,"secret":secret])
+        let query:[String:Any]=[kSecClass as String:kSecClassGenericPassword,kSecAttrService as String:LocalWipePlan.byoService,kSecAttrAccount as String:"s3"]
+        SecItemDelete(query as CFDictionary)
+        var add=query
+        add[kSecValueData as String]=data
+        add[kSecAttrAccessible as String]=kSecAttrAccessibleWhenUnlockedThisDeviceOnly
+        guard SecItemAdd(add as CFDictionary,nil)==errSecSuccess else {
+            throw GDTransferError(message:"Secure storage is unavailable.",status:0)
+        }
+    }
+}
 private enum SessionVault {
     static let service="app.gendragoon.cloudssd.mobile.auth"
     static var query:[String:Any]{[kSecClass as String:kSecClassGenericPassword,kSecAttrService as String:service,kSecAttrAccount as String:"firebase-refresh"]}
@@ -32,6 +53,9 @@ private enum SessionVault {
     @Published private(set) var email=""
     @Published var status="Opening your private cloud…"
     @Published var busy=false
+    @Published var accountDeleted=false
+    /// Set before any sign-out when a deletion receipt is already in the keychain.
+    @Published var resumedDeletion:DeletionReceipt?
     private var bearer="",refresh=""
     private var expires=Date.distantPast
     private var renewal:Task<String,Error>?
@@ -45,6 +69,12 @@ private enum SessionVault {
     private var apiKey:String {configuration["API_KEY"] as? String ?? ""}
     func start() async {
         guard stage == .loading else{return}
+        if let receipt=DeletionReceiptVault.load(),AccountDeletion.resumesBeforeSignOut(receipt) {
+            resumedDeletion=receipt
+            stage = .ready
+            status="Finishing account deletion…"
+            return
+        }
         guard configuration["PROJECT_ID"] as? String=="gendragoonssd",
               configuration["BUNDLE_ID"] as? String==Bundle.main.bundleIdentifier else {
             stage = .login;status="Mobile sign-in configuration is missing or mismatched.";return
@@ -58,28 +88,43 @@ private enum SessionVault {
         guard !busy else{return};busy=true
         Task {
             defer{busy=false}
-            do {
-                guard let clientID=configuration["CLIENT_ID"] as? String,!clientID.isEmpty,
-                      let scene=UIApplication.shared.connectedScenes.compactMap({$0 as? UIWindowScene}).first(where:{$0.activationState == .foregroundActive}),
-                      var controller=scene.windows.first(where:{$0.isKeyWindow})?.rootViewController else {
-                    throw GDTransferError(message:"Google sign-in is not ready in this window.",status:0)
-                }
-                while let presented=controller.presentedViewController{controller=presented}
-                GIDSignIn.sharedInstance.configuration=GIDConfiguration(clientID:clientID)
-                let signed=try await GIDSignIn.sharedInstance.signIn(withPresenting:controller)
-                guard let googleToken=signed.user.idToken?.tokenString else{throw GDTransferError(message:"Google did not return a valid sign-in.",status:401)}
-                var body=URLComponents();body.queryItems=[URLQueryItem(name:"id_token",value:googleToken),URLQueryItem(name:"providerId",value:"google.com")]
-                let data=try JSONSerialization.data(withJSONObject:["postBody":body.percentEncodedQuery ?? "","requestUri":"https://gendragoonssd.firebaseapp.com","returnSecureToken":true])
-                let result=try await googleRequest("https://identitytoolkit.googleapis.com/v1/accounts:signInWithIdp?key="+apiKey,body:data)
-                guard result["providerId"] as? String=="google.com",result["needConfirmation"] as? Bool != true,
-                      let id=result["localId"] as? String,!id.isEmpty,let access=result["idToken"] as? String,
-                      let refresh=result["refreshToken"] as? String else {throw GDTransferError(message:"Google account could not be verified.",status:401)}
-                generation=UUID();uid=id;email=result["email"] as? String ?? "Google account"
-                self.bearer=access;self.refresh=refresh;expires=Date().addingTimeInterval(3300)
-                try SessionVault.save(StoredSession(uid:uid,email:email,refreshToken:refresh))
-                try await checkTerms()
-            }catch{status=error.localizedDescription;if uid.isEmpty{stage = .login}}
+            do { _=try await completeGoogleSignIn();try await checkTerms() }
+            catch{status=error.localizedDescription;if uid.isEmpty{stage = .login}}
         }
+    }
+    /// New Google sign-in. Does not change the terms stage. The returned ID token is the one just issued.
+    func reauthenticate() async throws -> String {
+        let token=try await completeGoogleSignIn()
+        guard CloudSignals.freshSignIn(token,now:Date()) else {
+            throw GDTransferError(message:"Sign in again. The server only accepts a sign-in from the last 5 minutes.",status:401)
+        }
+        return token
+    }
+    private func completeGoogleSignIn() async throws -> String {
+        guard let clientID=configuration["CLIENT_ID"] as? String,!clientID.isEmpty,
+              let scene=UIApplication.shared.connectedScenes.compactMap({$0 as? UIWindowScene}).first(where:{$0.activationState == .foregroundActive}),
+              var controller=scene.windows.first(where:{$0.isKeyWindow})?.rootViewController else {
+            throw GDTransferError(message:"Google sign-in is not ready in this window.",status:0)
+        }
+        while let presented=controller.presentedViewController{controller=presented}
+        GIDSignIn.sharedInstance.configuration=GIDConfiguration(clientID:clientID)
+        let signed=try await GIDSignIn.sharedInstance.signIn(withPresenting:controller)
+        guard let googleToken=signed.user.idToken?.tokenString else{throw GDTransferError(message:"Google did not return a valid sign-in.",status:401)}
+        var body=URLComponents();body.queryItems=[URLQueryItem(name:"id_token",value:googleToken),URLQueryItem(name:"providerId",value:"google.com")]
+        let data=try JSONSerialization.data(withJSONObject:["postBody":body.percentEncodedQuery ?? "","requestUri":"https://gendragoonssd.firebaseapp.com","returnSecureToken":true])
+        let result=try await googleRequest("https://identitytoolkit.googleapis.com/v1/accounts:signInWithIdp?key="+apiKey,body:data)
+        guard result["providerId"] as? String=="google.com",result["needConfirmation"] as? Bool != true,
+              let id=result["localId"] as? String,!id.isEmpty,let access=result["idToken"] as? String,
+              let refresh=result["refreshToken"] as? String else {throw GDTransferError(message:"Google account could not be verified.",status:401)}
+        let nextEmail=result["email"] as? String
+        let expectedEmail=email.contains("@") ? email : ""
+        if !uid.isEmpty && !AccountMatch.same(expectedUid:uid,expectedEmail:expectedEmail,actualUid:id,actualEmail:nextEmail) {
+            throw GDTransferError(message:AccountDeletion.differentAccount,status:401)
+        }
+        generation=UUID();uid=id;email=nextEmail ?? "Google account"
+        self.bearer=access;self.refresh=refresh;expires=Date().addingTimeInterval(3300)
+        try SessionVault.save(StoredSession(uid:uid,email:email,refreshToken:refresh))
+        return access
     }
     private func googleRequest(_ text:String,body:Data,form:Bool=false) async throws->[String:Any]{
         guard let url=URL(string:text),url.scheme=="https" else{throw GDTransferError(message:"Invalid authentication endpoint.",status:0)}
@@ -143,5 +188,31 @@ private enum SessionVault {
             try await checkTerms()
         }catch{status=error.localizedDescription}}
     }
-    func signOut(){renewal?.cancel();renewal=nil;generation=UUID();bearer="";refresh="";uid="";email="";expires = .distantPast;SessionVault.clear();GIDSignIn.sharedInstance.signOut();stage = .login;status="Signed out."}
+    func signOut(){renewal?.cancel();renewal=nil;generation=UUID();bearer="";refresh="";uid="";email="";expires = .distantPast;resumedDeletion=nil;SessionVault.clear();GIDSignIn.sharedInstance.signOut();stage = .login;status="Signed out."}
+    /// Drops the Firebase session only. A deletion job keeps its receipt and keeps polling.
+    func clearSessionKeepingDeletion(){
+        renewal?.cancel();renewal=nil;generation=UUID();bearer="";refresh="";uid="";email="";expires = .distantPast
+        SessionVault.clear();GIDSignIn.sharedInstance.signOut()
+        status="Signed out. Account deletion is still finishing."
+    }
+    func saveByo(endpoint:String,bucket:String,access:String,secret:String) throws {
+        guard ByoFeature.serverFlowEnabled else {
+            throw GDTransferError(message:"Bring-your-own storage is not available.",status:0)
+        }
+        try ByoVault.save(endpoint:endpoint,bucket:bucket,access:access,secret:secret)
+    }
+    /// Clears the session, saved workspace selection, transfer checkpoints, exports and future bring-your-own secrets.
+    /// The done screen stays up until `returnToSignIn`. Upload code recreates its cache directory on the next sign-in.
+    func eraseLocalData() throws {
+        renewal?.cancel();renewal=nil;generation=UUID();bearer="";refresh="";expires = .distantPast
+        SessionVault.clear();ByoVault.clear();DeletionReceiptVault.clear();GIDSignIn.sharedInstance.signOut();resumedDeletion=nil
+        let defaults=UserDefaults.standard
+        for key in defaults.dictionaryRepresentation().keys where key.hasPrefix(LocalWipePlan.defaultsPrefix){defaults.removeObject(forKey:key)}
+        let caches=FileManager.default.urls(for:.cachesDirectory,in:.userDomainMask)[0].appendingPathComponent(LocalWipePlan.cacheDirectory,isDirectory:true)
+        if FileManager.default.fileExists(atPath:caches.path){try FileManager.default.removeItem(at:caches)}
+        let exports=FileManager.default.urls(for:.documentDirectory,in:.userDomainMask)[0].appendingPathComponent(LocalWipePlan.exportsDirectory,isDirectory:true)
+        if FileManager.default.fileExists(atPath:exports.path){try FileManager.default.removeItem(at:exports)}
+        accountDeleted=true
+    }
+    func returnToSignIn(){accountDeleted=false;signOut()}
 }

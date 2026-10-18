@@ -36,12 +36,38 @@ for mode in ['Debug','Release']:
  settings={'CLANG_ENABLE_MODULES':'YES','CLANG_ENABLE_OBJC_ARC':'YES','IPHONEOS_DEPLOYMENT_TARGET':'17.0','SDKROOT':'iphoneos','SWIFT_VERSION':'5.0','SWIFT_OPTIMIZATION_LEVEL':'-Onone' if mode=='Debug' else '-O','DEBUG_INFORMATION_FORMAT':'dwarf' if mode=='Debug' else 'dwarf-with-dsym'}
  project_configs.append(obj('proj-'+mode,'XCBuildConfiguration',name=mode,buildSettings=settings))
  settings={'ASSETCATALOG_COMPILER_APPICON_NAME':'AppIcon','PRODUCT_BUNDLE_IDENTIFIER':bundle,'PRODUCT_NAME':name,'INFOPLIST_FILE':'Info.plist','GENERATE_INFOPLIST_FILE':'NO','CODE_SIGN_STYLE':'Automatic','DEVELOPMENT_TEAM':'NZPU8H843J','TARGETED_DEVICE_FAMILY':'1,2','SUPPORTED_PLATFORMS':'iphoneos iphonesimulator','SUPPORTS_MACCATALYST':'NO','LD_RUNPATH_SEARCH_PATHS':['$(inherited)','@executable_path/Frameworks'],'OTHER_LDFLAGS':['$(inherited)','-ObjC'],'SWIFT_EMIT_LOC_STRINGS':'YES','SWIFT_VERSION':'5.0'}
- if mode=='Debug':settings['SWIFT_ACTIVE_COMPILATION_CONDITIONS']='DEBUG'
+ if mode=='Debug':
+  settings['SWIFT_ACTIVE_COMPILATION_CONDITIONS']='DEBUG'
+  settings['ENABLE_TESTABILITY']='YES'
  target_configs.append(obj('target-'+mode,'XCBuildConfiguration',name=mode,buildSettings=settings))
 tcl=obj('target-config-list','XCConfigurationList',buildConfigurations=target_configs,defaultConfigurationIsVisible='0',defaultConfigurationName='Release')
 pcl=obj('project-config-list','XCConfigurationList',buildConfigurations=project_configs,defaultConfigurationIsVisible='0',defaultConfigurationName='Release')
 target=obj('target','PBXNativeTarget',name=name,productName=name,productType='com.apple.product-type.application',productReference=product,buildConfigurationList=tcl,buildPhases=[sourcephase,frameworkphase,resourcephase],buildRules=[],dependencies=[],packageProductDependencies=pdeps)
-project=obj('project','PBXProject',attributes={'BuildIndependentTargetsInParallel':'YES','LastUpgradeCheck':'2700','TargetAttributes':{target:{'CreatedOnToolsVersion':'27.0','DevelopmentTeam':'NZPU8H843J'}}},buildConfigurationList=pcl,compatibilityVersion='Xcode 14.0',developmentRegion='en',hasScannedForEncodings='0',knownRegions=['en','Base'],mainGroup=group,productRefGroup=pg,projectDirPath='',projectRoot='',targets=[target],packageReferences=[package,zip_package])
+def test_target(label,product_name,product_type,sources,settings_extra,host):
+ configs=[]
+ for mode in ['Debug','Release']:
+  settings={'PRODUCT_BUNDLE_IDENTIFIER':bundle+'.'+label,'PRODUCT_NAME':product_name,'GENERATE_INFOPLIST_FILE':'YES','CODE_SIGN_STYLE':'Automatic','DEVELOPMENT_TEAM':'NZPU8H843J','TARGETED_DEVICE_FAMILY':'1,2','SUPPORTED_PLATFORMS':'iphoneos iphonesimulator','IPHONEOS_DEPLOYMENT_TARGET':'17.0','SDKROOT':'iphoneos','SWIFT_VERSION':'5.0','LD_RUNPATH_SEARCH_PATHS':['$(inherited)','@executable_path/Frameworks','@loader_path/Frameworks'],'TEST_TARGET_NAME':name}
+  settings.update(settings_extra)
+  if mode=='Debug':settings['SWIFT_ACTIVE_COMPILATION_CONDITIONS']='DEBUG'
+  configs.append(obj(label+'-'+mode,'XCBuildConfiguration',name=mode,buildSettings=settings))
+ cl=obj(label+'-config-list','XCConfigurationList',buildConfigurations=configs,defaultConfigurationIsVisible='0',defaultConfigurationName='Release')
+ refs=[];builds=[]
+ for p in sources:
+  f=obj(label+' '+p,'PBXFileReference',lastKnownFileType='sourcecode.swift',path=p,sourceTree='<group>')
+  refs.append(f);builds.append(obj(label+' build '+p,'PBXBuildFile',fileRef=f))
+ phase=obj(label+'-sources','PBXSourcesBuildPhase',buildActionMask='2147483647',files=builds,runOnlyForDeploymentPostprocessing='0')
+ prod=obj(label+'-product','PBXFileReference',explicitFileType='wrapper.cfbundle',includeInIndex='0',path=product_name+'.xctest',sourceTree='BUILT_PRODUCTS_DIR')
+ proxy=obj(label+'-proxy','PBXContainerItemProxy',containerPortal=uid('project'),proxyType='1',remoteGlobalIDString=target,remoteInfo=name)
+ dep=obj(label+'-dep','PBXTargetDependency',target=target,targetProxy=proxy)
+ native=obj(label+'-target','PBXNativeTarget',name=product_name,productName=product_name,productType=product_type,productReference=prod,buildConfigurationList=cl,buildPhases=[phase],buildRules=[],dependencies=[dep],packageProductDependencies=[])
+ return native,prod,refs
+unit_sources=sorted(p.relative_to(root).as_posix() for p in (root/'Tests').glob('*.swift'))
+ui_sources=sorted(p.relative_to(root).as_posix() for p in (root/'UITests').glob('*.swift'))
+unit,unit_product,unit_refs=test_target('unit','GenDragoonMobileTests','com.apple.product-type.bundle.unit-test',unit_sources,{'TEST_HOST':'$(BUILT_PRODUCTS_DIR)/'+name+'.app/'+name,'BUNDLE_LOADER':'$(TEST_HOST)'},True)
+ui,ui_product,ui_refs=test_target('ui','GenDragoonMobileUITests','com.apple.product-type.bundle.ui-testing',ui_sources,{},False)
+objects[pg]['children']=[product,unit_product,ui_product]
+objects[group]['children']=sref+rref+unit_refs+ui_refs+[plist,pg]
+project=obj('project','PBXProject',attributes={'BuildIndependentTargetsInParallel':'YES','LastUpgradeCheck':'2700','TargetAttributes':{target:{'CreatedOnToolsVersion':'27.0','DevelopmentTeam':'NZPU8H843J'}}},buildConfigurationList=pcl,compatibilityVersion='Xcode 14.0',developmentRegion='en',hasScannedForEncodings='0',knownRegions=['en','Base'],mainGroup=group,productRefGroup=pg,projectDirPath='',projectRoot='',targets=[target,unit,ui],packageReferences=[package,zip_package])
 def serialize(v):
  if isinstance(v,dict):return '{ '+ ' '.join(json.dumps(k)+ ' = '+serialize(x)+';' for k,x in v.items())+' }'
  if isinstance(v,list):return '('+', '.join(serialize(x) for x in v)+')'
@@ -49,6 +75,34 @@ def serialize(v):
 p=root/(name+'.xcodeproj');p.mkdir(exist_ok=True)
 (p/'project.pbxproj').write_text('// !$*UTF8*$!\n'+serialize({'archiveVersion':'1','classes':{},'objectVersion':'56','objects':objects,'rootObject':project})+'\n')
 schemes=p/'xcshareddata/xcschemes';schemes.mkdir(parents=True,exist_ok=True)
-ref=f'<BuildableReference BuildableIdentifier="primary" BlueprintIdentifier="{target}" BuildableName="{name}.app" BlueprintName="{name}" ReferencedContainer="container:{name}.xcodeproj"/>'
-(schemes/(name+'.xcscheme')).write_text(f'''<?xml version="1.0" encoding="UTF-8"?><Scheme LastUpgradeVersion="2700" version="1.3"><BuildAction parallelizeBuildables="YES" buildImplicitDependencies="YES"><BuildActionEntries><BuildActionEntry buildForTesting="YES" buildForRunning="YES" buildForProfiling="YES" buildForArchiving="YES" buildForAnalyzing="YES">{ref}</BuildActionEntry></BuildActionEntries></BuildAction><LaunchAction buildConfiguration="Debug" selectedDebuggerIdentifier="Xcode.DebuggerFoundation.Debugger.LLDB" selectedLauncherIdentifier="Xcode.IDEFoundation.Launcher.LLDB" launchStyle="0" useCustomWorkingDirectory="NO" ignoresPersistentStateOnLaunch="NO" debugDocumentVersioning="YES" allowLocationSimulation="YES"><BuildableProductRunnable runnableDebuggingMode="0">{ref}</BuildableProductRunnable></LaunchAction><ProfileAction buildConfiguration="Release" shouldUseLaunchSchemeArgsEnv="YES" savedToolIdentifier="" useCustomWorkingDirectory="NO" debugDocumentVersioning="YES"><BuildableProductRunnable runnableDebuggingMode="0">{ref}</BuildableProductRunnable></ProfileAction><AnalyzeAction buildConfiguration="Debug"/><ArchiveAction buildConfiguration="Release" revealArchiveInOrganizer="YES"/></Scheme>''')
-print('XCODE_PROJECT_CREATED',p,'SOURCE_FILES',len(sources),'PACKAGE','GoogleSignIn 10.0.0')
+def ref_for(blueprint,buildable,blueprint_name):
+ return f'<BuildableReference BuildableIdentifier="primary" BlueprintIdentifier="{blueprint}" BuildableName="{buildable}" BlueprintName="{blueprint_name}" ReferencedContainer="container:{name}.xcodeproj"/>'
+ref=ref_for(target,name+'.app',name)
+unit_ref=ref_for(unit,'GenDragoonMobileTests.xctest','GenDragoonMobileTests')
+ui_ref=ref_for(ui,'GenDragoonMobileUITests.xctest','GenDragoonMobileUITests')
+(schemes/(name+'.xcscheme')).write_text(f'''<?xml version="1.0" encoding="UTF-8"?>
+<Scheme LastUpgradeVersion="2700" version="1.7">
+<BuildAction parallelizeBuildables="YES" buildImplicitDependencies="YES">
+<BuildActionEntries>
+<BuildActionEntry buildForTesting="YES" buildForRunning="YES" buildForProfiling="YES" buildForArchiving="YES" buildForAnalyzing="YES">{ref}</BuildActionEntry>
+<BuildActionEntry buildForTesting="YES" buildForRunning="NO" buildForProfiling="NO" buildForArchiving="NO" buildForAnalyzing="NO">{unit_ref}</BuildActionEntry>
+<BuildActionEntry buildForTesting="YES" buildForRunning="NO" buildForProfiling="NO" buildForArchiving="NO" buildForAnalyzing="NO">{ui_ref}</BuildActionEntry>
+</BuildActionEntries>
+</BuildAction>
+<TestAction buildConfiguration="Debug" selectedDebuggerIdentifier="Xcode.DebuggerFoundation.Debugger.LLDB" selectedLauncherIdentifier="Xcode.IDEFoundation.Launcher.LLDB" shouldUseLaunchSchemeArgsEnv="YES">
+<Testables>
+<TestableReference skipped="NO">{unit_ref}</TestableReference>
+<TestableReference skipped="NO">{ui_ref}</TestableReference>
+</Testables>
+</TestAction>
+<LaunchAction buildConfiguration="Debug" selectedDebuggerIdentifier="Xcode.DebuggerFoundation.Debugger.LLDB" selectedLauncherIdentifier="Xcode.IDEFoundation.Launcher.LLDB" launchStyle="0" useCustomWorkingDirectory="NO" ignoresPersistentStateOnLaunch="NO" debugDocumentVersioning="YES" allowLocationSimulation="YES">
+<BuildableProductRunnable runnableDebuggingMode="0">{ref}</BuildableProductRunnable>
+</LaunchAction>
+<ProfileAction buildConfiguration="Release" shouldUseLaunchSchemeArgsEnv="YES" savedToolIdentifier="" useCustomWorkingDirectory="NO" debugDocumentVersioning="YES">
+<BuildableProductRunnable runnableDebuggingMode="0">{ref}</BuildableProductRunnable>
+</ProfileAction>
+<AnalyzeAction buildConfiguration="Debug"/>
+<ArchiveAction buildConfiguration="Release" revealArchiveInOrganizer="YES"/>
+</Scheme>
+''')
+print('XCODE_PROJECT_CREATED',p,'SOURCE_FILES',len(sources),'UNIT_TESTS',len(unit_sources),'UI_TESTS',len(ui_sources),'PACKAGE','GoogleSignIn 10.0.0')
