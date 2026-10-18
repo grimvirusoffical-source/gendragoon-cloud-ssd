@@ -19,7 +19,7 @@ final class AccountLogicTests: XCTestCase {
     }
 
     func testParsesRealStatusJson() throws {
-        XCTAssertEqual(BackendFixtures.accountDeletionSHA,"9d0f056")
+        XCTAssertEqual(BackendFixtures.accountDeletionSHA,"fff0a84")
         let created=AccountHttp.parse(status:202,data:Data(BackendFixtures.body("delete202").utf8))
         XCTAssertEqual(created.jobStatus,"deleting")
         XCTAssertTrue(AccountDeletion.validJob(created.jobId ?? ""))
@@ -174,28 +174,38 @@ final class AccountLogicTests: XCTestCase {
         XCTAssertFalse(flow.requestsWipe())
     }
 
-    func testFailedRetryableFalseClearsReceiptOnly() {
-        var flow=ready()
-        flow.onDeleteHttp(status:202,jobId:"job_dead",errorCode:nil,statusToken:token)
-        flow.onPollHttp(status:200,jobStatus:"failed",errorCode:nil,retryable:false)
+    func testFailedRetryableFalseClearsReceiptOnly() async {
+        let dead=fixture("status-failed-not-retryable")
+        XCTAssertEqual(dead.status,200)
+        XCTAssertEqual(dead.jobStatus,"failed")
+        XCTAssertEqual(dead.retryable,false)
+        XCTAssertEqual(BackendFixtures.requestPath(area:"account-deletion",name:"status-failed-not-retryable"),"/v2/account/deletions/00000000-0000-4000-8000-000000000009")
+        var flow=AccountDeletion.resume(DeletionReceipt.of(jobId:dead.jobId ?? "",statusToken:token))
+        let script=ScriptedDeletionTransport()
+        script.respond(dead)
+        await flow.pollThrough(script)
         XCTAssertEqual(flow.step,.failed)
         XCTAssertFalse(flow.dropReceipt)
         XCTAssertTrue(flow.showSupport)
         XCTAssertFalse(flow.offersRetry())
         XCTAssertTrue(flow.canDismiss())
-        XCTAssertEqual(flow.jobId,"job_dead")
+        XCTAssertEqual(flow.jobId,"00000000-0000-4000-8000-000000000009")
         XCTAssertEqual(flow.statusToken,token)
         XCTAssertFalse(flow.requestsWipe())
+        XCTAssertTrue(SupportContact.mailto(jobId:flow.jobId)?.absoluteString.contains("Account%20deletion%20"+(dead.jobId ?? "")) ?? false)
         XCTAssertTrue(flow.dismissError())
         XCTAssertTrue(flow.dropReceipt)
         XCTAssertNil(flow.jobId)
         XCTAssertFalse(flow.requestsWipe())
-        var retryable=ready()
-        retryable.onDeleteHttp(status:202,jobId:"job_live",errorCode:nil,statusToken:token)
-        retryable.onPollHttp(status:200,jobStatus:"failed",errorCode:nil,retryable:true)
+        let live=fixture("status-failed")
+        var retryable=AccountDeletion.resume(DeletionReceipt.of(jobId:live.jobId ?? "",statusToken:token))
+        let liveScript=ScriptedDeletionTransport()
+        liveScript.respond(live)
+        await retryable.pollThrough(liveScript)
+        XCTAssertEqual(live.retryable,true)
         XCTAssertFalse(retryable.dropReceipt)
         XCTAssertFalse(retryable.showSupport)
-        XCTAssertEqual(retryable.jobId,"job_live")
+        XCTAssertEqual(retryable.jobId,live.jobId)
         retryable.retry()
         XCTAssertEqual(retryable.step,.reauth)
         XCTAssertTrue(retryable.acceptFreshSignIn(authTime:Date(timeIntervalSince1970:2),now:Date(timeIntervalSince1970:2)))
@@ -289,10 +299,17 @@ final class AccountLogicTests: XCTestCase {
         unsigned.onPollHttp(status:401,jobStatus:nil,errorCode:nil,retryable:nil)
         XCTAssertEqual(unsigned.step,.reauth)
         XCTAssertNotEqual(unsigned.step,.signedOut)
+        XCTAssertEqual(unsigned.message,"Sign in again to continue.")
+        XCTAssertFalse(unsigned.keepsPolling())
+        XCTAssertFalse(unsigned.clearSession)
+        XCTAssertTrue(unsigned.repeatDelete)
         XCTAssertEqual(unsigned.jobId,"job_auth")
         XCTAssertEqual(unsigned.statusToken,token)
         XCTAssertFalse(unsigned.requestsWipe())
         XCTAssertFalse(unsigned.allowsDelete())
+        unsigned.onPollHttp(status:200,jobStatus:"done",errorCode:nil,retryable:false)
+        XCTAssertEqual(unsigned.step,.reauth)
+        XCTAssertFalse(unsigned.requestsWipe())
     }
 
     func testReauthRequiredRejectsADifferentAccount() {
@@ -608,11 +625,34 @@ final class AccountLogicTests: XCTestCase {
         blank.respond(unauthorized)
         await signIn.pollThrough(blank)
         XCTAssertEqual(signIn.step,.reauth)
+        XCTAssertEqual(signIn.message,"Sign in again to continue.")
         XCTAssertFalse(signIn.keepsPolling())
         XCTAssertFalse(signIn.clearSession)
+        XCTAssertTrue(signIn.repeatDelete)
         XCTAssertEqual(signIn.jobId,"job_poll")
         XCTAssertEqual(signIn.statusToken,token)
+        XCTAssertFalse(signIn.dropReceipt)
         XCTAssertFalse(signIn.requestsWipe())
+        let ignored=ScriptedDeletionTransport()
+        ignored.respond(AccountHttp.parse(status:200,data:Data("{\"jobId\":\"job_poll\",\"status\":\"done\",\"retryable\":false}".utf8)))
+        await signIn.pollThrough(ignored)
+        XCTAssertEqual(signIn.step,.reauth)
+        XCTAssertFalse(signIn.requestsWipe())
+        XCTAssertTrue(signIn.acceptFreshSignIn(authTime:Date(timeIntervalSince1970:2),now:Date(timeIntervalSince1970:2)))
+        XCTAssertTrue(signIn.allowsDelete())
+
+        var bare=AccountDeletion.resume(DeletionReceipt.of(jobId:"job_poll",statusToken:token))
+        let empty=ScriptedDeletionTransport()
+        empty.respond(AccountHttp.parse(status:401,data:Data()))
+        await bare.pollThrough(empty)
+        XCTAssertNil(AccountHttp.parse(status:401,data:Data()).error)
+        XCTAssertEqual(bare.step,.reauth)
+        XCTAssertEqual(bare.message,"Sign in again to continue.")
+        XCTAssertFalse(bare.keepsPolling())
+        XCTAssertFalse(bare.clearSession)
+        XCTAssertEqual(bare.jobId,"job_poll")
+        XCTAssertEqual(bare.statusToken,token)
+        XCTAssertFalse(bare.requestsWipe())
     }
 
     func testRetryAfterFailureSendsDeleteAndSavesTheNewToken() async {
@@ -666,13 +706,15 @@ final class AccountLogicTests: XCTestCase {
     func testNotRetryableFailureShowsSupportAndDismissWipesNothing() async {
         XCTAssertTrue(SupportContact.isPlaceholder)
         XCTAssertEqual(SupportContact.address,"SUPPORT_CONTACT_PLACEHOLDER@invalid")
-        var failed=ready()
-        failed.onDeleteHttp(status:202,jobId:"job_support",errorCode:nil,statusToken:token)
-        failed.onPollHttp(status:200,jobStatus:"failed",errorCode:nil,retryable:false)
+        let dead=fixture("status-failed-not-retryable")
+        var failed=AccountDeletion.resume(DeletionReceipt.of(jobId:dead.jobId ?? "",statusToken:token))
+        let deadScript=ScriptedDeletionTransport()
+        deadScript.respond(dead)
+        await failed.pollThrough(deadScript)
         XCTAssertTrue(failed.showSupport)
         XCTAssertTrue(failed.canDismiss())
         XCTAssertFalse(failed.offersRetry())
-        XCTAssertEqual(failed.jobId,"job_support")
+        XCTAssertEqual(failed.jobId,dead.jobId)
         XCTAssertTrue(failed.dismissError())
         XCTAssertNil(failed.jobId)
         XCTAssertFalse(failed.requestsWipe())
@@ -697,7 +739,7 @@ final class AccountLogicTests: XCTestCase {
         XCTAssertTrue(blocked.showSupport)
         XCTAssertFalse(blocked.offersRetry())
         XCTAssertTrue(blocked.canDismiss())
-        XCTAssertEqual(blocked.jobId,"00000000-0000-4000-8000-0000000000aa")
+        XCTAssertEqual(blocked.jobId,"00000000-0000-4000-8000-000000000009")
         XCTAssertEqual(blocked.statusToken,token)
         XCTAssertTrue(SupportContact.mailto(jobId:blocked.jobId)?.absoluteString.contains("Account%20deletion%20"+(conflict.jobId ?? "")) ?? false)
         XCTAssertFalse(blocked.requestsWipe())
@@ -708,8 +750,8 @@ final class AccountLogicTests: XCTestCase {
     }
 
     func testVendoredKeyEnvelopeAndPayloadTooLargeAreLoaded() {
-        XCTAssertEqual(BackendFixtures.accountDeletionSHA,"9d0f056")
-        XCTAssertEqual(BackendFixtures.keyEnvelopeSHA,"24fba02")
+        XCTAssertEqual(BackendFixtures.accountDeletionSHA,"fff0a84")
+        XCTAssertEqual(BackendFixtures.keyEnvelopeSHA,"ee4f76f")
         let tooLarge=AccountHttp.parse(status:BackendFixtures.responseStatus(area:"errors",name:"payload-too-large"),data:BackendFixtures.responseBodyData(area:"errors",name:"payload-too-large"))
         XCTAssertEqual(tooLarge.status,413)
         XCTAssertEqual(tooLarge.error,"payload_too_large")
@@ -720,6 +762,8 @@ final class AccountLogicTests: XCTestCase {
         XCTAssertFalse(huge.requestsWipe())
         XCTAssertEqual(BackendFixtures.responseStatus(area:"key-envelope",name:"create"),201)
         XCTAssertTrue(BackendFixtures.requestPath(area:"key-envelope",name:"create").hasSuffix("/key-envelope"))
+        XCTAssertTrue(BackendFixtures.requestBodyString(area:"key-envelope",name:"create").contains("+/v7"))
+        XCTAssertTrue(BackendFixtures.responseBodyString(area:"key-envelope",name:"create").contains("-_v7"))
         let conflict=AccountHttp.parse(status:BackendFixtures.responseStatus(area:"key-envelope",name:"conflict"),data:BackendFixtures.responseBodyData(area:"key-envelope",name:"conflict"))
         XCTAssertEqual(conflict.status,409)
         XCTAssertEqual(conflict.error,"envelope_exists")
@@ -883,7 +927,7 @@ private final class MemoryReplacement:ReplacementStore {
 /// `reauth_required` and a 401 with no code go to sign-in. None of them wipe.
 ///
 /// Generated fixtures live under `native/Mobile/fixtures/shared/account-deletion/`.
-/// `status-invalid-token` and `status-unauthorized` are from 9d0f056.
+/// `status-invalid-token` and `status-unauthorized` are from fff0a84.
 /// The export redacts tokens to `"<redacted>"`; that string is the opaque token here.
 final class InvalidTokenDeletionTests: XCTestCase {
     private let area="account-deletion"
@@ -1022,8 +1066,8 @@ final class InvalidTokenDeletionTests: XCTestCase {
 /// The repo-root `fixtures/` directory wins when this branch has it.
 /// `singular-path.json` is JSON. A non-JSON body in a test is synthetic.
 private enum BackendFixtures {
-    static let accountDeletionSHA="9d0f056"
-    static let keyEnvelopeSHA="24fba02"
+    static let accountDeletionSHA="fff0a84"
+    static let keyEnvelopeSHA="ee4f76f"
     static let sharedFixtureSHA="da39276"
 
     static func body(_ name:String)->String {

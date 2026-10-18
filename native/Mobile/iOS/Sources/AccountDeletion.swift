@@ -154,18 +154,14 @@ struct AccountDeletion:Equatable {
         wipe=false
         plainError=false
         let polling=step == .polling || (step == .signedOut && keepsPolling())
+        if polling && (errorCode==nil || errorCode?.isEmpty==true || errorCode=="unauthorized" || errorCode=="invalid_token") {
+            // Status GET 401 unauthorized, a 401 with no code, or a rejected status token:
+            // stop polling, keep the job, and show re-sign-in on the deletion screen.
+            // Only a Firebase/owner-token invalid_token signs out and keeps polling.
+            showResignIn()
+            return
+        }
         if errorCode=="invalid_token" {
-            if polling {
-                // Status token rejected. Stop, keep the job, and ask for sign-in.
-                // The next fresh sign-in sends DELETE and saves the token from 202 or 410.
-                clearSession=false
-                dropReceipt=false
-                repeatDelete=true
-                step = .reauth
-                message="Sign in again to continue."
-                return
-            }
-            // Owner token rejected. Sign out. A saved status token keeps polling.
             clearSession=true
             repeatDelete=false
             if let jobId,let statusToken,Self.validJob(jobId),Self.validToken(statusToken) {
@@ -176,12 +172,22 @@ struct AccountDeletion:Equatable {
             }
             step = .signedOut;message="Sign in again to continue.";return
         }
-        // A 401 with no code goes back to sign-in and keeps any saved job and token.
         if errorCode==nil || errorCode?.isEmpty==true {
             step = .reauth;message="Sign in again to continue.";return
         }
         step = .reauth
         message="Sign in again. The server only accepts a sign-in from the last 5 minutes."
+    }
+    /// Re-sign-in stays on the deletion screen. The next fresh sign-in sends DELETE again.
+    private mutating func showResignIn(){
+        clearSession=false
+        dropReceipt=false
+        repeatDelete=true
+        showSupport=false
+        dismissible=false
+        wipe=false
+        step = .reauth
+        message="Sign in again to continue."
     }
     func exhausted()->Bool { polls>=Self.pollLimit }
     mutating func nextPollDelayMillis()->Int { let delay=1000<<min(polls,3);polls+=1;return delay }

@@ -164,7 +164,7 @@ struct MobileExport:Identifiable {let id=UUID();let url:URL}
         guard let client else{throw GDTransferError(message:"Sign in again to continue.",status:401)}
         return try await client.deleteAccount(freshToken:freshToken)
     }
-    /// Polls with the status token. A missing Firebase user still polls; a local token failure is `reauth_required`.
+    /// Polls with the status token. A missing Firebase user still polls. A 401 with no JSON code is re-sign-in, not `reauth_required`.
     func pollDeletion(_ path:String,statusToken:String) async throws -> AccountHttp {
         let transport:GDTransferClient
         if let client {transport=client}
@@ -175,7 +175,7 @@ struct MobileExport:Identifiable {let id=UUID();let url:URL}
         }
         do { return try await transport.accountDeletionStatus(path:path,statusToken:statusToken) }
         catch let error as GDTransferError where error.status==401 {
-            return AccountHttp(status:401,raw:"",error:"reauth_required",jobId:nil,jobStatus:nil,retryable:nil,statusToken:nil)
+            return AccountHttp(status:401,raw:error.message,error:nil,jobId:nil,jobStatus:nil,retryable:nil,statusToken:nil)
         }
     }
     func mergeWorkspace(source:String,target:String,confirmName:String) async throws {

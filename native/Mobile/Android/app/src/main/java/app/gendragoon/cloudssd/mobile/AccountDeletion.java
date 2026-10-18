@@ -196,18 +196,14 @@ final class AccountDeletion {
         wipe=false;
         plainError=false;
         boolean polling=step==Step.POLLING||(step==Step.SIGNED_OUT&&keepsPolling());
+        if(polling&&(errorCode==null||errorCode.isEmpty()||"unauthorized".equals(errorCode)||"invalid_token".equals(errorCode))){
+            // Status GET 401 unauthorized, a 401 with no code, or a rejected status token:
+            // stop polling, keep the job, and show re-sign-in on the deletion screen.
+            // Only a Firebase/owner-token invalid_token signs out and keeps polling.
+            showResignIn();
+            return;
+        }
         if("invalid_token".equals(errorCode)){
-            if(polling){
-                // Status token rejected. Stop, keep the job, and ask for sign-in.
-                // The next fresh sign-in sends DELETE and saves the token from 202 or 410.
-                clearSession=false;
-                dropReceipt=false;
-                repeatDelete=true;
-                step=Step.REAUTH;
-                message="Sign in again to continue.";
-                return;
-            }
-            // Owner token rejected. Sign out. A saved status token keeps polling.
             clearSession=true;
             repeatDelete=false;
             if(AccountActions.validJob(jobId)&&AccountActions.validToken(statusToken)){
@@ -220,7 +216,6 @@ final class AccountDeletion {
             message="Sign in again to continue.";
             return;
         }
-        // A 401 with no code goes back to sign-in and keeps any saved job and token.
         if(errorCode==null||errorCode.isEmpty()){
             step=Step.REAUTH;
             message="Sign in again to continue.";
@@ -228,6 +223,18 @@ final class AccountDeletion {
         }
         step=Step.REAUTH;
         message="Sign in again. The server only accepts a sign-in from the last 5 minutes.";
+    }
+
+    /** Re-sign-in stays on the deletion screen. The next fresh sign-in sends DELETE again. */
+    private void showResignIn(){
+        clearSession=false;
+        dropReceipt=false;
+        repeatDelete=true;
+        showSupport=false;
+        dismissible=false;
+        wipe=false;
+        step=Step.REAUTH;
+        message="Sign in again to continue.";
     }
 
     boolean exhausted(){return polls>=POLL_LIMIT;}

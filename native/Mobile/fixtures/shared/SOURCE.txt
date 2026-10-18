@@ -1,7 +1,8 @@
 Lock, workspace, merge, BYO, and ownership fixtures are copied from
 grimvirusoffical-source/gendragoon-cloud-ssd fixtures/ on fix/backend-workspace-policy at da39276.
-Account-deletion fixtures are copied from fixtures/account-deletion on PR #6 at 9d0f056.
-key-envelope fixtures are copied from PR #9 at 24fba02. errors/payload-too-large.json is from that export.
+Account-deletion fixtures are copied from fixtures/account-deletion on PR #6 at fff0a84.
+key-envelope fixtures are copied from PR #9 at ee4f76f. wrappedKey is base64 or base64url; mobile does not decode it.
+errors/payload-too-large.json is from that export.
 Each file is {request, response:{status, body}}. Do not edit these JSON files by hand.
 Tests read the repo-root fixtures/ directory when this branch has it, and this copy otherwise.
 singular-path.json is JSON 404 {"error":"not_found"}. A non-JSON body in the tests is synthetic, not a fixture.
