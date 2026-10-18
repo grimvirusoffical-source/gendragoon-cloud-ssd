@@ -348,11 +348,8 @@ export function WorkspacesScreen(props: {
   onOpen?: (workspaceId: string) => void;
   /** Same checkout path as the lapsed lock screen, for one unpaid workspace. */
   onPay?: (workspaceId: string) => void;
-  /**
-   * Server grace deadline per workspace id, milliseconds.
-   * Provisional until cloud-ssd PR #5 reports the pay-by field.
-   */
-  gracePayByMs?: Readonly<Record<string, number>>;
+  /** Server `graceEndsAt` per workspace id, milliseconds. */
+  graceEndsAt?: Readonly<Record<string, number>>;
   /** Overrides `WORKSPACE_PRICING_ENABLED` in tests. */
   pricingEnabled?: boolean;
 }) {
@@ -386,7 +383,7 @@ export function WorkspacesScreen(props: {
       {props.capMessage ? <Banner testID="workspace-cap">{props.capMessage}</Banner> : null}
       {rows.map((workspace) => {
         const deleting = deletingIds.has(workspace.id);
-        const graceMs = props.gracePayByMs?.[workspace.id];
+        const graceMs = props.graceEndsAt?.[workspace.id];
         const inGrace = typeof graceMs === "number" && Number.isFinite(graceMs);
         const price = deleting || inGrace
           ? null

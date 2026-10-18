@@ -16,7 +16,7 @@ export function isDeletingWorkspace(workspace: { projectStatus?: string | null }
   return workspace.projectStatus === "deleting";
 }
 
-/** Non-blocking grace copy. The date is the server `payByMs`, formatted in UTC. */
+/** Non-blocking grace copy. The date is the server `graceEndsAt`, formatted in UTC. */
 export function graceBanner(payByMs: number): string {
   const date = new Intl.DateTimeFormat("en-US", {
     month: "short",

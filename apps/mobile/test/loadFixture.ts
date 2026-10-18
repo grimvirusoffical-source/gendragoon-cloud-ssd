@@ -4,27 +4,40 @@ import path from "node:path";
 /** gendragoon-cloud-ssd PR #5 at the BYO, lock, and merge snapshot. */
 export const FIXTURE_SOURCE_SHA = "da3927627fee76103981714f9f8ffa954843b74b";
 
-/** cloud-ssd PR #6 support fixtures. The rest of account-deletion stays on fff0a84. */
-export const SUPPORT_FIXTURE_SHA = "d33970cbf0175a74898c37a8a624a92b1c1a5a94";
+/** cloud-ssd PR #6. Account deletion and errors are pinned here. */
+export const DELETION_FIXTURE_SHA = "d33970cbf0175a74898c37a8a624a92b1c1a5a94";
 
-/** cloud-ssd PR #5 tip that adds `workspaces/owner-fee-waived.json`. */
-export const OWNER_FEE_WAIVED_SHA = "0715b1a933a3ee3bb489e28a6122475403bb341d";
+/** Support fixtures that shipped with the deletion pin. */
+export const SUPPORT_FIXTURE_SHA = DELETION_FIXTURE_SHA;
+
+/**
+ * cloud-ssd PR #6 head that adds `account-deletion/support-unauthorized.json`.
+ * The rest of account deletion stays on `DELETION_FIXTURE_SHA`.
+ */
+export const SUPPORT_UNAUTHORIZED_SHA = "580e672230bf4cf458f4ec28dfcafb30860cc67f";
+
+/** cloud-ssd PR #5 policy fixtures: fee waiver, grace, lapse, and make-hosted. */
+export const WORKSPACE_POLICY_SHA = "0715b1a933a3ee3bb489e28a6122475403bb341d";
+
+/** Same commit as `WORKSPACE_POLICY_SHA`. */
+export const OWNER_FEE_WAIVED_SHA = WORKSPACE_POLICY_SHA;
 
 /** Files whose source commit differs from the rest of their area. */
 export const FIXTURE_SOURCE_SHA_BY_FILE: Record<string, string> = {
-  "account-deletion/support-received.json": SUPPORT_FIXTURE_SHA,
-  "account-deletion/support-repeat.json": SUPPORT_FIXTURE_SHA,
-  "account-deletion/support-bad-token.json": SUPPORT_FIXTURE_SHA,
-  "account-deletion/support-rate-limited.json": SUPPORT_FIXTURE_SHA,
-  "account-deletion/support-not-needed.json": SUPPORT_FIXTURE_SHA,
-  "workspaces/owner-fee-waived.json": OWNER_FEE_WAIVED_SHA,
+  "account-deletion/support-unauthorized.json": SUPPORT_UNAUTHORIZED_SHA,
+  "workspaces/owner-fee-waived.json": WORKSPACE_POLICY_SHA,
+  "workspaces/byo-register-ends-grandfathered.json": WORKSPACE_POLICY_SHA,
+  "workspaces/byo-in-grace.json": WORKSPACE_POLICY_SHA,
+  "workspaces/byo-lapsed-others-open.json": WORKSPACE_POLICY_SHA,
+  "workspaces/make-hosted.json": WORKSPACE_POLICY_SHA,
+  "workspace-lock/byo-lapsed.json": WORKSPACE_POLICY_SHA,
 };
 
 /** Later fixture areas, keyed by the directory under fixtures/. */
 export const FIXTURE_SOURCE_SHA_BY_AREA: Record<string, string> = {
-  /** cloud-ssd PR #6. Support cases are d33970c; see FIXTURE_SOURCE_SHA_BY_FILE. */
-  "account-deletion": "fff0a84b6d75acb3a79cff7f146450c486efbe56",
-  "errors": "fff0a84b6d75acb3a79cff7f146450c486efbe56",
+  /** cloud-ssd PR #6 at d33970c. `support-unauthorized` is newer; see FIXTURE_SOURCE_SHA_BY_FILE. */
+  "account-deletion": DELETION_FIXTURE_SHA,
+  "errors": DELETION_FIXTURE_SHA,
   /** cloud-ssd PR #7, manifest ifGeneration as a decimal string. */
   "storage-urls": "8267784a790bbe8418b3cbe36e8a4b91849b0e81",
   /** cloud-ssd PR #9 tip. Responses store salt, iv, and wrappedKey as unpadded base64url. */

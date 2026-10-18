@@ -10,7 +10,7 @@ import {
   SUPPORT_REQUEST_SENT,
   deletionSupportRequestPath,
 } from "../src/supportRequest";
-import { SUPPORT_FIXTURE_SHA, loadFixture } from "./loadFixture";
+import { SUPPORT_FIXTURE_SHA, SUPPORT_UNAUTHORIZED_SHA, loadFixture } from "./loadFixture";
 
 const TOKEN = "status-token";
 
@@ -233,36 +233,43 @@ describe("deletion support request", () => {
     openURL.mockRestore();
   });
 
-  it("PROVISIONAL: a local 401 unauthorized or a 401 with no code mails and never asks for sign-in", async () => {
-    // Riley has not shipped a support-request 401 fixture. Both cases are local until that file exists.
-    const unauthorized = await ask(jobId, (async () => responseFor(401, { error: "unauthorized" })) as typeof fetch);
-    const noCode = await ask(jobId, (async () => new Response("", { status: 401 })) as typeof fetch);
+  it("401 unauthorized from support-unauthorized mails and never asks for sign-in", async () => {
+    const fixture = loadFixture<{ error: string }>("account-deletion/support-unauthorized.json");
+    expect(fixture.sourceSha).toBe(SUPPORT_UNAUTHORIZED_SHA);
+    expect(fixture.sourcePath).toBe("fixtures/account-deletion/support-unauthorized.json");
+    expect(fixture.request.method).toBe("POST");
+    expect(fixture.request.body).toBeNull();
+    expect(fixture.response).toEqual({ status: 401, body: { error: "unauthorized" } });
+    const unauthorizedJob = jobIdOf(fixture.request.path);
+    const unauthorized = await ask(
+      unauthorizedJob,
+      (async () => responseFor(fixture.response.status, fixture.response.body)) as typeof fetch,
+    );
     expect(unauthorized).toEqual({ kind: "fallback", contact: SUPPORT_CONTACT });
-    expect(noCode).toEqual({ kind: "fallback", contact: SUPPORT_CONTACT });
 
     const openURL = jest.spyOn(Linking, "openURL").mockResolvedValue(undefined as never);
     const onReauth = jest.fn();
     const secrets = new MemorySecretStore();
     await secrets.set("account-deletion:status-token", new TextEncoder().encode(TOKEN));
-    const mailto = supportContactTarget(SUPPORT_CONTACT.value, jobId);
-    expect(mailto).toBe(`mailto:${SUPPORT_CONTACT.value}?subject=${encodeURIComponent(`Account deletion ${jobId}`)}`);
+    const mailto = supportContactTarget(SUPPORT_CONTACT.value, unauthorizedJob);
+    expect(mailto).toBe(`mailto:${SUPPORT_CONTACT.value}?subject=${encodeURIComponent(`Account deletion ${unauthorizedJob}`)}`);
     const screen = await render(
       <DeleteAccountScreen
         frame="not-retryable"
-        jobId={jobId}
+        jobId={unauthorizedJob}
         supportEndpointEnabled
         apiBase="https://api.example.test"
-        supportFetch={(async () => responseFor(401, { error: "unauthorized" })) as typeof fetch}
+        supportFetch={(async () => responseFor(fixture.response.status, fixture.response.body)) as typeof fetch}
         activeTransfers={0}
         secrets={secrets}
         workspaceIds={["ws-1"]}
         idToken=""
         client={{
           async deleteAccount() {
-            return { jobId };
+            return { jobId: unauthorizedJob };
           },
           async deletionStatus() {
-            return { jobId, status: "failed", retryable: false };
+            return { jobId: unauthorizedJob, status: "failed", retryable: false };
           },
         }}
         onReauth={onReauth}

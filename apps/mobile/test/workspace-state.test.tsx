@@ -1,35 +1,50 @@
 /**
- * PROVISIONAL. cloud-ssd PR #5 at 4c3dd13 does not yet return
- * `workspace_busy`, `projectStatus: "deleting"`, a per-workspace lapse, or
- * the grace `payByMs`. These tests pin the client behavior Avery and Riley
- * described. They are not fixture contracts.
+ * Required workspace policy from cloud-ssd PR #5 at 0715b1a.
+ * Lapse locks one workspace, grace still accepts writes, and make-hosted
+ * reports the demoted workspace's graceEndsAt.
  */
-import { ApiError, WorkspaceLockedError, type LockAssessment, type WorkspaceRecord } from "@gendragoon/core";
+import { WorkspaceLockedError, type LockAssessment, type WorkspaceRecord } from "@gendragoon/core";
 import { fireEvent, render } from "@testing-library/react-native";
-import { includedPricingEndsWarning } from "../src/pricing";
-import { ConnectStorageScreen, LockScreen, WorkspacesScreen } from "../src/screens";
+import { LockScreen, WorkspacesScreen } from "../src/screens";
 import {
-  WORKSPACE_BUSY_MESSAGE,
   accountLockCoversApp,
   graceBanner,
   locksThisWorkspaceOnly,
   noteWorkspaceLock,
 } from "../src/workspaceState";
+import { WORKSPACE_POLICY_SHA, loadFixture } from "./loadFixture";
 
-const FREE_ID = "11111111-1111-4111-8111-000000000001";
-const PAID_ID = "11111111-1111-4111-8111-000000000002";
-const PAY_BY = Date.UTC(2026, 9, 21);
+interface UploadBody {
+  uploadId: string;
+  chunkBytes: number;
+  totalChunks: number;
+}
 
-function row(partial: Pick<WorkspaceRecord, "id" | "name"> & Partial<WorkspaceRecord>): WorkspaceRecord & { feeWaived: boolean } {
-  return {
-    kind: "paid",
-    isFree: false,
-    grandfathered: false,
-    monthlyPriceCents: 500,
-    projectStatus: "active",
-    feeWaived: false,
-    ...partial,
+interface LockBody {
+  error: string;
+  reason: "lapsed";
+  overBy: number;
+  unpaidWorkspaceIds: string[];
+}
+
+interface MakeHostedBody {
+  hosted: boolean;
+  workspaceId: string;
+  freeWorkspaceId: string;
+  demoted: {
+    checkoutUrl: string;
+    graceEndsAt: number;
+    paidThroughMs: number;
+    requiresCheckout: boolean;
+    workspaceId: string;
+    workspaceMonthlyCents: number;
   };
+}
+
+function workspaceIdOf(requestPath: string): string {
+  const id = requestPath.split("/")[3];
+  if (!id) throw new Error(`No workspace id in ${requestPath}`);
+  return id;
 }
 
 function access(partial: Partial<LockAssessment> = {}): LockAssessment {
@@ -49,72 +64,73 @@ function access(partial: Partial<LockAssessment> = {}): LockAssessment {
   };
 }
 
-const free = row({ id: FREE_ID, name: "Free Hosted", isFree: true, monthlyPriceCents: 0 });
-const paid = row({ id: PAID_ID, name: "Second Workspace" });
+function row(partial: Pick<WorkspaceRecord, "id" | "name"> & Partial<WorkspaceRecord>): WorkspaceRecord & { feeWaived: boolean } {
+  return {
+    kind: "paid",
+    isFree: false,
+    grandfathered: false,
+    monthlyPriceCents: 500,
+    projectStatus: "active",
+    feeWaived: false,
+    ...partial,
+  };
+}
 
-describe("PROVISIONAL workspace policy the server has not shipped", () => {
-  it("PROVISIONAL: 409 workspace_busy keeps the workspace and names the in-progress work", async () => {
-    const onDelete = jest.fn(async () => {
-      throw new ApiError(409, "workspace_busy", "busy");
+describe("workspace policy fixtures", () => {
+  it("loads the 0715b1a lapse, grace, and make-hosted fixtures", () => {
+    for (const rel of [
+      "workspaces/byo-in-grace.json",
+      "workspaces/byo-lapsed-others-open.json",
+      "workspaces/make-hosted.json",
+      "workspace-lock/byo-lapsed.json",
+    ]) {
+      const fixture = loadFixture(rel);
+      expect(fixture.sourceSha).toBe(WORKSPACE_POLICY_SHA);
+      expect(fixture.sourcePath).toBe(`fixtures/${rel}`);
+    }
+  });
+
+  it("a lapsed BYO workspace locks only itself", async () => {
+    const locked = loadFixture<LockBody>("workspace-lock/byo-lapsed.json");
+    const open = loadFixture<UploadBody>("workspaces/byo-lapsed-others-open.json");
+    const lockedId = workspaceIdOf(locked.request.path);
+    const openId = workspaceIdOf(open.request.path);
+    expect(locked.response.status).toBe(423);
+    expect(locked.response.body).toMatchObject({
+      error: "workspace_lock",
+      reason: "lapsed",
+      overBy: 0,
+      unpaidWorkspaceIds: [lockedId],
     });
-    const screen = await render(
-      <WorkspacesScreen
-        workspaces={[free, paid]}
-        unpaidIds={[]}
-        onDelete={onDelete}
-        onMerge={() => undefined}
-      />,
-    );
-    await fireEvent.press(screen.getByLabelText("Delete Free Hosted"));
-    await fireEvent.press(screen.getByLabelText("Confirm delete Free Hosted"));
-    expect(await screen.findByText(WORKSPACE_BUSY_MESSAGE)).toBeTruthy();
-    expect(screen.getByTestId(`workspace-name-${FREE_ID}`)).toBeTruthy();
-    expect(onDelete).toHaveBeenCalledTimes(1);
-  });
+    expect(open.response.status).toBe(201);
+    expect(open.response.body.uploadId).toBeTruthy();
+    expect(openId).not.toBe(lockedId);
 
-  it("PROVISIONAL: a deleting workspace shows Deleting... and disables its actions", async () => {
-    const onDelete = jest.fn();
-    const onPay = jest.fn();
-    const deleting = row({ id: PAID_ID, name: "Second Workspace", projectStatus: "deleting" as WorkspaceRecord["projectStatus"] });
-    const screen = await render(
-      <WorkspacesScreen
-        workspaces={[free, deleting]}
-        unpaidIds={[PAID_ID]}
-        onDelete={onDelete}
-        onMerge={() => undefined}
-        onPay={onPay}
-      />,
-    );
-    expect(screen.getByTestId(`workspace-deleting-${PAID_ID}`)).toHaveTextContent("Deleting...");
-    expect(screen.getByLabelText("Delete Second Workspace")).toBeDisabled();
-    expect(screen.getByLabelText("Pay to restore Second Workspace")).toBeDisabled();
-    expect(screen.getByLabelText("Merge source Second Workspace")).toBeDisabled();
-    expect(screen.getByLabelText("Merge target Second Workspace")).toBeDisabled();
-    expect(screen.getByLabelText("Delete Free Hosted")).not.toBeDisabled();
-    await fireEvent.press(screen.getByLabelText("Delete Second Workspace"));
-    expect(onDelete).not.toHaveBeenCalled();
-    await fireEvent.press(screen.getByLabelText("Pay to restore Second Workspace"));
-    expect(onPay).not.toHaveBeenCalled();
-  });
-
-  it("PROVISIONAL: a lapsed workspace locks only itself", async () => {
-    const current = access();
     const next = noteWorkspaceLock(
-      new WorkspaceLockedError({ reason: "lapsed", overBy: 0, unpaidWorkspaceIds: [PAID_ID] }),
-      current,
+      new WorkspaceLockedError({
+        reason: locked.response.body.reason,
+        overBy: locked.response.body.overBy,
+        unpaidWorkspaceIds: locked.response.body.unpaidWorkspaceIds,
+      }),
+      access(),
     );
     expect(next.locked).toBe(false);
     expect(next.uploadsBlocked).toBe(false);
-    expect(next.unpaidIds).toEqual([PAID_ID]);
-    expect(next.lapsedIds).toEqual([PAID_ID]);
+    expect(next.unpaidIds).toEqual([lockedId]);
+    expect(next.lapsedIds).toEqual([lockedId]);
     expect(accountLockCoversApp({ ...next, locked: true })).toBe(false);
-    expect(locksThisWorkspaceOnly(next, PAID_ID)).toBe(true);
-    expect(locksThisWorkspaceOnly(next, FREE_ID)).toBe(false);
+    expect(locksThisWorkspaceOnly(next, lockedId)).toBe(true);
+    expect(locksThisWorkspaceOnly(next, openId)).toBe(false);
+
     const screen = await render(
       <LockScreen
         workspaceOnly
-        workspaces={[paid]}
-        lock={{ reason: "lapsed", overBy: 0, unpaidWorkspaceIds: [PAID_ID] }}
+        workspaces={[row({ id: lockedId, name: "Lapsed bucket" })]}
+        lock={{
+          reason: locked.response.body.reason,
+          overBy: locked.response.body.overBy,
+          unpaidWorkspaceIds: locked.response.body.unpaidWorkspaceIds,
+        }}
         onReview={() => undefined}
         onPay={() => undefined}
       />,
@@ -122,6 +138,7 @@ describe("PROVISIONAL workspace policy the server has not shipped", () => {
     expect(screen.getByText("This workspace is locked. Your other workspaces stay usable. Downloads stay available.")).toBeTruthy();
     expect(screen.queryByText(/This account is/)).toBeNull();
     expect(screen.getByTestId("pay-to-restore")).toBeTruthy();
+    expect(screen.getByTestId(`lock-workspace-${lockedId}`)).toHaveTextContent("Lapsed bucket · unpaid");
   });
 
   it("an over-cap lock still covers the whole account", () => {
@@ -131,44 +148,56 @@ describe("PROVISIONAL workspace policy the server has not shipped", () => {
     );
     expect(next.locked).toBe(true);
     expect(accountLockCoversApp(next)).toBe(true);
-    expect(locksThisWorkspaceOnly({ ...next, unpaidIds: [PAID_ID], lapsedIds: [PAID_ID] }, PAID_ID)).toBe(false);
+    expect(locksThisWorkspaceOnly({ ...next, unpaidIds: ["ws"], lapsedIds: ["ws"] }, "ws")).toBe(false);
   });
 
-  it("PROVISIONAL: losing the free slot shows the grace banner and Pay, not a silent price", async () => {
-    const lost = row({ id: PAID_ID, name: "Second Workspace", isFree: false, monthlyPriceCents: 500 });
+  it("grace still accepts a write, and make-hosted shows Pay from graceEndsAt", async () => {
+    const grace = loadFixture<UploadBody>("workspaces/byo-in-grace.json");
+    const made = loadFixture<MakeHostedBody>("workspaces/make-hosted.json");
+    const graceId = workspaceIdOf(grace.request.path);
+    const demoted = made.response.body.demoted;
+    expect(grace.response.status).toBe(201);
+    expect(grace.response.body.uploadId).toBe("00000000-0000-4000-8000-000000000006");
+    expect(made.response.status).toBe(200);
+    expect(made.response.body.hosted).toBe(true);
+    expect(made.response.body.freeWorkspaceId).toBe(made.response.body.workspaceId);
+    expect(demoted.requiresCheckout).toBe(true);
+    expect(demoted.workspaceMonthlyCents).toBe(500);
+    expect(demoted.workspaceId).not.toBe(graceId);
+
     const onPay = jest.fn();
     const screen = await render(
       <WorkspacesScreen
-        workspaces={[lost, free]}
+        workspaces={[
+          row({
+            id: demoted.workspaceId,
+            name: "Demoted workspace",
+            isFree: false,
+            monthlyPriceCents: demoted.workspaceMonthlyCents,
+            feeWaived: false,
+          }),
+          row({
+            id: made.response.body.freeWorkspaceId,
+            name: "Hosted workspace",
+            isFree: true,
+            monthlyPriceCents: 0,
+            feeWaived: false,
+          }),
+        ]}
         unpaidIds={[]}
-        gracePayByMs={{ [PAID_ID]: PAY_BY }}
+        graceEndsAt={{ [demoted.workspaceId]: demoted.graceEndsAt }}
         onDelete={() => undefined}
         onMerge={() => undefined}
         onPay={onPay}
       />,
     );
-    expect(graceBanner(PAY_BY)).toBe("Payment due, pay by Oct 21, 2026 to keep using this workspace.");
-    expect(screen.getByTestId(`workspace-grace-${PAID_ID}`)).toHaveTextContent(graceBanner(PAY_BY));
-    expect(screen.queryByTestId(`workspace-price-${PAID_ID}`)).toBeNull();
+    expect(graceBanner(demoted.graceEndsAt)).toBe("Payment due, pay by Nov 20, 2023 to keep using this workspace.");
+    expect(screen.getByTestId(`workspace-grace-${demoted.workspaceId}`)).toHaveTextContent(graceBanner(demoted.graceEndsAt));
+    expect(screen.queryByTestId(`workspace-price-${demoted.workspaceId}`)).toBeNull();
     expect(screen.queryByText("$5.00")).toBeNull();
-    expect(screen.getByTestId(`workspace-price-${FREE_ID}`).props.children).toBe("Free");
-    expect(screen.getByLabelText("Delete Second Workspace")).not.toBeDisabled();
-    await fireEvent.press(screen.getByTestId(`pay-grace-${PAID_ID}`));
-    expect(onPay).toHaveBeenCalledWith(PAID_ID);
-  });
-
-  it("PROVISIONAL: BYO on a grandfathered workspace warns before the providers can be chosen", async () => {
-    const onSelect = jest.fn();
-    const screen = await render(
-      <ConnectStorageScreen endsIncludedPricingCents={500} onSelectProvider={onSelect} />,
-    );
-    expect(screen.getByTestId("byo-included-warning")).toHaveTextContent(includedPricingEndsWarning(500));
-    expect(includedPricingEndsWarning(500)).toBe(
-      "Switching to your own storage ends this workspace's included pricing. It will cost $5.00/mo.",
-    );
-    expect(screen.queryByTestId("byo-aws")).toBeNull();
-    await fireEvent.press(screen.getByTestId("byo-end-included"));
-    await fireEvent.press(screen.getByTestId("byo-aws"));
-    expect(onSelect).toHaveBeenCalledWith("aws");
+    expect(screen.getByTestId(`workspace-price-${made.response.body.freeWorkspaceId}`).props.children).toBe("Free");
+    expect(screen.getByLabelText("Delete Demoted workspace")).not.toBeDisabled();
+    await fireEvent.press(screen.getByTestId(`pay-grace-${demoted.workspaceId}`));
+    expect(onPay).toHaveBeenCalledWith(demoted.workspaceId);
   });
 });

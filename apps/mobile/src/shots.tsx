@@ -223,7 +223,7 @@ export function ShotFrame(props: { id: ShotId }) {
               },
             ]}
             unpaidIds={[]}
-            gracePayByMs={{ "11111111-1111-4111-8111-000000000002": Date.UTC(2026, 9, 21) }}
+            graceEndsAt={{ "11111111-1111-4111-8111-000000000002": Date.UTC(2026, 9, 21) }}
             onDelete={() => undefined}
             onMerge={() => undefined}
             onPay={() => undefined}

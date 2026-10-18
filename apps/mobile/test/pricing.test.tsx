@@ -157,27 +157,34 @@ describe("workspace price labels", () => {
   });
 
   it("a BYO register that ends grandfathering shows the price and warns before confirm", async () => {
-    const body = {
-      byoRegistered: true,
-      endpoint: "https://bucket.s3.us-east-1.amazonaws.com",
-      providerType: "s3",
-      grandfatheringEnded: true,
-      grandfathered: false,
-      isFree: false,
-      monthlyPriceCents: 500,
-      feeWaived: false,
-    };
+    const fixture = loadFixture<{
+      byoRegistered: boolean;
+      endpoint: string;
+      providerType: string;
+      grandfatheringEnded: boolean;
+      grandfathered: boolean;
+      isFree: boolean;
+      monthlyPriceCents: number;
+      feeWaived: boolean;
+    }>("workspaces/byo-register-ends-grandfathered.json");
+    expect(fixture.sourceSha).toBe(OWNER_FEE_WAIVED_SHA);
+    expect(fixture.sourcePath).toBe("fixtures/workspaces/byo-register-ends-grandfathered.json");
+    const body = fixture.response.body;
+    expect(fixture.response.status).toBe(200);
+    expect(body.grandfatheringEnded).toBe(true);
+    expect(body.feeWaived).toBe(false);
+    expect(body.monthlyPriceCents).toBe(500);
     expect(grandfatheringEndedPrice({ ...body, feeWaived: undefined })).toBeNull();
     expect(grandfatheringEndedPrice(body)).toBe("$5.00");
-    expect(includedPricingEndsWarning(500)).toBe(
+    expect(includedPricingEndsWarning(body.monthlyPriceCents)).toBe(
       "Switching to your own storage ends this workspace's included pricing. It will cost $5.00/mo.",
     );
     const screen = await render(<ConnectStorageScreen registration={body} />);
     expect(screen.getByTestId("byo-ended-price").props.children).toBe("$5.00");
-    expect(screen.getByTestId("byo-included-warning")).toHaveTextContent(includedPricingEndsWarning(500));
+    expect(screen.getByTestId("byo-included-warning")).toHaveTextContent(includedPricingEndsWarning(body.monthlyPriceCents));
     expect(screen.queryByTestId("byo-registered")).toBeNull();
     await fireEvent.press(screen.getByTestId("byo-confirm-included"));
-    expect(screen.getByTestId("byo-registered")).toHaveTextContent(`s3 · ${body.endpoint}`);
+    expect(screen.getByTestId("byo-registered")).toHaveTextContent(`${body.providerType} · ${body.endpoint}`);
   });
 
   it("labels grandfathered-plus-new from the vendored fixture", async () => {
