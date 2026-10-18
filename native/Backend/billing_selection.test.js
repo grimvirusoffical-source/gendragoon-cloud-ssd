@@ -53,7 +53,7 @@ test('an exactly matching legacy draft resumes without writes or charges and kee
 test('an existing annual BYO draft replays its original contract without migration or a project fee',async t=>{
  const f=await fixture(t,{name:selection.name,kind:'byo',storageTier:null,storageMode:null,storageInterval:'year',storageActive:false,provisioned:false});
  const before=structuredClone(f.rows),result=await f.post('/v2/workspaces/draft',{name:selection.name,mode:'byo',interval:'year',intentId:selection.intentId});
- assert.equal(result.status,200);assert.equal(result.body.resumed,true);assert.equal(result.body.quote.totalCents,10000);
+ assert.equal(result.status,200);assert.equal(result.body.resumed,true);assert.equal(result.body.quote.totalCents,5000);
  assert.equal(result.body.oneTimeProjectCents,0);assert.deepEqual(f.rows,before);assert.equal(f.created.length,0);
 });
 test('unknown legacy creation intents receive an update requirement before any workspace write or Checkout',async t=>{

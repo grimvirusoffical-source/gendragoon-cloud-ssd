@@ -19,7 +19,7 @@ function storageQuote(tier,interval,mode="standard",billingVersion=1){
 }
 function byoQuote(interval){
  if(!VALID_INTERVALS.has(interval))throw Error("Invalid BYO interval");
- return {interval,kind:"byo",totalCents:1000*yearFactor(interval),storageGB:0,workers:1};
+ return {interval,kind:"byo",totalCents:500*yearFactor(interval),storageGB:0,workers:1};
 }
 function performanceQuote(tier,interval){
  if(typeof tier!=="string"||!Object.hasOwn(PERFORMANCE,tier)||!VALID_INTERVALS.has(interval))throw Error("Invalid performance plan");
@@ -44,7 +44,7 @@ function bundleWorkers(tier){
 function effectiveWorkers(workspace){
  if(!workspace||["archived","pending_payment","payment_revoked","payment_confirmed_pending_capacity"].includes(projectStatus(workspace)))return 0;
  if(workspace.kind==="byo"){
-   if(!workspace.byoActive||!workspace.manualProviderConfigured)return 0;
+   if(!workspace.byoActive||!workspace.manualProviderConfigured||workspace.byoChallengeVerified!==true)return 0;
    return workspace.performanceActive===true && PERFORMANCE[workspace.performanceTier] ?
      PERFORMANCE[workspace.performanceTier].workers:FREE_WORKERS;
  }
@@ -121,7 +121,7 @@ function registerBillingV2({app,db,stripe,admin,auth,agreed,hash,prices,env=proc
      qualifyingStorageTier:"2TB",qualifyingPerformanceTier:"turbo",qualifyingWorkers:8,
      qualificationLabel:"2 TB storage AND Turbo (8 workers) or higher on the same active project; equivalent bundles qualify",
      paymentAvailable:projects.paymentAvailable(),archiveRetainsData:true},
-   byo:{monthlyCents:1000,yearlyCents:10000,providerFeesExtra:true,manualSetupRequired:true},
+   byo:{monthlyCents:500,yearlyCents:5000,providerFeesExtra:true,manualSetupRequired:true},
    purchasesEnabled:env.STRIPE_CHECKOUT_ENABLED==="true",
    storage:Object.fromEntries(Object.keys(STORAGE).map(t=>[t,{
      gb:STORAGE[t].gb,monthlyCents:STORAGE[t].standard,
@@ -301,6 +301,8 @@ function registerBillingV2({app,db,stripe,admin,auth,agreed,hash,prices,env=proc
      await projects.withLease(req,w.id,async fresh=>{
        const plan=byoQuote(req.body?.interval||fresh.data.intendedSelection?.byoInterval||fresh.data.byoInterval||fresh.data.storageInterval||"month");
        if(req.ownerBenefits===true){
+         if(fresh.data.byoChallengeVerified!==true)
+           return res.status(409).json({error:"Verify the bring-your-own challenge before activating storage",code:"BYO_CHALLENGE_REQUIRED"});
          await fresh.ref.update({byoActive:true,byoInterval:plan.interval,entitlementSource:"owner",updatedAt:stamp()});
          return res.json({complimentary:true,workspaceId:fresh.id,message:"Owner BYO access activated. Your provider's own charges still apply."});
        }
@@ -382,7 +384,7 @@ function registerBillingV2({app,db,stripe,admin,auth,agreed,hash,prices,env=proc
      expected=priceKeysBYO(byoQuote(interval)).map(verifiedPrice);
      const matches=matchesStripePrices(sub,expected);
      patch={byoSubscriptionId:sub.id,byoStatus:sub.status,
-       byoActive:active&&matches,byoInterval:matches?interval:(data.byoInterval||null)};
+       byoActive:active&&matches&&data.byoChallengeVerified===true,byoInterval:matches?interval:(data.byoInterval||null)};
    } else if(kind==="storage"){
      if(!["paid","free"].includes(data.kind) || (data.storageSubscriptionId && data.storageSubscriptionId!==sub.id))return false;
      const tier=data.pendingStorageTier||data.storageTier,interval=data.pendingStorageInterval||data.storageInterval,

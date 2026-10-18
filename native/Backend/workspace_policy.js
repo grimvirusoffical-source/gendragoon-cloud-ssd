@@ -16,8 +16,12 @@ const MONTHLY_LOOKUP_KEY="gdssd_workspace_monthly_v3";
 const QUALIFYING_STORAGE_GB=2000;
 const QUALIFYING_WORKERS=8;
 const S3_ALIASES=new Set(["s3","aws","r2","cloudflare","backblaze","b2","wasabi","minio","gcs","google"]);
-const SECRET_KEY=/^(accessKey|accessKeyId|secretAccessKey|secret|password|privateKey|sessionToken|credentials|awsSecretAccessKey|awsAccessKeyId|secretKey|apiKey|clientSecret|token)$/i;
-const indexes=new Set();
+const SECRET_KEY=/^(accessKey|accessKeyId|secretAccessKey|secret|password|privateKey|private_key|sessionToken|credentials|awsSecretAccessKey|awsAccessKeyId|secretKey|apiKey|clientSecret|token|serviceAccount|service_account|keyFile|pem)$/i;
+const PRIVATE_KEY_BLOCK=/-----BEGIN (?:RSA |OPENSSH |EC |DSA |ENCRYPTED )?PRIVATE KEY-----/;
+const SERVICE_ACCOUNT_JSON=/"type"\s*:\s*"service_account"|"private_key"\s*:/;
+const GRANDFATHER_CUTOFF_MS=Number(process.env.GRANDFATHER_CUTOFF_MS)||Date.parse("2026-10-17T00:00:00Z");
+const LIST_UNAVAILABLE={scopeUnavailable:true};
+const LIST_UNAVAILABLE_LOCK={error:"workspace_lock",reason:"scope_unavailable",overBy:0,unpaidWorkspaceIds:[]};
 
 function monthlyPriceId(env={},prices={}){
  const fromEnv=env.STRIPE_WORKSPACE_MONTHLY_PRICE_ID;
@@ -26,20 +30,30 @@ function monthlyPriceId(env={},prices={}){
  if(typeof fromCatalog==="string"&&/^price_[A-Za-z0-9]+$/.test(fromCatalog))return fromCatalog;
  return null;
 }
-function registerWorkspaceIndex(db){
- if(db&&db.rows&&typeof db.rows.values==="function")indexes.add(db);
- return db;
+function createdAtMs(w){
+ const raw=w?.createdAtMs??w?.createdAt;
+ if(typeof raw==="number"&&Number.isFinite(raw))return raw<1e12?Math.round(raw*1000):raw;
+ if(raw&&typeof raw.toMillis==="function")return raw.toMillis();
+ // An unresolved server timestamp is this write, not a legacy row.
+ if(raw&&typeof raw==="object")return Date.now();
+ return null;
 }
 function isGrandfathered(w){
  if(!w||typeof w!=="object")return false;
  // Monthly records opt out explicitly. Existing one-time and free rows do not
  // carry workspaceFeeModel and must not be rewritten to add one.
  if(w.workspaceFeeModel==="monthly")return false;
+ // Rows created on or after the cutoff are not grandfathered. A missing
+ // createdAt is a legacy row written before the field existed.
+ const created=createdAtMs(w);
+ if(created!=null&&created>=GRANDFATHER_CUTOFF_MS)return false;
  if(w.kind==="free"||w.feeIsOneTime===true)return true;
  return w.projectBillingVersion===2&&["paid","free","owner"].includes(w.projectFeeStatus);
 }
 function periodEndMs(w){
- const raw=w&&(w.workspaceFeePeriodEndMs??w.currentPeriodEndMs);
+ // Grace is anchored to the last paid invoice period, never to a subscription
+ // current_period_end (Stripe advances that on a failed renewal).
+ const raw=w&&(w.paidThroughMs??w.workspaceFeePeriodEndMs);
  if(typeof raw!=="number"||!Number.isFinite(raw))return null;
  return raw<1e12?Math.round(raw*1000):raw;
 }
@@ -102,28 +116,16 @@ function summarizeProjects(projects){
 function lockBody(summary){
  return {error:"workspace_lock",reason:summary.reason,overBy:summary.overBy||0,unpaidWorkspaceIds:summary.unpaidWorkspaceIds||[]};
 }
-function projectsInSameIndex(workspace,accountHash){
- let db=null;
- for(const candidate of indexes){
-  for(const value of candidate.rows.values())if(value===workspace){db=candidate;break;}
-  if(db)break;
- }
- if(!db)return null;
- const projects=[];
- for(const [path,value] of db.rows){
-  if(!value||typeof value!=="object"||Array.isArray(value))continue;
-  const parts=String(path).split("/");
-  if(parts.length!==4||parts[1]!==accountHash||parts[2]!=="workspaces")continue;
-  if(parts[0]==="gd_accounts"&&value.accountHash===accountHash)projects.push({...value,id:parts[3]});
-  else if(parts[0]==="tenants"&&parts[3]==="free"&&value.accountKey===accountHash)projects.push({...value,id:"free"});
- }
- return projects;
-}
 function findSecretFields(body,prefix=""){
+ if(typeof body==="string"){
+  if(PRIVATE_KEY_BLOCK.test(body)||SERVICE_ACCOUNT_JSON.test(body))return [prefix||"value"];
+  return [];
+ }
  if(!body||typeof body!=="object")return [];
  const found=[];
  for(const [key,value] of Object.entries(body)){
   if(SECRET_KEY.test(key)&&value!=null&&value!=="")found.push(prefix+key);
+  else if(typeof value==="string"&&(PRIVATE_KEY_BLOCK.test(value)||SERVICE_ACCOUNT_JSON.test(value)))found.push(prefix+key);
   else if(value&&typeof value==="object")found.push(...findSecretFields(value,prefix+key+"."));
  }
  return found;
@@ -141,12 +143,20 @@ function normalizeProvider(raw){
  if(value==="sftp")return "sftp";
  return null;
 }
+function unsupportedProvider(provider){
+ const error=new Error("byo_provider_unsupported");
+ error.status=422;error.code="byo_provider_unsupported";error.provider=provider;
+ throw error;
+}
 function publicByoRegistration(body){
  rejectProviderSecrets(body);
  if(!body||Array.isArray(body)||typeof body!=="object"){
   const error=new Error("Provider registration is incomplete");error.status=400;error.code="BYO_REGISTRATION_INVALID";throw error;
  }
- const providerType=normalizeProvider(body.provider||body.providerType);
+ const rawProvider=String(body.provider||body.providerType||"").trim().toLowerCase();
+ // SFTP, Azure, and WebDAV are not launch providers. S3-compatible only.
+ if(rawProvider==="sftp"||rawProvider==="azure"||rawProvider==="webdav")unsupportedProvider(rawProvider);
+ const providerType=normalizeProvider(rawProvider);
  const endpoint=typeof body.endpoint==="string"?body.endpoint.trim():"";
  const fingerprint=typeof body.bucketFingerprint==="string"?body.bucketFingerprint.trim():
   typeof body.hostFingerprint==="string"?body.hostFingerprint.trim():"";
@@ -178,7 +188,47 @@ function collisionName(original,sourceName,taken){
 function fileDigest(data){
  if(typeof data?.sha256==="string"&&/^[a-f0-9]{64}$/i.test(data.sha256))return data.sha256.toLowerCase();
  if(typeof data?.hash==="string"&&/^[a-f0-9]{64}$/i.test(data.hash))return data.hash.toLowerCase();
- return crypto.createHash("sha256").update(String(data?.sizeBytes)+":"+(data?.name||"")).digest("hex");
+ return null;
+}
+function storedChecksums(meta){
+ if(!meta||typeof meta!=="object")return {};
+ const out={};
+ if(typeof meta.crc32c==="string"&&meta.crc32c)out.crc32c=meta.crc32c;
+ const md5=meta.md5Hash||meta.md5;
+ if(typeof md5==="string"&&md5)out.md5=md5;
+ if(typeof meta.sha256==="string"&&/^[a-f0-9]{64}$/i.test(meta.sha256))out.sha256=meta.sha256.toLowerCase();
+ if(typeof meta.etag==="string"&&meta.etag&&!String(meta.etag).includes("-"))out.etag=meta.etag.replace(/"/g,"");
+ return out;
+}
+function checksumsAgree(source,dest){
+ const keys=["crc32c","md5","sha256","etag"].filter(key=>source[key]&&dest[key]);
+ if(!keys.length)return null;
+ return keys.every(key=>source[key]===dest[key]);
+}
+function invoicePaidThroughMs(invoice){
+ if(!invoice||typeof invoice!=="object")return null;
+ let end=null;
+ for(const line of invoice.lines?.data||[]){
+  const raw=line?.period?.end;
+  if(typeof raw==="number"&&Number.isFinite(raw))end=end==null?raw:Math.max(end,raw);
+ }
+ if(end==null&&typeof invoice.period_end==="number"&&Number.isFinite(invoice.period_end))end=invoice.period_end;
+ if(end==null)return null;
+ return end<1e12?Math.round(end*1000):end;
+}
+function isPrivateAddress(address){
+ const value=String(address||"").toLowerCase().replace(/^\[|\]$/g,"");
+ if(value==="::1"||value==="::"||value.startsWith("fe80:")||value.startsWith("fc")||value.startsWith("fd"))return true;
+ const mapped=value.startsWith("::ffff:")?value.slice(7):value;
+ const parts=mapped.split(".").map(Number);
+ if(parts.length!==4||parts.some(part=>!Number.isInteger(part)||part<0||part>255))return value.includes(":")?false:true;
+ const [a,b]=parts;
+ if(a===0||a===10||a===127)return true;
+ if(a===169&&b===254)return true;
+ if(a===172&&b>=16&&b<=31)return true;
+ if(a===192&&b===168)return true;
+ if(a===100&&b>=64&&b<=127)return true;
+ return false;
 }
 function canListWorkspaces(db){
  try{
@@ -187,7 +237,7 @@ function canListWorkspaces(db){
  }catch(_){return false;}
 }
 async function listAccountProjects(db,ownerHash){
- if(!canListWorkspaces(db))return null;
+ if(!canListWorkspaces(db))return LIST_UNAVAILABLE;
  const legacy=db.collection("tenants").doc(ownerHash).collection("workspaces").doc("free");
  const docs=await db.collection("gd_accounts").doc(ownerHash).collection("workspaces").limit(201).get();
  const projects=[];
@@ -203,7 +253,8 @@ function writeNeedsLock(method){return method!=="GET"&&method!=="HEAD"&&method!=
 
 module.exports={FREE_WORKSPACES,WORKSPACE_FEE_USD_MONTHLY,WORKSPACE_FEE_CENTS,BASE_CAP,RAISED_CAP,
  LAPSE_GRACE_MS,BYO_CHALLENGE_TTL_MS,MONTHLY_LOOKUP_KEY,QUALIFYING_STORAGE_GB,QUALIFYING_WORKERS,
- monthlyPriceId,registerWorkspaceIndex,isGrandfathered,evaluateLapse,projectStatus,activatedBasicProject,
- qualifiesForRaisedCap,summarizeProjects,lockBody,projectsInSameIndex,findSecretFields,rejectProviderSecrets,
- publicByoRegistration,issueChallenge,verifyChallenge,collisionName,fileDigest,listAccountProjects,
- writeNeedsLock};
+ GRANDFATHER_CUTOFF_MS,LIST_UNAVAILABLE,LIST_UNAVAILABLE_LOCK,
+ monthlyPriceId,isGrandfathered,evaluateLapse,projectStatus,activatedBasicProject,
+ qualifiesForRaisedCap,summarizeProjects,lockBody,findSecretFields,rejectProviderSecrets,
+ publicByoRegistration,issueChallenge,verifyChallenge,collisionName,fileDigest,storedChecksums,checksumsAgree,
+ invoicePaidThroughMs,isPrivateAddress,listAccountProjects,writeNeedsLock};

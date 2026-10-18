@@ -12,14 +12,21 @@ const {Storage}=require("@google-cloud/storage");
 const {TransferGovernor}=require("./free_performance");
 const {installedBilling}=require("./billing_gateway");
 const {createProjectService,ProjectError,listAccountProjects,summarizeProjects,lockBody}=require("./projects");
+const {lockedWrite:lockedWriteWith}=require("./locked_write");
 const {effectiveStorageQuota,effectiveWorkers}=require("./billing_v2");
 const apiKeys=require("./api_keys");
 const required=["CUSTOMER_BUCKET","STORAGE_PROJECT_ID"];
 for(const key of required)if(!process.env[key])throw Error("Missing deployment environment variable: "+key);
 if(process.env.STORAGE_PROJECT_ID!=="gendragood-ssd")throw Error("Unexpected storage project");
 if(process.env.CUSTOMER_BUCKET==="gen-dragoon-ssd")throw Error("Personal bucket is forbidden");
-initializeApp({projectId:"gendragoonssd"});
-const db=new Firestore({projectId:process.env.STORAGE_PROJECT_ID});
+let firebaseApp,firestoreClient;
+function firestore(){
+ if(!firebaseApp)firebaseApp=initializeApp({projectId:"gendragoonssd"});
+ if(!firestoreClient)firestoreClient=new Firestore({projectId:process.env.STORAGE_PROJECT_ID});
+ return firestoreClient;
+}
+// Property access connects. Requiring this module does not.
+const db=new Proxy({},{get(_target,prop){const real=firestore();const value=real[prop];return typeof value==="function"?value.bind(real):value;}});
 const bucket=new Storage({projectId:process.env.STORAGE_PROJECT_ID}).bucket(process.env.CUSTOMER_BUCKET);
 const app=express();
 app.disable("x-powered-by");app.use((req,res,next)=>{
@@ -74,7 +81,7 @@ async function auth(req,res,next){
    next();
  }catch(_){res.status(503).json({error:"API key verification unavailable"})}
 }
-apiKeys.install(app,{db,auth:getAuth(),firebaseAuth,accountKey,workspaceRef,FieldValue});
+apiKeys.install(app,{db,firebaseAuth,accountKey,workspaceRef,FieldValue});
 const requireRead=apiKeys.requireScope("files:read");
 const requireWrite=apiKeys.requireScope("files:write");
 // All paid-workspace drafts, pricing, Checkout links and signed Stripe events
@@ -100,15 +107,8 @@ async function currentWorkspace(req,res){
  if(effectiveStorageQuota(w)<=0){res.status(403).json({error:"This project is not active. Restore or activate it in Projects."});return null}
  return w;
 }
-async function lockedWrite(req,res){
- try{
-  const listed=await listAccountProjects(db,accountKey(req.user.uid));
-  if(!listed)return false;
-  const summary=summarizeProjects(listed);
-  if(!summary.locked)return false;
-  res.status(423).json(lockBody(summary));
-  return true;
- }catch(_){res.status(503).json({error:"Workspace policy unavailable"});return true;}
+function lockedWrite(req,res){
+ return lockedWriteWith(req,res,{db,accountKey,listAccountProjects,summarizeProjects,lockBody});
 }
 async function runFreeTransfer(req,workspace,action){
  return governor.run(accountKey(req.user.uid),workspace,async()=>{
@@ -314,6 +314,9 @@ app.delete("/v1/files/:id",auth,requireWrite,async(req,res)=>{
    res.json({deleted:true});
  }catch(_){res.status(503).json({error:"Unable to remove file"})}
 });
-const port=Number(process.env.PORT||8080);
-if(require.main===module)app.listen(port,()=>console.log("GenDragoon free storage API ready"));
-module.exports={app,QUOTA,CHUNK,safeName,validID};
+function start(port=Number(process.env.PORT||8080)){
+ firestore();
+ return app.listen(port,()=>console.log("GenDragoon free storage API ready"));
+}
+if(require.main===module)start();
+module.exports={app,QUOTA,CHUNK,safeName,validID,lockedWrite,start};

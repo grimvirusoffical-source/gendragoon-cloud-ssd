@@ -4,7 +4,6 @@
 // No credentials, sockets, cloud APIs, or production records are used.
 function memoryFirestore(initial=[]){
  const rows=new Map(initial.map(([key,value])=>[key,structuredClone(value)]));
- require("./workspace_policy").registerWorkspaceIndex({rows});
  let tail=Promise.resolve();
  function snap(path){return {exists:rows.has(path),id:path.split("/").at(-1),ref:doc(path),data:()=>structuredClone(rows.get(path))};}
  function doc(path){return {path,id:path.split("/").at(-1),get:async()=>snap(path),collection:name=>collection(path+"/"+name),

@@ -5,9 +5,10 @@ const crypto=require("node:crypto");
 const {STORAGE,PERFORMANCE,validateWorkspaceName}=require("./catalog");
 const policy=require("./workspace_policy");
 const {FREE_WORKSPACES,WORKSPACE_FEE_CENTS,BASE_CAP,RAISED_CAP,QUALIFYING_STORAGE_GB,QUALIFYING_WORKERS,
- monthlyPriceId,registerWorkspaceIndex,isGrandfathered,evaluateLapse,projectStatus,activatedBasicProject,
+ monthlyPriceId,isGrandfathered,evaluateLapse,projectStatus,activatedBasicProject,
  qualifiesForRaisedCap:qualifiesForHigherLimit,summarizeProjects,lockBody,publicByoRegistration,rejectProviderSecrets,
- issueChallenge,verifyChallenge,collisionName,fileDigest,listAccountProjects}=policy;
+ issueChallenge,verifyChallenge,collisionName,fileDigest,storedChecksums,checksumsAgree,invoicePaidThroughMs,isPrivateAddress,
+ listAccountProjects}=policy;
 const PROJECT_FEE_CENTS=WORKSPACE_FEE_CENTS,DEFAULT_PROJECT_LIMIT=BASE_CAP,QUALIFIED_PROJECT_LIMIT=RAISED_CAP;
 const BASIC_QUOTA_BYTES=2_000_000_000;
 const UUID=/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
@@ -26,10 +27,16 @@ function effectiveStorageQuota(w){
  if(w.storageActive===true&&Object.hasOwn(STORAGE,w.storageTier||""))return STORAGE[w.storageTier].gb*1e9;
  return activatedBasicProject(w)?BASIC_QUOTA_BYTES:0;
 }
+function freeSlotsUsed(projects){
+ return (Array.isArray(projects)?projects:[]).filter(workspace=>workspace&&(workspace.kind==="free"||workspace.projectFeeStatus==="free")).length;
+}
 function policyFor(account,projects,{ownerBenefits=false,paymentAvailable=false}={}){
  const summary=summarizeProjects(projects);
- const freeClaimed=account.freeProjectClaimed===true||projects.length>0;
- return {firstProjectFree:true,freeProjectClaimed:freeClaimed,freeProjectAvailable:!freeClaimed,
+ const freeUsed=freeSlotsUsed(projects);
+ // A claimed allowance still counts after the free workspace is archived.
+ const reserved=account.freeProjectClaimed===true?Math.max(freeUsed,FREE_WORKSPACES):freeUsed;
+ const freeClaimed=reserved>=FREE_WORKSPACES;
+ return {firstProjectFree:true,freeProjectClaimed:freeClaimed,freeProjectAvailable:reserved<FREE_WORKSPACES,
    newProjectOneTimeCents:PROJECT_FEE_CENTS,workspaceMonthlyCents:WORKSPACE_FEE_CENTS,freeWorkspaces:FREE_WORKSPACES,
    currency:"usd",feeIsOneTime:false,
    defaultLimit:DEFAULT_PROJECT_LIMIT,qualifiedLimit:QUALIFIED_PROJECT_LIMIT,
@@ -62,8 +69,7 @@ function validateSelection(raw){
 }
 function hasContinuingBilling(w){return ["storage","performance","byo"].some(k=>w[k+"SubscriptionId"]&&!["canceled","incomplete_expired"].includes(w[k+"Status"]));}
 
-function createProjectService({db,stamp,hash,stripe,env={},prices={},ensureCustomer,objectStore=null}){
- registerWorkspaceIndex(db);
+function createProjectService({db,stamp,hash,stripe,env={},prices={},ensureCustomer,objectStore=null,byoFetch=null}){
  const accounts=db.collection("gd_accounts");
  const accountRef=owner=>accounts.doc(owner);
  const collection=owner=>accountRef(owner).collection("workspaces");
@@ -367,8 +373,15 @@ function createProjectService({db,stamp,hash,stripe,env={},prices={},ensureCusto
    return db.runTransaction(async tx=>{
      const snap=await tx.get(ref);
      if(!snap.exists||!owned(snap.data(),owner,id))throw new ProjectError(404,"Project not found","PROJECT_NOT_FOUND");
+     const current=snap.data();
      const patch={providerType:registration.providerType,endpoint:registration.endpoint,
        bucketFingerprint:registration.bucketFingerprint,byoRegistered:true,updatedAt:stamp()};
+     // A new or changed endpoint invalidates the previous proof. First-time
+     // registration leaves absent flags unset so callers can tell it never activated.
+     const changed=!!current.endpoint&&current.endpoint!==registration.endpoint;
+     if(changed||current.byoChallengeVerified===true||current.byoActive===true||current.manualProviderConfigured===true){
+       patch.byoChallengeVerified=false;patch.byoActive=false;patch.manualProviderConfigured=false;patch.bucketFingerprint=null;
+     }
      tx.update(ref,patch);return patch;
    });
  }
@@ -382,21 +395,72 @@ function createProjectService({db,stamp,hash,stripe,env={},prices={},ensureCusto
    });
    return {nonce:challenge.nonce,expiresAtMs:challenge.expiresAtMs,ttlMs:policy.BYO_CHALLENGE_TTL_MS};
  }
- async function verifyByo(req,id,body){
-   try{rejectProviderSecrets(body||{});}catch(error){throw new ProjectError(error.status||400,error.message,error.code||"BYO_SECRET_REJECTED");}
-   const readBack=typeof body?.readBack==="string"?body.readBack:typeof body?.nonce==="string"?body.nonce:"";
-   const owner=hash(req.user.uid),ref=refFor(owner,id);
-   return db.runTransaction(async tx=>{
-     const snap=await tx.get(ref);
-     if(!snap.exists||!owned(snap.data(),owner,id))throw new ProjectError(404,"Project not found","PROJECT_NOT_FOUND");
-     const result=verifyChallenge(snap.data().byoChallenge,readBack,Date.now());
-     if(!result.ok)throw new ProjectError(400,"Bring-your-own challenge was not verified",result.code);
-     tx.update(ref,{byoChallenge:{...snap.data().byoChallenge,used:true,nonce:null},byoChallengeVerified:true,
-       manualProviderConfigured:true,byoActive:true,updatedAt:stamp()});
-     return {verified:true,workspaceId:id};
-   });
+ function challengeError(status,message,code){return new ProjectError(status,message,code);}
+ function endpointHost(value){
+  try{const url=new URL(value);if(url.protocol!=="https:"||url.username||url.password)return null;return url;}
+  catch(_){return null;}
  }
- async function reconcileWorkspaceFee(sub,{eventType=""}={}){
+ function fingerprintFromFetch(fetched,body){
+  const headers=fetched?.headers||{};
+  const etag=headers.etag||headers.ETag||headers.Etag;
+  if(typeof etag==="string"){
+   const clean=etag.replace(/^W\//i,"").replace(/"/g,"");
+   if(/^[a-f0-9]{8,128}$/i.test(clean))return clean.toLowerCase();
+  }
+  if(typeof fetched?.fingerprint==="string"&&/^[a-f0-9]{8,128}$/i.test(fetched.fingerprint))return fetched.fingerprint.toLowerCase();
+  return crypto.createHash("sha256").update(body).digest("hex");
+ }
+ async function defaultByoFetch(url){
+  const parsed=endpointHost(url);
+  if(!parsed)throw challengeError(400,"Challenge URL must be https","BYO_ENDPOINT_HOST_MISMATCH");
+  const dns=require("node:dns").promises;
+  const records=await dns.lookup(parsed.hostname,{all:true,verbatim:true});
+  if(!records.length||records.some(record=>isPrivateAddress(record.address)))
+   throw challengeError(400,"Challenge URL does not resolve to a public address","BYO_ENDPOINT_PRIVATE_ADDRESS");
+  const response=await fetch(url,{method:"GET",redirect:"manual",signal:AbortSignal.timeout(3000)});
+  if(response.status>=300&&response.status<400)throw challengeError(400,"Challenge URL must not redirect","BYO_ENDPOINT_REDIRECT");
+  if(response.status!==200)throw challengeError(400,"Challenge object was not readable","BYO_CHALLENGE_MISMATCH");
+  const bytes=Buffer.from(await response.arrayBuffer());
+  if(bytes.length>1024)throw challengeError(400,"Challenge object is too large","BYO_CHALLENGE_MISMATCH");
+  const etag=response.headers.get("etag");
+  return {status:200,body:bytes,headers:etag?{etag}:{},host:parsed.host};
+ }
+ async function verifyByo(req,id,body){
+  try{rejectProviderSecrets(body||{});}catch(error){throw new ProjectError(error.status||400,error.message,error.code||"BYO_SECRET_REJECTED");}
+  const presignedUrl=typeof body?.presignedUrl==="string"?body.presignedUrl:typeof body?.proofUrl==="string"?body.proofUrl:"";
+  // An echoed nonce is not proof the client can read its bucket.
+  if(!presignedUrl)throw challengeError(400,"The server must fetch the challenge object","BYO_CHALLENGE_PROOF_REQUIRED");
+  const owner=hash(req.user.uid),ref=refFor(owner,id);
+  const snap=await ref.get();
+  if(!snap.exists||!owned(snap.data(),owner,id))throw new ProjectError(404,"Project not found","PROJECT_NOT_FOUND");
+  const data=snap.data();
+  if(data.providerType!=="s3")throw challengeError(422,"byo_provider_unsupported","byo_provider_unsupported");
+  const registered=endpointHost(data.endpoint);
+  const proof=endpointHost(presignedUrl);
+  if(!registered||!proof||proof.host!==registered.host)
+   throw challengeError(400,"Presigned URL host does not match the registered endpoint","BYO_ENDPOINT_HOST_MISMATCH");
+  const challenge=data.byoChallenge;
+  const gate=verifyChallenge(challenge,challenge?.nonce,Date.now());
+  if(!gate.ok)throw challengeError(400,"Bring-your-own challenge was not verified",gate.code);
+  if(!proof.pathname.includes("/.gendragoon-challenge/"+challenge.nonce))
+   throw challengeError(400,"Challenge object path does not match the nonce","BYO_CHALLENGE_MISMATCH");
+  const fetched=await (byoFetch||defaultByoFetch)(presignedUrl);
+  if(fetched?.status&&fetched.status!==200)throw challengeError(400,"Challenge object was not readable","BYO_CHALLENGE_MISMATCH");
+  const bytes=Buffer.isBuffer(fetched?.body)?fetched.body:Buffer.from(fetched?.body||"");
+  if(bytes.length>1024||bytes.toString()!==challenge.nonce)
+   throw challengeError(400,"Challenge object contents did not match the nonce","BYO_CHALLENGE_MISMATCH");
+  const fingerprint=fingerprintFromFetch(fetched,bytes);
+  return db.runTransaction(async tx=>{
+    const fresh=await tx.get(ref);
+    if(!fresh.exists||!owned(fresh.data(),owner,id))throw new ProjectError(404,"Project not found","PROJECT_NOT_FOUND");
+    const again=verifyChallenge(fresh.data().byoChallenge,challenge.nonce,Date.now());
+    if(!again.ok)throw challengeError(400,"Bring-your-own challenge was not verified",again.code);
+    tx.update(ref,{byoChallenge:{...fresh.data().byoChallenge,used:true,nonce:null},byoChallengeVerified:true,
+      manualProviderConfigured:true,byoActive:true,bucketFingerprint:fingerprint,updatedAt:stamp()});
+    return {verified:true,workspaceId:id,bucketFingerprint:fingerprint};
+  });
+ }
+ async function reconcileWorkspaceFee(sub,{eventType="",invoice=null}={}){
    const meta=sub?.metadata||{};
    if(meta.kind!=="workspace_fee")return false;
    const owner=meta.accountHash,id=meta.workspaceId;
@@ -407,17 +471,25 @@ function createProjectService({db,stamp,hash,stripe,env={},prices={},ensureCusto
    if(account.data().stripeCustomerId!==customer)return false;
    // Grandfathered one-time and legacy free workspaces are never lapsed or rewritten.
    if(isGrandfathered(workspace.data()))return true;
-   const periodSeconds=sub.current_period_end||sub.items?.data?.[0]?.current_period_end;
-   const periodEndMs=typeof periodSeconds==="number"?(periodSeconds<1e12?Math.round(periodSeconds*1000):periodSeconds):(workspace.data().workspaceFeePeriodEndMs??null);
-   let workspaceFeeStatus=workspace.data().workspaceFeeStatus||"past_due",workspaceFeePaid=false;
-   if(eventType==="invoice.payment_failed"){workspaceFeeStatus="past_due";workspaceFeePaid=false;}
-   else if(eventType==="invoice.paid"){workspaceFeeStatus="active";workspaceFeePaid=true;}
-   else if(eventType==="customer.subscription.deleted"||sub.status==="canceled"||sub.status==="incomplete_expired"){workspaceFeeStatus="canceled";workspaceFeePaid=false;}
-   else if(sub.status==="active"||sub.status==="trialing"){workspaceFeeStatus="active";workspaceFeePaid=true;}
-   else if(sub.status==="past_due"||sub.status==="unpaid"){workspaceFeeStatus="past_due";workspaceFeePaid=false;}
+   // Status comes only from the subscription retrieved for this delivery.
+   // The event type must not overwrite a newer status from an older event.
+   const status=sub.status||"";
+   let workspaceFeeStatus="past_due",workspaceFeePaid=false;
+   if(status==="active"||status==="trialing"){workspaceFeeStatus="active";workspaceFeePaid=true;}
+   else if(status==="canceled"||status==="cancelled"||status==="incomplete_expired"){workspaceFeeStatus="canceled";workspaceFeePaid=false;}
+   else {workspaceFeeStatus="past_due";workspaceFeePaid=false;}
+   const current=workspace.data();
    const patch={workspaceFeeModel:"monthly",workspaceFeeStatus,workspaceFeePaid,workspaceFeeSubscriptionId:sub.id,
-     workspaceFeePeriodEndMs:periodEndMs,feeIsOneTime:false,updatedAt:stamp()};
-   if(workspaceFeePaid&&workspace.data().projectStatus==="lapsed")patch.projectStatus="active";
+     feeIsOneTime:false,updatedAt:stamp()};
+   if(eventType==="invoice.paid"){
+     const paidEnd=invoicePaidThroughMs(invoice);
+     if(paidEnd!=null){
+       const previous=typeof current.paidThroughMs==="number"?current.paidThroughMs:null;
+       const next=previous==null?paidEnd:Math.max(previous,paidEnd);
+       patch.paidThroughMs=next;patch.workspaceFeePeriodEndMs=next;
+     }
+   }
+   if(workspaceFeePaid&&current.projectStatus==="lapsed")patch.projectStatus="active";
    await ref.update(patch);return true;
  }
  async function merge(req,sourceId,{targetId,confirmName}={}){
@@ -425,7 +497,7 @@ function createProjectService({db,stamp,hash,stripe,env={},prices={},ensureCusto
    const owner=hash(req.user.uid),sourceRef=refFor(owner,sourceId),targetRef=refFor(owner,targetId);
    const tombRef=accountRef(owner).collection("workspace_merges").doc(sourceId);
    const tomb=await tombRef.get();
-   if(tomb.exists){
+   if(tomb.exists&&tomb.data().phase==="completed"){
      if(confirmName!==tomb.data().name)throw new ProjectError(400,"Enter the exact source workspace name","CONFIRM_NAME_REQUIRED");
      if(tomb.data().targetId!==targetId)throw new ProjectError(409,"This workspace was already merged elsewhere","MERGE_CONFLICT");
      for(const key of tomb.data().sourceObjectKeys||[])if(objectStore)await objectStore.delete(key);
@@ -433,6 +505,13 @@ function createProjectService({db,stamp,hash,stripe,env={},prices={},ensureCusto
    }
    const token=crypto.randomUUID();
    let held=false;
+   const verifyFailed=()=>new ProjectError(409,"Copied object failed verification","MERGE_VERIFY_FAILED");
+   async function agrees(sourceMeta,destMeta,size){
+     if(destMeta&&destMeta.size!=null&&destMeta.size!==size)throw verifyFailed();
+     const verdict=checksumsAgree(storedChecksums(sourceMeta),storedChecksums(destMeta));
+     if(verdict===false)throw verifyFailed();
+     return verdict;
+   }
    try{
      const locked=await db.runTransaction(async tx=>{
        const [source,target]=await Promise.all([tx.get(sourceRef),tx.get(targetRef)]);
@@ -451,17 +530,22 @@ function createProjectService({db,stamp,hash,stripe,env={},prices={},ensureCusto
      });
      held=true;
      const sourceName=locked.source.name;
+     // State record first, before any source file is removed, so a crash can resume.
+     await tombRef.set({name:sourceName,targetId,phase:"copying",copied:0,mergeId:token},{merge:true});
      const copied=new Map((locked.source.mergeCopied||[]).map(entry=>[entry.fileId,entry]));
      const taken=new Set((await listFiles(targetRef)).map(file=>file.data.name));
      for(const entry of copied.values())if(entry.name)taken.add(entry.name);
      const sourceFiles=await listFiles(sourceRef);
+     let heartbeat=0;
      for(const file of sourceFiles){
        const digest=fileDigest(file.data),size=file.data.sizeBytes||0;
        const previous=copied.get(file.id);
        if(previous){
          const dest=await targetRef.collection("files").doc(previous.destId).get();
          const stat=objectStore&&previous.objectKey?await objectStore.stat(previous.objectKey):null;
-         if(dest.exists&&dest.data().sizeBytes===size&&fileDigest(dest.data())===digest&&(!stat||stat.size===size&&stat.sha256===digest))continue;
+         const recordOk=dest.exists&&dest.data().sizeBytes===size&&(!digest||fileDigest(dest.data())===digest);
+         const statOk=!stat||(stat.size===size&&checksumsAgree(storedChecksums(file.data),storedChecksums(stat))!==false);
+         if(recordOk&&statOk){if(previous.name)taken.add(previous.name);continue;}
        }
        const name=previous?.name||collisionName(file.data.name,sourceName,taken);
        taken.add(name);
@@ -470,45 +554,63 @@ function createProjectService({db,stamp,hash,stripe,env={},prices={},ensureCusto
        if(file.data.objectKey){
          if(!objectStore)throw new ProjectError(503,"Workspace file storage is not available for merge","MERGE_STORAGE_UNAVAILABLE");
          const copiedObject=await objectStore.copy(file.data.objectKey,objectKey);
-         if(!copiedObject||copiedObject.size!==size||copiedObject.sha256!==digest)throw new ProjectError(409,"Copied object failed verification","MERGE_VERIFY_FAILED");
+         const copiedOk=await agrees(file.data,copiedObject,size);
+         const stat=await objectStore.stat(objectKey);
+         const statOk=await agrees(file.data,stat,size);
+         if(copiedOk==null&&statOk==null){
+           if(typeof objectStore.read!=="function")throw verifyFailed();
+           const [left,right]=await Promise.all([objectStore.read(file.data.objectKey),objectStore.read(objectKey)]);
+           const hashOf=buf=>crypto.createHash("sha256").update(buf).digest("hex");
+           if(hashOf(left)!==hashOf(right))throw verifyFailed();
+         }
        }
-       const record={name,sizeBytes:size,sha256:digest,copiedFrom:{workspaceId:sourceId,fileId:file.id,sha256:digest,sizeBytes:size},createdAt:stamp()};
+       const record={name,sizeBytes:size,copiedFrom:{workspaceId:sourceId,fileId:file.id,sizeBytes:size},createdAt:stamp()};
+       if(digest){record.sha256=digest;record.copiedFrom.sha256=digest;}
+       if(file.data.crc32c)record.crc32c=file.data.crc32c;
+       if(file.data.md5Hash)record.md5Hash=file.data.md5Hash;
+       if(file.data.md5)record.md5=file.data.md5;
        if(objectKey)record.objectKey=objectKey;
        const destRef=targetRef.collection("files").doc(destId);
        const existing=await destRef.get();
        if(existing.exists)await destRef.set(record);else await destRef.create(record);
-       if(objectStore&&objectKey){
-         const stat=await objectStore.stat(objectKey);
-         if(!stat||stat.size!==size||stat.sha256!==digest)throw new ProjectError(409,"Copied object failed verification","MERGE_VERIFY_FAILED");
-       }
        const saved=await destRef.get();
-       if(!saved.exists||saved.data().sizeBytes!==size||fileDigest(saved.data())!==digest)throw new ProjectError(409,"Copied file record failed verification","MERGE_VERIFY_FAILED");
+       if(!saved.exists||saved.data().sizeBytes!==size)throw verifyFailed();
+       if(digest&&fileDigest(saved.data())!==digest)throw verifyFailed();
+       if(file.data.crc32c&&saved.data().crc32c!==file.data.crc32c)throw verifyFailed();
        copied.set(file.id,{fileId:file.id,destId,name,sha256:digest,sizeBytes:size,objectKey,sourceObjectKey:file.data.objectKey||null});
-       await sourceRef.update({mergeCopied:[...copied.values()],updatedAt:stamp()});
+       heartbeat++;
+       const lock={token,sourceId,targetId,expiresAtMs:Date.now()+120000,phase:"copying"};
+       const progress={mergeCopied:[...copied.values()],updatedAt:stamp(),...(heartbeat%50===0?{mergeLock:lock}:{})};
+       await sourceRef.update(progress);
+       if(heartbeat%50===0)await targetRef.update({mergeLock:lock,updatedAt:stamp()});
      }
+     const freshSource=await sourceRef.get();
+     if(freshSource.exists)await cancelSourceBilling(freshSource.data(),sourceId);
      const sourceObjectKeys=[...copied.values()].map(entry=>entry.sourceObjectKey).filter(Boolean);
-     for(const entry of copied.values()){
-       const dest=await targetRef.collection("files").doc(entry.destId).get();
-       if(!dest.exists||dest.data().sizeBytes!==entry.sizeBytes||fileDigest(dest.data())!==entry.sha256)
-         throw new ProjectError(409,"Copied file record failed verification","MERGE_VERIFY_FAILED");
-       if(objectStore&&entry.objectKey){
-         const stat=await objectStore.stat(entry.objectKey);
-         if(!stat||stat.size!==entry.sizeBytes||stat.sha256!==entry.sha256)throw new ProjectError(409,"Copied object failed verification","MERGE_VERIFY_FAILED");
+     async function drain(collectionName){
+       for(;;){
+         const removed=await db.runTransaction(async tx=>{
+           const snap=await tx.get(sourceRef.collection(collectionName).limit(399));
+           const docs=snap.docs||[];
+           if(!docs.length)return 0;
+           for(const doc of docs)tx.delete(doc.ref);
+           return docs.length;
+         });
+         if(!removed)break;
        }
      }
-     const finalFiles=await listFiles(sourceRef);
-     if(finalFiles.some(file=>!copied.has(file.id)))throw new ProjectError(409,"Source changed during merge. Retry to resume.","MERGE_SOURCE_CHANGED");
+     await drain("files");
+     await drain("uploads");
      await db.runTransaction(async tx=>{
-       const [source,target]=await Promise.all([tx.get(sourceRef),tx.get(targetRef)]);
+       const [source,target,targetFiles,leftover]=await Promise.all([
+         tx.get(sourceRef),tx.get(targetRef),tx.get(targetRef.collection("files")),tx.get(sourceRef.collection("files").limit(1))]);
+       if((leftover.docs||[]).length)throw new ProjectError(409,"Source changed during merge. Retry to resume.","MERGE_SOURCE_CHANGED");
        if(!source.exists||source.data().mergeLock?.token!==token)throw new ProjectError(409,"Merge lock lost","MERGE_LOCK_LOST");
        if(!target.exists||!owned(target.data(),owner,targetId))throw new ProjectError(404,"Project not found","PROJECT_NOT_FOUND");
-       const files=await listFiles(targetRef);
-       const uploads=await sourceRef.collection("uploads").get();
-       for(const file of await listFiles(sourceRef))tx.delete(file.ref);
-       for(const upload of uploads.docs)tx.delete(upload.ref);
-       tx.set(tombRef,{name:sourceName,targetId,copied:copied.size,sourceObjectKeys,mergedAt:stamp()});
+       const used=(targetFiles.docs||[]).reduce((sum,file)=>sum+(file.data().sizeBytes||0),0);
+       tx.set(tombRef,{name:sourceName,targetId,phase:"completed",copied:copied.size,sourceObjectKeys,mergedAt:stamp()});
        tx.delete(sourceRef);
-       tx.update(targetRef,{mergeLock:null,usedBytes:files.reduce((sum,file)=>sum+(file.data.sizeBytes||0),0),updatedAt:stamp()});
+       tx.update(targetRef,{mergeLock:null,usedBytes:used,updatedAt:stamp()});
      });
      held=false;
      if(objectStore)for(const key of sourceObjectKeys)await objectStore.delete(key);
@@ -523,6 +625,12 @@ function createProjectService({db,stamp,hash,stripe,env={},prices={},ensureCusto
        }).catch(()=>{});
      }
    }
+ }
+ async function cancelSourceBilling(data,mergeId){
+   const cancel=stripe&&stripe.subscriptions&&stripe.subscriptions.cancel;
+   if(typeof cancel!=="function")return;
+   const ids=[...new Set(["workspaceFee","storage","performance","byo"].map(key=>data[key+"SubscriptionId"]).filter(id=>typeof id==="string"&&id))];
+   for(const id of ids)await cancel(id,{},{idempotencyKey:"gd-merge-"+mergeId+"-cancel-"+id});
  }
  return {inventory,get,create,setSelection,checkout,archive,restore,withLease,reconcilePayment,revokePayment,
    registerByo,issueByoChallenge,verifyByo,reconcileWorkspaceFee,merge,

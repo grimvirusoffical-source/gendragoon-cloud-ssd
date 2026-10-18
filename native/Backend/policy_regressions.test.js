@@ -12,11 +12,11 @@ const idFor=n=>"12345678-1234-4000-8000-"+String(n).padStart(12,"0");
 const base={kind:"paid",accountHash:owner,name:"Existing",projectBillingVersion:2,projectStatus:"active",projectFeeStatus:"paid",
   provisioned:true,storageActive:false,performanceActive:false,usedBytes:0,reservedBytes:0};
 const qualifier={storageActive:true,storageTier:"2TB",performanceActive:true,performanceTier:"turbo"};
-function fixture(){
+function fixture(options={}){
   const db=memoryFirestore([["gd_accounts/"+owner,{stripeCustomerId:"cus_test"}]]);
   const stripe={prices:{retrieve:async()=>{throw Error("no Stripe in policy tests");}},checkout:{sessions:{}}};
   const env={STRIPE_CHECKOUT_ENABLED:"true",STRIPE_PROJECT_CHECKOUT_READY:"true",STRIPE_PROJECT_CREATION_PRICE_ID:"price_test",STRIPE_ENVIRONMENT:"test",PUBLIC_URL:"https://billing.example"};
-  const service=createProjectService({db,stamp:()=>1,hash:uid=>uid==="other"?other:owner,stripe,env,ensureCustomer:async()=>"cus_test"});
+  const service=createProjectService({db,stamp:()=>1,hash:uid=>uid==="other"?other:owner,stripe,env,ensureCustomer:async()=>"cus_test",...options});
   const path=id=>"gd_accounts/"+owner+"/workspaces/"+id;
   const put=(id,v={})=>db.rows.set(path(id),{...base,name:"P"+id.slice(-2),...v});
   return {db,service,req:{user:{uid:"owner"}},put,path,record:id=>db.rows.get(path(id))};
@@ -63,7 +63,9 @@ test("cap: paid storage route denies access to workspaces over the cap after dow
   const f=fixture();for(let n=1;n<=15;n++)f.put(idFor(n),n===1?qualifier:{});
   f.db.rows.set(f.path(idFor(1)),{...f.record(idFor(1)),storageActive:false,performanceActive:false});
   // Over the 10 cap after downgrade: uploads must be blocked (reads may stay allowed by the lock rule).
-  const scope=scopeFromWorkspace(f.record(idFor(15)),owner,idFor(15));
+  // Pass the account list explicitly. A missing list is fail-closed (scope_unavailable), not this over-cap case.
+  const listed=[];for(let n=1;n<=15;n++)listed.push({...f.record(idFor(n)),id:idFor(n)});
+  const scope=scopeFromWorkspace(f.record(idFor(15)),owner,idFor(15),listed);
   assert.ok(scope===null||scope.uploadsBlocked===true,"workspace 15 still gets a writable storage scope");
   assert.equal(scope.uploadsBlocked,true);
   assert.deepEqual(scope.lock,{error:"workspace_lock",reason:"over_cap",overBy:5,unpaidWorkspaceIds:[]});
@@ -153,20 +155,26 @@ test("byo secrets: server rejects any payload with provider secrets and never pe
     assert.equal(blob.includes(secret),false);
   }finally{for(const [name,fn] of saved)console[name]=fn;await new Promise(resolve=>server.close(resolve));}
 });
-test("byo challenge: workspace stays inactive without a verified challenge read-back",async()=>{
+test("byo challenge: workspace stays inactive without a verified server-side fetch",async()=>{
   assert.equal(projectStatus({...byo(1),projectStatus:undefined}),"pending_activation");
   assert.equal(projectStatus({...byo(1),byoActive:true,manualProviderConfigured:true,projectStatus:undefined}),"pending_activation");
-  const f=fixture();
-  f.db.rows.set(f.path(idFor(1)),{kind:"byo",accountHash:owner,name:"BYO challenge",provisioned:true,byoActive:true,manualProviderConfigured:true,providerType:"s3",endpoint:"https://s3.example.com",bucketFingerprint:"a".repeat(16)});
+  const endpoint="https://s3.example.com";
+  const byoFetch=async url=>{
+    const nonce=new URL(url).pathname.split("/").pop();
+    return {status:200,body:Buffer.from(nonce),headers:{etag:'"'+"ab".repeat(16)+'"'}};
+  };
+  const f=fixture({byoFetch});
+  f.db.rows.set(f.path(idFor(1)),{kind:"byo",accountHash:owner,name:"BYO challenge",provisioned:true,byoActive:true,manualProviderConfigured:true,providerType:"s3",endpoint,bucketFingerprint:"a".repeat(16)});
   assert.equal(projectStatus(f.record(idFor(1))),"pending_activation");
   const issued=await f.service.issueByoChallenge(f.req,idFor(1));
-  await assert.rejects(f.service.verifyByo(f.req,idFor(1),{readBack:"not-the-nonce"}),{status:400,code:"BYO_CHALLENGE_MISMATCH"});
+  await assert.rejects(f.service.verifyByo(f.req,idFor(1),{readBack:"not-the-nonce"}),{status:400,code:"BYO_CHALLENGE_PROOF_REQUIRED"});
+  await assert.rejects(f.service.verifyByo(f.req,idFor(1),{presignedUrl:endpoint+"/.gendragoon-challenge/not-the-nonce"}),{status:400,code:"BYO_CHALLENGE_MISMATCH"});
   assert.notEqual(f.record(idFor(1)).byoChallengeVerified,true);
-  await f.service.verifyByo(f.req,idFor(1),{readBack:issued.nonce});
+  await f.service.verifyByo(f.req,idFor(1),{presignedUrl:endpoint+"/.gendragoon-challenge/"+issued.nonce});
   assert.equal(f.record(idFor(1)).byoChallengeVerified,true);assert.equal(projectStatus(f.record(idFor(1))),"active");
-  await assert.rejects(f.service.verifyByo(f.req,idFor(1),{readBack:issued.nonce}),{code:"BYO_CHALLENGE_USED"});
-  f.db.rows.set(f.path(idFor(2)),{kind:"byo",accountHash:owner,name:"BYO expired",provisioned:true,providerType:"sftp",endpoint:"sftp://files.example",bucketFingerprint:"b".repeat(16),byoChallenge:{nonce:"expired-nonce",expiresAtMs:Date.now()-1,used:false}});
-  await assert.rejects(f.service.verifyByo(f.req,idFor(2),{readBack:"expired-nonce"}),{code:"BYO_CHALLENGE_EXPIRED"});
+  await assert.rejects(f.service.verifyByo(f.req,idFor(1),{presignedUrl:endpoint+"/.gendragoon-challenge/"+issued.nonce}),{code:"BYO_CHALLENGE_USED"});
+  f.db.rows.set(f.path(idFor(2)),{kind:"byo",accountHash:owner,name:"BYO expired",provisioned:true,providerType:"s3",endpoint,bucketFingerprint:"b".repeat(16),byoChallenge:{nonce:"expired-nonce",expiresAtMs:Date.now()-1,used:false}});
+  await assert.rejects(f.service.verifyByo(f.req,idFor(2),{presignedUrl:endpoint+"/.gendragoon-challenge/expired-nonce"}),{code:"BYO_CHALLENGE_EXPIRED"});
 });
 
 // ---- 3. Lapse ----
@@ -175,7 +183,8 @@ test("lapse: unpaid workspace lapses at Stripe current_period_end + 3 days grace
   const express=require("express"),Stripe=require("stripe"),{installedBilling,STRIPE_API_VERSION}=require("./billing_gateway");
   assert.equal(LAPSE_GRACE_MS,3*24*60*60*1000);
   const f=fixture();const periodEnd=1_700_000_000,endMs=periodEnd*1000;
-  f.put(idFor(3),{workspaceFeeModel:"monthly",workspaceFeeStatus:"pending",projectFeeStatus:"pending",projectStatus:"active",provisioned:true});
+  // Grace is anchored to the last paid period, which payment_failed must not move.
+  f.put(idFor(3),{workspaceFeeModel:"monthly",workspaceFeeStatus:"pending",projectFeeStatus:"pending",projectStatus:"active",provisioned:true,paidThroughMs:endMs,workspaceFeePeriodEndMs:endMs});
   f.put(idFor(4));const grandfathered=structuredClone(f.record(idFor(4)));
   const sub={id:"sub_ws",customer:"cus_test",status:"past_due",current_period_end:periodEnd,metadata:{kind:"workspace_fee",accountHash:owner,workspaceId:idFor(3)}};
   let retrieves=0;
