@@ -49,7 +49,7 @@ The job is keyed by `accountHash` (`sha256("gd-v1:"+uid)` in the running service
 ## Job status
 
 ```http
-GET /v2/account/deletion/:jobId
+GET /v2/account/deletions/:jobId
 ```
 
 ```json
@@ -97,4 +97,4 @@ await svc.jobStatus(jobId);   // {status:"queued"|"running"|"done"|"failed"}
 registerAccountDeletion({app, firebaseAuth, db, stripe, bucket, auth, byoProviders, hash, now});
 ```
 
-`registerAccountDeletion` mounts `DELETE /v2/account` and `GET /v2/account/deletion/:jobId`. The running service registers it from `installedBilling` so the same Stripe client used for Checkout performs the cancellations. `auth` is Firebase Admin Auth (`deleteUser`, `revokeRefreshTokens`).
+`registerAccountDeletion` mounts `DELETE /v2/account` and `GET /v2/account/deletions/:jobId`. The running service registers it from `installedBilling` so the same Stripe client used for Checkout performs the cancellations. `auth` is Firebase Admin Auth (`deleteUser`, `revokeRefreshTokens`).

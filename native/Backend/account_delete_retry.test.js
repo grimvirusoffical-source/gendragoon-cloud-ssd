@@ -100,7 +100,7 @@ test("account delete: exactly five minutes of auth_time is still fresh",async()=
  assert.equal(res.status,202);
  assert.equal((await untilDone(f.svc,res.jobId)).status,"done");
 });
-test("GET /v2/account/deletion/:jobId reports the polled job without the Firebase user",async()=>{
+test("GET /v2/account/deletions/:jobId reports the polled job without the Firebase user",async()=>{
  const db=memoryFirestore();
  const stripe={subscriptions:{list:async()=>({has_more:false,data:[]}),cancel:async()=>({})}};
  const bucket={deleteFiles:async()=>{}};
@@ -120,7 +120,7 @@ test("GET /v2/account/deletion/:jobId reports the polled job without the Firebas
   const deadline=Date.now()+5000;
   let status;
   do{
-   const polled=await fetch(base+"/v2/account/deletion/"+body.jobId);
+   const polled=await fetch(base+"/v2/account/deletions/"+body.jobId);
    assert.equal(polled.status,200);
    status=await polled.json();
    if(status.status==="done")break;
@@ -128,7 +128,7 @@ test("GET /v2/account/deletion/:jobId reports the polled job without the Firebas
   }while(Date.now()<deadline);
   assert.equal(status.status,"done");
   assert.equal((await svc.jobStatus(body.jobId)).status,"done");
-  const missing=await fetch(base+"/v2/account/deletion/00000000-0000-4000-8000-000000000000");
+  const missing=await fetch(base+"/v2/account/deletions/00000000-0000-4000-8000-000000000000");
   assert.equal(missing.status,404);
  }finally{server.close();}
 });

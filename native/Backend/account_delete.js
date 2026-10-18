@@ -245,7 +245,7 @@ function registerAccountDeletion({app,firebaseAuth,...deps}){
    res.status(status).json({error:error?.code||"account_deletion_failed"});
   }
  });
- app.get("/v2/account/deletion/:jobId",async(req,res)=>{
+ app.get("/v2/account/deletions/:jobId",async(req,res)=>{
   try{
    const job=await svc.jobStatus(req.params.jobId);
    if(!job)return res.status(404).json({error:"not_found"});
