@@ -226,7 +226,10 @@ class RestartWorkerTests(unittest.TestCase):
     def test_packaging_requires_restart_and_profile_resources(self):
         spec=importlib.util.spec_from_file_location("fixture_package",RESOURCE.parent/"package_macos.py")
         package=importlib.util.module_from_spec(spec);spec.loader.exec_module(package)
-        (self.resources/"gendragoon_project_files.py").write_text("fixture required project browser")
+        for name in package.REQUIRED_RESOURCES:
+            path = self.resources / name
+            if not path.is_file():
+                path.write_text("fixture required " + name)
         package.require_runtime_resources(self.app)
         (self.resources/"gendragoon_update_restart.py").unlink()
         with self.assertRaisesRegex(RuntimeError,"gendragoon_update_restart.py"):

@@ -21,6 +21,8 @@ REQUIRED_RESOURCES=("gendragoon_update_restart.py", "gendragoon_auto_update.py",
     "gendragoon_app_control.py", "gendragoon_app_launch.py", "gendragoon_library.py",
     "gendragoon_upload_workspace.py", "gendragoon_performance.py",
     "gendragoon_performance_profiles.json", "gendragoon_project_files.py",
+    "gendragoon_aes.py", "gendragoon_account.py", "gendragoon_hosted_storage.py",
+    "gendragoon_byo_connect.py", "extension-map.json",
     "redxai_updater.py", "grim-apps-manifest.json")
 
 def require_runtime_resources(app):

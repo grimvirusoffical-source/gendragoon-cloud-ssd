@@ -685,8 +685,8 @@ struct GDManagedAppSession: Identifiable {
 @MainActor private struct MultiCloudPanel: View {
     @ObservedObject var library: LibraryModel
     var body: some View {
-        Panel(title: "Cloud Providers & Your Own VPS") {
-            Text("Connect any cloud or VPS: SFTP, a virtual private server, S3-compatible storage, Backblaze B2, Cloudflare R2, WebDAV, Google Drive, OneDrive, or Google Cloud. The workspace fee is $5/month, the same as a hosted workspace. Supply endpoint, provider, region, bucket, access ID, secret and permissions in the local Terminal wizard. A Google Cloud Owner role is checked only for a bring-your-own Google Cloud bucket.").font(.system(size: 12)).foregroundStyle(.gray)
+        Panel(title: "S3-compatible storage") {
+            Text("Connect Amazon S3, Cloudflare R2, Backblaze B2, Wasabi, MinIO, or Google Cloud with S3/HMAC keys. The workspace fee is $5/month. SFTP, Azure, and WebDAV are coming soon and have no connect flow. Keys stay in the macOS Keychain. The challenge sends a presigned GET, not the nonce.").font(.system(size: 12)).foregroundStyle(.gray)
             HStack {
                 ActionButton(title: "Open Manual Terminal Configuration", systemName: "terminal", action: library.openProviderSetup, isPrimary: true)
                 ActionButton(title: "Refresh Providers", systemName: "arrow.clockwise", action: library.refresh, isDisabled: library.busy)
@@ -742,7 +742,7 @@ struct GDManagedAppSession: Identifiable {
     @ObservedObject var cloud: CloudModel
     var body: some View {
         Panel(title: "Google Cloud · Browser Login") {
-                        Text("GenDragoonSSD · Personal Cloud Storage. This Google Cloud connection is only for a bucket you bring yourself, and it requires the Owner role on that project. Hosted workspaces use your signed-in account on the shared customer bucket. Any other cloud or VPS is $5/month as well and does not use this check. Customer Google sign-in uses the separate Firebase project (gendragoonssd).")
+                        Text("GenDragoonSSD · Personal Cloud Storage. Hosted workspaces use your signed-in account on the shared customer bucket. A bucket you connect is S3-compatible and is $5/month. Google Cloud uses S3/HMAC keys. SFTP, Azure, and WebDAV are coming soon. Customer Google sign-in uses the separate Firebase project (gendragoonssd).")
                             .font(.system(size: 12)).foregroundStyle(.gray)
                         HStack(spacing: 10) {
                             ActionButton(title: "Connect Google Cloud · Opera", systemName: "person.crop.circle.badge.checkmark", action: cloud.connectGoogle, isPrimary: true, isDisabled: cloud.cloudBusy)
@@ -862,8 +862,8 @@ private struct PlansPanel: View {
             }
             HStack {
                 VStack(alignment:.leading,spacing:3) {
-                    Text("Your cloud or VPS · $5/month").font(.system(size:12,weight:.semibold))
-                    Text("Same workspace fee as a hosted workspace. Any cloud or VPS, not only Google Cloud. Provider charges stay with that provider. Performance features cost extra unless you stay on the free performance tier.")
+                    Text("Your S3-compatible bucket · $5/month").font(.system(size:12,weight:.semibold))
+                    Text("Same workspace fee as a hosted workspace. Amazon S3, R2, B2, Wasabi, MinIO, or Google Cloud with S3/HMAC keys. SFTP, Azure, and WebDAV are coming soon. Provider charges stay with that provider.")
                         .font(.system(size:11)).foregroundStyle(.gray)
                 }
                 Spacer()

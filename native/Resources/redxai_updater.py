@@ -5,6 +5,7 @@ Watches release feeds for grim's apps, starting with GenDragoon Cloud SSD.
 When an update is already downloaded and ready, quit that app, replace it, and
 relaunch it. Additional apps are entries in grim-apps-manifest.json.
 """
+import argparse
 import json
 import os
 import platform
@@ -54,3 +55,15 @@ def offer_relaunch(app):
     if not companion.is_dir() or companion.is_symlink():
         return None
     return None
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description="Red-XAI relaunches a ready update when GenDragoon cannot relaunch itself.")
+    parser.add_argument("action", nargs="?", choices=("show",), default="show")
+    parser.parse_args(argv)
+    print("Red-XAI relaunches a ready update from grim-apps-manifest.json.")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

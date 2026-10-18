@@ -98,7 +98,7 @@ struct ProjectUploadSection: View {
                     Text("The saved destination is unavailable in the current authorized cloud choices. It stays selected; refresh access or choose another destination before uploading.")
                         .font(.caption).foregroundStyle(.red)
                 } else if workspace.projects.isEmpty && !workspace.destinationAvailable {
-                    Text("No destination is selected. Hosted files use your signed-in workspace. A bring-your-own Google Cloud bucket needs the Owner role; any other cloud or VPS does not.")
+                    Text("No destination is selected. Hosted files use your signed-in workspace. A bucket you connect is S3-compatible, including Google Cloud with S3/HMAC keys. SFTP, Azure, and WebDAV are coming soon.")
                         .font(.caption).foregroundStyle(.secondary)
                 }
                 Button("Refresh cloud projects and upload state") {

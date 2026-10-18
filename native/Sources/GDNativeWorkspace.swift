@@ -238,11 +238,11 @@ enum GDNativeHelper {
                 Button { showCleanup.toggle() } label: { Label("Cleanup Drive", systemImage: "folder.badge.gearshape") }
                     .disabled(native.maintenanceBusy)
             }
-            Text("Hosted workspaces use the shared customer bucket and your signed-in account. Bring-your-own storage can be any cloud or VPS and is $5/month per workspace, the same as a hosted workspace. A Google Cloud Owner role is required only for a bring-your-own Google Cloud bucket.")
+            Text("Hosted workspaces use the shared customer bucket and your signed-in account. Bring-your-own storage is an S3-compatible bucket at $5/month per workspace. SFTP, Azure, and WebDAV are coming soon.")
                 .font(.system(size: 11)).foregroundStyle(.secondary)
-            DisclosureGroup("Connect a cloud or VPS", isExpanded: $showConnection) {
+            DisclosureGroup("Connect S3-compatible storage", isExpanded: $showConnection) {
                 VStack(alignment: .leading, spacing: 12) {
-                    Text("Google Cloud is one bring-your-own option. Other clouds and a VPS connect from the provider section and do not use the Owner-role check. Performance features cost extra unless you stay on the free performance tier.")
+                    Text("Bring-your-own Google Cloud uses S3/HMAC keys. SFTP, Azure, and WebDAV are coming soon and have no connect flow. Performance features cost extra unless you stay on the free performance tier.")
                         .font(.caption).foregroundStyle(.secondary)
                     HStack {
                         Button("Connect Google Cloud") { native.connectGoogle() }
@@ -450,9 +450,9 @@ enum GDNativeHelper {
     @ObservedObject var library: LibraryModel
     @ObservedObject private var activity = GDUpdateActivity.shared
     var body: some View {
-        DisclosureGroup("Bring your own cloud or VPS") {
+        DisclosureGroup("Bring your own S3-compatible bucket") {
             VStack(alignment: .leading, spacing: 10) {
-                Text("Connect SFTP, a VPS, S3-compatible storage, Google Drive, WebDAV, or another provider on this Mac. This is $5/month per workspace, the same as a hosted workspace, and it does not require a Google Cloud Owner role. Performance features cost extra unless you stay on the free performance tier.")
+                Text("Connect Amazon S3, Cloudflare R2, Backblaze B2, Wasabi, MinIO, or Google Cloud with S3/HMAC keys. This is $5/month per workspace. SFTP, Azure, and WebDAV are shown as coming soon and have no connect flow. Performance features cost extra unless you stay on the free performance tier.")
                     .font(.caption).foregroundStyle(.secondary)
                 HStack {
                     Button("Open Provider Configuration") { library.openProviderSetup() }

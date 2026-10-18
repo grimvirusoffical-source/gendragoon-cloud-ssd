@@ -620,7 +620,7 @@ struct GenDragoonFreeCloudPanel: View {
             if let fee = customer.nextProjectCents {
                 Text(fee == 0 ? "Your first workspace is free." : String(format: "This additional workspace is $%.2f per month. The free workspace is not replaced.", Double(fee) / 100)).font(.system(size: 12)).foregroundStyle(.secondary)
             } else { Text("Your first workspace is free. Each additional workspace is a $5/month subscription.").font(.system(size: 12)).foregroundStyle(.secondary) }
-            Text("A bring-your-own cloud or VPS is also $5/month per workspace, not only Google Cloud. Performance features cost extra unless you stay on the free performance tier.").font(.system(size: 12)).foregroundStyle(.secondary)
+            Text("An S3-compatible bucket you connect is also $5/month per workspace. SFTP, Azure, and WebDAV are coming soon. Performance features cost extra unless you stay on the free performance tier.").font(.system(size: 12)).foregroundStyle(.secondary)
             if let limit = customer.projectLimit { Text("\(customer.projectCount ?? customer.activeProjects.count) of \(limit) project slots used.").font(.caption).foregroundStyle(.secondary) }
             HStack { Button("Cancel") { showCreate = false }; Spacer(); Button("Create Project") { customer.create(name: projectName); showCreate = false; projectName = "" }.buttonStyle(.borderedProminent).disabled(projectName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty) }
         }.padding(28).frame(width: 440)

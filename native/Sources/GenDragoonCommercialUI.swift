@@ -144,7 +144,7 @@ private struct GDDraftWorkspace: Identifiable, Codable {
     }
     private var chosen:GDTier? { gdTiers.first(where:{$0.id == selectedTier}) }
     private var chosenLabel:String {
-        if storageMode == "byo" { return "\(GDWorkspaceOffer.monthlyLabel) · Your cloud or VPS" }
+        if storageMode == "byo" { return "\(GDWorkspaceOffer.monthlyLabel) · Your S3-compatible bucket" }
         guard let t=chosen else {return "Choose a plan"}
         return "\(t.capacity) · \(gdMoney(annual ? t.yearly : t.monthly))/\(annual ? "year" : "month")"
     }
@@ -295,8 +295,8 @@ private struct GDDraftWorkspace: Identifiable, Codable {
             GDHeading(kicker:"STORAGE + PERFORMANCE",title:"Choose your cloud plan.",subtitle:"Select a server-listed tier, retain your choice, and review the exact amount in secure checkout.")
             GenDragoonStripePurchases(focus:"bundle")
             GDPanel {
-                Label("Bring your own cloud or VPS",systemImage:"server.rack").font(.headline)
-                Text("Connect any cloud or VPS, not only Google Cloud. The workspace is \(GDWorkspaceOffer.monthlyLabel), the same as a hosted workspace. Your provider bills its own storage and network. Performance features cost extra unless you stay on the free performance tier.")
+                Label("Bring your own S3-compatible bucket",systemImage:"server.rack").font(.headline)
+                Text("Connect an S3-compatible bucket: Amazon S3, Cloudflare R2, Backblaze B2, Wasabi, MinIO, or Google Cloud with S3/HMAC keys. The workspace is \(GDWorkspaceOffer.monthlyLabel). SFTP, Azure, and WebDAV are coming soon. Performance features cost extra unless you stay on the free performance tier.")
                     .font(.caption).foregroundStyle(gdSecondary)
             }
             GenDragoonStripePurchases(focus:"byo")
@@ -370,7 +370,7 @@ private struct GDDraftWorkspace: Identifiable, Codable {
     }
     private var workspacesPage: some View {
         VStack(alignment:.leading,spacing:20) {
-            GDHeading(kicker:"PROJECT WORKSPACES",title:"A separate cloud for every project.",subtitle:"The first hosted workspace is free. Each additional hosted workspace, and each bring-your-own cloud or VPS workspace, is $5/month. Performance features cost extra unless you stay on the free performance tier.")
+            GDHeading(kicker:"PROJECT WORKSPACES",title:"A separate cloud for every project.",subtitle:"The first hosted workspace is free. Each additional hosted workspace, and each S3-compatible bucket you connect, is $5/month. SFTP, Azure, and WebDAV are coming soon. Performance features cost extra unless you stay on the free performance tier.")
             if loginSession.isOwner { GDPanel {
                 HStack {
                     Image(systemName:"externaldrive.fill.badge.checkmark")

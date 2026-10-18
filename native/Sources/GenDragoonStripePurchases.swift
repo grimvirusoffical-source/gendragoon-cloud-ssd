@@ -8,23 +8,36 @@ enum GDWorkspaceOffer {
     static let monthlyCents = 500
     static let freePerformanceWorkers = 1
     static let providers: [GDByoProvider] = [
-        GDByoProvider(id: "s3", title: "Amazon S3 or S3-compatible"),
-        GDByoProvider(id: "sftp", title: "SFTP or your own VPS"),
-        GDByoProvider(id: "gcs", title: "Google Cloud Storage"),
-        GDByoProvider(id: "r2", title: "Cloudflare R2"),
-        GDByoProvider(id: "b2", title: "Backblaze B2"),
-        GDByoProvider(id: "webdav", title: "WebDAV"),
-        GDByoProvider(id: "google-drive", title: "Google Drive"),
-        GDByoProvider(id: "onedrive", title: "OneDrive"),
-        GDByoProvider(id: "other", title: "Another cloud"),
+        GDByoProvider(id: "s3", title: "Amazon S3", available: true),
+        GDByoProvider(id: "r2", title: "Cloudflare R2", available: true),
+        GDByoProvider(id: "b2", title: "Backblaze B2", available: true),
+        GDByoProvider(id: "wasabi", title: "Wasabi", available: true),
+        GDByoProvider(id: "minio", title: "MinIO", available: true),
+        GDByoProvider(id: "gcs", title: "Google Cloud via S3/HMAC keys", available: true),
+        GDByoProvider(id: "sftp", title: "SFTP", available: false),
+        GDByoProvider(id: "azure", title: "Azure", available: false),
+        GDByoProvider(id: "webdav", title: "WebDAV", available: false),
     ]
     static var monthlyLabel: String { String(format: "$%.2f/month", Double(monthlyCents) / 100) }
-    static let byoSummary = "Connect any cloud or VPS you already run. The workspace fee is $5/month, the same as a hosted workspace. Performance features cost extra unless you stay on the free performance tier."
+    static let byoSummary = "Connect an S3-compatible bucket you already run: Amazon S3, Cloudflare R2, Backblaze B2, Wasabi, MinIO, or Google Cloud with S3/HMAC keys. The workspace fee is $5/month. SFTP, Azure, and WebDAV are coming soon."
+    static func canConnect(_ id: String) -> Bool { providers.first { $0.id == id }?.available == true }
+    static func comingSoonMessage(_ title: String) -> String { "\(title) is coming soon. There is no connect flow for it yet." }
+    static func byoFailureMessage(code: String, status: Int) -> String {
+        if status == 422 || code == "byo_provider_unsupported" {
+            return "This provider is not supported. Choose Amazon S3, Cloudflare R2, Backblaze B2, Wasabi, MinIO, or Google Cloud with an S3/HMAC key."
+        }
+        if status == 409 || code == "byo_unverifiable" {
+            return "GenDragoon could not verify the challenge object from your bucket. Check the endpoint and keys, then run the challenge again."
+        }
+        return code.isEmpty ? "Billing is temporarily unavailable. Please retry." : code
+    }
 }
 
 struct GDByoProvider: Identifiable {
     let id: String
     let title: String
+    let available: Bool
+    var pickerTitle: String { available ? title : "\(title) · Coming soon" }
 }
 
 private struct GDBillingEndpoint: Decodable { let endpoint: String }
@@ -210,26 +223,22 @@ private struct GDBillingSelection: Codable, Equatable {
         begin(login: session) { try self.openCheckout(await self.send("billing/customer-portal", method: "POST")) }
     }
     func buyManualBYO(login session: GDLoginSession, workspaceID: String, remote: String, provider: String, yearly: Bool) {
+        guard let offer = GDWorkspaceOffer.providers.first(where: { $0.id == provider }) else {
+            status = GDWorkspaceOffer.byoFailureMessage(code: "byo_provider_unsupported", status: 422)
+            return
+        }
+        guard offer.available else { status = GDWorkspaceOffer.comingSoonMessage(offer.title); return }
         guard workspaces.contains(where: { $0.id == workspaceID && $0.isAvailable }) else { status = "Choose an active project first."; return }
         guard remote.range(of: "^[A-Za-z0-9_-]{3,40}$", options: .regularExpression) != nil else { status = "Enter an existing remote name using 3–40 letters, numbers, dashes or underscores."; return }
-        guard let root = Bundle.main.resourceURL, FileManager.default.isExecutableFile(atPath: root.appendingPathComponent("rclone").path) else { status = "The local provider tool is unavailable."; return }
         begin(login: session) {
-            self.status = "Checking your cloud or VPS connection…"
-            let process = Process()
-            process.executableURL = root.appendingPathComponent("rclone")
-            let config = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support/GenDragoon Cloud SSD/gendragoon-rclone.conf")
-            process.arguments = ["--config", config.path, "lsd", remote + ":", "--timeout", "20s", "--contimeout", "10s", "--retries", "1", "--low-level-retries", "1"]
-            // Discard output to avoid retaining provider identifiers or filling pipes.
-            process.standardOutput = FileHandle.nullDevice; process.standardError = FileHandle.nullDevice
-            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-                process.terminationHandler = { _ in continuation.resume() }
-                do { try process.run() } catch { process.terminationHandler = nil; continuation.resume(throwing: error); return }
-                DispatchQueue.global().asyncAfter(deadline: .now() + 45) { if process.isRunning { process.terminate() } }
+            self.status = "Registering \(offer.title). The challenge uses keys already in the macOS Keychain."
+            do {
+                _ = try await self.send("v2/workspaces/" + workspaceID + "/byo/register", method: "POST", payload: ["provider": "s3", "label": remote])
+            } catch let error as GDTransferError {
+                throw GDTransferError(message: GDWorkspaceOffer.byoFailureMessage(code: error.message, status: error.status), status: error.status)
             }
-            guard process.terminationStatus == 0 else { throw GDTransferError(message: "The provider check failed or timed out. Verify the remote in My Cloud and retry.", status: 0) }
-            _ = try await self.send("v2/workspaces/" + workspaceID + "/manual-provider", method: "POST", payload: ["provider": provider, "label": remote, "connectionTested": true])
-            try self.openCheckout(await self.send("v2/workspaces/" + workspaceID + "/checkout/byo", method: "POST", payload: ["interval": yearly ? "year" : "month"]))
-            if self.ownerBenefits { try await self.loadWorkspaces() }
+            self.status = "Write .gendragoon-challenge/<nonce> with those keys, send only the presigned GET, and delete the object after GenDragoon confirms."
+            _ = yearly
         }
     }
     func retainSelection(login session: GDLoginSession, workspaceID: String, payload: [String: String]) {
@@ -391,18 +400,18 @@ struct GenDragoonStripePurchases: View {
         } else if focus == "byo" {
             projectPicker
             Text(GDWorkspaceOffer.byoSummary).font(.system(size: 12)).foregroundStyle(.secondary)
-            Picker("Cloud or VPS", selection: $selected.provider) {
-                ForEach(GDWorkspaceOffer.providers) { provider in Text(provider.title).tag(provider.id) }
+            Picker("S3-compatible storage", selection: $selected.provider) {
+                ForEach(GDWorkspaceOffer.providers) { provider in Text(provider.pickerTitle).tag(provider.id) }
             }
-            if selected.provider == "gcs" {
-                Text("Google Cloud is one option. This Mac checks that your Google account is Owner on that project before the bucket is used. Hosted workspaces on the shared customer bucket do not use that check.").font(.system(size: 11)).foregroundStyle(.secondary)
+            if let provider = GDWorkspaceOffer.providers.first(where: { $0.id == selected.provider }), !provider.available {
+                Text(GDWorkspaceOffer.comingSoonMessage(provider.title)).font(.system(size: 12, weight: .semibold))
             } else {
-                Text("SFTP, a VPS, S3-compatible storage, and the other providers here do not require a Google Cloud Owner role. Credentials stay on this Mac.").font(.system(size: 11)).foregroundStyle(.secondary)
+                Text("Keys stay in the macOS Keychain. This Mac writes .gendragoon-challenge/<nonce>, sends a presigned GET, and deletes the object only after GenDragoon confirms. Google Cloud uses S3/HMAC keys here.").font(.system(size: 11)).foregroundStyle(.secondary)
+                TextField("Existing remote name", text: $selected.remote).textFieldStyle(.roundedBorder)
+                Text("Workspace fee: \(GDWorkspaceOffer.monthlyLabel), the same as a hosted workspace. Your provider's own storage and network charges stay separate. Performance features cost extra unless you stay on the free performance tier.").font(.system(size: 12, weight: .semibold))
+                Button(billing.ownerBenefits ? "Start challenge and activate — included" : "Start challenge · \(GDWorkspaceOffer.monthlyLabel)") { billing.buyManualBYO(login: login, workspaceID: selected.workspaceID, remote: selected.remote, provider: selected.provider, yearly: false) }
+                    .buttonStyle(.borderedProminent).tint(.cyan).disabled(blocked || selected.remote.isEmpty || (catalog.catalogVersion ?? 1) < 2 || !billing.workspaces.contains { $0.id == selected.workspaceID && $0.isAvailable } || !GDWorkspaceOffer.canConnect(selected.provider))
             }
-            TextField("Existing remote name", text: $selected.remote).textFieldStyle(.roundedBorder)
-            Text("Workspace fee: \(GDWorkspaceOffer.monthlyLabel), the same as a hosted workspace. Your provider's own storage and network charges stay separate. Performance features cost extra unless you stay on the free performance tier.").font(.system(size: 12, weight: .semibold))
-            Button(billing.ownerBenefits ? "Verify connection and activate — included" : "Verify connection and continue · \(GDWorkspaceOffer.monthlyLabel)") { billing.buyManualBYO(login: login, workspaceID: selected.workspaceID, remote: selected.remote, provider: selected.provider, yearly: false) }
-                .buttonStyle(.borderedProminent).tint(.cyan).disabled(blocked || selected.remote.isEmpty || (catalog.catalogVersion ?? 1) < 2 || !billing.workspaces.contains { $0.id == selected.workspaceID && $0.isAvailable })
         } else if focus == "ads" {
             Text("Permanent ad removal · " + money(catalog.removeAds.oneTimeCents) + " once").font(.system(size: 16, weight: .semibold))
             Button(billing.ownerBenefits ? "Ad removal included" : "Continue to one-time purchase") { billing.buyRemoveAds(login: login) }.buttonStyle(.borderedProminent).tint(.cyan).disabled(blocked || login.isAdFree)
