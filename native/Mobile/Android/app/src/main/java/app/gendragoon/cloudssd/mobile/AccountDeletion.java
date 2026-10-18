@@ -20,6 +20,7 @@ final class AccountDeletion {
     static final String CONFIRM_PHRASE="DELETE";
     static final long FRESH_SIGN_IN_MS=CloudSignals.FRESH_SIGN_IN_MS;
     static final int POLL_LIMIT=90;
+    static final String STILL_IN_PROGRESS="Your deletion is still in progress.";
 
     Step step=Step.EXPLAIN;
     String message;
@@ -395,8 +396,18 @@ final class AccountDeletion {
         if(!keepsPolling())return;
         if(supportRefresh){
             boolean ok=exchange!=null&&!exchange.failed&&exchange.body!=null&&exchange.body.status>=200&&exchange.body.status<300;
+            String refreshed=ok?exchange.body.jobStatus:null;
             supportRefresh=false;
-            if(!ok){
+            if(ok&&("running".equals(refreshed)||"queued".equals(refreshed))){
+                // Still running: no mailto and no error.
+                lastBody=exchange.body;
+                onPollHttp(exchange.body.status,refreshed,exchange.body.error,exchange.body.retryable,exchange.body.jobId);
+                message=STILL_IN_PROGRESS;
+                return;
+            }
+            if(ok&&"done".equals(refreshed)){lastBody=exchange.body;onPollHttp(exchange.body.status,refreshed,exchange.body.error,exchange.body.retryable,exchange.body.jobId);return;}
+            // failed, an invalid status body, a non-2xx or a transport failure: mailto.
+            {
                 lastBody=exchange==null?null:exchange.body;
                 supportFallback();
                 openSupportMailto=true;

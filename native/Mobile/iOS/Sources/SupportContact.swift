@@ -46,6 +46,8 @@ enum DeletionSupport {
         var message:String?
         var opensMailto:Bool { kind == .mailto }
     }
+    /// Reads the saved job from the Keychain-backed vault. Any thrown error returns nil, which falls back to mailto.
+    static func savedJob(_ read:() throws -> String?)->String? { (try? read()) ?? nil }
     static func call(jobId:String?,statusToken:String?)->Call { call(jobId:jobId,savedJobId:jobId,statusToken:statusToken,enabled:enabled) }
     static func call(jobId:String?,statusToken:String?,enabled:Bool)->Call { call(jobId:jobId,savedJobId:jobId,statusToken:statusToken,enabled:enabled) }
     /// Sends nothing unless `jobId` is the job saved on this device. A mismatch opens mailto.
@@ -70,6 +72,7 @@ enum DeletionSupport {
         if status==409,CloudSignals.jsonString(body,"error")=="support_not_needed" {
             return Result(kind:.refresh,requestId:nil,message:nil)
         }
+        // No countdown: Retry-After is ignored, whatever it says.
         if status==429 {return Result(kind:.already,requestId:nil,message:already)}
         return Result(kind:.mailto,requestId:nil,message:nil)
     }

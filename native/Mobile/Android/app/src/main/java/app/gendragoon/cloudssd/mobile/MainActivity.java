@@ -453,8 +453,11 @@ public final class MainActivity extends AppCompatActivity {
     }
     private void contactDeletionSupport(){
         AccountDeletion current=deletion;if(current==null)return;
-        DeletionReceipt saved=DeletionReceiptVault.read(this);
-        DeletionSupport.Call call=DeletionSupport.call(current.jobId,saved==null?null:saved.jobId,current.statusToken,DeletionSupport.ENABLED);
+        String savedJob=DeletionSupport.savedJob(()->{DeletionReceipt saved=DeletionReceiptVault.read(this);return saved==null?null:saved.jobId;});
+        DeletionSupport.Call attempted;
+        try{attempted=DeletionSupport.call(current.jobId,savedJob,current.statusToken,DeletionSupport.ENABLED);}catch(RuntimeException error){attempted=null;}
+        if(attempted==null){openDeletionMailto(current.jobId);return;}
+        DeletionSupport.Call call=attempted;
         if(!call.send){openDeletionMailto(current.jobId);return;}
         io.execute(()->{
             DeletionSupport.Result result;

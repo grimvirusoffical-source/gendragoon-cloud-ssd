@@ -1044,13 +1044,71 @@ public final class AccountDeletionTest {
             assertTrue(flow.showSupport);
             assertFalse(flow.message.contains("Sign in"));
         }
-        // A successful refresh keeps the normal status flow.
+        // A refresh that reports running keeps the normal status flow.
         AccountDeletion ok=AccountDeletion.resume(DeletionReceipt.of(dead.jobId,TOKEN));
         ok.pollThrough(new Script().respond(dead));
         ok.applySupport(refresh);
-        ok.pollThrough(new Script().respond(dead));
+        ok.pollThrough(new Script().respond(AccountActions.parse(200,"{\"jobId\":\""+dead.jobId+"\",\"status\":\"running\"}")));
         assertFalse(ok.openSupportMailto);
         assertFalse(ok.supportRefresh);
+    }
+
+    private static AccountDeletion refreshing(AccountActions.HttpBody dead){
+        AccountDeletion flow=AccountDeletion.resume(DeletionReceipt.of(dead.jobId,TOKEN));
+        flow.pollThrough(new Script().respond(dead));
+        DeletionSupport.Result refresh=DeletionSupport.interpret(409,BackendFixtures.responseBody("account-deletion","support-not-needed"),false);
+        assertFalse(flow.applySupport(refresh));
+        return flow;
+    }
+
+    @Test public void supportRefreshFailedOpensMailto(){
+        AccountActions.HttpBody dead=fixture("status-failed-not-retryable");
+        AccountDeletion flow=refreshing(dead);
+        flow.pollThrough(new Script().respond(AccountActions.parse(200,"{\"jobId\":\""+dead.jobId+"\",\"status\":\"failed\",\"retryable\":true}")));
+        assertTrue(flow.openSupportMailto);
+        assertEquals(AccountDeletion.Step.FAILED,flow.step);
+        assertTrue(flow.showSupport);
+    }
+
+    @Test public void supportRefreshRunningOrQueuedShowsStillInProgress(){
+        AccountActions.HttpBody dead=fixture("status-failed-not-retryable");
+        for(String status:new String[]{"running","queued"}){
+            AccountDeletion flow=refreshing(dead);
+            flow.pollThrough(new Script().respond(AccountActions.parse(200,"{\"jobId\":\""+dead.jobId+"\",\"status\":\""+status+"\"}")));
+            assertFalse(status,flow.openSupportMailto);
+            assertEquals("Your deletion is still in progress.",flow.message);
+            assertNotEquals(AccountDeletion.Step.FAILED,flow.step);
+            assertFalse(flow.showSupport);
+        }
+    }
+
+    @Test public void supportRefreshInvalidBodyFallsBack(){
+        AccountActions.HttpBody dead=fixture("status-failed-not-retryable");
+        for(String body:new String[]{"","not json","{}","{\"status\":\"completed\"}","{\"status\":42}"}){
+            AccountDeletion flow=refreshing(dead);
+            flow.pollThrough(new Script().respond(AccountActions.parse(200,body)));
+            assertTrue(body,flow.openSupportMailto);
+            assertEquals(AccountDeletion.Step.FAILED,flow.step);
+        }
+    }
+
+    @Test public void supportSavedJobReadFailureFallsBackToMailto(){
+        String job=fixture("status-failed-not-retryable").jobId;
+        assertNull(DeletionSupport.savedJob(()->{throw new java.security.KeyStoreException("keystore unavailable");}));
+        assertNull(DeletionSupport.savedJob(()->{throw new IllegalStateException("corrupt");}));
+        assertEquals(job,DeletionSupport.savedJob(()->job));
+        DeletionSupport.Call call=DeletionSupport.call(job,DeletionSupport.savedJob(()->{throw new java.io.IOException("x");}),TOKEN,true);
+        assertFalse(call.send);
+    }
+
+    @Test public void support429ShowsAlreadySentWithoutCountdown(){
+        String body=BackendFixtures.responseBody("account-deletion","support-rate-limited");
+        for(String extra:new String[]{body,"{\"error\":\"rate_limited\",\"retryAfter\":-5}","{\"error\":\"rate_limited\",\"retryAfter\":\"soon\"}",""}){
+            DeletionSupport.Result result=DeletionSupport.interpret(429,extra,false);
+            assertEquals(DeletionSupport.Kind.ALREADY,result.kind);
+            assertEquals("Request already sent.",result.message);
+            assertFalse(result.opensMailto());
+        }
     }
 
     /** Riley PR #5 at 0715b1a. Labels come from the server fields. {@code feeWaived} is required. */

@@ -63,6 +63,11 @@ final class DeletionSupport {
 
     private DeletionSupport(){}
 
+    /** Reads the saved job from the Keystore-backed vault. Any failure returns null, which falls back to mailto. */
+    static String savedJob(java.util.concurrent.Callable<String> read){
+        try{return read.call();}catch(Throwable error){return null;}
+    }
+
     static Call call(String jobId,String statusToken){return call(jobId,jobId,statusToken,ENABLED);}
 
     static Call call(String jobId,String statusToken,boolean enabled){return call(jobId,jobId,statusToken,enabled);}
@@ -89,6 +94,7 @@ final class DeletionSupport {
         String requestId=JsonFields.string(raw,"requestId");
         if(status==202&&"received".equals(JsonFields.string(raw,"status"))&&requestId!=null&&!requestId.isEmpty())return new Result(Kind.SENT,requestId,SENT);
         if(status==409&&"support_not_needed".equals(JsonFields.string(raw,"error")))return new Result(Kind.REFRESH,null,null);
+        // No countdown: Retry-After is ignored, whatever it says.
         if(status==429)return new Result(Kind.ALREADY,null,ALREADY);
         return new Result(Kind.MAILTO,null,null);
     }

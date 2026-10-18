@@ -169,7 +169,7 @@ struct CloudDeletionTransport:DeletionTransport {
         }catch{model.fail(error.localizedDescription)}
     }
     private func contactSupport() async {
-        let call=DeletionSupport.call(jobId:model.flow.jobId,savedJobId:DeletionReceiptVault.load()?.jobId,statusToken:model.flow.statusToken,enabled:DeletionSupport.enabled)
+        let call=DeletionSupport.call(jobId:model.flow.jobId,savedJobId:DeletionSupport.savedJob{DeletionReceiptVault.load()?.jobId},statusToken:model.flow.statusToken,enabled:DeletionSupport.enabled)
         guard call.send,let path=call.path,let token=call.statusToken else {
             if let url=SupportContact.mailto(jobId:model.flow.jobId){await UIApplication.shared.open(url)}
             return

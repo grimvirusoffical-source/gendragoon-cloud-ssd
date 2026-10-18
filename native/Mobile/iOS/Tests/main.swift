@@ -1049,9 +1049,68 @@ final class AccountLogicTests: XCTestCase {
         var ok=AccountDeletion.resume(DeletionReceipt.of(jobId:dead.jobId ?? "",statusToken:token))
         let a=ScriptedDeletionTransport();a.respond(dead);await ok.pollThrough(a)
         _=ok.applySupport(refresh)
-        let b=ScriptedDeletionTransport();b.respond(dead);await ok.pollThrough(b)
+        let b=ScriptedDeletionTransport();b.respond(AccountHttp.parse(status:200,data:Data("{\"jobId\":\"\(dead.jobId ?? "")\",\"status\":\"running\"}".utf8)));await ok.pollThrough(b)
         XCTAssertFalse(ok.openSupportMailto)
         XCTAssertFalse(ok.supportRefresh)
+    }
+
+    private func refreshing(_ dead:AccountHttp) async -> AccountDeletion {
+        var flow=AccountDeletion.resume(DeletionReceipt.of(jobId:dead.jobId ?? "",statusToken:token))
+        let first=ScriptedDeletionTransport();first.respond(dead);await flow.pollThrough(first)
+        let refresh=DeletionSupport.interpret(status:409,body:BackendFixtures.responseBodyString(area:"account-deletion",name:"support-not-needed"),transportFailed:false)
+        XCTAssertFalse(flow.applySupport(refresh))
+        return flow
+    }
+    private func status(_ job:String?,_ value:String)->AccountHttp {
+        AccountHttp.parse(status:200,data:Data("{\"jobId\":\"\(job ?? "")\",\"status\":\"\(value)\",\"retryable\":true}".utf8))
+    }
+
+    func testSupportRefreshFailedOpensMailto() async {
+        let dead=fixture("status-failed-not-retryable")
+        var flow=await refreshing(dead)
+        let s=ScriptedDeletionTransport();s.respond(status(dead.jobId,"failed"));await flow.pollThrough(s)
+        XCTAssertTrue(flow.openSupportMailto)
+        XCTAssertEqual(flow.step,.failed)
+        XCTAssertTrue(flow.showSupport)
+    }
+
+    func testSupportRefreshRunningOrQueuedShowsStillInProgress() async {
+        let dead=fixture("status-failed-not-retryable")
+        for value in ["running","queued"] {
+            var flow=await refreshing(dead)
+            let s=ScriptedDeletionTransport();s.respond(status(dead.jobId,value));await flow.pollThrough(s)
+            XCTAssertFalse(flow.openSupportMailto,value)
+            XCTAssertEqual(flow.message,"Your deletion is still in progress.")
+            XCTAssertNotEqual(flow.step,.failed)
+            XCTAssertFalse(flow.showSupport)
+        }
+    }
+
+    func testSupportRefreshInvalidBodyFallsBack() async {
+        let dead=fixture("status-failed-not-retryable")
+        for body in ["","not json","{}","{\"status\":\"completed\"}","{\"status\":42}"] {
+            var flow=await refreshing(dead)
+            let s=ScriptedDeletionTransport();s.respond(AccountHttp.parse(status:200,data:Data(body.utf8)));await flow.pollThrough(s)
+            XCTAssertTrue(flow.openSupportMailto,body)
+            XCTAssertEqual(flow.step,.failed)
+        }
+    }
+
+    func testSupportSavedJobReadFailureFallsBackToMailto() {
+        let job=fixture("status-failed-not-retryable").jobId ?? ""
+        XCTAssertNil(DeletionSupport.savedJob{throw ReplacementFailure.offline})
+        XCTAssertEqual(DeletionSupport.savedJob{job},job)
+        XCTAssertFalse(DeletionSupport.call(jobId:job,savedJobId:DeletionSupport.savedJob{throw ReplacementFailure.delete},statusToken:token,enabled:true).send)
+    }
+
+    func testSupport429ShowsAlreadySentWithoutCountdown() {
+        let body=BackendFixtures.responseBodyString(area:"account-deletion",name:"support-rate-limited")
+        for extra in [body,"{\"error\":\"rate_limited\",\"retryAfter\":-5}","{\"error\":\"rate_limited\",\"retryAfter\":\"soon\"}",""] {
+            let result=DeletionSupport.interpret(status:429,body:extra,transportFailed:false)
+            XCTAssertEqual(result.kind,.already)
+            XCTAssertEqual(result.message,"Request already sent.")
+            XCTAssertFalse(result.opensMailto)
+        }
     }
 
     /// Riley PR #5 at 0715b1a. Labels come from the server fields. `feeWaived` is required.

@@ -10,6 +10,7 @@ import Security
 struct AccountDeletion:Equatable {
     enum Step:Equatable,Hashable { case explain, confirm, reauth, deleting, polling, done, failed, wiped, signedOut }
     static let confirmPhrase="DELETE"
+    static let stillInProgress="Your deletion is still in progress."
     static let freshSeconds:TimeInterval=300
     static let pollLimit=90
     static let confirmJSON="{\"confirm\":\"DELETE\"}"
@@ -295,7 +296,21 @@ struct AccountDeletion:Equatable {
         if supportRefresh {
             supportRefresh=false
             let ok = !exchange.failed && (exchange.body.map{$0.status>=200 && $0.status<300} ?? false)
-            if !ok {
+            let refreshed = ok ? exchange.body?.jobStatus : nil
+            if ok,let body=exchange.body,refreshed=="running" || refreshed=="queued" {
+                // Still running: no mailto and no error.
+                lastHttp=body
+                onPollHttp(status:body.status,jobStatus:refreshed,errorCode:body.error,retryable:body.retryable,reportedJobId:body.jobId)
+                message=Self.stillInProgress
+                return
+            }
+            if ok,let body=exchange.body,refreshed=="done" {
+                lastHttp=body
+                onPollHttp(status:body.status,jobStatus:refreshed,errorCode:body.error,retryable:body.retryable,reportedJobId:body.jobId)
+                return
+            }
+            // failed, an invalid status body, a non-2xx or a transport failure: mailto.
+            do {
                 lastHttp=exchange.body
                 supportFallback()
                 openSupportMailto=true
