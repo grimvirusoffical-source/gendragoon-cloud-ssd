@@ -3,8 +3,8 @@ import XCTest
 @testable import GenDragoonContract
 
 /// Riley's fixtures are `{request, response:{status, body}}` at `fixtures/<area>/<case>.json`.
-/// Account deletion is `npm run fixtures` from PR #6 `9d0f056`. Key envelopes are the same
-/// command from PR #9 `24fba02`. `fixtures/errors/payload-too-large.json` is the JSON 413.
+/// Account deletion is `npm run fixtures` from PR #6 `fff0a84`. Key envelopes are the same
+/// command from PR #9 `ee4f76f`. Storage URLs are PR #7 `8267784`.
 struct GDFixtureFile {
     var method: String
     var path: String
@@ -340,13 +340,23 @@ final class AccountDeletionContractTests: XCTestCase {
         XCTAssertFalse(firebase.showSignIn)
         XCTAssertTrue(firebase.keepPolling)
         XCTAssertEqual(firebase.signal, .signedOut)
-        let bare = try GDFixtureFile.load("account-deletion", "status-unauthorized")
-        XCTAssertEqual(GDServerCode.read(bare.body), "unauthorized")
-        let stopped = GDAccountContract.unauthorizedDeletion(json: bare.body, savedJobExists: true, credential: .statusToken)
+        let unauthorized = try GDFixtureFile.load("account-deletion", "status-unauthorized")
+        XCTAssertEqual(GDServerCode.read(unauthorized.body), "unauthorized")
+        let stopped = GDAccountContract.unauthorizedDeletion(json: unauthorized.body, savedJobExists: true, credential: .statusToken)
         XCTAssertTrue(stopped.showSignIn)
         XCTAssertFalse(stopped.signOut)
         XCTAssertFalse(stopped.keepPolling)
-        XCTAssertNil(stopped.signal)
+        XCTAssertEqual(stopped.signal, .reauthRequired)
+        XCTAssertEqual(stopped.signal?.signal, "reauth_required")
+        let noCode = GDAccountContract.unauthorizedDeletion(json: [:], savedJobExists: true, credential: .statusToken)
+        XCTAssertEqual(noCode.signal, .reauthRequired)
+        XCTAssertFalse(noCode.keepPolling)
+        XCTAssertFalse(noCode.wipe)
+        XCTAssertTrue(noCode.keepSavedJob)
+        XCTAssertFalse(noCode.signOut)
+        let firebaseUnauthorized = GDAccountContract.unauthorizedDeletion(json: unauthorized.body, savedJobExists: true, credential: .firebase)
+        XCTAssertNil(firebaseUnauthorized.signal)
+        XCTAssertFalse(firebaseUnauthorized.signOut)
     }
 
     func testSingularPathIsJSONNotFound() throws {
@@ -378,7 +388,7 @@ final class AccountDeletionContractTests: XCTestCase {
             guard let typed = error as? GDDeletionNotRetryable else {
                 return XCTFail("409 deletion_not_retryable raises GDDeletionNotRetryable")
             }
-            XCTAssertEqual(typed.jobId, "00000000-0000-4000-8000-0000000000aa")
+            XCTAssertEqual(typed.jobId, "00000000-0000-4000-8000-000000000009")
         }
         XCTAssertNoThrow(try GDAccountContract.deletionNotRetryable(status: 202, json: fixture.body))
     }
@@ -394,6 +404,24 @@ final class AccountDeletionContractTests: XCTestCase {
         }
         let recovery = GDAccountContract.pollRecovery(for: GDAccountContract.interpretStart(status: fixture.status, json: fixture.body))
         XCTAssertFalse(recovery.wipe)
+        XCTAssertFalse(recovery.sendDelete)
+    }
+
+    func testFailedNotRetryableFixtureShowsSupportAndDismiss() throws {
+        let fixture = try GDFixtureFile.load("account-deletion", "status-failed-not-retryable")
+        XCTAssertEqual(fixture.status, 200)
+        XCTAssertEqual(Set(fixture.body.keys), Set(["jobId", "retryable", "status"]))
+        XCTAssertEqual(fixture.body["status"] as? String, "failed")
+        XCTAssertEqual(fixture.body["retryable"] as? Bool, false)
+        XCTAssertEqual(fixture.body["jobId"] as? String, "00000000-0000-4000-8000-000000000009")
+        guard case .failed(_, false) = GDAccountContract.interpretPoll(status: fixture.status, json: fixture.body) else {
+            return XCTFail("a non-retryable failure stays failed")
+        }
+        let recovery = GDAccountContract.pollRecovery(for: GDAccountContract.interpretPoll(status: fixture.status, json: fixture.body))
+        XCTAssertFalse(recovery.wipe)
+        XCTAssertTrue(recovery.keepSavedJob)
+        XCTAssertFalse(recovery.showRetry)
+        XCTAssertTrue(recovery.allowDismiss)
         XCTAssertFalse(recovery.sendDelete)
     }
 

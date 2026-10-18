@@ -1,16 +1,16 @@
 {
   "request": {
     "body": {
-      "iv": "AwMDAwMDAwMDAwMD",
+      "iv": "+/v7+/v7+/v7+/v7",
       "kdf": {
         "alg": "argon2id",
         "iterations": 2,
         "memoryKiB": 19456,
         "parallelism": 1
       },
-      "salt": "AgICAgICAgICAgICAgICAg",
+      "salt": "/////////////////////w==",
       "version": 1,
-      "wrappedKey": "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcH"
+      "wrappedKey": "+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7"
     },
     "headers": {
       "authorization": "<redacted>",

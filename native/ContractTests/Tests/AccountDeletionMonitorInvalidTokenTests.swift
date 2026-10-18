@@ -150,7 +150,8 @@ final class AccountDeletionMonitorInvalidTokenTests: XCTestCase {
         let signals = SignalBox()
         deletion.onAuthFailure = { signals.values.append($0) }
         await deletion.resumeAndWait(maxPolls: 3)
-        XCTAssertEqual(signals.values, [])
+        XCTAssertEqual(signals.values, [.reauthRequired])
+        XCTAssertEqual(signals.values.map(\.signal), ["reauth_required"])
         XCTAssertEqual(transport.sent.count, 1)
         XCTAssertEqual(session.signOuts, 0)
         XCTAssertEqual(session.signInPrompts.count, 1)
@@ -252,7 +253,7 @@ final class AccountDeletionMonitorInvalidTokenTests: XCTestCase {
         deletion.offersPollRetry = true
         await deletion.retrySavedDeletion()
         XCTAssertEqual(transport.sent.map(\.method), ["DELETE"])
-        XCTAssertEqual(deletion.notRetryable, GDDeletionNotRetryable(jobId: "00000000-0000-4000-8000-0000000000aa"))
+        XCTAssertEqual(deletion.notRetryable, GDDeletionNotRetryable(jobId: "00000000-0000-4000-8000-000000000009"))
         XCTAssertTrue(deletion.statusText.contains("support"))
         XCTAssertTrue(deletion.showsSupportContact)
         XCTAssertEqual(GDSupportContact.current.value.isEmpty, false)
@@ -292,11 +293,30 @@ final class AccountDeletionMonitorInvalidTokenTests: XCTestCase {
         XCTAssertNil(jobs.job)
     }
 
-    func testNonRetryableFailureOffersDismissAndClearsTheJobOnlyThen() async throws {
-        let transport = ScriptTransport(replies: [
-            (200, ["jobId": job, "status": "failed", "retryable": false, "failure": "stripe_cancel_failed"]),
-        ])
+    func testBareStatus401SignalsReauthRequiredAndDoesNotWipe() async throws {
+        let transport = ScriptTransport(replies: [(401, [:])])
         let jobs = MemoryJobs(); jobs.job = GDSavedDeletionJob(jobId: job, statusToken: token, ownerUID: "uid-owner")
+        let session = FakeSession()
+        var wiped = 0
+        let deletion = monitor(transport, jobs, session) { wiped += 1 }
+        let signals = SignalBox()
+        deletion.onAuthFailure = { signals.values.append($0) }
+        await deletion.resumeAndWait(maxPolls: 3)
+        XCTAssertEqual(signals.values, [.reauthRequired])
+        XCTAssertEqual(transport.sent.count, 1)
+        XCTAssertEqual(session.signOuts, 0)
+        XCTAssertEqual(session.signInPrompts.count, 1)
+        XCTAssertEqual(wiped, 0)
+        XCTAssertEqual(jobs.job?.jobId, job)
+        XCTAssertEqual(jobs.job?.statusToken, token)
+    }
+
+    func testNonRetryableFailureOffersDismissAndClearsTheJobOnlyThen() async throws {
+        let fixture = try GDFixtureFile.load("account-deletion", "status-failed-not-retryable")
+        XCTAssertEqual(Set(fixture.body.keys), Set(["jobId", "retryable", "status"]))
+        let failedJob = try XCTUnwrap(fixture.body["jobId"] as? String)
+        let transport = ScriptTransport(replies: [(fixture.status, fixture.body)])
+        let jobs = MemoryJobs(); jobs.job = GDSavedDeletionJob(jobId: failedJob, statusToken: token, ownerUID: "uid-owner")
         let session = FakeSession()
         var wiped = 0
         let deletion = monitor(transport, jobs, session) { wiped += 1 }
@@ -305,7 +325,8 @@ final class AccountDeletionMonitorInvalidTokenTests: XCTestCase {
         XCTAssertTrue(deletion.offersJobDismiss)
         XCTAssertTrue(deletion.showsSupportContact)
         XCTAssertNil(deletion.notRetryable)
-        XCTAssertEqual(jobs.job?.jobId, job)
+        XCTAssertEqual(jobs.job?.jobId, failedJob)
+        XCTAssertTrue(deletion.statusText.contains("support"))
         XCTAssertEqual(wiped, 0)
         deletion.dismissSavedJob()
         XCTAssertNil(jobs.job)

@@ -72,6 +72,32 @@ final class KeyEnvelopeContractTests: XCTestCase {
         within.kdf.iterations = 11
         XCTAssertThrowsError(try GDKeyEnvelopeContract.validate(within))
         XCTAssertThrowsError(try GDKeyEnvelopeContract.decode(["version": 1, "opsLimit": 3, "memLimit": 65536, "salt": "aa", "iv": "bb", "wrappedKey": "cc"]))
+        let created = try GDFixtureFile.load("key-envelope", "create")
+        let submitted = try XCTUnwrap(created.requestBody as? [String: Any])
+        let fromRequest = try GDKeyEnvelopeContract.decode(submitted)
+        let fromResponse = try GDKeyEnvelopeContract.decode(created.body)
+        XCTAssertEqual(GDBase64URL.decode(fromRequest.salt), GDBase64URL.decode(fromResponse.salt))
+        XCTAssertEqual(GDBase64URL.decode(fromRequest.iv), GDBase64URL.decode(fromResponse.iv))
+        XCTAssertEqual(GDBase64URL.decode(fromRequest.wrappedKey), GDBase64URL.decode(fromResponse.wrappedKey))
+        let written = try JSONSerialization.jsonObject(with: try GDKeyEnvelopeContract.encode(fromRequest)) as? [String: Any]
+        for field in ["salt", "iv", "wrappedKey"] {
+            let stored = try XCTUnwrap(written?[field] as? String)
+            XCTAssertEqual(stored, created.body[field] as? String, field)
+            XCTAssertFalse(stored.contains("="), field)
+            XCTAssertFalse(stored.contains("+"), field)
+            XCTAssertFalse(stored.contains("/"), field)
+            XCTAssertEqual(GDBase64URL.encode(try XCTUnwrap(GDBase64URL.decode(stored))), stored, field)
+        }
+        var scrypt = created.body
+        for n in [1 << 14, 1 << 20] {
+            scrypt["kdf"] = ["alg": "scrypt", "N": n, "r": 8, "p": 1]
+            let accepted = try GDKeyEnvelopeContract.decode(scrypt)
+            XCTAssertEqual(accepted.kdf.n, n)
+        }
+        for n in [1 << 13, 1 << 21, 49152] {
+            scrypt["kdf"] = ["alg": "scrypt", "N": n, "r": 8, "p": 1]
+            XCTAssertThrowsError(try GDKeyEnvelopeContract.decode(scrypt), "N \(n)")
+        }
         let large = try GDFixtureFile.load("key-envelope", "payload-too-large")
         XCTAssertEqual(large.status, 413)
         guard case .showError = GDKeyEnvelopeContract.followUp(status: large.status, json: large.body) else {

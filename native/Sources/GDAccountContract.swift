@@ -198,17 +198,18 @@ enum GDAccountContract {
     static let deletionNotRetryableMessage = "This deletion can't be retried. Contact GenDragoon support. Dismiss it when you no longer want to watch the job. Local keys and caches were kept."
 
     /// 401 never wipes.
-    /// A Firebase `invalid_token` sends `signed_out`, clears only the session, keeps the job,
-    /// and keeps polling with the saved status token until `done` wipes.
-    /// A status-token `invalid_token` sends `reauth_required`, stops the poll, keeps the job, and asks for sign-in.
+    /// Only a Firebase `invalid_token` sends `signed_out`. The session is cleared, the job stays,
+    /// and polling continues with the saved status token until `done` wipes.
+    /// A status GET `invalid_token`, `unauthorized`, or a 401 with no code sends `reauth_required`.
+    /// That stops the poll, keeps the job, and asks for sign-in.
     /// After that sign-in, DELETE is sent again so the 410 can supply a fresh status token.
-    /// `reauth_required` and a bare 401 ask for sign-in. A saved Firebase job keeps polling.
     static func unauthorizedDeletion(json: [String: Any], savedJobExists: Bool, credential: GDDeletionCredential = .firebase) -> GDUnauthorizedDeletion {
         let code = errorCode(json)
         if credential == .statusToken {
+            let reauth = code == "invalid_token" || code == "unauthorized" || GDServerCode.read(json).isEmpty
             return GDUnauthorizedDeletion(wipe: false, showSignIn: true, keepSavedJob: savedJobExists,
                                           retryDelete: savedJobExists, signOut: false, keepPolling: false,
-                                          signal: code == "invalid_token" ? .reauthRequired : nil)
+                                          signal: reauth ? .reauthRequired : nil)
         }
         switch code {
         case "invalid_token":

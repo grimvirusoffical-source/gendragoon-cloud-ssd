@@ -9,6 +9,25 @@ struct GDKeyEnvelopeKDF: Codable, Equatable {
     var memoryKiB: Int
     var iterations: Int
     var parallelism: Int
+    /// scrypt CPU/memory cost. Absent for argon2id.
+    var n: Int?
+    var r: Int?
+    var p: Int?
+
+    enum CodingKeys: String, CodingKey {
+        case alg, memoryKiB, iterations, parallelism, r, p
+        case n = "N"
+    }
+
+    init(alg: String, memoryKiB: Int = 0, iterations: Int = 0, parallelism: Int = 0, n: Int? = nil, r: Int? = nil, p: Int? = nil) {
+        self.alg = alg
+        self.memoryKiB = memoryKiB
+        self.iterations = iterations
+        self.parallelism = parallelism
+        self.n = n
+        self.r = r
+        self.p = p
+    }
 }
 
 /// The only wire shape for a workspace key envelope.
@@ -40,18 +59,34 @@ enum GDKeyEnvelopeContract {
     static func updateHeaders(version: Int) -> [String: String] { ["If-Match": "\"\(version)\""] }
 
     static func encode(_ wire: GDKeyEnvelopeWire) throws -> Data {
-        try validate(wire)
+        let salt = try canonical(wire.salt)
+        let iv = try canonical(wire.iv)
+        let wrappedKey = try canonical(wire.wrappedKey)
+        var writing = wire
+        writing.salt = salt
+        writing.iv = iv
+        writing.wrappedKey = wrappedKey
+        try validate(writing)
+        let kdf: [String: Any]
+        if writing.kdf.alg == "scrypt" {
+            var scrypt: [String: Any] = ["alg": "scrypt", "N": writing.kdf.n ?? 0]
+            if let r = writing.kdf.r { scrypt["r"] = r }
+            if let p = writing.kdf.p { scrypt["p"] = p }
+            kdf = scrypt
+        } else {
+            kdf = [
+                "alg": writing.kdf.alg,
+                "memoryKiB": writing.kdf.memoryKiB,
+                "iterations": writing.kdf.iterations,
+                "parallelism": writing.kdf.parallelism,
+            ]
+        }
         let object: [String: Any] = [
-            "version": wire.version,
-            "kdf": [
-                "alg": wire.kdf.alg,
-                "memoryKiB": wire.kdf.memoryKiB,
-                "iterations": wire.kdf.iterations,
-                "parallelism": wire.kdf.parallelism,
-            ],
-            "salt": wire.salt,
-            "iv": wire.iv,
-            "wrappedKey": wire.wrappedKey,
+            "version": writing.version,
+            "kdf": kdf,
+            "salt": salt,
+            "iv": iv,
+            "wrappedKey": wrappedKey,
         ]
         return try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
     }
@@ -67,40 +102,74 @@ enum GDKeyEnvelopeContract {
         if object["opsLimit"] != nil || object["memLimit"] != nil || object["kdfParams"] != nil {
             throw GDKeyEnvelopeError.message("The workspace key envelope is not valid.")
         }
-        guard let version = object["version"] as? Int ?? (object["version"] as? NSNumber)?.intValue,
+        guard let version = Self.intValue(object["version"]),
               let kdf = object["kdf"] as? [String: Any],
               let alg = kdf["alg"] as? String,
-              let memory = kdf["memoryKiB"] as? Int ?? (kdf["memoryKiB"] as? NSNumber)?.intValue,
-              let iterations = kdf["iterations"] as? Int ?? (kdf["iterations"] as? NSNumber)?.intValue,
-              let parallelism = kdf["parallelism"] as? Int ?? (kdf["parallelism"] as? NSNumber)?.intValue,
               let salt = object["salt"] as? String,
               let iv = object["iv"] as? String,
               let wrappedKey = object["wrappedKey"] as? String else {
             throw GDKeyEnvelopeError.message("The workspace key envelope is not valid.")
         }
-        let wire = GDKeyEnvelopeWire(version: version, kdf: GDKeyEnvelopeKDF(alg: alg, memoryKiB: memory, iterations: iterations, parallelism: parallelism), salt: salt, iv: iv, wrappedKey: wrappedKey)
+        let params: GDKeyEnvelopeKDF
+        if alg == "scrypt" {
+            guard let n = intValue(kdf["N"]) else {
+                throw GDKeyEnvelopeError.message("The workspace key envelope is not valid.")
+            }
+            params = GDKeyEnvelopeKDF(alg: alg, n: n, r: intValue(kdf["r"]), p: intValue(kdf["p"]))
+        } else {
+            guard let memory = intValue(kdf["memoryKiB"]),
+                  let iterations = intValue(kdf["iterations"]),
+                  let parallelism = intValue(kdf["parallelism"]) else {
+                throw GDKeyEnvelopeError.message("The workspace key envelope is not valid.")
+            }
+            params = GDKeyEnvelopeKDF(alg: alg, memoryKiB: memory, iterations: iterations, parallelism: parallelism)
+        }
+        let wire = GDKeyEnvelopeWire(version: version, kdf: params, salt: salt, iv: iv, wrappedKey: wrappedKey)
         try validate(wire)
         return wire
     }
 
     static func validate(_ wire: GDKeyEnvelopeWire) throws {
-        guard wire.version >= 1, wire.kdf.alg == "argon2id" else {
+        guard wire.version >= 1 else {
             throw GDKeyEnvelopeError.message("The workspace key envelope is not valid.")
         }
-        guard wire.kdf.parallelism >= 1 else {
-            throw GDKeyEnvelopeError.message("The workspace key envelope is not valid.")
-        }
-        guard wire.kdf.memoryKiB >= 1, wire.kdf.memoryKiB <= maxMemoryKiB else {
-            throw GDKeyEnvelopeError.message("Those passphrase settings are too expensive for this Mac.")
-        }
-        guard wire.kdf.iterations >= 1, wire.kdf.iterations <= maxIterations else {
-            throw GDKeyEnvelopeError.message("Those passphrase settings are too expensive for this Mac.")
+        if wire.kdf.alg == "scrypt" {
+            guard let n = wire.kdf.n, (1 << 14)...(1 << 20) ~= n, (n & (n - 1)) == 0 else {
+                throw GDKeyEnvelopeError.message("Those passphrase settings are too expensive for this Mac.")
+            }
+        } else {
+            guard wire.kdf.alg == "argon2id" else {
+                throw GDKeyEnvelopeError.message("The workspace key envelope is not valid.")
+            }
+            guard wire.kdf.parallelism >= 1 else {
+                throw GDKeyEnvelopeError.message("The workspace key envelope is not valid.")
+            }
+            guard wire.kdf.memoryKiB >= 1, wire.kdf.memoryKiB <= maxMemoryKiB else {
+                throw GDKeyEnvelopeError.message("Those passphrase settings are too expensive for this Mac.")
+            }
+            guard wire.kdf.iterations >= 1, wire.kdf.iterations <= maxIterations else {
+                throw GDKeyEnvelopeError.message("Those passphrase settings are too expensive for this Mac.")
+            }
         }
         guard let salt = GDBase64URL.decode(wire.salt), (16...64).contains(salt.count),
               let iv = GDBase64URL.decode(wire.iv), (12...32).contains(iv.count),
               GDBase64URL.decode(wire.wrappedKey) != nil else {
             throw GDKeyEnvelopeError.message("The workspace key envelope is not valid.")
         }
+    }
+
+    /// Salt, iv, and wrappedKey are stored as unpadded base64url whichever input alphabet arrived.
+    static func canonical(_ text: String) throws -> String {
+        guard let data = GDBase64URL.decode(text) else {
+            throw GDKeyEnvelopeError.message("The workspace key envelope is not valid.")
+        }
+        return GDBase64URL.encode(data)
+    }
+
+    private static func intValue(_ value: Any?) -> Int? {
+        if let number = value as? Int { return number }
+        if let number = value as? NSNumber { return number.intValue }
+        return nil
     }
 
     static func followUp(status: Int, json: [String: Any]) -> GDKeyEnvelopeFollowUp {
@@ -141,10 +210,22 @@ enum GDBase64URL {
             .replacingOccurrences(of: "=", with: "")
     }
 
+    /// Accepts standard base64 or unpadded base64url. Rejects a string that does not round-trip.
     static func decode(_ text: String) -> Data? {
-        var encoded = text.replacingOccurrences(of: "-", with: "+").replacingOccurrences(of: "_", with: "/")
-        let remainder = encoded.count % 4
-        if remainder != 0 { encoded += String(repeating: "=", count: 4 - remainder) }
-        return Data(base64Encoded: encoded)
+        if text.isEmpty || text.unicodeScalars.contains(where: { CharacterSet.whitespacesAndNewlines.contains($0) }) {
+            return nil
+        }
+        let url = text.replacingOccurrences(of: "=", with: "")
+            .replacingOccurrences(of: "+", with: "-")
+            .replacingOccurrences(of: "/", with: "_")
+        let alphabet = CharacterSet(charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_")
+        guard url.unicodeScalars.allSatisfy({ alphabet.contains($0) }) else { return nil }
+        let remainder = url.count % 4
+        if remainder == 1 { return nil }
+        var padded = url
+        if remainder != 0 { padded += String(repeating: "=", count: 4 - remainder) }
+        let standard = padded.replacingOccurrences(of: "-", with: "+").replacingOccurrences(of: "_", with: "/")
+        guard let data = Data(base64Encoded: standard), encode(data) == url else { return nil }
+        return data
     }
 }
