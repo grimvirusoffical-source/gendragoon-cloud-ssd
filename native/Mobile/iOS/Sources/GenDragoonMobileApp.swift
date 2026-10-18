@@ -14,12 +14,12 @@ private let panel=Color(red:0.115,green:0.093,blue:0.16)
 struct MobileRoot:View {
     @EnvironmentObject private var session:MobileSession
     var body:some View{
-        ZStack{canvas.ignoresSafeArea();switch session.stage{
+        ZStack{canvas.ignoresSafeArea();if session.accountDeleted{AccountDeletedScreen()}else{switch session.stage{
         case .loading:VStack(spacing:20){Image(systemName:"cloud.fill").font(.system(size:65)).foregroundStyle(violet);ProgressView();Text("Opening your cloud…").font(.subheadline).foregroundStyle(.secondary)}
         case .login:MobileLogin()
         case .terms:MobileTerms()
         case .ready:MobileLibrary().id(session.uid)
-        }}.task{await session.start()}
+        }}}.task{await session.start()}
     }
 }
 private struct MobileLogin:View {
@@ -75,6 +75,7 @@ private struct MobileLibrary:View {
     @State private var settings=false
     @State private var grid=false
     @State private var removing:GDCloudItem?
+    @State private var deleteAccount=false
     private func size(_ n:Int64)->String{ByteCountFormatter.string(fromByteCount:n,countStyle:.file)}
     private func icon(_ name:String)->String{
         switch (name as NSString).pathExtension.lowercased(){
@@ -94,13 +95,12 @@ private struct MobileLibrary:View {
             VStack(alignment:.leading,spacing:7){Text(file.name).font(.subheadline.weight(.semibold)).lineLimit(2);Text(size(file.sizeBytes)).font(.caption2).foregroundStyle(.secondary)}
             Spacer(minLength:4)
             Menu{Button{cloud.restore(file)}label:{Label("Restore and share",systemImage:"arrow.down.to.line")};Button(role:.destructive){removing=file}label:{Label("Delete cloud copy",systemImage:"trash")}}label:{Image(systemName:"ellipsis").frame(width:42,height:44)}.disabled(cloud.busy).accessibilityLabel("Actions for "+file.name)
-        }.padding(14).background(panel,in:RoundedRectangle(cornerRadius:15)).contextMenu{Button("Restore and share"){cloud.restore(file)};Button("Delete cloud copy",role:.destructive){removing=file}}
+        }.padding(14).background(panel,in:RoundedRectangle(cornerRadius:15))
     }
     var body:some View{NavigationStack{
         ScrollView{VStack(alignment:.leading,spacing:20){
             HStack{VStack(alignment:.leading,spacing:7){Text("YOUR DIGITAL SPACE").font(.system(size:9,weight:.bold,design:.monospaced)).tracking(2).foregroundStyle(violet);Text("My cloud").font(.largeTitle.weight(.bold)).tracking(-1);Text("Everything you need. Nothing in your way.").font(.caption).foregroundStyle(.secondary)};Spacer();Image(systemName:"cloud.fill").font(.system(size:37)).foregroundStyle(violet).padding(15).background(violet.opacity(0.12),in:RoundedRectangle(cornerRadius:21))}
             Picker("Workspace",selection:$cloud.selected){Text("Free · 2 GB").tag("free");ForEach(cloud.choices){Text($0.name).tag($0.id)}}.pickerStyle(.menu).frame(maxWidth:.infinity,alignment:.leading).padding(8).background(panel,in:RoundedRectangle(cornerRadius:11)).disabled(cloud.busy)
-            if cloud.ownerBenefits{Label("Owner access · All available plans included · No ads",systemImage:"checkmark.seal.fill").font(.subheadline.weight(.medium)).foregroundStyle(violet).padding(14).frame(maxWidth:.infinity,alignment:.leading).background(violet.opacity(0.10),in:RoundedRectangle(cornerRadius:14))}
             if let c=cloud.config{
                 HStack(spacing:12){metric("Used / total",size(c.usedBytes)+" / "+size(c.quotaBytes));metric("Parallel transfers",String((cloud.dataSaver||cloud.constrainedNetwork) ? 1:min(4,c.transfer.workers)))}
                 ProgressView(value:min(1,Double(c.usedBytes+c.reservedBytes)/Double(max(1,c.quotaBytes)))).tint(violet)
@@ -132,11 +132,13 @@ private struct MobileLibrary:View {
         .fileImporter(isPresented:$importing,allowedContentTypes:importFolders ? [.folder] : [.item],allowsMultipleSelection:true){result in switch result{case .success(let urls):if cloud.removeOriginals{pendingUpload=urls;confirmOriginalRemoval=true}else{cloud.upload(urls)};case .failure(let error):cloud.status=error.localizedDescription}}
         .confirmationDialog("Upload and remove originals?",isPresented:$confirmOriginalRemoval,titleVisibility:.visible){Button("Verify then remove \(pendingUpload.count) selected items",role:.destructive){cloud.upload(pendingUpload);pendingUpload=[]};Button("Keep originals and upload"){cloud.removeOriginals=false;cloud.upload(pendingUpload);pendingUpload=[]};Button("Cancel",role:.cancel){pendingUpload=[]}}message:{Text("Originals are removed only after a complete cloud read-back and archive restore check. Some providers delete permanently.")}
         .sheet(item:$cloud.export){value in NativeShare(url:value.url).presentationDetents([.medium,.large])}
-        .sheet(isPresented:$settings){NavigationStack{Form{Section("Google account"){Text(session.email).textSelection(.enabled);Button("Reset App",role:.destructive){confirmReset=true}.disabled(cloud.busy);Button("Sign out",role:.destructive){cloud.pause();settings=false;session.signOut()}.disabled(cloud.busy)};Section("Transfers"){Toggle("Data saver",isOn:$cloud.dataSaver);Text("Cellular, constrained networks and Low Power Mode reduce concurrency automatically. Higher paid worker limits do not change your carrier speed.").font(.footnote).foregroundStyle(.secondary)};Section("About"){Text("GenDragoon 1.0");Link("Privacy Notice",destination:URL(string:"https://gendragoon-free-10068843866.us-central1.run.app/mobile/privacy.txt")!);Text("Mobile releases update through the App Store/TestFlight. Desktop self-updating does not apply to this iOS app.").font(.footnote).foregroundStyle(.secondary)}}.alert("Reset App?",isPresented:$confirmReset){Button("Reset",role:.destructive){cloud.resetLocalState();settings=false};Button("Cancel",role:.cancel){}}message:{Text("Clear local transfer cache and selected workspace. Cloud files and exported documents stay in place.")}.navigationTitle("Your account").toolbar{ToolbarItem(placement:.confirmationAction){Button("Done"){settings=false}}}}}
+        .sheet(isPresented:$settings){NavigationStack{Form{Section("Google account"){Text(session.email).textSelection(.enabled);Button("Reset App",role:.destructive){confirmReset=true}.disabled(cloud.busy);Button("Delete account",role:.destructive){settings=false;DispatchQueue.main.async{deleteAccount=true}}.disabled(cloud.busy);Button("Sign out",role:.destructive){cloud.pause();settings=false;session.signOut()}.disabled(cloud.busy)};Section("Transfers"){Toggle("Data saver",isOn:$cloud.dataSaver);Text("Cellular, constrained networks and Low Power Mode reduce concurrency automatically. Higher paid worker limits do not change your carrier speed.").font(.footnote).foregroundStyle(.secondary)};Section("About"){Text("GenDragoon 1.0");Link("Privacy Notice",destination:URL(string:"https://gendragoon-free-10068843866.us-central1.run.app/mobile/privacy.txt")!);Text("Mobile releases update through the App Store/TestFlight. Desktop self-updating does not apply to this iOS app.").font(.footnote).foregroundStyle(.secondary)}}.alert("Reset App?",isPresented:$confirmReset){Button("Reset",role:.destructive){cloud.resetLocalState();settings=false};Button("Cancel",role:.cancel){}}message:{Text("Clear local transfer cache and selected workspace. Cloud files and exported documents stay in place.")}.navigationTitle("Your account").toolbar{ToolbarItem(placement:.confirmationAction){Button("Done"){settings=false}}}}}
+        .fullScreenCover(isPresented:$deleteAccount){DeleteAccountView().environmentObject(session).environmentObject(cloud)}
+        .fullScreenCover(item:$cloud.workspaceLock){lock in WorkspaceLockView(lock:lock).environmentObject(session).environmentObject(cloud)}
         .alert("Delete cloud copy?",isPresented:Binding(get:{removing != nil},set:{if !$0{removing=nil}})){Button("Delete",role:.destructive){if let removing{cloud.delete(removing)};removing=nil};Button("Cancel",role:.cancel){removing=nil}}message:{Text("This removes \(removing?.name ?? "this file") from cloud storage. Local copies are not changed.")}
     }}
 }
-private struct NativeShare:UIViewControllerRepresentable {
+struct NativeShare:UIViewControllerRepresentable {
     let url:URL
     func makeUIViewController(context:Context)->UIActivityViewController{UIActivityViewController(activityItems:[url],applicationActivities:nil)}
     func updateUIViewController(_ uiViewController:UIActivityViewController,context:Context){}

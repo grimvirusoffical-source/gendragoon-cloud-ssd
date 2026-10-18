@@ -21,6 +21,7 @@ struct MobileExport:Identifiable {let id=UUID();let url:URL}
     @Published var fraction=0.0
     @Published var detail=""
     @Published var export:MobileExport?
+    @Published var workspaceLock:WorkspaceLock?
     private var task:Task<Void,Never>?
     private var client:GDTransferClient?
     private var owner=""
@@ -42,7 +43,11 @@ struct MobileExport:Identifiable {let id=UUID();let url:URL}
                 didChooseOwnerWorkspace = savedWorkspace != nil
             }
             try await load()
-        }catch{status=error.localizedDescription}
+        }catch{report(error)}
+    }
+    private func report(_ error:Error){
+        if let locked=error as? WorkspaceLocked {workspaceLock=locked.lock;return}
+        status=error.localizedDescription
     }
     private func load() async throws {
         guard let client else{return}
@@ -57,14 +62,15 @@ struct MobileExport:Identifiable {let id=UUID();let url:URL}
         catch let e as GDTransferError where e.status==404 && selected=="free"{config=nil;files=[];status="Create your free 2 GB workspace to begin."}
         catch{config=nil;files=[];throw error}
     }
-    func refresh(){guard !busy else{return};busy=true;task=Task{defer{busy=false};do{try await load()}catch{status=error.localizedDescription}}}
+    func refresh(){guard !busy else{return};busy=true;task=Task{defer{busy=false};do{try await load()}catch{report(error)}}}
     func refreshAndWait() async {refresh();await task?.value}
     func create(){guard !busy,let client else{return};busy=true;task=Task{defer{busy=false};do{
         do{_=try await client.json("v1/free",method:"POST",payload:["name":"My Free Cloud"])}catch let e as GDTransferError where e.status==409{}
         try await load()
-    }catch{status=error.localizedDescription}}}
+    }catch{report(error)}}}
     private func progress(_ p:GDTransferProgress){fraction=p.fraction;detail=p.phase+(p.bytesPerSecond>0 ? String(format:" · %.1f MB/s",p.bytesPerSecond/1e6):"");if let eta=p.secondsRemaining{detail+=String(format:" · ~%.0fs",eta)}}
     func upload(_ urls:[URL]){
+        guard CloudSignals.allowsTransfer(method:"PUT",locked:workspaceLock != nil) else{return}
         guard !busy,let client,let config,!urls.isEmpty else{return};busy=true;transferring=true;fraction=0
         let workspace=selected,constrained=dataSaver||constrainedNetwork,remove=removeOriginals,limit=config.maxFileBytes
         task=Task{defer{busy=false;transferring=false;removeOriginals=false};do{
@@ -89,7 +95,7 @@ struct MobileExport:Identifiable {let id=UUID();let url:URL}
             }
             try await load();status=remove ? "Upload and restore check passed. Selected originals removed." : "Upload verified. Your originals are unchanged."
         }catch is CancellationError{status="Paused. Select the same files to resume. Unverified originals were retained."}
-        catch{status=error.localizedDescription}}
+        catch{report(error)}}
     }
     func resetLocalState() {
         guard !busy else{return}
@@ -99,9 +105,10 @@ struct MobileExport:Identifiable {let id=UUID();let url:URL}
         do {if FileManager.default.fileExists(atPath:cache.path){try FileManager.default.removeItem(at:cache)};try FileManager.default.createDirectory(at:cache,withIntermediateDirectories:true,attributes:[.posixPermissions:0o700]);status="Local settings and transfer cache reset. Cloud and exported files retained.";refresh()}
         catch{status=error.localizedDescription}
     }
-    func restore(_ file:GDCloudItem){
+    func restore(_ file:GDCloudItem, from workspaceID:String?=nil){
+        guard CloudSignals.allowsTransfer(method:"GET",locked:workspaceLock != nil) else{return}
         guard !busy,let client else{return};busy=true;transferring=true;fraction=0
-        let workspace=selected,constrained=dataSaver||constrainedNetwork
+        let workspace=workspaceID ?? selected,constrained=dataSaver||constrainedNetwork
         task=Task{defer{busy=false;transferring=false};do{
             let temporary=try await client.download(file:file,workspace:workspace,constrained:constrained){[weak model=self] value in await model?.progress(value)}
             guard !file.name.contains("/"),!file.name.contains("\\"),file.name != ".",file.name != ".." else{throw GDTransferError(message:"Unsafe file name.",status:0)}
@@ -111,10 +118,30 @@ struct MobileExport:Identifiable {let id=UUID();let url:URL}
             if FileManager.default.fileExists(atPath:destination.path){_=try FileManager.default.replaceItemAt(destination,withItemAt:temporary)}else{try FileManager.default.moveItem(at:temporary,to:destination)}
             export=MobileExport(url:destination);status=MobileArchive.isApplication(file.name) ? "Application package restored for storage or transfer to its compatible device. iOS cannot run desktop or Android applications." : "Restored. Save or open this file in another app."
         }catch is CancellationError{status="Paused. Restore this file again to resume."}
-        catch{status=error.localizedDescription}}
+        catch{report(error)}}
     }
     func delete(_ file:GDCloudItem){guard !busy,let client else{return};busy=true;let workspace=selected
-        task=Task{defer{busy=false};do{try await client.delete(fileID:file.id,workspace:workspace);try await load()}catch{status=error.localizedDescription}}
+        task=Task{defer{busy=false};do{try await client.delete(fileID:file.id,workspace:workspace);try await load()}catch{report(error)}}
+    }
+    func filesForDownload(workspace:String) async throws -> [GDCloudItem] {
+        guard let client else{throw GDTransferError(message:"Sign in again to continue.",status:401)}
+        return try await client.list(workspace:workspace)
+    }
+    func deleteHostedWorkspace(_ id:String) async throws {
+        guard let client else{throw GDTransferError(message:"Sign in again to continue.",status:401)}
+        try await client.deleteWorkspace(id:id)
+    }
+    func reloadLibrary() async throws {
+        try await load();workspaceLock=nil
+    }
+    func deleteAccount(freshToken:String) async throws -> AccountHttp {
+        guard let client else{throw GDTransferError(message:"Sign in again to continue.",status:401)}
+        return try await client.deleteAccount(freshToken:freshToken)
+    }
+    func pollDeletion(_ path:String) async throws -> AccountHttp {
+        guard let client else{throw GDTransferError(message:"Sign in again to continue.",status:401)}
+        do { return try await client.accountDeletionStatus(path:path) }
+        catch let error as GDTransferError where error.status==401 { return AccountHttp(status:401,raw:"",error:nil,jobId:nil,statusUrl:nil,state:nil) }
     }
     func pause(){task?.cancel()}
 }

@@ -39,9 +39,11 @@ final class CloudApi {
             if(Thread.currentThread().isInterrupted())throw new InterruptedException("Paused");
             try{
                 Response response=exchange(ORIGIN+path,method,body,headers,attempt>0);
+                String text=new String(response.body,StandardCharsets.UTF_8);
+                CloudSignals.Route routed=CloudSignals.route(response.status,text,method);
+                if(routed.destination==CloudSignals.Destination.LOCK_SCREEN)throw new WorkspaceLocked(routed.lock);
                 if(response.status>=200&&response.status<300)return response;
-                String message="Cloud request failed (HTTP "+response.status+").";
-                try{message=response.json().optString("error",message);}catch(JSONException ignored){}
+                String message=routed.toast==null?"Cloud request failed (HTTP "+response.status+").":routed.toast;
                 Failure error=new Failure(response.status,message);
                 if(!List.of(401,408,429,500,502,503,504).contains(response.status))throw error;
                 last=error;
@@ -52,16 +54,19 @@ final class CloudApi {
         throw last;
     }
     Response exchange(String url,String method,byte[] body,Map<String,String> headers,boolean force)throws Exception{
+        return exchangeAuthorized(url,method,body,headers,token(force));
+    }
+    Response exchangeAuthorized(String url,String method,byte[] body,Map<String,String> headers,String bearer)throws Exception{
         URL target=new URL(url);
         if(!target.getProtocol().equals("https")||!Set.of("gendragoon-free-10068843866.us-central1.run.app","firestore.googleapis.com").contains(target.getHost()))throw new Failure(400,"Untrusted endpoint.");
         HttpsURLConnection c=(HttpsURLConnection)target.openConnection();
         try{
             c.setInstanceFollowRedirects(false);c.setConnectTimeout(30000);c.setReadTimeout(120000);c.setRequestMethod(method);c.setUseCaches(false);
-            c.setRequestProperty("Authorization","Bearer "+token(force));c.setRequestProperty("Accept","application/json");c.setRequestProperty("Accept-Encoding","identity");
+            c.setRequestProperty("Authorization","Bearer "+bearer);c.setRequestProperty("Accept","application/json");c.setRequestProperty("Accept-Encoding","identity");
             for(Map.Entry<String,String> e:headers.entrySet())c.setRequestProperty(e.getKey(),e.getValue());
             if(body!=null){c.setDoOutput(true);c.setFixedLengthStreamingMode(body.length);try(OutputStream out=c.getOutputStream()){out.write(body);}}
             int status=c.getResponseCode();byte[] bytes=new byte[0];
-            if(!method.equals("HEAD")){
+            if(!method.equals("HEAD")||status==423){
                 InputStream raw=status<400?c.getInputStream():c.getErrorStream();
                 if(raw!=null)try(InputStream in=raw;ByteArrayOutputStream out=new ByteArrayOutputStream()){
                     byte[] buffer=new byte[64*1024];int n,total=0;
@@ -70,6 +75,45 @@ final class CloudApi {
             }
             return new Response(status,bytes,c.getHeaderFields());
         }finally{c.disconnect();}
+    }
+    /**
+     * One-shot {@code DELETE /v2/account}. Current contract, adjustable when the route is merged:
+     * {@code 202 {"jobId"}}. Poll {@code GET /v2/account/deletions/{jobId}} for
+     * {@code {"state":"queued"|"running"|"done"|"failed"}}. A second delete returns 401 because the
+     * Firebase user is already gone. Uses {@code freshToken} as given: no session refresh and no retry.
+     */
+    AccountActions.HttpBody deleteAccountCall(String freshToken)throws Exception{
+        if(freshToken==null||freshToken.isEmpty())throw new Failure(401,"Sign in again to continue.");
+        Response response=exchangeAuthorized(ORIGIN+"/v2/account","DELETE",null,Map.of(),freshToken);
+        return AccountActions.parse(response.status,new String(response.body,StandardCharsets.UTF_8));
+    }
+    /** One-shot poll. A 401 is returned so an already-removed account can be treated as success. */
+    AccountActions.HttpBody pollDeletion(String path)throws Exception{
+        if(!AccountActions.safeAccountPath(path))throw new Failure(400,"Invalid deletion status route.");
+        try{
+            Response response=exchangeAuthorized(ORIGIN+path,"GET",null,Map.of(),token(false));
+            return AccountActions.parse(response.status,new String(response.body,StandardCharsets.UTF_8));
+        }catch(Failure error){
+            if(error.status==401)return new AccountActions.HttpBody(401,"",null,null,null,null);
+            throw error;
+        }
+    }
+    /**
+     * {@code DELETE /v2/workspaces/{id}}. Uses {@link #request}, so HTTP 423 {@code workspace_lock}
+     * still opens the lock screen. Hosted files are removed by the server. Bring-your-own storage is not modified.
+     */
+    void deleteWorkspace(String id)throws Exception{
+        if(id==null||(!"free".equals(id)&&!id.matches("[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}")))throw new Failure(400,"Invalid workspace.");
+        request("/v2/workspaces/"+id,"DELETE",(JSONObject)null);
+    }
+    /**
+     * Merge is not final and this method performs no request.
+     * Expected later call: {@code POST /v2/workspaces/{targetId}/merge} with {@code {"sourceId"}}.
+     * Duplicate files are kept as {@code name (from <source>)}.
+     */
+    static String mergeWorkspaces(String targetId,String sourceId,String sourceName){
+        if(targetId==null||sourceId==null)return AccountActions.mergeUnavailable(sourceName);
+        return AccountActions.mergeUnavailable(sourceName);
     }
     JSONObject get(String path)throws Exception{return request(path,"GET",(JSONObject)null).json();}
     List<JSONObject> files(String workspace)throws Exception{

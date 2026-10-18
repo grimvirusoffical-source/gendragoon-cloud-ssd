@@ -32,6 +32,7 @@ import com.google.android.material.switchmaterial.SwitchMaterial;
 import org.json.*;
 import java.io.*;
 import java.nio.charset.StandardCharsets;
+import java.security.KeyStore;
 import java.util.*;
 import java.util.concurrent.*;
 
@@ -45,6 +46,9 @@ public final class MainActivity extends AppCompatActivity {
     private long loadSerial=0;
     private String uid="",workspace="free",query="",sort="name";private boolean loading=false,workBusy=false;private int pageSize=100;
     private List<JSONObject> files=new ArrayList<>();private final Set<UUID> handled=new HashSet<>();
+    private boolean holdAuthNavigation=false;private WorkspaceLock activeLock;private AccountDeletion deletion;
+    private boolean deletionSignInStarted=false,deletionAuthBusy=false,wiping=false;private int deletionEpoch=0;
+    private final List<JSONObject> lockFiles=new ArrayList<>();private String lockFilesFor="";
     private ActivityResultLauncher<String[]> picker;private ActivityResultLauncher<Uri> folderPicker;private ActivityResultLauncher<String> notifications;
     private CloudApi api(){return new CloudApi(uid);}
     @Override public void onCreate(Bundle state){
@@ -52,16 +56,21 @@ public final class MainActivity extends AppCompatActivity {
         picker=registerForActivityResult(new ActivityResultContracts.OpenMultipleDocuments(),uris->chooseUpload(uris,false));
         folderPicker=registerForActivityResult(new ActivityResultContracts.OpenDocumentTree(),uri->{if(uri!=null)chooseUpload(List.of(uri),true);});
         notifications=registerForActivityResult(new ActivityResultContracts.RequestPermission(),allowed->{if(!allowed)say("Transfer started. Notifications are off; progress remains available in the app.");});
-        listener=firebase->{loadSerial++;FirebaseUser user=firebase.getCurrentUser();uid=user==null?"":user.getUid();workspace=user==null?"free":getSharedPreferences("gd-settings",MODE_PRIVATE).getString("workspace:"+uid,"free");files.clear();query="";handled.clear();if(user==null)showLogin();else checkConsent();};
+        listener=firebase->{FirebaseUser user=firebase.getCurrentUser();if(holdAuthNavigation){uid=user==null?"":user.getUid();return;}loadSerial++;uid=user==null?"":user.getUid();workspace=user==null?"free":getSharedPreferences("gd-settings",MODE_PRIVATE).getString("workspace:"+uid,"free");files.clear();query="";handled.clear();if(user==null)showLogin();else checkConsent();};
         auth.addAuthStateListener(listener);
         WorkManager.getInstance(this).getWorkInfosForUniqueWorkLiveData("GenDragoonTransfer").observe(this,items->{
             boolean previous=workBusy;workBusy=false;
             for(WorkInfo item:items){if(item.getState()==WorkInfo.State.RUNNING||item.getState()==WorkInfo.State.ENQUEUED||item.getState()==WorkInfo.State.BLOCKED){workBusy=true;Data p=item.getProgress();long total=p.getLong("total",0),done=p.getLong("done",0);
                 if(transferProgress!=null){transferProgress.setVisibility(View.VISIBLE);transferProgress.setProgressCompat(total>0?(int)(100*done/total):0,true);}if(transferText!=null)transferText.setText(p.getString("message")==null?"Transfer queued…":p.getString("message"));}
-                if(item.getState()==WorkInfo.State.FAILED&&!handled.contains(item.getId())){handled.add(item.getId());say(item.getOutputData().getString("message"));}
+                if(item.getState()==WorkInfo.State.FAILED&&handled.add(item.getId())){
+                    Data out=item.getOutputData();
+                    CloudSignals.Presentation presentation=CloudSignals.present(new CloudSignals.FailureNotice(out.getString("route"),out.getString("message"),out.getString("lock")));
+                    if(presentation.lockScreen)showLock(WorkspaceLock.decode(out.getString("lock")));
+                    else if(presentation.toast!=null)say(presentation.toast);
+                }
                 if(item.getState()==WorkInfo.State.SUCCEEDED&&"download".equals(item.getOutputData().getString("action"))&&uid.equals(item.getOutputData().getString("uid"))&&handled.add(item.getId()))showSaved(item.getOutputData().getString("path"));
             }
-            updateButtons();if(previous&&!workBusy&&!uid.isEmpty())load();
+            updateButtons();if(previous&&!workBusy&&!uid.isEmpty()&&activeLock==null&&deletion==null)load();
         });
     }
     @Override protected void onDestroy(){if(listener!=null)auth.removeAuthStateListener(listener);io.shutdownNow();super.onDestroy();}
@@ -82,6 +91,7 @@ public final class MainActivity extends AppCompatActivity {
     }
     private void status(){status=text("",12,false);status.setTextColor(muted);status.setPadding(dp(3),dp(13),dp(3),dp(8));content.addView(status);}
     private void say(String message){if(message==null)return;runOnUiThread(()->{if(status!=null)status.setText(message);});}
+    private void report(Exception error){Exception cause=CloudSignals.unwrap(error);if(cause instanceof WorkspaceLocked locked){runOnUiThread(()->showLock(locked.lock));return;}say(cause.getMessage());}
     private void showLogin(){shell();space(content,42);TextView cloud=text("☁",88,true);cloud.setTextColor(accent);content.addView(cloud);space(content,17);content.addView(text("Your cloud.\nWithin reach.",43,true));space(content,18);TextView sub=text("Private files, less clutter. Upload, restore and share across your devices.",16,false);sub.setTextColor(muted);content.addView(sub);space(content,28);
         LinearLayout panel=inside(card(content));panel.addView(text("2 GB free to get started",19,true));space(panel,14);panel.addView(text("Resumable transfers · Integrity checks\nNative file picking · Safe sharing",13,false));space(panel,20);panel.addView(button("Continue with Google",this::signIn));status();say("Your Google password is entered only on Google's secure page.");}
     private void signIn(){
@@ -98,29 +108,29 @@ public final class MainActivity extends AppCompatActivity {
         });
     }
     private void checkConsent(){String owner=uid;shell();content.addView(text("Opening your cloud…",27,true));status();
-        io.execute(()->{try{boolean accepted=new CloudApi(owner).termsAccepted();runOnUiThread(()->{if(!owner.equals(uid))return;if(accepted)load();else showTerms();});}catch(Exception e){say("Could not verify your Terms record. "+e.getMessage());runOnUiThread(()->content.addView(button("Retry",this::checkConsent)));}});
+        io.execute(()->{try{boolean accepted=new CloudApi(owner).termsAccepted();runOnUiThread(()->{if(!owner.equals(uid))return;if(accepted)load();else showTerms();});}catch(Exception e){if(e instanceof WorkspaceLocked)report(e);else{say("Could not verify your Terms record. "+e.getMessage());runOnUiThread(()->content.addView(button("Retry",this::checkConsent)));}}});
     }
     private String asset(String name)throws IOException{try(InputStream in=getAssets().open(name);ByteArrayOutputStream out=new ByteArrayOutputStream()){byte[] b=new byte[8192];int n;while((n=in.read(b))>=0)out.write(b,0,n);return out.toString("UTF-8");}}
     private void showTerms(){shell();content.addView(text("Before you begin",30,true));space(content,12);content.addView(text("Read the Terms before saving your agreement to your Google account.",14,false));
         LinearLayout panel=inside(card(content));TextView body=text("",12,false);try{body.setText(asset("terms.txt"));}catch(Exception e){body.setText("Terms unavailable. Do not continue.");}body.setTextIsSelectable(true);panel.addView(body);
         CheckBox read=new CheckBox(this);read.setText("I confirm I have read the Terms");content.addView(read);CheckBox agree=new CheckBox(this);agree.setText("I agree to the Terms and Privacy Notice");content.addView(agree);
         content.addView(button("Read the Privacy Notice",()->{try{new MaterialAlertDialogBuilder(this).setTitle("Privacy Notice").setMessage(asset("privacy.txt")).setPositiveButton("Done",null).show();}catch(Exception e){say(e.getMessage());}}));
-        MaterialButton accept=button("Accept and continue",()->{if(!read.isChecked()||!agree.isChecked())return;String owner=uid;io.execute(()->{try{new CloudApi(owner).acceptTerms();runOnUiThread(()->{if(uid.equals(owner))load();});}catch(Exception e){say(e.getMessage());}});});accept.setEnabled(false);read.setOnCheckedChangeListener((b,c)->accept.setEnabled(c&&agree.isChecked()));agree.setOnCheckedChangeListener((b,c)->accept.setEnabled(c&&read.isChecked()));content.addView(accept);status();
+        MaterialButton accept=button("Accept and continue",()->{if(!read.isChecked()||!agree.isChecked())return;String owner=uid;io.execute(()->{try{new CloudApi(owner).acceptTerms();runOnUiThread(()->{if(uid.equals(owner))load();});}catch(Exception e){report(e);}});});accept.setEnabled(false);read.setOnCheckedChangeListener((b,c)->accept.setEnabled(c&&agree.isChecked()));agree.setOnCheckedChangeListener((b,c)->accept.setEnabled(c&&read.isChecked()));content.addView(accept);status();
     }
     private void load(){if(uid.isEmpty())return;String owner=uid,chosen=workspace;long serial=++loadSerial;loading=true;updateButtons();
         io.execute(()->{try{
             CloudApi api=new CloudApi(owner);JSONArray all=api.get("/v2/workspaces").getJSONArray("workspaces");List<JSONObject> spaces=new ArrayList<>();for(int n=0;n<all.length();n++){JSONObject s=all.getJSONObject(n);if("paid".equals(s.optString("kind"))&&s.optBoolean("storageActive")&&s.optBoolean("provisioned"))spaces.add(s);}
             String effective=chosen;boolean found=chosen.equals("free");for(JSONObject entry:spaces)if(chosen.equals(entry.optString("id")))found=true;if(!found)effective="free";
             JSONObject config=null;List<JSONObject> list=new ArrayList<>();try{config=api.get(CloudApi.workspace(effective)+"/config");list=api.files(effective);}catch(CloudApi.Failure e){if(e.status!=404||!effective.equals("free"))throw e;}
-            JSONObject cfg=config;List<JSONObject> loaded=list;String verifiedWorkspace=effective;runOnUiThread(()->{if(serial!=loadSerial||!owner.equals(uid))return;loading=false;workspace=verifiedWorkspace;getSharedPreferences("gd-settings",MODE_PRIVATE).edit().putString("workspace:"+uid,workspace).apply();files=loaded;showLibrary(spaces,cfg);});
-        }catch(Exception e){runOnUiThread(()->{if(serial!=loadSerial||!owner.equals(uid))return;loading=false;updateButtons();say(e.getMessage());});}});
+            JSONObject cfg=config;List<JSONObject> loaded=list;String verifiedWorkspace=effective;runOnUiThread(()->{if(serial!=loadSerial||!owner.equals(uid))return;loading=false;activeLock=null;lockFiles.clear();lockFilesFor="";deletion=null;workspace=verifiedWorkspace;getSharedPreferences("gd-settings",MODE_PRIVATE).edit().putString("workspace:"+uid,workspace).apply();files=loaded;showLibrary(spaces,cfg);});
+        }catch(Exception e){runOnUiThread(()->{if(serial!=loadSerial||!owner.equals(uid))return;loading=false;if(e instanceof WorkspaceLocked locked){showLock(locked.lock);return;}updateButtons();say(e.getMessage());});}});
     }
     private void showLibrary(List<JSONObject> spaces,JSONObject cfg){
         boolean dataSaver=getPreferences(MODE_PRIVATE).getBoolean("data-saver",false);shell();TextView eyebrow=text("YOUR DIGITAL SPACE",9,true);eyebrow.setTextColor(accent);eyebrow.setLetterSpacing(.18f);content.addView(eyebrow);space(content,10);content.addView(text("My cloud",38,true));TextView subtitle=text("Everything you need. Nothing in your way.",13,false);subtitle.setTextColor(muted);content.addView(subtitle);space(content,20);
         List<String> ids=new ArrayList<>(List.of("free")),names=new ArrayList<>(List.of("Free · 2 GB"));for(JSONObject s:spaces){ids.add(s.optString("id"));names.add(s.optString("name"));}
         Spinner selected=new Spinner(this);ArrayAdapter<String> adapter=new ArrayAdapter<>(this,android.R.layout.simple_spinner_dropdown_item,names);selected.setAdapter(adapter);selected.setSelection(Math.max(0,ids.indexOf(workspace)));selected.setEnabled(!workBusy&&!loading);content.addView(selected,new LinearLayout.LayoutParams(-1,dp(48)));selected.setOnItemSelectedListener(new android.widget.AdapterView.OnItemSelectedListener(){public void onNothingSelected(android.widget.AdapterView<?> p){}public void onItemSelected(android.widget.AdapterView<?> p,View v,int pos,long id){if(!ids.get(pos).equals(workspace)){workspace=ids.get(pos);getSharedPreferences("gd-settings",MODE_PRIVATE).edit().putString("workspace:"+uid,workspace).apply();query="";load();}}});
         LinearLayout panel=inside(card(content));
-        if(cfg==null){panel.addView(text("Start with 2 GB, on us.",24,true));space(panel,12);panel.addView(text("Private storage with resumable transfers and integrity checks. No payment required.",14,false));space(panel,16);panel.addView(button("Create free workspace",()->{String owner=uid;io.execute(()->{try{new CloudApi(owner).request("/v1/free","POST",new JSONObject().put("name","My Free Cloud"));runOnUiThread(this::load);}catch(Exception e){say(e.getMessage());}});}));status();say("Create your free workspace to begin.");return;}
+        if(cfg==null){panel.addView(text("Start with 2 GB, on us.",24,true));space(panel,12);panel.addView(text("Private storage with resumable transfers and integrity checks. No payment required.",14,false));space(panel,16);panel.addView(button("Create free workspace",()->{String owner=uid;io.execute(()->{try{new CloudApi(owner).request("/v1/free","POST",new JSONObject().put("name","My Free Cloud"));runOnUiThread(this::load);}catch(Exception e){report(e);}});}));status();say("Create your free workspace to begin.");return;}
         long used=cfg.optLong("usedBytes"),quota=cfg.optLong("quotaBytes");panel.addView(text(Formatter.formatFileSize(this,used)+" / "+Formatter.formatFileSize(this,quota),24,true));space(panel,8);TextView label=text("STORAGE USED / TOTAL",9,true);label.setTextColor(muted);panel.addView(label);space(panel,15);LinearProgressIndicator capacity=new LinearProgressIndicator(this);capacity.setIndicatorColor(accent);capacity.setProgressCompat((int)Math.min(100,100*(used+cfg.optLong("reservedBytes"))/Math.max(1,quota)),false);panel.addView(capacity);space(panel,12);panel.addView(text("Up to "+Math.min(4,cfg.optJSONObject("transfer").optInt("workers",1))+" parallel transfers on this device",12,false));
         content.addView(text("Applications, files & folders",20,true));space(content,8);
         content.addView(text("Choose app packages such as APKs, any files, or a complete folder. Android installs compatible APKs with your approval. Desktop and iOS applications are stored for their own devices.",12,false));
@@ -139,17 +149,17 @@ public final class MainActivity extends AppCompatActivity {
         if(visible.isEmpty()){TextView empty=text(files.isEmpty()?"No cloud files yet.\nUpload your first file to get started.":"No matching files.",16,false);empty.setGravity(Gravity.CENTER);empty.setTextColor(muted);empty.setPadding(0,dp(35),0,dp(35));fileList.addView(empty);return;}
         for(JSONObject file:visible.subList(0,Math.min(pageSize,visible.size()))){LinearLayout p=inside(card(fileList));TextView title=text(file.optString("name"),14,true);title.setMaxLines(3);p.addView(title);space(p,7);TextView size=text(Formatter.formatFileSize(this,file.optLong("sizeBytes")),11,false);size.setTextColor(muted);p.addView(size);space(p,8);LinearLayout actions=new LinearLayout(this);actions.setGravity(Gravity.END);
             MaterialButton restore=button("Restore",()->enqueueDownload(file));restore.setEnabled(!workBusy);actions.addView(restore);
-            MaterialButton remove=button("Delete",()->new MaterialAlertDialogBuilder(this).setTitle("Delete cloud copy?").setMessage("Remove "+file.optString("name")+" from cloud storage? Local copies are unchanged.").setNegativeButton("Cancel",null).setPositiveButton("Delete",(d,w)->{String owner=uid,where=workspace;io.execute(()->{try{new CloudApi(owner).request(CloudApi.workspace(where)+"/files/"+file.getString("id"),"DELETE",(JSONObject)null);runOnUiThread(()->{if(owner.equals(uid))load();});}catch(Exception e){say(e.getMessage());}});}).show());remove.setEnabled(!workBusy);remove.setBackgroundTintList(ColorStateList.valueOf(surface));remove.setTextColor(Color.rgb(222,172,188));actions.addView(remove);p.addView(actions);
+            MaterialButton remove=button("Delete",()->new MaterialAlertDialogBuilder(this).setTitle("Delete cloud copy?").setMessage("Remove "+file.optString("name")+" from cloud storage? Local copies are unchanged.").setNegativeButton("Cancel",null).setPositiveButton("Delete",(d,w)->{String owner=uid,where=workspace;io.execute(()->{try{new CloudApi(owner).request(CloudApi.workspace(where)+"/files/"+file.getString("id"),"DELETE",(JSONObject)null);runOnUiThread(()->{if(owner.equals(uid))load();});}catch(Exception e){report(e);}});}).show());remove.setEnabled(!workBusy);remove.setBackgroundTintList(ColorStateList.valueOf(surface));remove.setTextColor(Color.rgb(222,172,188));actions.addView(remove);p.addView(actions);
         }
         if(visible.size()>pageSize)fileList.addView(button("Show more files",()->{pageSize+=100;drawFiles();}));
     }
     private void chooseUpload(List<Uri> uris,boolean folder){
-        if(uris.isEmpty()||uid.isEmpty()||workBusy)return;
+        if(uris.isEmpty()||uid.isEmpty()||workBusy||!CloudSignals.allowsTransfer("PUT",activeLock!=null))return;
         if(removeOriginals!=null&&removeOriginals.isChecked())new MaterialAlertDialogBuilder(this).setTitle("Upload and remove originals?").setMessage("The "+uris.size()+" selected items will be removed only after a complete cloud read-back and archive restore check. Some document providers delete permanently.").setNegativeButton("Cancel",null).setNeutralButton("Keep originals",(d,w)->queueUploads(uris,folder,false)).setPositiveButton("Verify then remove",(d,w)->queueUploads(uris,folder,true)).show();
         else queueUploads(uris,folder,false);
     }
     private void queueUploads(List<Uri> uris,boolean folder,boolean remove){
-        if(workBusy||uid.isEmpty())return;List<OneTimeWorkRequest> jobs=new ArrayList<>();
+        if(workBusy||uid.isEmpty()||!CloudSignals.allowsTransfer("PUT",activeLock!=null))return;List<OneTimeWorkRequest> jobs=new ArrayList<>();
         for(Uri uri:uris){
             try{getContentResolver().takePersistableUriPermission(uri,Intent.FLAG_GRANT_READ_URI_PERMISSION|(remove?Intent.FLAG_GRANT_WRITE_URI_PERMISSION:0));}
             catch(SecurityException e){try{getContentResolver().takePersistableUriPermission(uri,Intent.FLAG_GRANT_READ_URI_PERMISSION);}catch(SecurityException denied){say("This provider cannot grant resumable access. Save the selection in Files or Downloads first.");return;}}
@@ -158,9 +168,11 @@ public final class MainActivity extends AppCompatActivity {
         WorkContinuation chain=WorkManager.getInstance(this).beginUniqueWork("GenDragoonTransfer",ExistingWorkPolicy.KEEP,jobs.get(0));for(int i=1;i<jobs.size();i++)chain=chain.then(jobs.get(i));chain.enqueue();workBusy=true;updateButtons();
         if(removeOriginals!=null)removeOriginals.setChecked(false);if(Build.VERSION.SDK_INT>=33)notifications.launch(Manifest.permission.POST_NOTIFICATIONS);
     }
-    private OneTimeWorkRequest request(String action,Data.Builder input){return new OneTimeWorkRequest.Builder(TransferWorker.class).setInputData(input.putString("uid",uid).putString("workspace",workspace).putString("action",action).putBoolean("dataSaver",saver!=null&&saver.isChecked()).build()).setConstraints(new Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED).build()).addTag("GenDragoon").build();}
-    private void enqueueDownload(JSONObject file){if(workBusy)return;OneTimeWorkRequest work=request("download",new Data.Builder().putString("file",file.toString()));WorkManager.getInstance(this).enqueueUniqueWork("GenDragoonTransfer",ExistingWorkPolicy.KEEP,work);workBusy=true;updateButtons();if(Build.VERSION.SDK_INT>=33)notifications.launch(Manifest.permission.POST_NOTIFICATIONS);}
-    private void updateButtons(){if(upload!=null)upload.setEnabled(!workBusy&&!loading);if(folderUpload!=null)folderUpload.setEnabled(!workBusy&&!loading);if(removeOriginals!=null)removeOriginals.setEnabled(!workBusy&&!loading);if(refresh!=null)refresh.setEnabled(!workBusy&&!loading);if(saver!=null)saver.setEnabled(!workBusy);if(pause!=null)pause.setVisibility(workBusy?View.VISIBLE:View.GONE);if(transferProgress!=null)transferProgress.setVisibility(workBusy?View.VISIBLE:View.GONE);}
+    private OneTimeWorkRequest request(String action,Data.Builder input){return request(action,input,workspace);}
+    private OneTimeWorkRequest request(String action,Data.Builder input,String where){return new OneTimeWorkRequest.Builder(TransferWorker.class).setInputData(input.putString("uid",uid).putString("workspace",where).putString("action",action).putBoolean("dataSaver",saver!=null&&saver.isChecked()).build()).setConstraints(new Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED).build()).addTag("GenDragoon").build();}
+    private void enqueueDownload(JSONObject file){enqueueDownload(file,workspace);}
+    private void enqueueDownload(JSONObject file,String where){if(workBusy||where==null||where.isEmpty()||!CloudSignals.allowsTransfer("GET",activeLock!=null))return;OneTimeWorkRequest work=request("download",new Data.Builder().putString("file",file.toString()),where);WorkManager.getInstance(this).enqueueUniqueWork("GenDragoonTransfer",ExistingWorkPolicy.KEEP,work);workBusy=true;updateButtons();if(Build.VERSION.SDK_INT>=33)notifications.launch(Manifest.permission.POST_NOTIFICATIONS);}
+    private void updateButtons(){boolean uploads=!workBusy&&!loading&&CloudSignals.allowsTransfer("PUT",activeLock!=null);if(upload!=null)upload.setEnabled(uploads);if(folderUpload!=null)folderUpload.setEnabled(uploads);if(removeOriginals!=null)removeOriginals.setEnabled(uploads);if(refresh!=null)refresh.setEnabled(!workBusy&&!loading);if(saver!=null)saver.setEnabled(!workBusy);if(pause!=null)pause.setVisibility(workBusy?View.VISIBLE:View.GONE);if(transferProgress!=null)transferProgress.setVisibility(workBusy?View.VISIBLE:View.GONE);}
     private void showSaved(String path){if(path==null||uid.isEmpty())return;File file=new File(path);try{String allowed=new File(getFilesDir(),"exports/"+CloudApi.sha(uid.getBytes(StandardCharsets.UTF_8))).getCanonicalPath()+File.separator;if(!file.getCanonicalPath().startsWith(allowed)||!file.isFile())return;}catch(Exception e){say("Restored file is unavailable.");return;}
         new MaterialAlertDialogBuilder(this).setTitle("File restored").setNeutralButton(file.getName().toLowerCase(Locale.ROOT).endsWith(".apk")?"Install APK":null,(dialog,which)->installPackage(file)).setMessage(file.getName()+" is verified and ready."+(SelectionArchive.isApplication(file.getName())?" Application packages run only on compatible platforms. Android installations are managed by the system, separately from the GenDragoon cache.":"")).setNegativeButton("Done",null).setPositiveButton("Share or save",(dialog,which)->{Uri uri=FileProvider.getUriForFile(this,getPackageName()+".files",file);Intent share=new Intent(Intent.ACTION_SEND).setType("application/octet-stream").putExtra(Intent.EXTRA_STREAM,uri).addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);share.setClipData(ClipData.newRawUri(file.getName(),uri));startActivity(Intent.createChooser(share,"Save or open file"));}).show();
     }
@@ -189,11 +201,169 @@ public final class MainActivity extends AppCompatActivity {
     }
     private void account(){
         FirebaseUser user=auth.getCurrentUser();if(user==null)return;
-        new MaterialAlertDialogBuilder(this).setTitle(user.getEmail()).setItems(new String[]{"About GenDragoon", "Reset App", "Privacy Notice", "Sign out"},(dialog,which)->{
-            if(which==0)new MaterialAlertDialogBuilder(this).setTitle("GenDragoon").setMessage("Cloud files, folders and application packages. Your workspace quotas and transfer limits are verified by the server. Mobile updates are distributed through the app store. Android manages installed apps independently of the GenDragoon cache.").setPositiveButton("Done",null).show();
-            else if(which==1)resetApp();
-            else if(which==2)startActivity(new Intent(Intent.ACTION_VIEW,Uri.parse(CloudApi.ORIGIN+"/mobile/privacy.txt")));
-            else{WorkManager.getInstance(this).cancelUniqueWork("GenDragoonTransfer");auth.signOut();}
-        }).setNegativeButton("Done",null).show();
+        LinearLayout box=vertical();box.setPadding(dp(8),dp(4),dp(8),dp(4));
+        box.addView(button("About GenDragoon",()->new MaterialAlertDialogBuilder(this).setTitle("GenDragoon").setMessage("Cloud files, folders and application packages. Your workspace quotas and transfer limits are verified by the server. Mobile updates are distributed through the app store. Android manages installed apps independently of the GenDragoon cache.").setPositiveButton("Done",null).show()));
+        box.addView(button("Reset App",this::resetApp));
+        box.addView(button("Privacy Notice",()->startActivity(new Intent(Intent.ACTION_VIEW,Uri.parse(CloudApi.ORIGIN+"/mobile/privacy.txt")))));
+        androidx.appcompat.app.AlertDialog[] shown=new androidx.appcompat.app.AlertDialog[1];
+        MaterialButton delete=button("Delete account",()->{if(shown[0]!=null)shown[0].dismiss();deletionEpoch++;deletion=new AccountDeletion();deletionSignInStarted=false;wiping=false;holdAuthNavigation=true;showDeleteAccount();});
+        delete.setBackgroundTintList(ColorStateList.valueOf(Color.rgb(120,32,48)));delete.setTextColor(Color.WHITE);box.addView(delete);
+        box.addView(button("Sign out",()->{WorkManager.getInstance(this).cancelUniqueWork("GenDragoonTransfer");auth.signOut();}));
+        shown[0]=new MaterialAlertDialogBuilder(this).setTitle(user.getEmail()==null?"Account":user.getEmail()).setView(box).setNegativeButton("Done",null).create();shown[0].show();
+    }
+    private void showLock(WorkspaceLock lock){
+        activeLock=lock==null?new WorkspaceLock(List.of(),""):lock;loadSerial++;deletion=null;shell();
+        content.addView(text("Workspaces locked",30,true));space(content,12);
+        TextView body=text("Your files are still readable and downloadable. Uploads are paused until you delete or merge workspaces down to your plan limit.",15,false);body.setTextColor(muted);content.addView(body);
+        String issues=activeLock.issueSummary();if(!issues.isEmpty()){space(content,10);content.addView(text(issues,14,true));}
+        space(content,8);TextView note=text("Duplicates are kept as name (from <source>).",12,false);note.setTextColor(muted);content.addView(note);space(content,8);
+        if(activeLock.workspaces.isEmpty())content.addView(text("The server did not include a workspace list.",14,false));
+        for(WorkspaceLock.Item item:activeLock.workspaces){
+            LinearLayout panel=inside(card(content));panel.addView(text(item.label(),16,true));space(panel,8);
+            LinearLayout actions=new LinearLayout(this);
+            MaterialButton remove=button("Delete",()->confirmDeleteWorkspace(item));remove.setEnabled(item.id!=null&&!workBusy);remove.setBackgroundTintList(ColorStateList.valueOf(Color.rgb(120,32,48)));remove.setTextColor(Color.WHITE);actions.addView(remove);
+            MaterialButton merge=button("Merge",()->chooseMerge(item));merge.setEnabled(item.id!=null&&!workBusy);merge.setBackgroundTintList(ColorStateList.valueOf(surface));merge.setTextColor(accent);actions.addView(merge);
+            MaterialButton download=button("Download files",()->listWorkspaceFiles(item));download.setEnabled(item.id!=null&&!workBusy&&CloudSignals.allowsTransfer("GET",true));actions.addView(download);
+            panel.addView(actions);
+            if(item.id!=null&&item.id.equals(lockFilesFor)){
+                if(lockFiles.isEmpty()){space(panel,8);panel.addView(text("No files to download in this workspace.",13,false));}
+                for(JSONObject file:lockFiles){space(panel,8);panel.addView(text(file.optString("name"),14,false));MaterialButton restore=button("Download",()->enqueueDownload(file,item.id));restore.setEnabled(!workBusy);panel.addView(restore);}
+            }
+        }
+        space(content,12);content.addView(button("Check again",this::load));status();
+    }
+    private void confirmDeleteWorkspace(WorkspaceLock.Item item){
+        if(item.id==null)return;
+        new MaterialAlertDialogBuilder(this).setTitle("Delete workspace?").setMessage("This permanently deletes the hosted workspace \""+item.label()+"\" and its files. Bring-your-own storage is not changed.").setNegativeButton("Cancel",null).setPositiveButton("Delete workspace",(d,w)->{
+            String owner=uid,id=item.id;io.execute(()->{try{new CloudApi(owner).deleteWorkspace(id);runOnUiThread(()->{if(owner.equals(uid))load();});}catch(Exception e){report(e);}});
+        }).show();
+    }
+    private void chooseMerge(WorkspaceLock.Item source){
+        List<WorkspaceLock.Item> targets=new ArrayList<>();List<String> labels=new ArrayList<>();
+        for(WorkspaceLock.Item candidate:activeLock.workspaces)if(candidate.id!=null&&!candidate.id.equals(source.id)){targets.add(candidate);labels.add(candidate.label());}
+        if(targets.isEmpty()){new MaterialAlertDialogBuilder(this).setTitle("Merge workspaces").setMessage(AccountActions.mergeUnavailable(source.name)).setPositiveButton("OK",null).show();return;}
+        new MaterialAlertDialogBuilder(this).setTitle("Merge into").setItems(labels.toArray(new String[0]),(d,which)->{
+            WorkspaceLock.Item target=targets.get(which);
+            String sourceName=source.name==null||source.name.isEmpty()?source.id:source.name;
+            new MaterialAlertDialogBuilder(this).setTitle("Merge workspaces").setMessage(CloudApi.mergeWorkspaces(target.id,source.id,sourceName)).setPositiveButton("OK",null).show();
+        }).setNegativeButton("Cancel",null).show();
+    }
+    private void listWorkspaceFiles(WorkspaceLock.Item item){
+        if(item.id==null||!CloudSignals.allowsTransfer("GET",true))return;
+        String owner=uid,id=item.id;io.execute(()->{try{
+            List<JSONObject> listed=new CloudApi(owner).files(id);
+            runOnUiThread(()->{if(!owner.equals(uid)||activeLock==null)return;lockFiles.clear();lockFiles.addAll(listed);lockFilesFor=id;showLock(activeLock);});
+        }catch(Exception e){report(e);}});
+    }
+    private void showDeleteAccount(){
+        if(deletion==null)return;loadSerial++;shell();
+        content.addView(text("Delete account",30,true));space(content,12);
+        switch(deletion.step){
+            case EXPLAIN -> {
+                content.addView(text("This deletes your account, all hosted workspaces and their files. Subscriptions are cancelled. Bring-your-own storage is not changed.",15,false));
+                space(content,16);content.addView(button("Continue",()->{deletion.continueFromExplain();showDeleteAccount();}));
+                space(content,8);content.addView(button("Cancel",this::cancelDeletion));
+            }
+            case CONFIRM -> {
+                content.addView(text("Type DELETE to confirm. You will sign in with Google again immediately before the account is deleted.",15,false));
+                space(content,12);EditText phrase=new EditText(this);phrase.setHint("Type DELETE");phrase.setSingleLine(true);content.addView(phrase);
+                MaterialButton confirm=button("Delete account",()->{if(deletion.confirmPhrase(phrase.getText().toString())){deletionSignInStarted=false;showDeleteAccount();}});
+                confirm.setEnabled(false);confirm.setBackgroundTintList(ColorStateList.valueOf(Color.rgb(120,32,48)));confirm.setTextColor(Color.WHITE);
+                phrase.addTextChangedListener(new TextWatcher(){public void beforeTextChanged(CharSequence s,int a,int b,int c){}public void onTextChanged(CharSequence s,int a,int b,int c){confirm.setEnabled(AccountDeletion.CONFIRM_PHRASE.equals(s.toString()));}public void afterTextChanged(Editable e){}});
+                space(content,12);content.addView(confirm);space(content,8);content.addView(button("Cancel",this::cancelDeletion));
+            }
+            case REAUTH -> {
+                content.addView(text(deletion.message==null?"Sign in again. The server only accepts a sign-in from the last 5 minutes.":deletion.message,15,false));
+                space(content,16);content.addView(button("Sign in again",this::beginDeletionSignIn));
+                space(content,8);content.addView(button("Cancel",this::cancelDeletion));
+                if(deletion.staleRetries==0&&!deletionSignInStarted){deletionSignInStarted=true;beginDeletionSignIn();}
+            }
+            case DELETING, POLLING -> {content.addView(text(deletion.step==AccountDeletion.Step.POLLING?"Deleting your account…":"Starting deletion…",15,false));}
+            case DONE -> {
+                if(wiping)content.addView(text("Removing this device's copy of your account…",15,false));
+                else{content.addView(text(deletion.message==null?"Local data could not be removed.":deletion.message,15,false));space(content,12);content.addView(button("Retry",this::finishDeletionLocally));}
+            }
+            case FAILED -> {
+                content.addView(text(deletion.message==null?"Account deletion did not finish. You can retry.":deletion.message,15,false));
+                space(content,12);content.addView(button("Retry",()->{deletion.retry();showDeleteAccount();}));
+                space(content,8);content.addView(button("Cancel",this::cancelDeletion));
+            }
+            case WIPED -> {
+                content.addView(text("Your account has been deleted.",18,true));space(content,8);
+                content.addView(text("Hosted workspaces and this device's copy of your data have been erased. Bring-your-own storage was not changed.",15,false));
+                space(content,16);content.addView(button("Return to sign-in",()->{holdAuthNavigation=false;deletion=null;wiping=false;activeLock=null;showLogin();}));
+            }
+        }
+        status();
+    }
+    private void cancelDeletion(){deletionEpoch++;deletionAuthBusy=false;wiping=false;holdAuthNavigation=false;deletion=null;load();}
+    private void beginDeletionSignIn(){
+        if(deletionAuthBusy||deletion==null||deletion.step!=AccountDeletion.Step.REAUTH)return;
+        deletionAuthBusy=true;holdAuthNavigation=true;int epoch=deletionEpoch;
+        GetGoogleIdOption option=new GetGoogleIdOption.Builder().setServerClientId(getString(R.string.default_web_client_id)).setFilterByAuthorizedAccounts(false).setAutoSelectEnabled(false).build();
+        credentials.getCredentialAsync(this,new GetCredentialRequest.Builder().addCredentialOption(option).build(),new CancellationSignal(),command->main.post(command),new CredentialManagerCallback<GetCredentialResponse,GetCredentialException>(){
+            @Override public void onResult(GetCredentialResponse result){
+                if(epoch!=deletionEpoch||deletion==null){deletionAuthBusy=false;return;}
+                try{Credential c=result.getCredential();if(!(c instanceof CustomCredential)||!GoogleIdTokenCredential.TYPE_GOOGLE_ID_TOKEN_CREDENTIAL.equals(c.getType()))throw new IllegalStateException("Unexpected Google credential.");
+                    GoogleIdTokenCredential google=GoogleIdTokenCredential.createFrom(c.getData());
+                    auth.signInWithCredential(GoogleAuthProvider.getCredential(google.getIdToken(),null)).addOnCompleteListener(task->{
+                        if(epoch!=deletionEpoch||deletion==null){deletionAuthBusy=false;return;}
+                        if(!task.isSuccessful()||auth.getCurrentUser()==null){deletionAuthBusy=false;deletion.message=task.getException()==null?"Sign-in failed.":task.getException().getMessage();showDeleteAccount();return;}
+                        auth.getCurrentUser().getIdToken(false).addOnCompleteListener(tokenTask->{
+                            deletionAuthBusy=false;if(epoch!=deletionEpoch||deletion==null)return;
+                            if(!tokenTask.isSuccessful()||tokenTask.getResult()==null||tokenTask.getResult().getToken()==null){deletion.message="Sign in again. The server only accepts a sign-in from the last 5 minutes.";showDeleteAccount();return;}
+                            String jwt=tokenTask.getResult().getToken();Long authTime=CloudSignals.authTimeMillis(jwt);
+                            if(!deletion.acceptFreshSignIn(authTime==null?0L:authTime,System.currentTimeMillis())){showDeleteAccount();return;}
+                            sendDelete(jwt,epoch);
+                        });
+                    });
+                }catch(Exception error){deletionAuthBusy=false;if(deletion!=null)deletion.message=error.getMessage();showDeleteAccount();}
+            }
+            @Override public void onError(@NonNull GetCredentialException error){deletionAuthBusy=false;if(epoch!=deletionEpoch||deletion==null)return;deletion.message=error.getMessage()==null?"Google sign-in was cancelled or unavailable.":error.getMessage();showDeleteAccount();}
+        });
+    }
+    private void sendDelete(String jwt,int epoch){
+        if(deletion==null)return;deletion.noteDeleteSent();String owner=uid;
+        io.execute(()->{try{AccountActions.HttpBody body=new CloudApi(owner).deleteAccountCall(jwt);runOnUiThread(()->applyDelete(body,epoch));}catch(Exception error){runOnUiThread(()->{if(epoch!=deletionEpoch||deletion==null)return;deletion.fail(error.getMessage());showDeleteAccount();});}});
+    }
+    private void applyDelete(AccountActions.HttpBody body,int epoch){
+        if(epoch!=deletionEpoch||deletion==null)return;
+        if(body.status==423&&CloudSignals.CODE_LOCK.equals(body.error)){showLock(WorkspaceLock.decode(body.raw));return;}
+        deletion.onDeleteHttp(body.status,body.jobId,body.statusUrl,body.error);advanceDeletion();
+    }
+    private void advanceDeletion(){
+        if(deletion==null)return;
+        if(deletion.step==AccountDeletion.Step.POLLING){
+            if(deletion.exhausted()){deletion.fail("Account deletion is still running. You can retry.");showDeleteAccount();return;}
+            long delay=deletion.nextPollDelayMillis();int epoch=deletionEpoch;showDeleteAccount();main.postDelayed(()->io.execute(()->pollOnce(epoch)),delay);return;
+        }
+        if(deletion.step==AccountDeletion.Step.DONE){finishDeletionLocally();return;}
+        showDeleteAccount();
+    }
+    private void pollOnce(int epoch){
+        if(epoch!=deletionEpoch||deletion==null||deletion.step!=AccountDeletion.Step.POLLING)return;
+        String path=deletion.statusPath,owner=uid;
+        try{AccountActions.HttpBody body=new CloudApi(owner).pollDeletion(path);runOnUiThread(()->{
+            if(epoch!=deletionEpoch||deletion==null||deletion.step!=AccountDeletion.Step.POLLING)return;
+            if(body.status==423&&CloudSignals.CODE_LOCK.equals(body.error)){showLock(WorkspaceLock.decode(body.raw));return;}
+            deletion.onPollHttp(body.status,body.state);advanceDeletion();
+        });}catch(Exception error){runOnUiThread(()->{if(epoch!=deletionEpoch||deletion==null)return;deletion.fail(error.getMessage());showDeleteAccount();});}
+    }
+    private void finishDeletionLocally(){
+        if(wiping||deletion==null||deletion.step!=AccountDeletion.Step.DONE)return;
+        wiping=true;holdAuthNavigation=true;deletionEpoch++;showDeleteAccount();
+        io.execute(()->{try{eraseAccountData();runOnUiThread(()->{wiping=false;if(deletion!=null)deletion.noteWiped();showDeleteAccount();});}catch(Exception error){runOnUiThread(()->{wiping=false;if(deletion!=null)deletion.message=error.getMessage()==null?"Local data could not be removed.":error.getMessage();showDeleteAccount();});}});
+    }
+    private void eraseAccountData()throws Exception{
+        WorkManager.getInstance(this).cancelUniqueWork("GenDragoonTransfer");
+        for(String name:LocalDataWipe.PREFERENCES)getSharedPreferences(name,MODE_PRIVATE).edit().clear().commit();
+        getPreferences(MODE_PRIVATE).edit().clear().commit();
+        File cache=getCacheDir().getCanonicalFile();
+        for(String child:LocalDataWipe.CACHE_DIRS){File selected=new File(cache,child);if(selected.exists())clearManaged(selected,cache);}
+        File exports=new File(getFilesDir(),LocalDataWipe.FILES_DIR);
+        if(exports.exists())clearManaged(exports,getFilesDir().getCanonicalFile());
+        KeyStore store=KeyStore.getInstance("AndroidKeyStore");store.load(null);
+        for(String alias:LocalDataWipe.keystoreAliasesToDelete(Collections.list(store.aliases())))store.deleteEntry(alias);
+        auth.signOut();
     }
 }
