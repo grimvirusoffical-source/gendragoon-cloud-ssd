@@ -428,7 +428,7 @@ final class StorageAndManifestContractTests: XCTestCase {
         XCTAssertEqual(GDStorageContract.byoMessage(code: GDServerCode.read(external.body), status: external.status), String?(GDStorageContract.byoExternalMessage))
         let plaintext = try GDFixtureFile.load("storage", "plaintext-rejected")
         XCTAssertTrue(GDStorageContract.rejectsPlaintext(plaintext.requestBody as? [String: Any] ?? [:]))
-        XCTAssertFalse(JSONSerialization.data(withJSONObject: plaintext.body).base64EncodedString().isEmpty)
+        XCTAssertFalse(try JSONSerialization.data(withJSONObject: plaintext.body).base64EncodedString().isEmpty)
         let encoded = String(decoding: try JSONSerialization.data(withJSONObject: plaintext.body), as: UTF8.self)
         XCTAssertFalse(encoded.contains("super-secret-report.pdf"))
         XCTAssertFalse(encoded.contains("not-a-real-key"))
