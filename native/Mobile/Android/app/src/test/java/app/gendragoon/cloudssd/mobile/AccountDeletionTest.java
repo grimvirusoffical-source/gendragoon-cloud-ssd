@@ -572,13 +572,18 @@ public final class AccountDeletionTest {
     @Test public void pollUnauthorizedKeepsTheJobUntilFixturesLand() throws Exception {
         AccountDeletion invalid=AccountDeletion.resume(DeletionReceipt.of("job_poll",TOKEN));
         invalid.pollThrough(new Script().respond(AccountActions.parse(401,"{\"error\":\"invalid_token\"}")));
-        assertEquals(AccountDeletion.Step.POLLING,invalid.step);
+        assertEquals(AccountDeletion.Step.SIGNED_OUT,invalid.step);
+        assertTrue(invalid.keepsPolling());
         assertTrue(invalid.clearSession);
         assertEquals("job_poll",invalid.jobId);
         assertEquals(TOKEN,invalid.statusToken);
         assertFalse(invalid.dropReceipt);
         assertFalse(invalid.requestsWipe());
         assertFalse(invalid.allowsDelete());
+        Script done=new Script().respond(AccountActions.parse(200,"{\"jobId\":\"job_poll\",\"status\":\"done\",\"retryable\":false}"));
+        invalid.pollThrough(done);
+        assertEquals("Bearer "+TOKEN,done.authorizations.get(0));
+        assertTrue(invalid.requestsWipe());
 
         AccountDeletion reauth=AccountDeletion.resume(DeletionReceipt.of("job_poll",TOKEN));
         reauth.pollThrough(new Script().respond(AccountActions.parse(401,"{}")));

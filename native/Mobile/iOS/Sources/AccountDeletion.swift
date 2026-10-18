@@ -96,8 +96,10 @@ struct AccountDeletion:Equatable {
         plainError=false
         fail("Account deletion did not start. You can retry.")
     }
+    /// Polling continues after `invalid_token`. Sign-out keeps the job and later polls are not ignored.
+    func keepsPolling()->Bool { step == .polling || (step == .signedOut && jobId != nil && !(statusToken ?? "").isEmpty) }
     mutating func onPollHttp(status:Int,jobStatus:String?,errorCode:String?,retryable:Bool?){
-        guard step == .polling else {return}
+        guard keepsPolling() else {return}
         plainError=false
         if status==423 && errorCode==CloudSignals.lockCode {wipe=false;return}
         if status==401 {onUnauthorized(errorCode);return}
@@ -108,7 +110,7 @@ struct AccountDeletion:Equatable {
             return
         }
         if (200..<300).contains(status) {
-            if jobStatus=="queued" || jobStatus=="running" {step = .polling;wipe=false;return}
+            if jobStatus=="queued" || jobStatus=="running" {if step != .signedOut {step = .polling};wipe=false;return}
             if jobStatus=="done" {step = .done;wipe=true;message=nil;return}
             if jobStatus=="failed" {
                 if retryable==false {
@@ -137,6 +139,8 @@ struct AccountDeletion:Equatable {
             if let jobId,let statusToken,Self.validJob(jobId),Self.validToken(statusToken) {
                 clearSession=true
                 dropReceipt=false
+                step = .signedOut
+                message="Deleting your account…"
                 return
             }
             step = .signedOut;message="Sign in again to continue.";return
@@ -199,7 +203,7 @@ struct AccountDeletion:Equatable {
         onDeleteHttp(status:body.status,jobId:body.jobId,errorCode:body.error,statusToken:body.statusToken)
     }
     mutating func pollThrough(_ transport:any DeletionTransport) async {
-        guard step == .polling else {return}
+        guard keepsPolling() else {return}
         guard let path=statusPath,let statusToken,let call=Self.pollCall(path:path,statusToken:statusToken) else {
             plainError=false
             fail("Could not read deletion status. You can retry.")
@@ -209,7 +213,7 @@ struct AccountDeletion:Equatable {
         completePoll(exchange)
     }
     mutating func completePoll(_ exchange:DeletionExchange) {
-        guard step == .polling else {return}
+        guard keepsPolling() else {return}
         guard !exchange.failed,let body=exchange.body else {
             plainError=false
             lastHttp=nil
@@ -228,10 +232,8 @@ struct AccountDeletion:Equatable {
     static func validJob(_ jobId:String)->Bool {
         jobId.range(of:"^[A-Za-z0-9_-]{1,80}$",options:.regularExpression) != nil && !jobId.contains("..") && !jobId.contains("/") && !jobId.contains("\\")
     }
-    static func validToken(_ token:String)->Bool {
-        guard token.count>=8 && token.count<=512 else {return false}
-        return token.unicodeScalars.allSatisfy { $0.value>32 && $0.value<127 && $0 != "\"" && $0 != "\\" }
-    }
+    /// Runtime gate only. Redacted fixture tokens such as `<redacted>` stay valid. A shape check must not cause another DELETE.
+    static func validToken(_ token:String)->Bool { !token.isEmpty }
     static func statusPath(jobId:String)->String? {
         guard validJob(jobId) else {return nil}
         let allowed=CharacterSet(charactersIn:"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-")

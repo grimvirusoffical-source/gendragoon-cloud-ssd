@@ -530,13 +530,19 @@ final class AccountLogicTests: XCTestCase {
         let denied=ScriptedDeletionTransport()
         denied.respond(AccountHttp.parse(status:401,data:Data("{\"error\":\"invalid_token\"}".utf8)))
         await invalid.pollThrough(denied)
-        XCTAssertEqual(invalid.step,.polling)
+        XCTAssertEqual(invalid.step,.signedOut)
+        XCTAssertTrue(invalid.keepsPolling())
         XCTAssertTrue(invalid.clearSession)
         XCTAssertEqual(invalid.jobId,"job_poll")
         XCTAssertEqual(invalid.statusToken,token)
         XCTAssertFalse(invalid.dropReceipt)
         XCTAssertFalse(invalid.requestsWipe())
         XCTAssertFalse(invalid.allowsDelete())
+        let donePoll=ScriptedDeletionTransport()
+        donePoll.respond(AccountHttp.parse(status:200,data:Data("{\"jobId\":\"job_poll\",\"status\":\"done\",\"retryable\":false}".utf8)))
+        await invalid.pollThrough(donePoll)
+        XCTAssertEqual(donePoll.authorizations.first,"Bearer "+token)
+        XCTAssertTrue(invalid.requestsWipe())
 
         var reauth=AccountDeletion.resume(DeletionReceipt.of(jobId:"job_poll",statusToken:token))
         let blank=ScriptedDeletionTransport()
@@ -676,8 +682,124 @@ private final class MemoryReplacement:ReplacementStore {
     func trashLocalOriginal() throws { events.append("trash") }
 }
 
-/// Account-deletion fixtures are `fixtures/account-deletion` at d788ccb.
-/// Lock, merge, BYO, workspace, and ownership cases stay at da39276.
+/// Avery's ruling (Oct 17): a 401 `{"error":"invalid_token"}` signs the user out. Sign-out clears
+/// only the session. The saved jobId and statusToken stay, polling continues with
+/// `Bearer statusToken`, and local data is wiped only on `done`. `reauth_required` and a 401
+/// with no code go to sign-in instead. None of them wipe.
+///
+/// Every server body is Riley's generated fixture from PR #6 at d788ccb, vendored under
+/// `native/Mobile/fixtures/shared/account-deletion/`. The 410, poll-404 and status-done
+/// fixtures share job ...0005. The export redacts tokens to `"<redacted>"`; that string is the
+/// opaque token here.
+final class InvalidTokenDeletionTests: XCTestCase {
+    private let area="account-deletion"
+
+    private func fixture(_ name:String)->AccountHttp {
+        AccountHttp.parse(status:BackendFixtures.responseStatus(area:area,name:name),data:BackendFixtures.responseBodyData(area:area,name:name))
+    }
+
+    private func ready()->AccountDeletion {
+        var flow=AccountDeletion()
+        flow.continueFromExplain()
+        XCTAssertTrue(flow.confirmPhrase("DELETE"))
+        XCTAssertTrue(flow.acceptFreshSignIn(authTime:Date(timeIntervalSince1970:1),now:Date(timeIntervalSince1970:1)))
+        flow.noteDeleteSent()
+        return flow
+    }
+
+    /// 410 account_deleted for job ...0005 starts polling, then the poll gets invalid_token.
+    private func pollingThenInvalidToken()->AccountDeletion {
+        var flow=ready()
+        let gone=fixture("account-deleted")
+        flow.onDeleteHttp(status:gone.status,jobId:gone.jobId,errorCode:gone.error,statusToken:gone.statusToken)
+        XCTAssertEqual(flow.step,.polling)
+        let invalid=fixture("invalid-token")
+        flow.onPollHttp(status:invalid.status,jobStatus:invalid.jobStatus,errorCode:invalid.error,retryable:invalid.retryable)
+        return flow
+    }
+
+    func testInvalidTokenFixtureIsTheGeneratedDelete401() {
+        XCTAssertEqual(BackendFixtures.requestPath(area:area,name:"invalid-token"),"/v2/account")
+        XCTAssertEqual(BackendFixtures.requestBody(area:area,name:"invalid-token")["confirm"] as? String,"DELETE")
+        let invalid=fixture("invalid-token")
+        XCTAssertEqual(invalid.status,401)
+        XCTAssertEqual(invalid.error,"invalid_token")
+        XCTAssertNil(invalid.jobId)
+        XCTAssertNil(invalid.statusToken)
+    }
+
+    func testInvalidTokenOnDeleteSignsOutWithoutWipingOrInventingAJob() {
+        var flow=ready()
+        let invalid=fixture("invalid-token")
+        flow.onDeleteHttp(status:invalid.status,jobId:invalid.jobId,errorCode:invalid.error,statusToken:invalid.statusToken)
+        XCTAssertEqual(flow.step,.signedOut)
+        XCTAssertFalse(flow.requestsWipe())
+        XCTAssertNil(flow.receipt())
+        XCTAssertFalse(flow.allowsDelete())
+        XCTAssertTrue(LocalWipePlan.keychainServicesRemoved(wipe:flow.requestsWipe()).isEmpty)
+    }
+
+    func testInvalidTokenIsSignOutWhileReauthRequiredIsSignIn() {
+        XCTAssertEqual(pollingThenInvalidToken().step,.signedOut)
+        var reauth=ready()
+        let gone=fixture("account-deleted")
+        reauth.onDeleteHttp(status:gone.status,jobId:gone.jobId,errorCode:gone.error,statusToken:gone.statusToken)
+        let needsReauth=fixture("reauth-required")
+        reauth.onPollHttp(status:needsReauth.status,jobStatus:needsReauth.jobStatus,errorCode:needsReauth.error,retryable:needsReauth.retryable)
+        XCTAssertEqual(reauth.step,.reauth)
+        XCTAssertEqual(reauth.jobId,gone.jobId)
+        XCTAssertFalse(reauth.requestsWipe())
+        // Bare 401 with no code: AccountLogicTests.testLockAndUnauthorizedDoNotWipe.
+    }
+
+    func testInvalidTokenWhilePollingKeepsTheSavedJobAndToken() {
+        let gone=fixture("account-deleted")
+        let flow=pollingThenInvalidToken()
+        XCTAssertFalse(flow.requestsWipe())
+        XCTAssertFalse(flow.wipe)
+        XCTAssertFalse(flow.dropReceipt,"sign-out must not drop the saved receipt")
+        XCTAssertEqual(flow.jobId,gone.jobId)
+        XCTAssertEqual(flow.statusToken,gone.statusToken)
+        let receipt=flow.receipt()
+        XCTAssertNotNil(receipt)
+        XCTAssertTrue(AccountDeletion.resumesBeforeSignOut(receipt))
+        XCTAssertTrue(LocalWipePlan.keychainServicesRemoved(wipe:flow.requestsWipe()).isEmpty)
+    }
+
+    func testAfterInvalidTokenTheSavedJobPollsWithBearerAndWipesOnlyOnDone() {
+        let gone=fixture("account-deleted")
+        let signedOut=pollingThenInvalidToken()
+        // What the next launch does with the kept receipt (MobileSession -> AccountDeletion.resume).
+        var resumed=AccountDeletion.resume(signedOut.receipt())
+        XCTAssertEqual(resumed.step,.polling)
+        XCTAssertEqual(resumed.statusPath,BackendFixtures.requestPath(area:area,name:"status-done"))
+        let call=AccountDeletion.pollCall(path:resumed.statusPath ?? "",statusToken:resumed.statusToken ?? "")
+        XCTAssertEqual(call?.method,"GET")
+        XCTAssertEqual(call?.authorization,"Bearer "+(gone.statusToken ?? "missing"))
+
+        let expired=fixture("expired-token")
+        resumed.onPollHttp(status:expired.status,jobStatus:expired.jobStatus,errorCode:expired.error,retryable:expired.retryable)
+        XCTAssertFalse(resumed.requestsWipe())
+        XCTAssertEqual(resumed.jobId,gone.jobId)
+        XCTAssertFalse(resumed.dropReceipt)
+        resumed.retry()
+        XCTAssertEqual(resumed.step,.polling)
+
+        let done=fixture("status-done")
+        resumed.onPollHttp(status:done.status,jobStatus:done.jobStatus,errorCode:done.error,retryable:done.retryable)
+        XCTAssertEqual(resumed.step,.done)
+        XCTAssertTrue(resumed.requestsWipe())
+    }
+
+    /// After sign-out the same session still polls, so `done` wipes without a relaunch.
+    func test_bug_invalidTokenKeepsPollingInTheSameSessionAndWipesOnDone() {
+        var flow=pollingThenInvalidToken()
+        let done=fixture("status-done")
+        flow.onPollHttp(status:done.status,jobStatus:done.jobStatus,errorCode:done.error,retryable:done.retryable)
+        XCTAssertTrue(flow.requestsWipe(),"done after invalid_token should wipe without a relaunch")
+    }
+}
+
 /// The repo-root `fixtures/` directory wins when this branch has it.
 /// A response body may be JSON or a raw string such as Express HTML.
 private enum BackendFixtures {

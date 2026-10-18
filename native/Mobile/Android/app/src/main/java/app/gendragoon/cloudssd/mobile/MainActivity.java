@@ -318,8 +318,11 @@ public final class MainActivity extends AppCompatActivity {
                 else{space(content,8);content.addView(button("Cancel",this::cancelDeletion));}
             }
             case SIGNED_OUT -> {
-                content.addView(text("Sign in again to continue.",15,false));
-                space(content,16);content.addView(button("Return to sign-in",this::leaveDeletionSignedOut));
+                if(deletion.keepsPolling())content.addView(text("Deleting your account…",15,false));
+                else{
+                    content.addView(text("Sign in again to continue.",15,false));
+                    space(content,16);content.addView(button("Return to sign-in",this::leaveDeletionSignedOut));
+                }
             }
             case WIPED -> {
                 content.addView(text("Your account has been deleted.",18,true));space(content,8);
@@ -429,9 +432,9 @@ public final class MainActivity extends AppCompatActivity {
     private void advanceDeletion(){
         if(deletion==null)return;
         if(deletion.dropReceipt&&!deletion.requestsWipe())DeletionReceiptVault.clear(this);
-        if(deletion.clearSession){deletion.clearSession=false;holdAuthNavigation=true;auth.signOut();}
-        if(deletion.step==AccountDeletion.Step.SIGNED_OUT){leaveDeletionSignedOut();return;}
-        if(deletion.step==AccountDeletion.Step.POLLING){
+        if(deletion.clearSession){deletion.clearSession=false;holdAuthNavigation=true;if(auth.getCurrentUser()!=null)auth.signOut();}
+        if(deletion.step==AccountDeletion.Step.SIGNED_OUT&&!deletion.keepsPolling()){leaveDeletionSignedOut();return;}
+        if(deletion.keepsPolling()){
             if(deletion.exhausted()){deletion.fail("Account deletion is still running. You can retry.");showDeleteAccount();return;}
             long delay=deletion.nextPollDelayMillis();int epoch=deletionEpoch;showDeleteAccount();main.postDelayed(()->io.execute(()->pollOnce(epoch)),delay);return;
         }
@@ -439,11 +442,11 @@ public final class MainActivity extends AppCompatActivity {
         showDeleteAccount();
     }
     private void pollOnce(int epoch){
-        if(epoch!=deletionEpoch||deletion==null||deletion.step!=AccountDeletion.Step.POLLING)return;
+        if(epoch!=deletionEpoch||deletion==null||!deletion.keepsPolling())return;
         String path=deletion.statusPath,token=deletion.statusToken,owner=uid;
         AccountDeletion.Exchange exchange=AccountDeletion.exchange((method,route,payload,authorization)->new CloudApi(owner).pollDeletion(path,token),"GET",path,null,"Bearer "+token);
         runOnUiThread(()->{
-            if(epoch!=deletionEpoch||deletion==null||deletion.step!=AccountDeletion.Step.POLLING)return;
+            if(epoch!=deletionEpoch||deletion==null||!deletion.keepsPolling())return;
             deletion.completePoll(exchange);
             AccountActions.HttpBody body=deletion.lastBody;
             if(body!=null&&body.status==423&&CloudSignals.CODE_LOCK.equals(body.error))activeLock=WorkspaceLock.decode(body.raw).named(knownSpaces);

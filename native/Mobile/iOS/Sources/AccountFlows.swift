@@ -101,8 +101,13 @@ struct CloudDeletionTransport:DeletionTransport {
                         if model.flow.canDismiss() { Button("Dismiss"){model.dismissError();dismiss()} }
                         else { Button("Cancel"){dismiss()} }
                     case .signedOut:
-                        Text(model.flow.message ?? "Sign in again to continue.")
-                        Button("Return to sign-in"){session.signOut();dismiss()}.buttonStyle(.borderedProminent)
+                        if model.flow.keepsPolling() {
+                            ProgressView()
+                            Text("Deleting your account…")
+                        } else {
+                            Text(model.flow.message ?? "Sign in again to continue.")
+                            Button("Return to sign-in"){session.signOut();dismiss()}.buttonStyle(.borderedProminent)
+                        }
                     case .wiped:
                         Text("Your account has been deleted.")
                     }
@@ -112,7 +117,7 @@ struct CloudDeletionTransport:DeletionTransport {
         .task(id:model.flow.step){await onStep()}
     }
     private func onStep() async {
-        if model.flow.step == .polling { await poll() }
+        if model.flow.keepsPolling() { await poll() }
         else if model.flow.step == .done && model.flow.requestsWipe() { await wipe() }
         else if model.flow.step == .signedOut { session.signOut();dismiss() }
     }
@@ -137,11 +142,11 @@ struct CloudDeletionTransport:DeletionTransport {
     }
     private func poll() async {
         let transport=CloudDeletionTransport(cloud:cloud)
-        while model.flow.step == .polling {
+        while model.flow.keepsPolling() {
             if model.exhausted(){model.fail("Account deletion is still running. You can retry.");return}
             let delay=model.nextPollDelayMillis()
             try? await Task.sleep(nanoseconds:UInt64(delay)*1_000_000)
-            if Task.isCancelled || model.flow.step != .polling {return}
+            if Task.isCancelled || !model.flow.keepsPolling() {return}
             await model.pollThrough(transport)
             if model.flow.clearSession {
                 session.clearSessionKeepingDeletion()

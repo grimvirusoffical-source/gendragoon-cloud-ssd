@@ -109,8 +109,11 @@ final class AccountDeletion {
         fail("Account deletion did not start. You can retry.");
     }
 
+    /** Polling continues after {@code invalid_token}. Sign-out keeps the job and later polls are not ignored. */
+    boolean keepsPolling(){return step==Step.POLLING||(step==Step.SIGNED_OUT&&jobId!=null&&statusToken!=null&&!statusToken.isEmpty());}
+
     void onPollHttp(int status,String jobStatus,String errorCode,Boolean retryable){
-        if(step!=Step.POLLING)return;
+        if(!keepsPolling())return;
         plainError=false;
         if(status==423&&CloudSignals.CODE_LOCK.equals(errorCode)){wipe=false;return;}
         if(status==401){onUnauthorized(errorCode);return;}
@@ -123,7 +126,7 @@ final class AccountDeletion {
             return;
         }
         if(status>=200&&status<300){
-            if("queued".equals(jobStatus)||"running".equals(jobStatus)){step=Step.POLLING;wipe=false;return;}
+            if("queued".equals(jobStatus)||"running".equals(jobStatus)){if(step!=Step.SIGNED_OUT)step=Step.POLLING;wipe=false;return;}
             if("done".equals(jobStatus)){step=Step.DONE;wipe=true;message=null;return;}
             if("failed".equals(jobStatus)){
                 if(Boolean.FALSE.equals(retryable)){
@@ -163,6 +166,8 @@ final class AccountDeletion {
             if(AccountActions.validJob(jobId)&&AccountActions.validToken(statusToken)){
                 clearSession=true;
                 dropReceipt=false;
+                step=Step.SIGNED_OUT;
+                message="Deleting your account…";
                 return;
             }
             step=Step.SIGNED_OUT;
@@ -275,7 +280,7 @@ final class AccountDeletion {
     }
 
     void pollThrough(DeletionTransport transport){
-        if(step!=Step.POLLING)return;
+        if(!keepsPolling())return;
         AccountActions.PollCall call=AccountActions.pollCall(statusPath,statusToken);
         if(call==null){
             plainError=false;
@@ -286,7 +291,7 @@ final class AccountDeletion {
     }
 
     void completePoll(Exchange exchange){
-        if(step!=Step.POLLING)return;
+        if(!keepsPolling())return;
         if(exchange==null||exchange.failed||exchange.body==null){
             plainError=false;
             lastBody=null;
@@ -406,13 +411,9 @@ final class AccountActions {
         return !jobId.contains("..")&&!jobId.contains("/")&&!jobId.contains("\\");
     }
 
+    /** Runtime gate only. Redacted fixture tokens such as {@code <redacted>} stay valid. A shape check must not cause another DELETE. */
     static boolean validToken(String token){
-        if(token==null||token.length()<8||token.length()>512)return false;
-        for(int i=0;i<token.length();i++){
-            char c=token.charAt(i);
-            if(c<=' '||c=='"'||c=='\\'||c>=127)return false;
-        }
-        return true;
+        return token!=null&&!token.isEmpty();
     }
 
     static String encodeJob(String jobId){

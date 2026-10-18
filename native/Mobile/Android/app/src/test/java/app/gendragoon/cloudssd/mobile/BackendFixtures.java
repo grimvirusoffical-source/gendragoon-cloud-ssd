@@ -36,19 +36,41 @@ final class BackendFixtures {
     }
 
     static int responseStatus(String area,String name){
-        String file=shared(area,name);
+        String file=withoutResponseBody(shared(area,name));
         int response=keyAt(file,"response",0);
-        int from=response;
-        while(from<file.length()){
-            int status=keyAt(file,"status",from);
-            int end=status;
-            if(end<file.length()&&(file.charAt(end)=='-'||file.charAt(end)=='+'))end++;
-            int digits=end;
-            while(end<file.length()&&Character.isDigit(file.charAt(end)))end++;
-            if(end>digits)return Integer.parseInt(file.substring(status,end));
-            from=end+1;
+        int status=keyAt(file,"status",response);
+        int end=status;
+        if(end<file.length()&&(file.charAt(end)=='-'||file.charAt(end)=='+'))end++;
+        int digits=end;
+        while(end<file.length()&&Character.isDigit(file.charAt(end)))end++;
+        if(end==digits)throw new IllegalStateException("Missing status in "+area+"/"+name);
+        return Integer.parseInt(file.substring(status,end));
+    }
+
+    /**
+     * The export sorts keys, so {@code response.body} comes before {@code response.status}. A
+     * status poll body has its own {@code "status":"done"}; drop the body so the HTTP status is read.
+     */
+    private static String withoutResponseBody(String file){
+        int response=keyAt(file,"response",0);
+        int at=file.indexOf("\"body\"",response);
+        if(at<0)return file;
+        int value=keyAt(file,"body",response);
+        return file.substring(0,value)+"null"+file.substring(rawValueEnd(file,value));
+    }
+
+    /** End index of a JSON value in the source text. String length is the encoded length, not the decoded text. */
+    private static int rawValueEnd(String json,int start){
+        char first=json.charAt(start);
+        if(first=='"'){
+            for(int i=start+1;i<json.length();i++){
+                char c=json.charAt(i);
+                if(c=='\\'){i++;continue;}
+                if(c=='"')return i+1;
+            }
+            throw new IllegalStateException("Unclosed JSON string");
         }
-        throw new IllegalStateException("Missing status in "+area+"/"+name);
+        return start+jsonValue(json,start).length();
     }
 
     static String responseBody(String area,String name){
