@@ -11,7 +11,8 @@ const {Firestore,FieldValue}=require("@google-cloud/firestore");
 const {Storage}=require("@google-cloud/storage");
 const {TransferGovernor}=require("./free_performance");
 const {installedBilling}=require("./billing_gateway");
-const {createProjectService,ProjectError}=require("./projects");
+const {createProjectService,ProjectError,listAccountProjects,summarizeProjects,lockBody}=require("./projects");
+const {lockedWrite:lockedWriteWith}=require("./locked_write");
 const {effectiveStorageQuota,effectiveWorkers}=require("./billing_v2");
 const apiKeys=require("./api_keys");
 const {createLoginGate}=require("./login_gate");
@@ -19,8 +20,14 @@ const required=["CUSTOMER_BUCKET","STORAGE_PROJECT_ID"];
 for(const key of required)if(!process.env[key])throw Error("Missing deployment environment variable: "+key);
 if(process.env.STORAGE_PROJECT_ID!=="gendragood-ssd")throw Error("Unexpected storage project");
 if(process.env.CUSTOMER_BUCKET==="gen-dragoon-ssd")throw Error("Personal bucket is forbidden");
-initializeApp({projectId:"gendragoonssd"});
-const db=new Firestore({projectId:process.env.STORAGE_PROJECT_ID});
+let firebaseApp,firestoreClient;
+function firestore(){
+ if(!firebaseApp)firebaseApp=initializeApp({projectId:"gendragoonssd"});
+ if(!firestoreClient)firestoreClient=new Firestore({projectId:process.env.STORAGE_PROJECT_ID});
+ return firestoreClient;
+}
+// Property access connects. Requiring this module does not.
+const db=new Proxy({},{get(_target,prop){const real=firestore();const value=real[prop];return typeof value==="function"?value.bind(real):value;}});
 const bucket=new Storage({projectId:process.env.STORAGE_PROJECT_ID}).bucket(process.env.CUSTOMER_BUCKET);
 const app=express();
 app.disable("x-powered-by");app.use((req,res,next)=>{
@@ -68,7 +75,7 @@ async function auth(req,res,next){
    next();
  }catch(_){res.status(503).json({error:"API key verification unavailable"})}
 }
-apiKeys.install(app,{db,auth:getAuth(),firebaseAuth,accountKey,workspaceRef,FieldValue});
+apiKeys.install(app,{db,firebaseAuth,accountKey,workspaceRef,FieldValue});
 const requireRead=apiKeys.requireScope("files:read");
 const requireWrite=apiKeys.requireScope("files:write");
 // All paid-workspace drafts, pricing, Checkout links and signed Stripe events
@@ -89,9 +96,13 @@ async function currentWorkspace(req,res){
  const doc=await req.workspaceRef.get();
  if(!doc.exists){res.status(404).json({error:"Create free workspace first"});return null}
  const w=doc.data();
- if(w.accountKey!==accountKey(req.user.uid)||w.kind!=="free"){res.status(403).json({error:"Workspace access denied"});return null}
+ if(w.accountKey!==accountKey(req.user.uid)){res.status(404).json({error:"Workspace not found"});return null}
+ if(w.kind!=="free"){res.status(403).json({error:"Workspace access denied"});return null}
  if(effectiveStorageQuota(w)<=0){res.status(403).json({error:"This project is not active. Restore or activate it in Projects."});return null}
  return w;
+}
+function lockedWrite(req,res){
+ return lockedWriteWith(req,res,{db,accountKey,listAccountProjects,summarizeProjects,lockBody});
 }
 async function runFreeTransfer(req,workspace,action){
  return governor.run(accountKey(req.user.uid),workspace,async()=>{
@@ -152,7 +163,11 @@ app.post("/v1/free",auth,requireWrite,express.json({limit:"4kb"}),async(req,res)
    const result=await freeProjectPolicy.create(req,{name,legacyFree:true});
    res.status(201).json({created:true,name,quotaBytes:QUOTA,workers:1,policy:result.policy});
  }catch(e){
-   if(e instanceof ProjectError)return res.status(e.status).json({error:e.message,code:e.code});
+   if(e instanceof ProjectError){
+     const body={error:e.code};
+     if(e.message&&e.message!==e.code)body.message=e.message;
+     return res.status(e.status).json(body);
+   }
    if(e.code===6||e.message?.includes("ALREADY_EXISTS"))return res.status(409).json({error:"Free workspace already exists"});
    res.status(503).json({error:"Unable to create free workspace"});
  }
@@ -167,6 +182,7 @@ app.get("/v1/files",auth,requireRead,async(req,res)=>{
 });
 app.post("/v1/uploads",auth,requireWrite,express.json({limit:"4kb"}),async(req,res)=>{
  try{
+   if(await lockedWrite(req,res))return;
    const name=safeName(req.body?.name),size=req.body?.sizeBytes;
    if(!Number.isSafeInteger(size)||size<1||size>QUOTA)return res.status(400).json({error:"Invalid size"});
    await cleanupExpired(req);
@@ -199,6 +215,7 @@ app.put("/v1/uploads/:id/chunks/:index",auth,requireWrite,async(req,res)=>{
    return res.status(400).json({error:"Invalid chunk"});
  const ref=req.workspaceRef.collection("uploads").doc(id);
  try{
+   if(await lockedWrite(req,res))return;
    const workspace=await currentWorkspace(req,res);if(!workspace)return;
    const snap=await ref.get();
    if(!snap.exists||snap.data().status!=="active")return res.status(404).json({error:"Unknown upload"});
@@ -239,6 +256,7 @@ app.post("/v1/uploads/:id/finalize",auth,requireWrite,async(req,res)=>{
  const id=req.params.id;if(!validID(id))return res.status(400).end();
  const ref=req.workspaceRef.collection("uploads").doc(id);
  try{
+   if(await lockedWrite(req,res))return;
    const workspace=await currentWorkspace(req,res);if(!workspace)return;
    const snap=await ref.get();
    if(!snap.exists)return res.status(404).end();
@@ -294,6 +312,9 @@ app.delete("/v1/files/:id",auth,requireWrite,async(req,res)=>{
    res.json({deleted:true});
  }catch(_){res.status(503).json({error:"Unable to remove file"})}
 });
-const port=Number(process.env.PORT||8080);
-if(require.main===module)app.listen(port,()=>console.log("GenDragoon free storage API ready"));
-module.exports={app,QUOTA,CHUNK,safeName,validID};
+function start(port=Number(process.env.PORT||8080)){
+ firestore();
+ return app.listen(port,()=>console.log("GenDragoon free storage API ready"));
+}
+if(require.main===module)start();
+module.exports={app,QUOTA,CHUNK,safeName,validID,lockedWrite,start};
