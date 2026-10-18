@@ -89,6 +89,7 @@ async function start(db,{byoFetch=null,env:useEnv=env,stripe:useStripe=stripe,st
  const auth=(req,res,next)=>{
   const token=(req.headers.authorization||"").replace(/^Bearer /,"");
   if(token==="owner"||token==="other"){req.user={uid:token};return next();}
+  if(token==="owner-benefits"){req.user={uid:"owner"};req.ownerBenefits=true;return next();}
   res.status(401).json({error:"Sign in required"});
  };
  registerBillingV2({app,db,stripe:useStripe,admin:{firestore:{FieldValue:{serverTimestamp:()=>stamp}}},
@@ -113,7 +114,7 @@ function assertLock(record,reason){
 
 async function workspaceCases(){
  const db=memoryFirestore();
- const app=await start(db);
+ const app=await start(db,{stamp:FREE_STAMP});
  try{
   const created=await capture(app.base,"POST","/v2/projects",{body:{name:"Fixture Project",intentId:wid(1)}});
   if(created.response.status!==201)throw Error("create failed "+JSON.stringify(created.response));
@@ -218,7 +219,7 @@ async function byoCases(){
 function assertPrice(record,isFree,cents,label){
  const body=record.response.body||{};
  if(record.response.status!==200&&record.response.status!==201)throw Error(label+" status "+JSON.stringify(record.response));
- if(body.isFree!==isFree||body.monthlyPriceCents!==cents)throw Error(label+" price "+JSON.stringify(body));
+ if(body.isFree!==isFree||body.monthlyPriceCents!==cents||body.feeWaived!==false)throw Error(label+" price "+JSON.stringify(body));
 }
 const FREE_STAMP=Date.parse("2026-10-18T00:00:00Z");
 async function freeSlotCases(){
@@ -237,10 +238,10 @@ async function freeSlotCases(){
   const both=await capture(hosted.base,"GET","/v2/workspaces");
   const items=both.response.body?.workspaces||[];
   const kept=items.find(item=>item.id===wid(2)),converted=items.find(item=>item.id===wid(1));
-  if(kept?.isFree!==true||kept?.monthlyPriceCents!==0||converted?.isFree!==false||converted?.monthlyPriceCents!==500)
+  if(kept?.isFree!==true||kept?.monthlyPriceCents!==0||kept?.feeWaived!==false||converted?.isFree!==false||converted?.monthlyPriceCents!==500||converted?.feeWaived!==false)
    throw Error("hosted plus byo "+JSON.stringify(items));
-  if(both.response.body?.policy?.reason!=="lapsed"||!both.response.body.policy.unpaidWorkspaceIds.includes(wid(1)))
-   throw Error("hosted plus byo lock "+JSON.stringify(both.response.body?.policy));
+  if(both.response.body?.policy?.locked===true||both.response.body?.policy?.reason==="lapsed"||(both.response.body?.policy?.unpaidWorkspaceIds||[]).includes(wid(1)))
+   throw Error("hosted plus byo should still be in grace "+JSON.stringify(both.response.body?.policy));
   writeCase("workspaces","list-hosted-plus-byo",both);
  }finally{await hosted.close();}
  const only=await start(memoryFirestore(),{env:monthlyEnv,stripe:monthlyStripe(),stamp:FREE_STAMP});
@@ -253,11 +254,11 @@ async function freeSlotCases(){
   writeCase("workspaces","byo-first-paid",registered);
   const listed=await capture(only.base,"GET","/v2/workspaces");
   const item=listed.response.body?.workspaces?.[0];
-  if(listed.response.body?.workspaces?.length!==1||item?.isFree!==false||item?.monthlyPriceCents!==500)
+  if(listed.response.body?.workspaces?.length!==1||item?.isFree!==false||item?.monthlyPriceCents!==500||item?.feeWaived!==false)
    throw Error("list byo only "+JSON.stringify(listed.response.body));
   const policy=listed.response.body?.policy;
-  if(policy?.locked!==true||policy.reason!=="lapsed"||!policy.unpaidWorkspaceIds.includes(wid(3)))
-   throw Error("list byo lock "+JSON.stringify(policy));
+  if(policy?.locked===true||policy?.reason==="lapsed"||(policy?.unpaidWorkspaceIds||[]).includes(wid(3)))
+   throw Error("list byo should still be in grace "+JSON.stringify(policy));
   writeCase("workspaces","list-byo-only",listed);
  }finally{await only.close();}
  const replaced=await start(memoryFirestore(),{env:monthlyEnv,stripe:monthlyStripe(),stamp:FREE_STAMP});
@@ -303,11 +304,83 @@ async function freeSlotCases(){
   if(listed.response.body?.policy?.freeWorkspaceId!==newId)
    throw Error("grandfathered held the slot "+JSON.stringify(listed.response.body?.policy));
   for(const item of items){
-   if((item.monthlyPriceCents===0)!==(item.isFree===true||item.grandfathered===true))
+   if(typeof item.feeWaived!=="boolean")throw Error("feeWaived missing "+JSON.stringify(item));
+   if(item.feeWaived!==true&&item.feeWaived!==false)throw Error("feeWaived "+JSON.stringify(item));
+   if((item.monthlyPriceCents===0)!==(item.isFree===true||item.grandfathered===true||item.feeWaived===true))
     throw Error("price invariant "+JSON.stringify(item));
   }
   writeCase("workspaces","grandfathered-plus-new",listed);
  }finally{await mixedApp.close();}
+}
+async function pricingCorrectionCases(){
+ const grandfatheredDb=memoryFirestore();
+ const grandfatheredId=wid(20);
+ put(grandfatheredDb,grandfatheredId,paid("Grandfathered workspace",{feeIsOneTime:true,projectFeeStatus:"paid",createdAt:NOW}));
+ const grandfatheredApp=await start(grandfatheredDb,{env:monthlyEnv,stripe:monthlyStripe(),stamp:FREE_STAMP});
+ try{
+  const registered=await capture(grandfatheredApp.base,"POST","/v2/workspaces/"+grandfatheredId+"/byo/register",{body:byoBody});
+  const body=registered.response.body||{};
+  if(registered.response.status!==200||body.grandfathered!==false||body.grandfatheringEnded!==true||body.monthlyPriceCents!==500||body.feeWaived!==false)
+   throw Error("byo ends grandfathering "+JSON.stringify(registered.response));
+  writeCase("workspaces","byo-register-ends-grandfathered",registered);
+ }finally{await grandfatheredApp.close();}
+ function byoRow(name,extra){
+  return paid(name,{byoRegistered:true,providerType:"s3",endpoint:"https://bucket.s3.us-east-1.amazonaws.com",bucketFingerprint:"ab".repeat(8),
+   workspaceFeeModel:"monthly",feeIsOneTime:false,workspaceFeeStatus:"unpaid",workspaceFeePaid:false,workspaceFeeCents:500,
+   projectFeeStatus:"pending",projectStatus:"active",provisioned:true,...extra});
+ }
+ const graceDb=memoryFirestore();
+ put(graceDb,wid(21),byoRow("BYO in grace",{paidThroughMs:NOW}));
+ const graceApp=await start(graceDb);
+ try{
+  const uploaded=await capture(graceApp.base,"POST","/v2/workspaces/"+wid(21)+"/cloud/uploads",{body:{name:"open.txt",sizeBytes:4}});
+  if(uploaded.response.status!==201)throw Error("byo in grace "+JSON.stringify(uploaded.response));
+  writeCase("workspaces","byo-in-grace",uploaded);
+ }finally{await graceApp.close();}
+ const lapsedDb=memoryFirestore();
+ put(lapsedDb,wid(22),byoRow("BYO lapsed",{paidThroughMs:NOW-LAPSE_GRACE_MS-1}));
+ const lapsedApp=await start(lapsedDb);
+ try{
+  const blocked=await capture(lapsedApp.base,"POST","/v2/workspaces/"+wid(22)+"/cloud/uploads",{body:{name:"blocked.txt",sizeBytes:4}});
+  if(blocked.response.status!==423||blocked.response.body?.error!=="workspace_lock"||blocked.response.body?.reason!=="lapsed"||
+     JSON.stringify(blocked.response.body?.unpaidWorkspaceIds)!==JSON.stringify([wid(22)]))
+   throw Error("byo lapsed "+JSON.stringify(blocked.response));
+  writeCase("workspace-lock","byo-lapsed",blocked);
+ }finally{await lapsedApp.close();}
+ const openDb=memoryFirestore();
+ put(openDb,wid(23),byoRow("BYO lapsed sibling",{paidThroughMs:NOW-LAPSE_GRACE_MS-1}));
+ put(openDb,wid(24),paid("Still open",{projectFeeStatus:"free",projectStatus:"active",createdAt:FREE_STAMP,provisioned:true}));
+ const openApp=await start(openDb,{stamp:FREE_STAMP});
+ try{
+  const uploaded=await capture(openApp.base,"POST","/v2/workspaces/"+wid(24)+"/cloud/uploads",{body:{name:"sibling.txt",sizeBytes:4}});
+  if(uploaded.response.status!==201)throw Error("other workspace should stay open "+JSON.stringify(uploaded.response));
+  writeCase("workspaces","byo-lapsed-others-open",uploaded);
+ }finally{await openApp.close();}
+ const hosted=await start(memoryFirestore(),{env:monthlyEnv,stripe:monthlyStripe(),stamp:FREE_STAMP});
+ try{
+  const oldest=await capture(hosted.base,"POST","/v2/projects",{body:{name:"Oldest",intentId:wid(30)}});
+  const second=await capture(hosted.base,"POST","/v2/projects",{body:{name:"Second",intentId:wid(31)}});
+  if(oldest.response.status!==201||second.response.status!==201)throw Error("make-hosted setup "+oldest.response.status+" "+second.response.status);
+  const moved=await capture(hosted.base,"POST","/v2/workspaces/"+wid(30)+"/byo/register",{body:byoBody});
+  if(moved.response.status!==200)throw Error("make-hosted byo "+JSON.stringify(moved.response));
+  const back=await capture(hosted.base,"POST","/v2/projects/"+wid(30)+"/make-hosted");
+  const demoted=back.response.body?.demoted;
+  if(back.response.status!==200||back.response.body?.freeWorkspaceId!==wid(30)||demoted?.workspaceId!==wid(31)||demoted?.requiresCheckout!==true||
+     typeof demoted?.paidThroughMs!=="number"||demoted.graceEndsAt!==demoted.paidThroughMs+LAPSE_GRACE_MS||typeof demoted.checkoutUrl!=="string")
+   throw Error("make-hosted "+JSON.stringify(back.response));
+  writeCase("workspaces","make-hosted",back);
+ }finally{await hosted.close();}
+ const ownerApp=await start(memoryFirestore(),{env:monthlyEnv,stripe:monthlyStripe(),stamp:FREE_STAMP});
+ try{
+  const first=await capture(ownerApp.base,"POST","/v2/projects",{body:{name:"Free Hosted",intentId:wid(50)}});
+  if(first.response.body?.isFree!==true||first.response.body?.feeWaived!==false)throw Error("owner setup "+JSON.stringify(first.response.body));
+  const owner=await capture(ownerApp.base,"POST","/v2/projects",{token:"owner-benefits",body:{name:"Owner Benefit",intentId:wid(51)}});
+  const project=owner.response.body?.project;
+  if(owner.response.status!==201||owner.response.body?.feeWaived!==true||owner.response.body?.isFree!==false||owner.response.body?.monthlyPriceCents!==0||
+     project?.feeWaived!==true||project?.isFree!==false||project?.grandfathered!==false||project?.monthlyPriceCents!==0||project?.projectFeeStatus!=="owner")
+   throw Error("owner fee waived "+JSON.stringify(owner.response));
+  writeCase("workspaces","owner-fee-waived",owner);
+ }finally{await ownerApp.close();}
 }
 async function main(){
  fs.mkdirSync(outDir,{recursive:true});
@@ -324,5 +397,6 @@ async function main(){
  await mergeCases();
  await byoCases();
  await freeSlotCases();
+ await pricingCorrectionCases();
 }
 main().catch(error=>{console.error(error);process.exit(1);});

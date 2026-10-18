@@ -4,7 +4,6 @@
 // Riley's pinned rules (lower id wins ties, grandfathered never free, 0 cents iff isFree||grandfathered,
 // grandfathered-plus-new fixture) FAIL on 568f223 and PASS on 4c3dd13. They are plain tests here because
 // this branch is based on 4c3dd13; their names start with "[568f223 xfail]".
-// BUG(pr5): defects still present on 4c3dd13, marked node:test todo so CI stays green until fixed.
 const test=require("node:test"),assert=require("node:assert/strict"),crypto=require("node:crypto");
 const express=require("express");
 const {memoryFirestore}=require("./test_firestore");
@@ -13,7 +12,6 @@ const {WORKSPACE_FEE_CENTS,GRANDFATHER_CUTOFF_MS,LAPSE_GRACE_MS,summarizeProject
 const {registerBillingV2}=require("./billing_v2");
 const {registerPaidStorage}=require("./paid_storage");
 
-const BUG="BUG(pr5) expected-fail on 568f223 and 4c3dd13";
 const owner=crypto.createHash("sha256").update("pricing-risk-owner").digest("hex");
 const idFor=n=>"22222222-2222-4222-8222-"+String(n).padStart(12,"0");
 const AFTER=Date.parse("2026-10-18T00:00:00Z");
@@ -65,6 +63,8 @@ function priceView(f,inventory,n){
  const w=inventory.records.find(r=>r.id===id);
  return workspacePrice({...w.data,id},inventory.policy.freeWorkspaceId);
 }
+function shown(isFree,cents,waived=false){return {isFree,monthlyPriceCents:cents,feeWaived:waived};}
+function lapseRecord(f,n){f.db.rows.set(f.path(idFor(n)),{...f.record(n),paidThroughMs:Date.now()-LAPSE_GRACE_MS-1});}
 
 // ---- HTTP harness (same handlers the fixtures use) ----
 async function http(f){
@@ -140,7 +140,7 @@ test("[568f223 xfail] grandfathered never takes the free slot; the oldest non-gr
  assert.equal(fresh.monthlyPriceCents,0);
  const inv=await f.service.inventory(f.req);
  assert.equal(inv.policy.freeWorkspaceId,idFor(2));
- assert.deepEqual(priceView(f,inv,1),{isFree:false,monthlyPriceCents:0});
+ assert.deepEqual(priceView(f,inv,1),shown(false,0));
 });
 
 test("grandfathered workspace is never billed: list shows monthlyPriceCents 0 and grandfathered:true",async()=>{
@@ -166,17 +166,22 @@ test("[568f223 xfail] grandfathered-plus-new fixture exists",()=>{
  assert.ok(fs.existsSync(p.join(__dirname,"../../fixtures/workspaces/grandfathered-plus-new.json")));
 });
 
-test("registering BYO on a grandfathered workspace strips grandfathering and locks the account at once (documents current behaviour)",async()=>{
+test("registering BYO on a grandfathered workspace ends grandfathering and starts monthly grace",async()=>{
  const f=fixture();
  f.put(1,grandfathered());
  f.put(2,grandfathered({createdAt:BEFORE+5}));
  const r=await f.service.registerByo(f.req,idFor(1),byoBody);
+ assert.equal(r.grandfathered,false);
+ assert.equal(r.grandfatheringEnded,true);
  assert.equal(r.monthlyPriceCents,500);
- assert.equal(r.lapsed,true);
+ assert.equal(r.feeWaived,false);
+ assert.equal(r.lapsed,false);
  assert.equal(f.record(1).workspaceFeeModel,"monthly");
+ const {isGrandfathered}=require("./workspace_policy");
+ assert.equal(isGrandfathered(f.record(2)),true);
  const inv=await f.service.inventory(f.req);
- assert.equal(inv.policy.locked,true);
- assert.equal(inv.policy.reason,"lapsed");
+ assert.equal(inv.policy.locked,false);
+ assert.notEqual(inv.policy.reason,"lapsed");
 });
 
 // ===== 3. hosted -> BYO -> hosted =====
@@ -194,7 +199,7 @@ test("hosted -> BYO -> hosted through the service keeps createdAt and regains th
  assert.equal(f.record(1).projectFeeStatus,"free");
  const inv=await f.service.inventory(f.req);
  assert.equal(inv.policy.freeWorkspaceId,idFor(1));
- assert.deepEqual(priceView(f,inv,2),{isFree:false,monthlyPriceCents:500});
+ assert.deepEqual(priceView(f,inv,2),shown(false,500));
 });
 test("hosted -> BYO -> hosted regains eligibility by its original createdAt (data level; passes on 568f223)",async()=>{
  const f=fixture();
@@ -245,11 +250,13 @@ test("isFree:true always means monthlyPriceCents 0, on every list/create/get/BYO
   if(item.isFree===true)assert.equal(item.monthlyPriceCents,0,label);
   assert.ok(item.monthlyPriceCents===0||item.monthlyPriceCents===WORKSPACE_FEE_CENTS,label);
   assert.equal(typeof item.isFree,"boolean",label);
+  assert.equal(typeof item.feeWaived,"boolean",label+" feeWaived");
+  if(item.feeWaived!==true)assert.equal(item.feeWaived,false,label);
  }
 });
-test("[568f223 xfail] invariant: monthlyPriceCents is 0 exactly when isFree or grandfathered",async()=>{
+test("[568f223 xfail] invariant: monthlyPriceCents is 0 exactly when isFree or grandfathered or feeWaived",async()=>{
  const seen=await invariantScenario();
- const bad=seen.filter(({item})=>"grandfathered" in item&&((item.monthlyPriceCents===0)!==(item.isFree===true||item.grandfathered===true)));
+ const bad=seen.filter(({item})=>("grandfathered" in item||"feeWaived" in item)&&((item.monthlyPriceCents===0)!==(item.isFree===true||item.grandfathered===true||item.feeWaived===true)||typeof item.feeWaived!=="boolean"));
  assert.deepEqual(bad.map(b=>b.label+":"+(b.item.id||b.item.workspaceId)),[]);
 });
 test("at most one isFree:true per list, and it equals policy.freeWorkspaceId",async()=>{
@@ -275,12 +282,11 @@ test("deleting the free workspace promotes the next hosted one in Firestore (dis
  await f.service.remove(f.req,idFor(1));
  const inv=await f.service.inventory(f.req);
  assert.equal(inv.policy.freeWorkspaceId,idFor(2));
- assert.deepEqual(priceView(f,inv,2),{isFree:true,monthlyPriceCents:0});
- // Promotion clears the fee model but leaves the live Stripe subscription id behind.
+ assert.deepEqual(priceView(f,inv,2),shown(true,0));
  assert.equal(f.record(2).workspaceFeeModel,null);
- assert.equal(f.record(2).workspaceFeeSubscriptionId,"sub_ws_2");
+ assert.equal(f.record(2).workspaceFeeSubscriptionId,null);
 });
-test("promoted workspace: its $5 Stripe subscription is cancelled or prorated",{todo:BUG},async()=>{
+test("promoted workspace: its $5 Stripe subscription is cancelled or prorated",async()=>{
  const f=fixture();
  await f.create(1,"Free");f.tick();
  await f.create(2,"Paid");
@@ -297,10 +303,11 @@ test("promoted workspace: the next invoice.paid webhook flips it back to monthly
  await f.service.remove(f.req,idFor(1));
  // Stripe keeps charging: next month's invoice.paid arrives.
  await f.service.reconcileWorkspaceFee(sub(2),{eventType:"invoice.paid",invoice:invoice(Math.floor(AFTER/1000)+60*86400)});
- assert.equal(f.record(2).workspaceFeeModel,"monthly");
- assert.equal(f.record(2).workspaceFeeStatus,"active");
+ assert.notEqual(f.record(2).workspaceFeeModel,"monthly");
+ assert.notEqual(f.record(2).workspaceFeeStatus,"active");
+ assert.equal(f.record(2).projectFeeStatus,"free");
  const inv=await f.service.inventory(f.req);
- assert.deepEqual(priceView(f,inv,2),{isFree:true,monthlyPriceCents:0}); // UI says free, Stripe bills $5
+ assert.deepEqual(priceView(f,inv,2),shown(true,0));
 });
 test("promoted workspace: if the user then cancels the leftover subscription, the FREE workspace lapses and 423-locks the account",async()=>{
  const f=fixture();
@@ -315,11 +322,11 @@ test("promoted workspace: if the user then cancels the leftover subscription, th
   Date.now=()=>end*1000+LAPSE_GRACE_MS+1;
   const inv=await f.service.inventory(f.req);
   assert.equal(inv.policy.freeWorkspaceId,idFor(2));
-  assert.equal(inv.policy.locked,true);
-  assert.deepEqual(inv.policy.unpaidWorkspaceIds,[idFor(2)]);
+  assert.equal(inv.policy.locked,false);
+  assert.deepEqual(inv.policy.unpaidWorkspaceIds,[]);
  }finally{Date.now=realNow;}
 });
-test("deleting a paid workspace cancels its Stripe subscriptions",{todo:BUG},async()=>{
+test("deleting a paid workspace cancels its Stripe subscriptions",async()=>{
  const f=fixture();
  await f.create(1,"Free");f.tick();
  await f.create(2,"Paid");
@@ -335,44 +342,74 @@ test("deleted workspace: later Stripe webhooks for it are silently dropped (subs
  await f.service.reconcileWorkspaceFee(sub(2),{eventType:"invoice.paid",invoice:invoice(Math.floor(AFTER/1000)+30*86400)});
  await f.service.remove(f.req,idFor(2));
  const handled=await f.service.reconcileWorkspaceFee(sub(2),{eventType:"invoice.paid",invoice:invoice(Math.floor(AFTER/1000)+60*86400)});
- assert.equal(handled,false);
- assert.equal(f.stripe.calls.filter(c=>c[0]==="subscriptions.cancel").length,0);
+ assert.equal(handled,true);
+ assert.ok(f.stripe.calls.filter(c=>c[0]==="subscriptions.cancel").length>=1);
 });
-test("DELETE /v2/projects/:id leaves the files subcollection behind and ignores pending uploads / merge locks",async()=>{
+test("DELETE returns 409 workspace_busy, merge_active ahead of uploads and checkout",async()=>{
  const f=fixture();
  await f.create(1,"Free");f.tick();await f.create(2,"Busy");
  f.db.rows.set(f.path(idFor(2))+"/files/f1",{name:"a.txt",sizeBytes:4,objectKey:"customer/"+owner+"/managed/"+idFor(2)+"/files/f1"});
- f.db.rows.set(f.path(idFor(2)),{...f.record(2),reservedBytes:10,mergeLock:{token:"t",sourceId:idFor(2),targetId:idFor(1),expiresAtMs:Date.now()+60000,phase:"copying"}});
- const r=await f.service.remove(f.req,idFor(2));
- assert.equal(r.deleted,true);                         // no 409 for reservedBytes or an active merge lock
- assert.ok(f.db.rows.get(f.path(idFor(2))+"/files/f1")); // orphaned file record (and its object)
+ f.db.rows.set(f.path(idFor(2)),{...f.record(2),reservedBytes:10,workspaceFeeCheckoutSessionId:"cs_open",workspaceFeeStatus:"pending",
+  mergeLock:{token:"t",sourceId:idFor(2),targetId:idFor(1),expiresAtMs:Date.now()+60000,phase:"copying"}});
+ await assert.rejects(()=>f.service.remove(f.req,idFor(2)),err=>{
+  assert.equal(err.status,409);assert.equal(err.code,"workspace_busy");assert.equal(err.reason,"merge_active");return true;
+ });
+ assert.ok(f.db.rows.get(f.path(idFor(2))+"/files/f1"));
+ assert.notEqual(f.record(2).projectStatus,"deleting");
 });
-test("promoting a pending-payment workspace does not expire its open Checkout session",async()=>{
+test("DELETE returns 409 uploads_pending while an upload is active",async()=>{
+ const f=fixture();
+ await f.create(1,"Free");f.tick();await f.create(2,"Uploading");
+ f.db.rows.set(f.path(idFor(2))+"/uploads/u1",{status:"active",name:"a.txt",sizeBytes:4});
+ await assert.rejects(()=>f.service.remove(f.req,idFor(2)),err=>{
+  assert.equal(err.status,409);assert.equal(err.code,"workspace_busy");assert.equal(err.reason,"uploads_pending");return true;
+ });
+});
+test("DELETE returns 409 checkout_open and does not expire the session",async()=>{
+ const f=fixture();
+ await f.create(1,"Free");f.tick();await f.create(2,"Checking out");
+ f.db.rows.set(f.path(idFor(2)),{...f.record(2),workspaceFeeCheckoutSessionId:"cs_open",workspaceFeeStatus:"unpaid"});
+ await assert.rejects(()=>f.service.remove(f.req,idFor(2)),err=>{
+  assert.equal(err.status,409);assert.equal(err.code,"workspace_busy");assert.equal(err.reason,"checkout_open");return true;
+ });
+ assert.equal(f.stripe.calls.filter(c=>c[0]==="checkout.expire").length,0);
+ assert.equal(f.record(2).workspaceFeeCheckoutSessionId,"cs_open");
+});
+test("DELETE purges file records once the workspace is idle",async()=>{
+ const f=fixture();
+ await f.create(1,"Free");f.tick();await f.create(2,"Idle");
+ f.db.rows.set(f.path(idFor(2))+"/files/f1",{name:"a.txt",sizeBytes:4,objectKey:"customer/"+owner+"/managed/"+idFor(2)+"/files/f1"});
+ const r=await f.service.remove(f.req,idFor(2));
+ assert.equal(r.deleted,true);
+ assert.equal(f.db.rows.get(f.path(idFor(2))+"/files/f1"),undefined);
+ assert.equal(f.record(2),undefined);
+});
+test("promoting a pending-payment workspace expires its open Checkout session",async()=>{
  const f=fixture();
  await f.create(1,"Free");f.tick();await f.create(2,"Pending");
  await f.service.checkout(f.req,idFor(2));
  assert.equal(f.record(2).workspaceFeeCheckoutSessionId,"cs_month");
  await f.service.remove(f.req,idFor(1));
  assert.equal(f.record(2).projectFeeStatus,"free");
- assert.equal(f.record(2).workspaceFeeCheckoutSessionId,"cs_month"); // still payable
- assert.equal(f.stripe.calls.filter(c=>c[0]==="checkout.expire").length,0);
+ assert.equal(f.record(2).workspaceFeeCheckoutSessionId,null);
+ assert.equal(f.stripe.calls.filter(c=>c[0]==="checkout.expire").length,1);
 });
 
 // ===== 6. Merge =====
-test("merge free source into paid target with no other workspace: list shows target free but it keeps its $5 subscription",async()=>{
+test("merge free source into the only paid target promotes that target and cancels its subscription",async()=>{
  const f=fixture();
  await f.create(1,"Free source");f.tick();await f.create(2,"Paid target");
  await f.service.reconcileWorkspaceFee(sub(2),{eventType:"invoice.paid",invoice:invoice(Math.floor(AFTER/1000)+30*86400)});
  await f.service.merge(f.req,idFor(1),{targetId:idFor(2),confirmName:"Free source"});
- assert.equal(f.account().freeWorkspaceId,null);            // stored: nobody free
+ assert.equal(f.account().freeWorkspaceId,idFor(2));
  const inv=await f.service.inventory(f.req);
- assert.equal(inv.policy.freeWorkspaceId,idFor(2));          // computed fallback: target free
- assert.deepEqual(priceView(f,inv,2),{isFree:true,monthlyPriceCents:0});
- assert.equal(f.record(2).workspaceFeeModel,"monthly");
- assert.equal(f.record(2).workspaceFeeStatus,"active");    // still billed by Stripe
- assert.equal(f.stripe.calls.filter(c=>c[1]==="sub_ws_2").length,0);
+ assert.equal(inv.policy.freeWorkspaceId,idFor(2));
+ assert.deepEqual(priceView(f,inv,2),shown(true,0));
+ assert.equal(f.record(2).projectFeeStatus,"free");
+ assert.notEqual(f.record(2).workspaceFeeModel,"monthly");
+ assert.equal(f.stripe.calls.filter(c=>c[1]==="sub_ws_2"&&/subscriptions\.(cancel|update)/.test(c[0])).length,1);
 });
-test("merge: stored freeWorkspaceId and the computed one always agree after a merge",{todo:BUG},async()=>{
+test("merge: stored freeWorkspaceId and the computed one always agree after a merge",async()=>{
  const f=fixture();
  await f.create(1,"Free source");f.tick();await f.create(2,"Paid target");
  await f.service.merge(f.req,idFor(1),{targetId:idFor(2),confirmName:"Free source"});
@@ -390,14 +427,14 @@ test("merge paid source into free target cancels the source's subscriptions and 
  assert.equal(f.account().freeWorkspaceId,idFor(1));
  assert.equal(f.record(1).projectFeeStatus,"free");
 });
-test("merge free source with a third hosted workspace: slot goes to the oldest non-target; its subscription is not cancelled",async()=>{
+test("merge free source with a third hosted workspace: slot goes to the oldest non-target and its subscription is cancelled",async()=>{
  const f=fixture();
  await f.create(1,"Free source");f.tick();await f.create(2,"Target");f.tick();await f.create(3,"Third");
  await f.service.reconcileWorkspaceFee(sub(3),{eventType:"invoice.paid",invoice:invoice(Math.floor(AFTER/1000)+30*86400)});
  await f.service.merge(f.req,idFor(1),{targetId:idFor(2),confirmName:"Free source"});
- assert.equal(f.account().freeWorkspaceId,idFor(3));         // not the oldest remaining (#2): avoidId skips the target
- assert.equal(f.record(3).workspaceFeeSubscriptionId,"sub_ws_3");
- assert.equal(f.stripe.calls.filter(c=>c[1]==="sub_ws_3").length,0);
+ assert.equal(f.account().freeWorkspaceId,idFor(3));
+ assert.equal(f.record(3).projectFeeStatus,"free");
+ assert.equal(f.stripe.calls.filter(c=>c[1]==="sub_ws_3"&&c[0]==="subscriptions.cancel").length,1);
 });
 
 // ===== 7. 423 lapsed =====
@@ -405,65 +442,98 @@ async function upload(f,n){
  const h=await http(f);
  try{return await h.call("POST","/v2/workspaces/"+idFor(n)+"/cloud/uploads",{name:"x.txt",sizeBytes:4});}finally{await h.close();}
 }
-test("423: unpaid BYO blocks uploads on that workspace with reason lapsed",async()=>{
- const f=fixture();await f.create(1,"Only");await f.service.registerByo(f.req,idFor(1),byoBody);
+test("423: unpaid BYO stays open during grace, then locks only that workspace",async()=>{
+ const f=fixture();await f.create(1,"Only");
+ const registered=await f.service.registerByo(f.req,idFor(1),byoBody);
+ assert.equal(registered.lapsed,false);
+ assert.notEqual((await upload(f,1)).status,423);
+ lapseRecord(f,1);
  const r=await upload(f,1);
  assert.equal(r.status,423);assert.equal(r.body.reason,"lapsed");assert.deepEqual(r.body.unpaidWorkspaceIds,[idFor(1)]);
+ const s=summarizeProjects([{...f.record(1),id:idFor(1)}]);
+ assert.equal(s.locked,false);
+ assert.deepEqual(s.selfLockedWorkspaceIds,[idFor(1)]);
 });
-test("423: an unpaid BYO workspace also blocks uploads to the account's FREE hosted workspace (account-wide lock)",async()=>{
+test("423: a lapsed BYO workspace does not block the free hosted workspace",async()=>{
  const f=fixture();await f.create(1,"Free hosted");f.tick();await f.create(2,"BYO");
  await f.service.registerByo(f.req,idFor(2),byoBody);
- const r=await upload(f,1);
- assert.equal(r.status,423);
- assert.equal(r.body.reason,"lapsed");
- assert.deepEqual(r.body.unpaidWorkspaceIds,[idFor(2)]);
+ f.db.rows.set(f.path(idFor(2)),{...f.record(2),projectStatus:"active",provisioned:true,paidThroughMs:Date.now()-LAPSE_GRACE_MS-1});
+ const hosted=await upload(f,1);
+ assert.notEqual(hosted.status,423);
+ const byo=await upload(f,2);
+ assert.equal(byo.status,423);
+ assert.deepEqual(byo.body.unpaidWorkspaceIds,[idFor(2)]);
+ const inv=await f.service.inventory(f.req);
+ assert.equal(inv.policy.locked,false);
 });
-test("423: BYO lapses immediately at registration with no grace window (hosted monthly gets LAPSE_GRACE_MS)",async()=>{
+test("423: BYO uses the hosted 3-day grace and does not lapse at registration",async()=>{
  const f=fixture();await f.create(1,"Only");
  const r=await f.service.registerByo(f.req,idFor(1),byoBody);
- assert.equal(r.lapsed,true);
+ assert.equal(r.lapsed,false);
  const s=summarizeProjects([{...f.record(1),id:idFor(1)}]);
- assert.equal(s.reason,"lapsed");
+ assert.equal(s.reason,null);
+ assert.equal(s.locked,false);
+ lapseRecord(f,1);
+ const later=summarizeProjects([{...f.record(1),id:idFor(1)}]);
+ assert.equal(later.locked,false);
+ assert.deepEqual(later.selfLockedWorkspaceIds,[idFor(1)]);
 });
 test("423 clears once the BYO subscription is active",async()=>{
  const f=fixture();await f.create(1,"Only");await f.service.registerByo(f.req,idFor(1),byoBody);
+ lapseRecord(f,1);
+ assert.equal((await upload(f,1)).status,423);
  await f.service.reconcileWorkspaceFee(sub(1),{eventType:"invoice.paid",invoice:invoice(Math.floor(Date.now()/1000)+30*86400)});
  const inv=await f.service.inventory(f.req);
  assert.equal(inv.policy.locked,false);
  const r=await upload(f,1);
  assert.notEqual(r.status,423);
 });
-test("423: past_due BYO subscription re-locks immediately (no grace, unlike hosted)",async()=>{
+test("423: past_due BYO keeps the hosted grace instead of locking immediately",async()=>{
  const f=fixture();await f.create(1,"Only");await f.service.registerByo(f.req,idFor(1),byoBody);
- await f.service.reconcileWorkspaceFee(sub(1),{eventType:"invoice.paid",invoice:invoice(Math.floor(Date.now()/1000)+30*86400)});
+ const end=Math.floor(Date.now()/1000)+30*86400;
+ await f.service.reconcileWorkspaceFee(sub(1),{eventType:"invoice.paid",invoice:invoice(end)});
  await f.service.reconcileWorkspaceFee(sub(1,"past_due"),{eventType:"invoice.payment_failed"});
  const inv=await f.service.inventory(f.req);
- assert.equal(inv.policy.locked,true);
+ assert.equal(inv.policy.locked,false);
+ assert.deepEqual(inv.policy.unpaidWorkspaceIds,[]);
+ const realNow=Date.now;
+ try{
+  Date.now=()=>end*1000+LAPSE_GRACE_MS;
+  const later=await f.service.inventory(f.req);
+  assert.equal(later.policy.locked,false);
+  assert.deepEqual(later.policy.selfLockedWorkspaceIds,[idFor(1)]);
+ }finally{Date.now=realNow;}
 });
-test("423: reads stay allowed while lapsed",async()=>{
+test("423: reads stay allowed while a BYO workspace is lapsed",async()=>{
  const f=fixture();await f.create(1,"Only");await f.service.registerByo(f.req,idFor(1),byoBody);
+ lapseRecord(f,1);
  const h=await http(f);
  try{const r=await h.call("GET","/v2/workspaces/"+idFor(1)+"/cloud/files");assert.notEqual(r.status,423);}finally{await h.close();}
 });
 
 // ===== 8. makeHosted (added in 4c3dd13) =====
-test("makeHosted demotes the previous free workspace to $5 but it never lapses and is never sent to Checkout (unbilled)",async t=>{
+test("makeHosted demotes the previous free workspace onto the monthly fee with grace and Checkout",async t=>{
  const f=fixture();
  if(typeof f.service.makeHosted!=="function"){t.skip("568f223 has no makeHosted");return;}
  await f.create(1,"Oldest");f.tick();await f.create(2,"Second");
  await f.service.registerByo(f.req,idFor(1),byoBody);
  assert.equal(f.record(2).projectFeeStatus,"free");
- await f.service.makeHosted(f.req,idFor(1));
+ const before=Date.now();
+ const result=await f.service.makeHosted(f.req,idFor(1));
  const inv=await f.service.inventory(f.req);
- assert.deepEqual(priceView(f,inv,2),{isFree:false,monthlyPriceCents:500});
- assert.equal(f.record(2).workspaceFeeStatus,"unpaid");
+ assert.deepEqual(priceView(f,inv,2),shown(false,500));
+ assert.equal(result.demoted.requiresCheckout,true);
+ assert.equal(result.demoted.graceEndsAt,result.demoted.paidThroughMs+LAPSE_GRACE_MS);
+ assert.ok(result.demoted.paidThroughMs>=before+LAPSE_GRACE_MS-5);
+ assert.equal(typeof result.demoted.checkoutUrl,"string");
+ assert.equal(f.record(2).workspaceFeeCheckoutSessionId,"cs_month");
+ assert.equal(inv.policy.locked,false);
  const realNow=Date.now;
  try{Date.now=()=>realNow()+90*86400000;const later=await f.service.inventory(f.req);
-  assert.equal(later.policy.locked,false);                 // no paidThroughMs -> evaluateLapse never lapses it
-  assert.deepEqual(later.policy.unpaidWorkspaceIds,[]);}finally{Date.now=realNow;}
- assert.equal(f.record(2).workspaceFeeCheckoutSessionId,undefined);
+  assert.equal(later.policy.locked,true);
+  assert.ok(later.policy.unpaidWorkspaceIds.includes(idFor(2)));}finally{Date.now=realNow;}
 });
-test("makeHosted on a workspace with a paid BYO subscription cancels that subscription when it becomes free",{todo:BUG},async t=>{
+test("makeHosted on a workspace with a paid BYO subscription cancels that subscription when it becomes free",async t=>{
  const f=fixture();
  if(typeof f.service.makeHosted!=="function"){t.skip("568f223 has no makeHosted");return;}
  await f.create(1,"Oldest");f.tick();await f.create(2,"Second");
@@ -473,14 +543,15 @@ test("makeHosted on a workspace with a paid BYO subscription cancels that subscr
  assert.equal(f.record(1).projectFeeStatus,"free");
  assert.equal(f.stripe.calls.filter(c=>c[1]==="sub_ws_1").length,1,"sub_ws_1 should be cancelled/prorated: "+JSON.stringify(f.stripe.calls));
 });
-test("owner-benefit workspace reports monthlyPriceCents 500 although the owner is never charged (4c3dd13)",async()=>{
+test("owner-benefit workspace reports monthlyPriceCents 0 and feeWaived true",async()=>{
  const f=fixture();
  await f.create(1,"Free");
  const o=await f.create(2,"Owner perk",f.ownerReq);
  assert.equal(o.project.data.projectFeeStatus,"owner");
+ assert.equal(o.isFree,false);
+ assert.equal(o.monthlyPriceCents,0);
+ assert.equal(o.feeWaived,true);
  const inv=await f.service.inventory(f.req);
- const p=priceView(f,inv,2);
- if(p.monthlyPriceCents===0){/* 568f223 behaviour */return;}
- assert.equal(p.monthlyPriceCents,500);
- assert.equal(f.record(2).workspaceFeeModel,undefined);    // no monthly model, no Checkout: shown $5, never billed
+ assert.deepEqual(priceView(f,inv,2),shown(false,0,true));
+ assert.equal(f.record(2).workspaceFeeModel,undefined);
 });
