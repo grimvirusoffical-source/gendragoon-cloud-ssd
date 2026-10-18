@@ -2,7 +2,7 @@
 /* global console, process */
 /**
  * Re-copy fixtures/<area>/<case>.json from gendragoon-cloud-ssd.
- * Each source commit contributes only its areas. Policy fixtures stay on 568f223.
+ * Each source commit contributes only its areas. Policy fixtures stay on 4c3dd13.
  * Does not edit the JSON.
  *
  *   node packages/core/scripts/sync-server-fixtures.mjs
@@ -21,7 +21,7 @@ const repo = sourceMeta.url;
 const sources = [
   {
     branch: "fix/backend-workspace-policy",
-    commit: "568f2236ffe2520758fb8f20cf22566aefc14cf3",
+    commit: "4c3dd13587fae1ddfa907ad2b84c0886d7794ade",
     areas: ["workspace-lock", "workspaces", "merge", "byo", "ownership"],
   },
   {

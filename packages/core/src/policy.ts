@@ -49,7 +49,7 @@ export interface WorkspaceRecord {
    */
   isFree?: boolean;
   monthlyPriceCents?: number;
-  /** Absent means false. */
+  /** Server flag on list and create items. */
   grandfathered?: boolean;
   accountHash?: string;
   accountKey?: string;
@@ -130,9 +130,8 @@ export interface WorkspacePrice {
 }
 
 /**
- * Reads the server price. `isFree` and `monthlyPriceCents` are required.
- * `grandfathered` is optional and defaults to false. The input object is
- * not changed.
+ * Reads the server price. `isFree`, `monthlyPriceCents`, and `grandfathered`
+ * are required. The input object is not changed.
  */
 export function parseWorkspacePrice(value: unknown): WorkspacePrice {
   if (!value || typeof value !== "object") throw new TypeError("Workspace price is missing");
@@ -141,24 +140,18 @@ export function parseWorkspacePrice(value: unknown): WorkspacePrice {
   if (typeof record.monthlyPriceCents !== "number" || !Number.isInteger(record.monthlyPriceCents)) {
     throw new TypeError("Workspace monthlyPriceCents is missing");
   }
-  if ("grandfathered" in record && record.grandfathered !== undefined && typeof record.grandfathered !== "boolean") {
-    throw new TypeError("Workspace grandfathered is invalid");
-  }
+  if (typeof record.grandfathered !== "boolean") throw new TypeError("Workspace grandfathered is missing");
   return {
     isFree: record.isFree,
     monthlyPriceCents: record.monthlyPriceCents,
-    grandfathered: record.grandfathered === true,
+    grandfathered: record.grandfathered,
   };
 }
 
 /** `Free` when `isFree`, `Included` when `grandfathered`, otherwise USD cents. */
-export function workspacePriceLabel(price: {
-  isFree: boolean;
-  monthlyPriceCents: number;
-  grandfathered?: boolean;
-}): string {
+export function workspacePriceLabel(price: WorkspacePrice): string {
   if (price.isFree) return "Free";
-  if (price.grandfathered === true) return "Included";
+  if (price.grandfathered) return "Included";
   return formatMonthlyPriceCents(price.monthlyPriceCents);
 }
 

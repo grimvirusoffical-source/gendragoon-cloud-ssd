@@ -1,46 +1,42 @@
 /**
- * Workspace prices from gendragoon-cloud-ssd PR #5 @ 568f223.
- * `grandfathered-plus-new` is included when that fixture is in the export.
+ * Workspace prices from gendragoon-cloud-ssd PR #5 @ 4c3dd13.
+ * List items and create `project` objects always include `grandfathered`.
  */
-import { existsSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { GenDragoonClient, WorkspaceLockedError, parseWorkspacePrice, workspacePriceLabel } from "../src/index.js";
-import { loadServerFixture } from "./fixtures/server/load.js";
+import { listServerFixtures, loadServerFixture } from "./fixtures/server/load.js";
 
-const REQUIRED = [
-  "free-first",
-  "byo-first-paid",
-  "second-paid",
-  "delete-free-then-create",
-  "free-to-byo-billable",
-  "concurrent-create-one-free",
-  "list-byo-only",
-  "list-hosted-plus-byo",
-] as const;
-
-function pricedFixtures(): string[] {
-  const names: string[] = [...REQUIRED];
-  const extra = new URL("./fixtures/server/workspaces/grandfathered-plus-new.json", import.meta.url);
-  if (existsSync(extra)) names.push("grandfathered-plus-new");
-  return names;
-}
-
-function carriers(body: unknown): Record<string, unknown>[] {
+function workspaceItems(body: unknown): Record<string, unknown>[] {
   if (!body || typeof body !== "object") return [];
   const record = body as Record<string, unknown>;
   const found: Record<string, unknown>[] = [];
   if (Array.isArray(record.workspaces)) found.push(...record.workspaces as Record<string, unknown>[]);
   if (Array.isArray(record.projects)) found.push(...record.projects as Record<string, unknown>[]);
   if (record.project && typeof record.project === "object") found.push(record.project as Record<string, unknown>);
-  if (typeof record.isFree === "boolean" || typeof record.monthlyPriceCents === "number") found.push(record);
   return found;
 }
 
+const workspaceFixtures = listServerFixtures().filter((item) => item.area === "workspaces" && item.fixture.response.status < 400);
+const priced = workspaceFixtures.filter((item) => workspaceItems(item.fixture.response.body).length > 0);
+
 describe("workspace prices pass through the server fixtures", () => {
-  for (const name of pricedFixtures()) {
+  it("includes every list and create fixture, including grandfathered-plus-new", () => {
+    expect(priced.map((item) => item.name).sort()).toEqual([
+      "concurrent-create-one-free",
+      "create",
+      "delete-free-then-create",
+      "free-first",
+      "grandfathered-plus-new",
+      "list",
+      "list-byo-only",
+      "list-hosted-plus-byo",
+      "second-paid",
+    ]);
+  });
+
+  for (const { name, fixture } of priced) {
     it(`${name} keeps isFree, monthlyPriceCents, and grandfathered`, () => {
-      const fixture = loadServerFixture("workspaces", name);
-      const rows = carriers(fixture.response.body);
+      const rows = workspaceItems(fixture.response.body);
       expect(rows.length).toBeGreaterThan(0);
       for (const row of rows) {
         const before = structuredClone(row);
@@ -48,7 +44,7 @@ describe("workspace prices pass through the server fixtures", () => {
         expect(row).toEqual(before);
         expect(price.isFree).toBe(row.isFree);
         expect(price.monthlyPriceCents).toBe(row.monthlyPriceCents);
-        expect(price.grandfathered).toBe(row.grandfathered === true);
+        expect(price.grandfathered).toBe(row.grandfathered);
         expect(price.monthlyPriceCents === 0).toBe(price.isFree || price.grandfathered);
         if (price.isFree) expect(workspacePriceLabel(price)).toBe("Free");
         else if (price.grandfathered) expect(workspacePriceLabel(price)).toBe("Included");
@@ -57,26 +53,19 @@ describe("workspace prices pass through the server fixtures", () => {
     });
   }
 
-  it("defaults a missing grandfathered flag to false and leaves the payload alone", () => {
-    const raw = { isFree: false, monthlyPriceCents: 500 };
-    const price = parseWorkspacePrice(raw);
-    expect(price).toEqual({ isFree: false, monthlyPriceCents: 500, grandfathered: false });
-    expect(raw).toEqual({ isFree: false, monthlyPriceCents: 500 });
-    expect(workspacePriceLabel(price)).toBe("$5.00");
-  });
-
   it("labels Free only for isFree, Included for grandfathered, and formats every other cent amount", () => {
     expect(workspacePriceLabel({ isFree: true, grandfathered: true, monthlyPriceCents: 0 })).toBe("Free");
     expect(workspacePriceLabel({ isFree: false, grandfathered: true, monthlyPriceCents: 0 })).toBe("Included");
     expect(workspacePriceLabel({ isFree: false, grandfathered: false, monthlyPriceCents: 500 })).toBe("$5.00");
-    expect(workspacePriceLabel({ isFree: false, monthlyPriceCents: 0 })).toBe("$0.00");
+    expect(workspacePriceLabel({ isFree: false, grandfathered: false, monthlyPriceCents: 0 })).toBe("$0.00");
     expect(workspacePriceLabel({ isFree: false, grandfathered: false, monthlyPriceCents: 1250 })).toBe("$12.50");
   });
 
-  it("refuses to invent isFree or monthlyPriceCents when the server omitted them", () => {
+  it("refuses to invent isFree, monthlyPriceCents, or grandfathered", () => {
     expect(() => parseWorkspacePrice({ monthlyPriceCents: 0, grandfathered: true })).toThrow(/isFree/);
-    expect(() => parseWorkspacePrice({ isFree: false })).toThrow(/monthlyPriceCents/);
-    expect(() => parseWorkspacePrice({ isFree: false, monthlyPriceCents: 1.5 })).toThrow(/monthlyPriceCents/);
+    expect(() => parseWorkspacePrice({ isFree: false, grandfathered: false })).toThrow(/monthlyPriceCents/);
+    expect(() => parseWorkspacePrice({ isFree: false, monthlyPriceCents: 0 })).toThrow(/grandfathered/);
+    expect(() => parseWorkspacePrice({ isFree: false, monthlyPriceCents: 1.5, grandfathered: false })).toThrow(/monthlyPriceCents/);
   });
 
   it("a 423 lapsed write is WorkspaceLockedError with the server reason and unpaid ids", async () => {

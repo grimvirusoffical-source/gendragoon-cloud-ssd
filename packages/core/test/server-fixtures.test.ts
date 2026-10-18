@@ -1,6 +1,6 @@
 /**
  * Drives GenDragoonClient with Riley's vendored fixtures
- * (gendragoon-cloud-ssd fix/backend-workspace-policy @ 568f223).
+ * (gendragoon-cloud-ssd fix/backend-workspace-policy @ 4c3dd13).
  * Deletion, storage-urls, and key-envelope are not in this export.
  */
 import { readFileSync } from "node:fs";
@@ -67,8 +67,8 @@ async function invoke(client: GenDragoonClient, fixture: ServerFixture): Promise
 describe("vendored server fixtures", () => {
   it("records the source repo and commit", () => {
     expect(source.repository).toBe("grimvirusoffical-source/gendragoon-cloud-ssd");
-    expect(source.commit).toBe("568f2236ffe2520758fb8f20cf22566aefc14cf3");
-    expect(source.sources?.[0]?.commit).toBe("568f2236ffe2520758fb8f20cf22566aefc14cf3");
+    expect(source.commit).toBe("4c3dd13587fae1ddfa907ad2b84c0886d7794ade");
+    expect(source.sources?.[0]?.commit).toBe("4c3dd13587fae1ddfa907ad2b84c0886d7794ade");
   });
 
   const cases = listServerFixtures();

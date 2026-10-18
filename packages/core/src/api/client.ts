@@ -453,7 +453,11 @@ function machineCode(errorField: string, codeField: string): string {
   return codeField;
 }
 
-/** Rejects a partial server price. Does not invent `isFree` or cents, and does not write `grandfathered`. */
+/**
+ * Workspace list items and create `project` objects must carry `isFree`,
+ * `monthlyPriceCents`, and `grandfathered`. The response envelope is left
+ * unchanged. A register body that only repeats `isFree` is not a list item.
+ */
 function assertServerPrices(body: unknown): void {
   if (!body || typeof body !== "object") return;
   const record = body as Record<string, unknown>;
@@ -461,14 +465,5 @@ function assertServerPrices(body: unknown): void {
   if (Array.isArray(record.workspaces)) items.push(...record.workspaces);
   if (Array.isArray(record.projects)) items.push(...record.projects);
   if (record.project && typeof record.project === "object") items.push(record.project);
-  for (const item of items) {
-    if (carriesPrice(item)) parseWorkspacePrice(item);
-  }
-  if (carriesPrice(record)) parseWorkspacePrice(record);
-}
-
-function carriesPrice(value: unknown): boolean {
-  if (!value || typeof value !== "object") return false;
-  const record = value as Record<string, unknown>;
-  return "isFree" in record || "monthlyPriceCents" in record || "grandfathered" in record;
+  for (const item of items) parseWorkspacePrice(item);
 }

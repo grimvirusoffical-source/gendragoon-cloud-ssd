@@ -59,10 +59,10 @@ export interface Workspace {
   /** Server cents. 0 exactly when `isFree` or `grandfathered` is true. */
   monthlyPriceCents: number;
   /**
-   * Server flag. Absent means false until a fixture sends it.
+   * Server flag. Required on list items and create `project` objects.
    * The price label is Included only when this is true and `isFree` is false.
    */
-  grandfathered?: boolean;
+  grandfathered: boolean;
   /** Present on paid/BYO server documents. Omitted from today's public payload. */
   accountHash?: string;
   /** Legacy free project only (`tenants/{accountKey}/workspaces/free`). */
