@@ -43,14 +43,14 @@ export function Button(props: {
         pressed && !props.disabled ? styles.pressed : null,
       ]}
     >
-      <Text style={tone === "ghost" ? styles.ghostText : styles.buttonText}>{props.label}</Text>
+      <Text style={tone === "ghost" ? styles.ghostText : tone === "danger" ? styles.dangerText : styles.buttonText}>{props.label}</Text>
     </Pressable>
   );
 }
 
 export function Banner(props: { children: string; testID?: string }) {
   return (
-    <View style={styles.banner} testID={props.testID}>
+    <View accessibilityRole="alert" style={styles.banner} testID={props.testID}>
       <Text style={styles.bannerText}>{props.children}</Text>
     </View>
   );
@@ -64,8 +64,8 @@ const styles = StyleSheet.create({
   screen: {
     flex: 1,
     backgroundColor: colors.bg,
-    padding: space.lg,
-    gap: space.md,
+    padding: space.xl,
+    gap: space.lg,
   },
   titleBlock: { gap: space.xs },
   kicker: {
@@ -86,15 +86,18 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
     paddingHorizontal: space.lg,
+    paddingVertical: space.sm,
   },
   primary: { backgroundColor: colors.purple },
-  danger: { backgroundColor: colors.danger },
+  danger: { backgroundColor: "transparent", borderWidth: 1, borderColor: colors.dangerBorder },
   ghost: { backgroundColor: "transparent", borderWidth: 1, borderColor: colors.ghostBorder },
   disabled: { opacity: 0.4 },
   pressed: { opacity: 0.85 },
   buttonText: { color: colors.white, fontSize: typeScale.bodySize },
-  ghostText: { color: colors.nav, fontSize: typeScale.bodySize },
+  dangerText: { color: colors.dangerText, fontSize: typeScale.bodySize },
+  ghostText: { color: colors.text, fontSize: typeScale.bodySize },
   banner: {
+    backgroundColor: "rgba(255, 176, 32, 0.08)",
     borderWidth: 1,
     borderColor: colors.bannerBorder,
     borderRadius: radii.md,

@@ -31,6 +31,7 @@ import { sessionTokenAfterAuthFailure } from "./src/account/session";
 import { byoServerFlowReady } from "./src/byoReady";
 import { ENCRYPTED_WORKSPACE_ENABLED } from "./src/flags";
 import { createExpoSecureStore } from "./src/platform/secureStore";
+import { ShotFrame, webShot } from "./src/shots";
 
 type RootStack = {
   SignIn: undefined;
@@ -288,12 +289,15 @@ export function MobileRoot(props: {
 }
 
 export function App() {
+  const shot = webShot();
   return (
     <SafeAreaProvider>
       <StatusBar style="light" />
-      <NavigationContainer ref={navigationRef}>
-        <MobileRoot />
-      </NavigationContainer>
+      {shot ? <ShotFrame id={shot} /> : (
+        <NavigationContainer ref={navigationRef}>
+          <MobileRoot />
+        </NavigationContainer>
+      )}
     </SafeAreaProvider>
   );
 }

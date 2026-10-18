@@ -11,6 +11,7 @@ export default tseslint.config(
       "**/*.d.ts",
       "apps/desktop/electron-builder.cjs",
       "apps/desktop/scripts/**",
+      "apps/mobile/scripts/**",
       "packages/core/test/fixtures/**",
       "apps/mobile/android/**",
       "apps/mobile/ios/**",

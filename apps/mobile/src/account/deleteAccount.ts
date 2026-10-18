@@ -32,7 +32,7 @@ export async function deleteSignedInAccount(input: {
       secrets: input.secrets,
       secureStore: input.secrets,
     });
-    if (status.status === "done" || status.status === "failed") {
+    if (status.status === "done") {
       await input.secrets.delete(DELETION_UID_KEY);
     }
     return status;

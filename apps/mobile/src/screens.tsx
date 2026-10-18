@@ -373,6 +373,35 @@ export function PassphraseScreen(props: { onSubmit: (passphrase: string) => void
   );
 }
 
+export type DeletionFrame = "confirm" | "reauth" | "progress" | "retry" | "dismiss";
+
+interface DeletionNotice {
+  message: string;
+  retry: boolean;
+  dismiss: boolean;
+  reauth: boolean;
+  progress: boolean;
+}
+
+function deletionNotice(kind: "progress" | "retry" | "dismiss" | "reauth" | "missing" | "offline"): DeletionNotice {
+  if (kind === "progress") {
+    return { message: "Deletion is running.", retry: false, dismiss: false, reauth: false, progress: true };
+  }
+  if (kind === "retry") {
+    return { message: "Account deletion failed. You can try again.", retry: true, dismiss: false, reauth: false, progress: false };
+  }
+  if (kind === "dismiss") {
+    return { message: "Account deletion failed.", retry: false, dismiss: true, reauth: false, progress: false };
+  }
+  if (kind === "reauth") {
+    return { message: "Sign in again. Your last sign-in is older than 5 minutes.", retry: false, dismiss: false, reauth: true, progress: false };
+  }
+  if (kind === "offline") {
+    return { message: "Could not reach the server. Try again.", retry: true, dismiss: true, reauth: false, progress: false };
+  }
+  return { message: "The deletion status could not be loaded.", retry: true, dismiss: true, reauth: false, progress: false };
+}
+
 export function DeleteAccountScreen(props: {
   activeTransfers: number;
   secrets: SecretStore;
@@ -383,11 +412,14 @@ export function DeleteAccountScreen(props: {
   onSignedOut: () => void;
   onDone: () => void;
   onError: (message: string) => void;
+  /** Static frame for screenshots. Live deletion ignores it. */
+  frame?: DeletionFrame;
 }) {
-  const [step, setStep] = useState<"review" | "confirm">("review");
-  const [notice, setNotice] = useState<{ message: string; retry: boolean } | null>(null);
+  const [step, setStep] = useState<"review" | "confirm">(props.frame === "confirm" ? "confirm" : "review");
+  const [notice, setNotice] = useState<DeletionNotice | null>(props.frame && props.frame !== "confirm" ? deletionNotice(props.frame) : null);
   const blocked = props.activeTransfers > 0;
   async function confirm() {
+    setNotice(deletionNotice("progress"));
     try {
       const status = await deleteSignedInAccount({
         client: props.client,
@@ -395,17 +427,25 @@ export function DeleteAccountScreen(props: {
         workspaceIds: props.workspaceIds,
         secrets: props.secrets,
       });
-      if (status.status === "done") props.onDone();
-      else props.onError("Account deletion did not finish. Local keys were kept.");
+      if (status.status === "done") {
+        props.onDone();
+        return;
+      }
+      if (status.status === "failed") {
+        const retryable = (status as { retryable?: boolean }).retryable === true;
+        setNotice(deletionNotice(retryable ? "retry" : "dismiss"));
+        return;
+      }
+      props.onError("Account deletion did not finish. Local keys were kept.");
     } catch (error) {
       const action = deletionSessionAction(error);
-      if (action === "reauth") props.onReauth();
-      else if (action === "sign-out") props.onSignedOut();
-      else if (error instanceof ApiError && error.status === 404) {
-        setNotice({ message: "The deletion status could not be loaded.", retry: true });
-      } else if (error instanceof ApiError && error.status === 0) {
-        setNotice({ message: "Could not reach the server. Try again.", retry: true });
-      } else props.onError(error instanceof Error ? error.message : "Account deletion failed");
+      if (action === "reauth") {
+        setNotice(deletionNotice("reauth"));
+        props.onReauth();
+      } else if (action === "sign-out") props.onSignedOut();
+      else if (error instanceof ApiError && error.status === 404) setNotice(deletionNotice("missing"));
+      else if (error instanceof ApiError && error.status === 0) setNotice(deletionNotice("offline"));
+      else props.onError(error instanceof Error ? error.message : "Account deletion failed");
     }
   }
   async function dismiss() {
@@ -417,9 +457,12 @@ export function DeleteAccountScreen(props: {
       <Title kicker="Account">Delete account</Title>
       <Text style={styles.help}>Sign in again if this sign-in is more than five minutes old. Local keys are removed only when deletion is done.</Text>
       {blocked ? <Banner>Delete account is disabled during transfers.</Banner> : null}
-      {notice ? <Banner testID="deletion-error">{notice.message}</Banner> : null}
+      {notice ? (
+        <Banner testID={notice.progress ? "deletion-progress" : "deletion-error"}>{notice.message}</Banner>
+      ) : null}
       {notice?.retry ? <Button label="Retry" testID="deletion-retry" onPress={() => void confirm()} /> : null}
-      {notice ? <Button label="Dismiss" tone="ghost" testID="deletion-dismiss" onPress={() => void dismiss()} /> : null}
+      {notice?.reauth ? <Button label="Sign in again" testID="deletion-reauth" onPress={props.onReauth} /> : null}
+      {notice?.dismiss ? <Button label="Dismiss" tone="ghost" testID="deletion-dismiss" onPress={() => void dismiss()} /> : null}
       {!notice && step === "review" ? (
         <Button label="Continue" testID="delete-account-continue" disabled={blocked} onPress={() => setStep("confirm")} />
       ) : null}
@@ -455,7 +498,7 @@ export function SettingsHome(props: {
 const styles = StyleSheet.create({
   help: { color: colors.muted, fontSize: typeScale.helpSize },
   category: { color: colors.text, fontSize: typeScale.bodySize },
-  soon: { color: colors.faint, fontSize: typeScale.helpSize },
+  soon: { color: colors.muted, fontSize: typeScale.helpSize },
   input: {
     minHeight: 44,
     borderWidth: 1,

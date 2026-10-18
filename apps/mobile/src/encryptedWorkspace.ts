@@ -31,8 +31,8 @@ export async function createEncryptedWorkspace(input: {
 }
 
 /**
- * Core's upload request, which does not yet send ifGeneration or delete the
- * previous object only after the manifest commit.
+ * Core's upload request. The server passes `ifGeneration` back as a decimal
+ * string and uses a nested `kdf` object. This module does not parse either.
  */
 export function encryptedReplaceRequests(input: { oid: string; sizeBytes: number }): unknown[] {
   return [

@@ -98,7 +98,122 @@ describe("deletion fixtures", () => {
       secrets,
     });
     expect(status.status).toBe("failed");
+    expect(failed.response.body.retryable).toBe(true);
     expect(await secrets.get(workspaceKeyId("ws-1"))).toEqual(new Uint8Array([9]));
+  });
+
+  it("a retryable failure shows Retry", async () => {
+    const accepted = loadFixture<AcceptedBody>("account-deletion/accepted.json");
+    const failed = loadFixture<StatusBody>("account-deletion/status-failed.json");
+    const secrets = new MemorySecretStore();
+    const client = clientFor(async (_input, init) => {
+      if (init?.method === "DELETE") return responseFor(accepted.response.status, accepted.response.body, "application/json");
+      return responseFor(failed.response.status, failed.response.body, "application/json");
+    });
+    const screen = await render(
+      <DeleteAccountScreen
+        activeTransfers={0}
+        secrets={secrets}
+        workspaceIds={["ws-1"]}
+        idToken={idToken()}
+        client={client}
+        onReauth={() => undefined}
+        onSignedOut={() => undefined}
+        onDone={() => undefined}
+        onError={() => undefined}
+      />,
+    );
+    fireEvent.press(screen.getByTestId("delete-account-continue"));
+    await waitFor(() => expect(screen.queryByTestId("delete-account-confirm")).not.toBeNull());
+    fireEvent.press(screen.getByTestId("delete-account-confirm"));
+    await waitFor(() => expect(screen.queryByTestId("deletion-retry")).not.toBeNull());
+    expect(screen.queryByTestId("deletion-dismiss")).toBeNull();
+    expect(screen.getByText("Account deletion failed. You can try again.")).toBeTruthy();
+  });
+
+  it("a non-retryable failure shows Dismiss", async () => {
+    const accepted = loadFixture<AcceptedBody>("account-deletion/accepted.json");
+    const failed = loadFixture<StatusBody>("account-deletion/status-failed.json");
+    const secrets = new MemorySecretStore();
+    const client = clientFor(async (_input, init) => {
+      if (init?.method === "DELETE") return responseFor(accepted.response.status, accepted.response.body, "application/json");
+      return responseFor(failed.response.status, { ...failed.response.body, retryable: false }, "application/json");
+    });
+    const screen = await render(
+      <DeleteAccountScreen
+        activeTransfers={0}
+        secrets={secrets}
+        workspaceIds={["ws-1"]}
+        idToken={idToken()}
+        client={client}
+        onReauth={() => undefined}
+        onSignedOut={() => undefined}
+        onDone={() => undefined}
+        onError={() => undefined}
+      />,
+    );
+    fireEvent.press(screen.getByTestId("delete-account-continue"));
+    await waitFor(() => expect(screen.queryByTestId("delete-account-confirm")).not.toBeNull());
+    fireEvent.press(screen.getByTestId("delete-account-confirm"));
+    await waitFor(() => expect(screen.queryByTestId("deletion-dismiss")).not.toBeNull());
+    expect(screen.queryByTestId("deletion-retry")).toBeNull();
+    expect(screen.getByText("Account deletion failed.")).toBeTruthy();
+  });
+
+  it.failing("failed with retryable true keeps the job and the repeat DELETE resumes it", async () => {
+    const accepted = loadFixture<AcceptedBody>("account-deletion/accepted.json");
+    const failed = loadFixture<StatusBody>("account-deletion/status-failed.json");
+    const jobId = failed.response.body.jobId;
+    const secrets = new MemorySecretStore();
+    const methods: string[] = [];
+    const client = clientFor(async (input, init) => {
+      methods.push(init?.method ?? "");
+      if (init?.method === "DELETE") {
+        return responseFor(accepted.response.status, { ...accepted.response.body, jobId }, "application/json");
+      }
+      expect(String(input)).toContain(`/v2/account/deletions/${jobId}`);
+      return responseFor(failed.response.status, failed.response.body, "application/json");
+    });
+    const screen = await render(
+      <DeleteAccountScreen
+        activeTransfers={0}
+        secrets={secrets}
+        workspaceIds={["ws-1"]}
+        idToken={idToken()}
+        client={client}
+        onReauth={() => undefined}
+        onSignedOut={() => undefined}
+        onDone={() => undefined}
+        onError={() => undefined}
+      />,
+    );
+    fireEvent.press(screen.getByTestId("delete-account-continue"));
+    await waitFor(() => expect(screen.queryByTestId("delete-account-confirm")).not.toBeNull());
+    fireEvent.press(screen.getByTestId("delete-account-confirm"));
+    await waitFor(() => expect(screen.queryByTestId("deletion-retry")).not.toBeNull());
+    expect(await textOf(secrets, "account-deletion:job-id")).toBe(jobId);
+    methods.length = 0;
+    fireEvent.press(screen.getByTestId("deletion-retry"));
+    await waitFor(() => expect(methods.filter((method) => method === "DELETE").length).toBe(1));
+    expect(await textOf(secrets, "account-deletion:job-id")).toBe(jobId);
+  });
+
+  it.failing("the saved job is cleared only after done or dismiss, not after failed", async () => {
+    const accepted = loadFixture<AcceptedBody>("account-deletion/accepted.json");
+    const failed = loadFixture<StatusBody>("account-deletion/status-failed.json");
+    const secrets = new MemorySecretStore();
+    const client = clientFor(async (_input, init) => {
+      if (init?.method === "DELETE") return responseFor(accepted.response.status, accepted.response.body, "application/json");
+      return responseFor(failed.response.status, { ...failed.response.body, retryable: false }, "application/json");
+    });
+    await deleteSignedInAccount({
+      client,
+      idToken: idToken(),
+      workspaceIds: ["ws-1"],
+      secrets,
+    });
+    expect(await textOf(secrets, "account-deletion:job-id")).toBe(accepted.response.body.jobId);
+    expect(await textOf(secrets, "account-deletion:status-token")).toBe(accepted.response.body.statusToken);
   });
 
   it("invalid_token on DELETE signs out, keeps the uid, and wipes nothing", async () => {
@@ -337,7 +452,7 @@ describe("deletion fixtures", () => {
     expect(messageOnly).toBeInstanceOf(ApiError);
   });
 
-  it.failing("prefers the error field over a different code field and ignores message text", async () => {
+  it.failing("prefers the error field when it differs from code, and ignores message text", async () => {
     const error = await clientFor(async () => responseFor(401, {
       error: "invalid_token",
       code: "reauth_required",

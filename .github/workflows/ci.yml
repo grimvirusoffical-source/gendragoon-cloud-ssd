@@ -64,3 +64,32 @@ jobs:
           EXPO_NO_TELEMETRY: "1"
           CI: "1"
         run: pnpm exec expo prebuild --no-install --platform android
+
+  mobile-screenshots:
+    name: Mobile web screenshots
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Export the Expo web bundle
+        working-directory: apps/mobile
+        env:
+          EXPO_NO_TELEMETRY: "1"
+          CI: "1"
+        run: pnpm exec expo export --platform web
+      - name: Install Playwright Chromium
+        working-directory: apps/mobile
+        run: pnpm exec playwright install --with-deps chromium
+      - name: Capture fixture screens
+        working-directory: apps/mobile
+        run: node scripts/capture-screens.mjs
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mobile-screenshots
+          path: apps/mobile/docs/screenshots/*.png
+          if-no-files-found: error

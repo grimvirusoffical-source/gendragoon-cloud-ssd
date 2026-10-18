@@ -124,14 +124,16 @@ describe("encrypted workspace flag", () => {
     const put = loadFixture("storage-urls/put.json");
     const manifest = loadFixture("storage-urls/manifest-put.json");
     const remove = loadFixture("storage-urls/delete.json");
-    expect(manifest.request.body).toMatchObject({ op: "put", objects: ["manifest"], ifGeneration: 0 });
+    const manifestBody = manifest.request.body as { ifGeneration?: unknown };
+    const ifGeneration = String(manifestBody.ifGeneration);
+    expect(ifGeneration).toBe("0");
     const steps = encryptedReplaceRequests({
       oid: LIBRARY_OBJECT_ID,
       sizeBytes: 4,
     });
     expect(steps).toEqual([
       put.request.body,
-      manifest.request.body,
+      { ...manifest.request.body as object, ifGeneration },
       remove.request.body,
     ]);
   });
