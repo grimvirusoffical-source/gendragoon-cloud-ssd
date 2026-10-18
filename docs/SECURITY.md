@@ -9,7 +9,7 @@ Clients do not hold GCP credentials for the managed bucket. They also do not inv
 3. `POST /v2/workspaces/:id/storage-urls` returns V4 signed URLs or resumable-upload session URLs.
 4. Each URL is `https`, has no userinfo, contains the workspace prefix, and expires in at most 15 minutes.
 5. The client uploads or downloads ciphertext at that URL. It does not send an `Authorization` header or any key material.
-6. A locked workspace (over the cap, or unpaid) receives `access: "read-only"` and download links only. Upload and resumable requests are writes and return HTTP 423 `{ "code": "workspace_lock" }`. Reads and deletes keep working.
+6. A locked workspace (over the cap, or unpaid) receives `access: "read-only"` and download links only. Upload and resumable requests are writes and return HTTP 423 `{ "error": "workspace_lock", "reason", "overBy", "unpaidWorkspaceIds" }`. Reads and deletes keep working.
 
 ## Encryption
 

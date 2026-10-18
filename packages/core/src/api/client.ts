@@ -5,7 +5,6 @@ import { assertStorageUrlResponse, reauthIsRecent, reauthenticatedAtForDelete } 
 import type {
   AccessResponse,
   BillingStatusResponse,
-  ByoChallengeRequest,
   ByoChallengeResponse,
   ByoProofRequest,
   ByoProofResponse,
@@ -15,8 +14,10 @@ import type {
   CreateUploadRequest,
   FileListResponse,
   HealthResponse,
+  MergePreviewResponse,
   MergeRequest,
   MergeResponse,
+  ByoRegisterRequest,
   PricingResponse,
   ProjectListResponse,
   UploadStatus,
@@ -229,9 +230,16 @@ export class GenDragoonClient {
     return this.request("POST", `/v2/workspaces/${encodeURIComponent(id)}/checkout/workspace-fee`);
   }
 
-  /** Proposed. See docs/API.md. */
+  /** POST /v2/workspaces/:sourceId/merge with `{ targetId, confirmName }`. */
   mergeWorkspaces(body: MergeRequest): Promise<MergeResponse> {
-    return this.request("POST", "/v2/workspaces/merge", body);
+    const { sourceId, targetId, confirmName } = body;
+    return this.request("POST", `/v2/workspaces/${encodeURIComponent(sourceId)}/merge`, { targetId, confirmName });
+  }
+
+  /** POST /v2/workspaces/:sourceId/merge/preview. Same body as merge. */
+  previewMerge(body: MergeRequest): Promise<MergePreviewResponse> {
+    const { sourceId, targetId, confirmName } = body;
+    return this.request("POST", `/v2/workspaces/${encodeURIComponent(sourceId)}/merge/preview`, { targetId, confirmName });
   }
 
   /** Proposed lock-resolution delete. Archive remains the live non-destructive removal. */
@@ -239,15 +247,28 @@ export class GenDragoonClient {
     return this.request("DELETE", `/v2/workspaces/${encodeURIComponent(id)}`);
   }
 
-  /** Proposed. Body is provider, endpoint, and bucket fingerprint only. */
-  async createByoChallenge(id: string, body: ByoChallengeRequest): Promise<ByoChallengeResponse> {
+  /** POST /v2/workspaces/:id/byo/register. SFTP and the other coming-soon providers return 422. */
+  async registerByo(id: string, body: ByoRegisterRequest): Promise<Record<string, unknown>> {
     assertNoCredentialFields(body);
-    return this.request("POST", `/v2/workspaces/${encodeURIComponent(id)}/byo/challenge`, body);
+    return this.request("POST", `/v2/workspaces/${encodeURIComponent(id)}/byo/register`, body);
   }
 
-  async submitByoProof(id: string, body: ByoProofRequest): Promise<ByoProofResponse> {
+  /** POST /v2/workspaces/:id/byo/challenge. No body. Response is `{ nonce, expiresAtMs, ttlMs }`. */
+  createByoChallenge(id: string): Promise<ByoChallengeResponse> {
+    return this.request("POST", `/v2/workspaces/${encodeURIComponent(id)}/byo/challenge`);
+  }
+
+  /** POST /v2/workspaces/:id/byo/verify with `{ presignedUrl }`. `readBack` is not a proof. */
+  async verifyByo(id: string, body: ByoProofRequest): Promise<ByoProofResponse> {
+    if (!body?.presignedUrl) throw new Error("presignedUrl is required");
     assertNoCredentialFields(body);
-    return this.request("POST", `/v2/workspaces/${encodeURIComponent(id)}/byo/proof`, body);
+    return this.request("POST", `/v2/workspaces/${encodeURIComponent(id)}/byo/verify`, { presignedUrl: body.presignedUrl });
+  }
+
+  async submitByoProof(id: string, body: { presignedUrl?: string; presignedGetUrl?: string }): Promise<ByoProofResponse> {
+    const presignedUrl = body.presignedUrl ?? body.presignedGetUrl;
+    if (!presignedUrl) throw new Error("presignedUrl is required");
+    return this.verifyByo(id, { presignedUrl });
   }
 
   /** Proposed. Server-computed lock. Clients render this instead of deciding access. */
@@ -315,30 +336,61 @@ function safeJson(text: string): unknown {
 
 function toError(status: number, parsed: unknown): ApiError {
   const record = parsed && typeof parsed === "object"
-    ? parsed as { error?: unknown; code?: unknown; jobId?: unknown; statusToken?: unknown }
+    ? parsed as {
+      error?: unknown;
+      code?: unknown;
+      message?: unknown;
+      jobId?: unknown;
+      statusToken?: unknown;
+      reason?: unknown;
+      overBy?: unknown;
+      unpaidWorkspaceIds?: unknown;
+    }
     : {};
   const code = typeof record.code === "string" ? record.code : "";
   const errorField = typeof record.error === "string" ? record.error : "";
+  const machine = machineCode(errorField, code);
   const jobId = typeof record.jobId === "string" ? record.jobId : "";
   const statusToken = typeof record.statusToken === "string" && record.statusToken ? record.statusToken : undefined;
-  // PR #6 puts the machine code in `error` and omits `code`. Older fixtures send `code`
-  // plus a human `error` string, so account_deleted is recognized from either field.
-  const accountDeleted = code === "account_deleted" || errorField === "account_deleted";
+  const accountDeleted = machine === "account_deleted" || code === "account_deleted" || errorField === "account_deleted";
   if (status === 410 && accountDeleted && jobId) return new AccountDeletedError(jobId, statusToken);
-  if (status === 423 || code === "workspace_lock") return new WorkspaceLockedError();
-  if (status === 401 && code === "reauth_required") return new ReauthRequiredError();
-  if (status === 401 && code === "invalid_token") return new InvalidTokenError();
-  if (status === 422 && code === "byo_provider_unsupported") {
+  if (status === 423 || machine === "workspace_lock" || code === "workspace_lock") {
+    const unpaid = Array.isArray(record.unpaidWorkspaceIds)
+      ? record.unpaidWorkspaceIds.filter((id): id is string => typeof id === "string")
+      : [];
+    return new WorkspaceLockedError({
+      reason: typeof record.reason === "string" ? record.reason : "",
+      overBy: typeof record.overBy === "number" ? record.overBy : 0,
+      unpaidWorkspaceIds: unpaid,
+    });
+  }
+  if (status === 401 && machine === "reauth_required") return new ReauthRequiredError();
+  if (status === 401 && machine === "invalid_token") return new InvalidTokenError();
+  if (status === 422 && machine === "byo_provider_unsupported") {
     return new ApiError(422, "byo_provider_unsupported", BYO_UNSUPPORTED_MESSAGE);
   }
-  // Fallback only. The server does not send 409 byo_unverifiable.
-  // SFTP and the other coming-soon providers return 422 at registration.
-  if (status === 409 && code === "byo_unverifiable") {
+  // Fallback only. Riley's BYO fixtures do not include 409 byo_unverifiable.
+  if (status === 409 && machine === "byo_unverifiable") {
     return new ApiError(409, "byo_unverifiable", BYO_UNVERIFIABLE_MESSAGE);
   }
-  if (status === 404 || code === "PROJECT_FORBIDDEN") {
+  if (status === 404 || machine === "PROJECT_FORBIDDEN" || code === "PROJECT_FORBIDDEN") {
     return new ApiError(404, "NOT_FOUND", "Not found");
   }
-  const message = typeof record.error === "string" ? record.error : "Request failed";
-  return new ApiError(status, code || "REQUEST_FAILED", message);
+  const message = typeof record.message === "string"
+    ? record.message
+    : errorField && errorField !== machine
+      ? errorField
+      : "Request failed";
+  return new ApiError(status, machine || "REQUEST_FAILED", message);
+}
+
+/**
+ * Riley's fixtures and PR #6 put the machine code in `error` and omit `code`.
+ * Older tests put a sentence (or a different token) in `error` and the machine
+ * code in `code`. A token-shaped `error` wins when `code` is absent or equal.
+ */
+function machineCode(errorField: string, codeField: string): string {
+  const token = /^[A-Za-z0-9_]+$/.test(errorField);
+  if (token && (!codeField || errorField === codeField)) return errorField;
+  return codeField;
 }

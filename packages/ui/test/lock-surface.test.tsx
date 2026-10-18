@@ -1,7 +1,12 @@
+import { readdirSync, readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
-import { ApiError, WorkspaceLockedError, type LockAssessment, type WorkspaceRecord } from "@gendragoon/core";
+import { ApiError, GenDragoonClient, WorkspaceLockedError, type LockAssessment, type WorkspaceRecord } from "@gendragoon/core";
 import { AccountSurface } from "../src/AccountSurface.js";
+
+const lockDir = join(dirname(fileURLToPath(import.meta.url)), "../../core/test/fixtures/server/workspace-lock");
 
 function workspace(id: string, name: string): WorkspaceRecord {
   return {
@@ -66,6 +71,47 @@ describe("AccountSurface", () => {
     expect(html).toContain("Request failed");
     expect(html).not.toContain("data-testid=\"lock-screen\"");
     expect(html).toContain("Uploader");
+  });
+
+  it("renders every workspace-lock fixture: reason, overBy, and unpaid workspace ids", async () => {
+    for (const file of readdirSync(lockDir).filter((name) => name.endsWith(".json"))) {
+      const fixture = JSON.parse(readFileSync(join(lockDir, file), "utf8")) as {
+        response: { status: number; body: { reason: string; overBy: number; unpaidWorkspaceIds: string[] } };
+      };
+      const body = fixture.response.body;
+      const client = new GenDragoonClient({
+        baseUrl: "https://api.example.test",
+        getToken: () => "token",
+        fetch: async () => new Response(JSON.stringify(body), { status: fixture.response.status }),
+      });
+      const error = await client.createUpload("w", { name: "blocked.txt", sizeBytes: 4 }).catch((caught: unknown) => caught);
+      expect(error).toBeInstanceOf(WorkspaceLockedError);
+      const listed = [
+        ...workspaces,
+        ...body.unpaidWorkspaceIds.map((id) => workspace(id, id)),
+      ];
+      const html = renderToStaticMarkup(
+        <AccountSurface
+          phase="ready"
+          error={error}
+          assessment={clear}
+          workspaces={listed}
+          onDelete={() => undefined}
+        >
+          <p>Uploader</p>
+        </AccountSurface>,
+      );
+      expect(html).toContain("data-testid=\"lock-screen\"");
+      expect(html).toContain(`data-reason="${body.reason}"`);
+      expect(html).toContain(`data-over-by="${body.overBy}"`);
+      expect(html).toContain(`Over by ${body.overBy}.`);
+      if (body.unpaidWorkspaceIds.length === 0) {
+        expect(html).toContain("No unpaid workspaces.");
+      }
+      for (const id of body.unpaidWorkspaceIds) expect(html).toContain(id);
+      expect(html).not.toContain("data-testid=\"generic-error\"");
+      expect(html).not.toContain("Uploader");
+    }
   });
 
   it("shows the lock screen when the account phase is already delete-or-merge", () => {

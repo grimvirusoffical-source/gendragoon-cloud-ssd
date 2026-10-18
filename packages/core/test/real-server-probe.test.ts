@@ -27,6 +27,7 @@ import { assertKeyEnvelope, createKeyEnvelope, unwrapWorkspaceKey } from "../src
 import { createWorkspaceKey, importWorkspaceKey, LIBRARY_OBJECT_ID, openNamedFile, sealNamedFile } from "../src/seal.js";
 import { assertStorageUrlResponse, storageOperations } from "../src/storage.js";
 import type { StorageUrlResponse } from "../src/api/types.js";
+import { loadServerFixture } from "./fixtures/server/load.js";
 
 interface Pr7StorageUrls {
   issueStorageUrls(deps: unknown, req: unknown): Promise<Record<string, unknown>>;
@@ -95,7 +96,8 @@ describe("storage-urls vs PR #7", () => {
     const real = await pr7.issueStorageUrls(pr7Deps(), pr7Request({ op: "upload", objects: [LIBRARY_OBJECT_ID] }));
     expect(real).toHaveProperty("urls");
   });
-  it.fails("BUG(3) 409 {error:'byo_external'} surfaces as code byo_external", async () => {
+  // PENDING FIXTURE: storage-urls (including 409 byo_external) arrives with PR #7.
+  it("409 {error:'byo_external'} surfaces as code byo_external", async () => {
     const err = await client(409, { error: "byo_external" })
       .storageUrls(WS, { operations: [{ op: "download", oid: OID }] })
       .catch((e: unknown) => e);
@@ -104,39 +106,48 @@ describe("storage-urls vs PR #7", () => {
 });
 
 describe("error envelope vs PR #5 / #6", () => {
-  it.fails("BUG(3) 401 {error:'reauth_required'} is recognised", async () => {
+  it("401 {error:'reauth_required'} is recognised", async () => {
     const err = await client(401, { error: "reauth_required" }).deletionStatus("job-1").catch((e: unknown) => e);
     expect(isReauthRequired(err)).toBe(true);
   });
-  it.fails("BUG(10) 423 lock error keeps overBy and unpaidWorkspaceIds", async () => {
-    const err = await client(423, { error: "workspace_lock", reason: "over_cap", overBy: 2, unpaidWorkspaceIds: ["w1"] })
+  it("423 lock error keeps overBy and unpaidWorkspaceIds from the workspace-lock fixture", async () => {
+    const lock = loadServerFixture("workspace-lock", "over-cap-and-lapsed");
+    const body = lock.response.body as { overBy: number; unpaidWorkspaceIds: string[] };
+    const err = await client(lock.response.status, body)
       .createUpload("w", { name: "a", sizeBytes: 1 })
       .catch((e: unknown) => e);
     expect(err).toBeInstanceOf(WorkspaceLockedError);
-    expect(err).toMatchObject({ overBy: 2, unpaidWorkspaceIds: ["w1"] });
+    expect(err).toMatchObject({ overBy: body.overBy, unpaidWorkspaceIds: body.unpaidWorkspaceIds });
   });
-  it("422 byo_provider_unsupported maps to the coming-soon message", async () => {
-    const err = await client(422, { error: "byo_provider_unsupported", code: "byo_provider_unsupported", provider: "sftp" })
-      .createByoChallenge("w", { provider: "sftp", endpoint: "https://x.test", bucketFingerprint: "f" })
+  it("422 byo_provider_unsupported from the register fixture maps to the coming-soon message", async () => {
+    const fixture = loadServerFixture("byo", "provider-unsupported");
+    const err = await client(fixture.response.status, fixture.response.body)
+      .registerByo("w", fixture.request.body as { provider: string; endpoint: string; bucketFingerprint: string })
       .catch((e: unknown) => e);
     expect((err as Error).message).toMatch(/coming soon/);
   });
 });
 
 describe("BYO challenge and merge vs PR #5", () => {
-  it.fails("BUG(4) BYO proof is POSTed to /byo/verify as {presignedUrl}", async () => {
+  it("BYO proof is POSTed to /byo/verify as {presignedUrl}", async () => {
+    const verify = loadServerFixture("byo", "verify-success");
     const seen: { url?: string; body?: string } = {};
-    await client(200, { verified: true }, seen)
-      .submitByoProof("w", { challengeId: "c", presignedGetUrl: "https://h.test/.gendragoon-challenge/n" })
+    await client(verify.response.status, verify.response.body, seen)
+      .submitByoProof("w", { presignedGetUrl: (verify.request.body as { presignedUrl: string }).presignedUrl })
       .catch(() => undefined);
     expect(seen.url).toBe("https://api.test/v2/workspaces/w/byo/verify");
-    expect(JSON.parse(seen.body ?? "{}")).toHaveProperty("presignedUrl");
+    expect(JSON.parse(seen.body ?? "{}")).toEqual(verify.request.body);
   });
-  it.fails("BUG(10) merge is POSTed to /v2/workspaces/:sourceId/merge with confirmName", async () => {
+  it("merge is POSTed to /v2/workspaces/:sourceId/merge with confirmName", async () => {
+    const merge = loadServerFixture("merge", "completed");
     const seen: { url?: string; body?: string } = {};
-    await client(200, {}, seen).mergeWorkspaces({ sourceId: "a", targetId: "b" });
-    expect(seen.url).toBe("https://api.test/v2/workspaces/a/merge");
-    expect(JSON.parse(seen.body ?? "{}")).toHaveProperty("confirmName");
+    const sourceId = merge.request.path.split("/")[3] ?? "";
+    await client(merge.response.status, merge.response.body, seen).mergeWorkspaces({
+      sourceId,
+      ...(merge.request.body as { targetId: string; confirmName: string }),
+    });
+    expect(seen.url).toBe(`https://api.test${merge.request.path}`);
+    expect(JSON.parse(seen.body ?? "{}")).toEqual(merge.request.body);
   });
 });
 

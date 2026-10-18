@@ -180,10 +180,11 @@ export function App() {
         ? new GenDragoonClient({ baseUrl: apiBase, getToken: async () => token })
         : null;
       if (client && token) {
-        const challenge = await client.createByoChallenge(workspaceId, record);
-        challengeId = challenge.challengeId;
+        await client.registerByo(workspaceId, record);
+        const challenge = await client.createByoChallenge(workspaceId);
         nonce = challenge.nonce;
-        if (challenge.objectKey !== challengeObjectKey(nonce)) {
+        challengeId = nonce;
+        if (challengeObjectKey(nonce) !== `.gendragoon-challenge/${nonce}`) {
           throw new Error("Challenge object must be .gendragoon-challenge/<nonce>");
         }
       }

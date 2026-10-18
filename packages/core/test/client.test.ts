@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { ApiError, GenDragoonClient, WorkspaceLockedError, hidesWorkspaceExistence } from "../src/index.js";
+import { loadServerFixture } from "./fixtures/server/load.js";
 
 function jsonResponse(status: number, body: unknown): Response {
   return new Response(JSON.stringify(body), {
@@ -17,7 +18,8 @@ describe("GenDragoonClient", () => {
       fetch: async (input, init) => {
         seen.url = String(input);
         seen.authorization = new Headers(init?.headers).get("Authorization") ?? undefined;
-        return jsonResponse(404, { error: "Project not found", code: "PROJECT_NOT_FOUND" });
+        const foreign = loadServerFixture("ownership", "foreign-workspace");
+        return jsonResponse(foreign.response.status, foreign.response.body);
       },
     });
     await expect(client.getProject("someone-elses")).rejects.toMatchObject({
@@ -30,7 +32,8 @@ describe("GenDragoonClient", () => {
     expect(hidesWorkspaceExistence({ status: 403, code: "PROJECT_FORBIDDEN" })).toBe(true);
   });
 
-  it("collapses the legacy foreign-workspace 403 without echoing the token", async () => {
+  // PENDING FIXTURE: ownership fixtures only include 404 PROJECT_NOT_FOUND.
+  it("PENDING FIXTURE: legacy 403 PROJECT_FORBIDDEN collapses without echoing the token", async () => {
     const client = new GenDragoonClient({
       baseUrl: "https://api.example.test",
       getToken: () => "super-secret-token",
@@ -57,15 +60,23 @@ describe("GenDragoonClient", () => {
         return jsonResponse(200, { ok: true });
       },
     });
-    await client.mergeWorkspaces({ sourceId: "a", targetId: "b" });
-    await client.createByoChallenge("ws", {
-      provider: "b2",
-      endpoint: "https://s3.us-west-000.backblazeb2.com",
-      bucketFingerprint: "ab".repeat(32),
+    const merge = loadServerFixture("merge", "completed");
+    const register = loadServerFixture("byo", "register");
+    const sourceId = merge.request.path.split("/")[3] ?? "";
+    await client.mergeWorkspaces({
+      sourceId,
+      ...(merge.request.body as { targetId: string; confirmName: string }),
     });
-    expect(bodies[0]).toMatchObject({ url: "https://api.example.test/v2/workspaces/merge" });
-    expect(JSON.stringify(bodies[1])).not.toMatch(/secret|password|token/i);
-    await expect(client.createByoChallenge("ws", {
+    await client.registerByo(sourceId, register.request.body as { provider: string; endpoint: string; bucketFingerprint: string });
+    await client.createByoChallenge(sourceId);
+    expect(bodies[0]).toMatchObject({ url: `https://api.example.test${merge.request.path}`, body: merge.request.body });
+    expect(bodies[1]).toMatchObject({ url: `https://api.example.test${register.request.path}`, body: register.request.body });
+    expect(bodies[2]).toMatchObject({
+      url: `https://api.example.test/v2/workspaces/${sourceId}/byo/challenge`,
+      body: null,
+    });
+    expect(JSON.stringify(bodies)).not.toMatch(/secret|password|token/i);
+    await expect(client.registerByo("ws", {
       provider: "aws",
       endpoint: "https://s3.amazonaws.com",
       bucketFingerprint: "cd".repeat(32),
@@ -105,7 +116,8 @@ describe("GenDragoonClient", () => {
         const url = String(input);
         calls.push(`${init?.method} ${url}`);
         if (init?.method === "POST") {
-          return jsonResponse(423, { code: "workspace_lock", error: "over cap" });
+          const lock = loadServerFixture("workspace-lock", "over-cap");
+          return jsonResponse(lock.response.status, lock.response.body);
         }
         return jsonResponse(200, init?.method === "DELETE" ? { deleted: true } : { files: [], nextCursor: null, quotaBytes: 1, usedBytes: 0, workers: 2 });
       },
@@ -114,7 +126,14 @@ describe("GenDragoonClient", () => {
     try {
       await client.createUpload("ws", { name: "a.txt", sizeBytes: 1, kind: "file" });
     } catch (error) {
-      expect(error).toMatchObject({ status: 423, code: "workspace_lock", name: "WorkspaceLockedError" });
+      const lock = loadServerFixture("workspace-lock", "over-cap").response.body as { reason: string; overBy: number };
+      expect(error).toMatchObject({
+        status: 423,
+        code: "workspace_lock",
+        name: "WorkspaceLockedError",
+        reason: lock.reason,
+        overBy: lock.overBy,
+      });
       expect((error as Error).message).not.toContain("over cap");
       expect((error as Error).message).not.toContain("firebase-token");
     }
@@ -123,6 +142,7 @@ describe("GenDragoonClient", () => {
     expect(calls.map((call) => call.split(" ")[0])).toEqual(["POST", "POST", "GET", "DELETE"]);
   });
 
+  // PENDING FIXTURE: storage-urls and key-envelope arrive with PR #7. Deletion stays on Morgan's PR #6 shapes.
   it("requests /v2 storage links and accepts account deletion only after a recent re-auth", async () => {
     const seen: { method?: string; url?: string; body?: unknown }[] = [];
     const client = new GenDragoonClient({

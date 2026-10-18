@@ -163,43 +163,61 @@ export interface WorkspaceFeeCheckout {
   monthlyCents: 500;
 }
 
-/** Proposed merge. Riley builds the route; clients share the rename rule. */
+/** POST /v2/workspaces/:sourceId/merge. confirmName is the source workspace name. */
 export interface MergeRequest {
   sourceId: string;
   targetId: string;
+  confirmName: string;
 }
 
 export interface MergeResponse {
-  sourceId: string;
-  targetId: string;
-  moved: { sourcePath: string; targetPath: string; verified: boolean }[];
+  copied: number;
+  idempotent: boolean;
+  merged: boolean;
   sourceDeleted: boolean;
+  sourceId: string;
+  workspaceId: string;
 }
 
-/** Proposed. Server stores only these three fields. */
-export interface ByoChallengeRequest {
+export interface MergePreviewFile {
+  name: string;
+  renamedTo: string;
+  sizeBytes: number;
+}
+
+export interface MergePreviewResponse {
+  confirmName: string;
+  files: MergePreviewFile[];
+  sourceId: string;
+  targetId: string;
+}
+
+/** POST /v2/workspaces/:id/byo/register. No secrets. */
+export interface ByoRegisterRequest {
   provider: string;
   endpoint: string;
   bucketFingerprint: string;
 }
 
+/** Registration body. The challenge request itself has no body. */
+export type ByoChallengeRequest = ByoRegisterRequest;
+
+/** POST /v2/workspaces/:id/byo/challenge returns this. There is no request body. */
 export interface ByoChallengeResponse {
-  challengeId: string;
-  /** `.gendragoon-challenge/<nonce>` */
-  objectKey: string;
   nonce: string;
-  expiresAt: string;
+  expiresAtMs: number;
+  ttlMs: number;
 }
 
 /** Device-generated presigned GET for `.gendragoon-challenge/<nonce>`. No credentials. */
 export interface ByoProofRequest {
-  challengeId: string;
-  presignedGetUrl: string;
+  presignedUrl: string;
 }
 
 export interface ByoProofResponse {
   verified: boolean;
   workspaceId: string;
+  bucketFingerprint?: string;
 }
 
 /** Proposed login/plan-change payload. Server is source of truth. */

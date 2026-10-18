@@ -25,7 +25,7 @@ The live catalog still sells an extra project as a one-time activation (`additio
 When `GET /v2/access` says the account is locked:
 
 - Cloud data stays readable and downloadable. Deletes still succeed.
-- Writes return **HTTP 423** `{ "code": "workspace_lock" }`. The client throws `WorkspaceLockedError` and the account state machine moves to delete-or-merge. The UI shows the lock screen. It does not show that payload as a generic error.
+- Writes return **HTTP 423** `{ "error": "workspace_lock", "reason", "overBy", "unpaidWorkspaceIds" }`. `reason` is `over_cap`, `lapsed`, `over_cap_and_lapsed`, `scope_unavailable`, or `merge_in_progress`. The client throws `WorkspaceLockedError` with those fields and the account state machine moves to delete-or-merge. The lock screen renders the fixture fields. It does not show that payload as a generic error.
 - The user deletes or merges until the next access payload is unlocked.
 
 Proposed `GET /v2/access` (also fine as fields on `GET /v2/workspaces`):
@@ -54,11 +54,13 @@ Archived projects already drop out of `usedProjectSlots`. A lock-resolution dele
 
 ## Merge (new)
 
-`POST /v2/workspaces/merge`
+`POST /v2/workspaces/:sourceId/merge`
 
 ```json
-{ "sourceId": "…", "targetId": "…" }
+{ "targetId": "…", "confirmName": "<source workspace name>" }
 ```
+
+A wrong `confirmName` is **400** `{ "error": "CONFIRM_NAME_REQUIRED" }`. `POST /v2/workspaces/:sourceId/merge/preview` returns the renamed incoming paths before the copy. The completed merge body is `{ copied, idempotent, merged, sourceDeleted, sourceId, workspaceId }`.
 
 Move each object into the target workspace. If the relative path already exists, rename the **incoming** copy to `name (from <source workspace>)`. If that path also exists, use `name (from <source workspace>) 2`, then 3, and so on. Never overwrite the target's file. After every copied object has been read back and matched, delete the source workspace. If any copy fails verification, leave the source in place.
 
@@ -138,33 +140,28 @@ Subscription mode, metadata `{kind:"workspace_fee", accountHash, workspaceId}`. 
 
 ### BYO challenge
 
-Launch `provider` values: `aws`, `r2`, `b2`, `wasabi`, `minio`, `gcs-s3` (Google Cloud Storage via its S3 HMAC keys, not the native GCS API). SFTP, Azure Blob, and WebDAV are coming soon. They are disabled in Connect Storage. Registering one of them, including SFTP, returns **422** `{ "code": "byo_provider_unsupported" }`. The client shows that as “not supported yet / coming soon”.
+Launch `provider` values: `aws`, `r2`, `b2`, `wasabi`, `minio`, `gcs-s3` (Google Cloud Storage via its S3 HMAC keys, not the native GCS API). SFTP, Azure Blob, and WebDAV are coming soon. They are disabled in Connect Storage. Registering one of them, including SFTP, returns **422** `{ "error": "byo_provider_unsupported", "provider": "sftp" }`. The client shows that as “not supported yet / coming soon”.
 
-The server does not send **409** `byo_unverifiable`. The client still maps that code to a verification message as a fallback.
+The server does not send **409** `byo_unverifiable`. The client still maps that code to a verification message as a fallback. Riley's BYO fixtures do not include it.
 
-`POST /v2/workspaces/:id/byo/challenge`
+`POST /v2/workspaces/:id/byo/register`
 
 ```json
-{ "provider": "r2", "endpoint": "https://example.r2.cloudflarestorage.com", "bucketFingerprint": "<sha256 hex>" }
+{ "provider": "s3", "endpoint": "https://bucket.s3.us-east-1.amazonaws.com", "bucketFingerprint": "<hex>" }
 ```
 
-The endpoint must be `https` with no userinfo. Response:
+`POST /v2/workspaces/:id/byo/challenge` has no body. Response:
 
 ```json
-{
-  "challengeId": "…",
-  "objectKey": ".gendragoon-challenge/<nonce>",
-  "nonce": "…",
-  "expiresAt": "…"
-}
+{ "nonce": "…", "expiresAtMs": 1700000600000, "ttlMs": 600000 }
 ```
 
 The client writes `nonce` to `.gendragoon-challenge/<nonce>` with credentials that never leave the device. It then generates, on the device, a short-lived presigned GET for exactly that object (https, no userinfo, expiry at most 15 minutes) and sends:
 
-`POST /v2/workspaces/:id/byo/proof`
+`POST /v2/workspaces/:id/byo/verify`
 
 ```json
-{ "challengeId": "…", "presignedGetUrl": "https://…" }
+{ "presignedUrl": "https://…" }
 ```
 
 Do not send stored credentials, access keys, or a read-back of the object. Registering the same storage again runs a new challenge. The previous proof is not reused. Activate the workspace only when the server can GET that URL and the challenge has not expired. Persist `provider`, `endpoint`, and `bucketFingerprint` only. Reject any body that contains credential fields (`secretAccessKey`, `password`, `privateKey`, `token`, and the rest listed in `assertNoCredentialFields`).
@@ -178,9 +175,9 @@ Do not send stored credentials, access keys, or a read-back of the object. Regis
 ## Connect-your-own-storage flow
 
 1. The user picks a launch provider and types an https endpoint plus bucket. SFTP, Azure, and WebDAV stay disabled. The secret stays in the OS keychain.
-2. The client hashes `provider + endpoint + bucket` into `bucketFingerprint` and calls `POST .../byo/challenge`. The bucket name itself is not stored on the server. A provider the server will not register returns 422 `byo_provider_unsupported`.
-3. The client writes `.gendragoon-challenge/<nonce>` and creates a short-lived presigned GET on the device.
-4. `POST .../byo/proof` sends `{ challengeId, presignedGetUrl }`. The workspace stays inactive on failure. Connecting the storage again repeats steps 2–4.
+2. The client hashes `provider + endpoint + bucket` into `bucketFingerprint` and calls `POST .../byo/register`. The bucket name itself is not stored on the server. A provider the server will not register returns 422 `byo_provider_unsupported`.
+3. `POST .../byo/challenge` returns `{ nonce, expiresAtMs, ttlMs }`. The client writes `.gendragoon-challenge/<nonce>` and creates a short-lived presigned GET on the device.
+4. `POST .../byo/verify` sends `{ presignedUrl }`. The workspace stays inactive on failure. Connecting the storage again repeats steps 2–4.
 5. The workspace fee and any performance add-on are whatever `GET /v2/access` reports. The provider's own permissions are only the challenge. Ownership of the GenDragoon workspace remains `accountHash`.
 
 ## Managed bucket links

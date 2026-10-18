@@ -11,6 +11,9 @@
  * `it.fails` + "TODO(contract)" = PR #6 84f6fff ships statusToken; core does not use it yet
  *   (Avery's queued PR #1 push: statusToken polling + injected SecureStore {get,set,delete}).
  * Remove the marker when the fix lands; the test then has to pass for real.
+ *
+ * PENDING FIXTURE: account deletion is not in Riley's server fixture export yet.
+ * These bodies stay on the PR #6 shapes from this file.
  */
 import { describe, expect, it } from "vitest";
 import {
@@ -22,6 +25,7 @@ import {
   isWorkspaceLockError,
   workspaceKeyId,
 } from "../src/index.js";
+import { loadServerFixture } from "./fixtures/server/load.js";
 
 const BASE = "https://api.example.test";
 const JOB = "4f9c2a8e-0000-4000-8000-000000000001";
@@ -183,7 +187,7 @@ describe("deletion contract: 401s with PR #6 bodies ({error}, no `code`)", () =>
     expect(r.keys).toBe(2);
   });
 
-  it.fails("BUG(contract): 401 {error:'reauth_required'} maps to re-auth (client.ts:301,305 toError reads only `code`)", async () => {
+  it("401 {error:'reauth_required'} maps to re-auth", async () => {
     const r = await run({ del: [{ status: 401, body: { error: "reauth_required" } }] });
     expect(deletionAuthFailure(r.error)).toBe("reauth");
   });
@@ -194,7 +198,7 @@ describe("deletion contract: 401s with PR #6 bodies ({error}, no `code`)", () =>
     expect(r.keys).toBe(2);
   });
 
-  it.fails("BUG(contract): 401 {error:'invalid_token'} maps to sign-out (client.ts:301,306 toError reads only `code`)", async () => {
+  it("401 {error:'invalid_token'} maps to sign-out", async () => {
     const r = await run({ del: [{ status: 401, body: { error: "invalid_token" } }] });
     expect(deletionAuthFailure(r.error)).toBe("sign-out");
   });
@@ -342,8 +346,9 @@ describe("deletion contract: re-auth window and workspace lock", () => {
     expect(srv.calls.length).toBe(0);
   });
 
-  it("423 workspace_lock (PR #5 body) is surfaced as a workspace lock, no wipe", async () => {
-    const r = await run({ del: [{ status: 423, body: { error: "workspace_lock", reason: "over_cap", overBy: 1, unpaidWorkspaceIds: [] } }] });
+  it("423 workspace_lock from the over-cap fixture is surfaced as a workspace lock, no wipe", async () => {
+    const lock = loadServerFixture("workspace-lock", "over-cap");
+    const r = await run({ del: [{ status: lock.response.status, body: lock.response.body }] });
     expect(isWorkspaceLockError(r.error)).toBe(true);
     expect(r.keys).toBe(2);
   });

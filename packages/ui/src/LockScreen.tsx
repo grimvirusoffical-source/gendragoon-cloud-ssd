@@ -1,11 +1,21 @@
-import type { LockAssessment, WorkspaceRecord } from "@gendragoon/core";
+import type { LockAssessment, WorkspaceLockedError, WorkspaceRecord } from "@gendragoon/core";
 import { planMerge, planSummary } from "@gendragoon/core";
 import { useMemo, useState } from "react";
+
+const LOCK_REASON: Record<string, string> = {
+  over_cap: "This account is over the workspace cap.",
+  lapsed: "A workspace payment has lapsed.",
+  over_cap_and_lapsed: "This account is over the cap and a workspace payment has lapsed.",
+  scope_unavailable: "Workspace scope is unavailable.",
+  merge_in_progress: "A merge is in progress.",
+};
 
 export function LockScreen(props: {
   assessment: LockAssessment;
   workspaces: WorkspaceRecord[];
   onDelete: (id: string) => void;
+  /** HTTP 423 body from a workspace-lock fixture: reason, overBy, unpaidWorkspaceIds. */
+  lock?: WorkspaceLockedError;
 }) {
   const active = props.workspaces.filter((workspace) => workspace.projectStatus !== "archived");
   const [sourceId, setSourceId] = useState(active[1]?.id ?? active[0]?.id ?? "");
@@ -45,6 +55,23 @@ export function LockScreen(props: {
           </p>
         </div>
       </header>
+      {props.lock?.reason ? (
+        <div
+          className="banner"
+          data-testid="lock-detail"
+          data-reason={props.lock.reason}
+          data-over-by={String(props.lock.overBy)}
+        >
+          <p>{LOCK_REASON[props.lock.reason] ?? props.lock.reason} Over by {props.lock.overBy}.</p>
+          {props.lock.unpaidWorkspaceIds.length > 0 ? (
+            <ul data-testid="unpaid-workspaces">
+              {props.lock.unpaidWorkspaceIds.map((id) => <li key={id}>{id}</li>)}
+            </ul>
+          ) : (
+            <p data-testid="unpaid-workspaces">No unpaid workspaces.</p>
+          )}
+        </div>
+      ) : null}
       {props.assessment.locked ? (
         <div className="banner" data-testid="lock-banner">
           The server enforces this lock. Deleting or merging here is a request, not local permission.

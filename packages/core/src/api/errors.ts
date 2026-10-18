@@ -11,13 +11,22 @@ export class ApiError extends Error {
 }
 
 /**
- * HTTP 423 { code: "workspace_lock" } on a write while the account is over
- * the cap or unpaid. Reads and deletes do not use this error.
+ * HTTP 423 `{ error: "workspace_lock", reason, overBy, unpaidWorkspaceIds }`
+ * on a write. Reads and deletes do not use this error.
+ * `reason` is one of over_cap, lapsed, over_cap_and_lapsed, scope_unavailable,
+ * merge_in_progress, matching the workspace-lock fixtures.
  */
 export class WorkspaceLockedError extends ApiError {
-  constructor() {
+  readonly reason: string;
+  readonly overBy: number;
+  readonly unpaidWorkspaceIds: readonly string[];
+
+  constructor(details: { reason?: string; overBy?: number; unpaidWorkspaceIds?: readonly string[] } = {}) {
     super(423, "workspace_lock", "Workspace is locked");
     this.name = "WorkspaceLockedError";
+    this.reason = details.reason ?? "";
+    this.overBy = details.overBy ?? 0;
+    this.unpaidWorkspaceIds = Object.freeze([...(details.unpaidWorkspaceIds ?? [])]);
   }
 }
 

@@ -23,14 +23,15 @@ export function AccountSurface(props: {
     const assessment: LockAssessment = props.assessment.locked
       ? props.assessment
       : { ...props.assessment, locked: true, uploadsBlocked: true, normalUseBlocked: true };
+    const lock = isWorkspaceLockError(props.error) ? props.error : undefined;
     return (
       <>
-        {isWorkspaceLockError(props.error) ? (
+        {lock ? (
           <div className="banner" data-testid="lock-from-server">
             Uploads are paused. Delete or merge workspaces to continue. Downloads still work.
           </div>
         ) : null}
-        <LockScreen assessment={assessment} workspaces={props.workspaces} onDelete={props.onDelete} />
+        <LockScreen assessment={assessment} workspaces={props.workspaces} onDelete={props.onDelete} lock={lock} />
       </>
     );
   }

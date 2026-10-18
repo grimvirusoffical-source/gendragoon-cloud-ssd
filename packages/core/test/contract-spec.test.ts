@@ -20,6 +20,7 @@ import {
   accountFromAssessment,
   applyApiFailure,
   applySortOverride,
+  byoErrorMessage,
   byoSecretId,
   categorize,
   deleteAccountAndWipe,
@@ -32,6 +33,7 @@ import {
   viewAfterFailure,
   workspaceKeyId,
 } from "../src/index.js";
+import { listServerFixtures, loadServerFixture } from "./fixtures/server/load.js";
 
 const json = (status: number, body: unknown) =>
   new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
@@ -107,17 +109,22 @@ describe("server-decided plan and lock are reflected, not recomputed", () => {
 });
 
 describe("423 workspace_lock maps to the delete/merge lock screen", () => {
+  const locks = listServerFixtures().filter((item) => item.area === "workspace-lock");
   for (const [label, call] of [
     ["create upload", (c: GenDragoonClient) => c.createUpload("w1", { name: "a.bin", sizeBytes: 1 } as never)],
     ["chunk", (c: GenDragoonClient) => c.uploadChunk("w1", "u1", 0, new Uint8Array([1]), "0".repeat(64))],
     ["finalize", (c: GenDragoonClient) => c.finalizeUpload("w1", "u1")],
   ] as const) {
-    it(`a 423 on ${label} becomes WorkspaceLockedError and enters delete_or_merge on the workspaces view`, async () => {
-      const err = await call(clientReturning(423, { error: "workspace_lock", reason: "over_cap", overBy: 3 })).catch((e) => e);
-      expect(err).toBeInstanceOf(WorkspaceLockedError);
-      expect(applyApiFailure(ready, err).phase).toBe("delete_or_merge");
-      expect(viewAfterFailure("files", err)).toBe("workspaces");
-    });
+    for (const lock of locks) {
+      it(`a 423 ${lock.name} on ${label} becomes WorkspaceLockedError and enters delete_or_merge`, async () => {
+        const body = lock.fixture.response.body as { reason: string; overBy: number; unpaidWorkspaceIds: string[] };
+        const err = await call(clientReturning(lock.fixture.response.status, body)).catch((e) => e);
+        expect(err).toBeInstanceOf(WorkspaceLockedError);
+        expect(err).toMatchObject({ reason: body.reason, overBy: body.overBy, unpaidWorkspaceIds: body.unpaidWorkspaceIds });
+        expect(applyApiFailure(ready, err).phase).toBe("delete_or_merge");
+        expect(viewAfterFailure("files", err)).toBe("workspaces");
+      });
+    }
   }
   it("reads and downloads stay allowed while locked; uploads are refused client-side", () => {
     expect(storageOperations({ intent: "download", oid: "f1", locked: true }).operations).toEqual([{ op: "download", oid: "f1" }]);
@@ -128,12 +135,19 @@ describe("423 workspace_lock maps to the delete/merge lock screen", () => {
 });
 
 describe("ownership: another account's workspace is 404", () => {
-  it("404 and legacy 403 PROJECT_FORBIDDEN both surface as NOT_FOUND", async () => {
-    for (const [status, code] of [[404, "PROJECT_NOT_FOUND"], [403, "PROJECT_FORBIDDEN"]] as const) {
-      const err = await clientReturning(status, { error: "x", code }).getProject("other").catch((e) => e);
-      expect(err).toMatchObject({ status: 404, code: "NOT_FOUND" });
-      expect(hidesWorkspaceExistence(err)).toBe(true);
-    }
+  it("404 PROJECT_NOT_FOUND from the ownership fixture surfaces as NOT_FOUND", async () => {
+    const fixture = loadServerFixture("ownership", "foreign-workspace");
+    const err = await clientReturning(fixture.response.status, fixture.response.body).getProject("other").catch((e) => e);
+    expect(err).toMatchObject({ status: 404, code: "NOT_FOUND" });
+    expect(hidesWorkspaceExistence(err)).toBe(true);
+  });
+
+  // PENDING FIXTURE: Riley's ownership export has 404 PROJECT_NOT_FOUND only.
+  // The legacy 403 PROJECT_FORBIDDEN body is not a server fixture.
+  it("PENDING FIXTURE: legacy 403 PROJECT_FORBIDDEN still hides existence", async () => {
+    const err = await clientReturning(403, { error: "Project access denied", code: "PROJECT_FORBIDDEN" }).getProject("other").catch((e) => e);
+    expect(err).toMatchObject({ status: 404, code: "NOT_FOUND" });
+    expect(hidesWorkspaceExistence(err)).toBe(true);
   });
 });
 
@@ -145,6 +159,7 @@ describe("merge naming", () => {
   });
 });
 
+// PENDING FIXTURE: deletion responses come from Morgan's PR #6 shapes until that area is exported.
 describe("delete account: DELETE /v2/account", () => {
   it("sends DELETE /v2/account and returns the 202 job id", async () => {
     const seen: string[] = [];
@@ -193,12 +208,16 @@ describe("BYO connect: S3-compatible only at launch", () => {
   it("TODO(contract): SFTP is 'Coming soon', not a launch provider (Avery's follow-up push)", () => {
     expect(isLaunchProvider("sftp")).toBe(false);
   });
-  it("TODO(contract): 422 byo_provider_unsupported and 409 byo_unverifiable map to user messages", async () => {
-    const toMessage = (core as Record<string, unknown>).byoErrorMessage as ((e: unknown) => string) | undefined;
-    expect(typeof toMessage).toBe("function");
-    const unsupported = await clientReturning(422, { error: "x", code: "byo_provider_unsupported" }).createByoChallenge("b1", {} as never).catch((e) => e);
-    const unverifiable = await clientReturning(409, { error: "x", code: "byo_unverifiable" }).createByoChallenge("b1", {} as never).catch((e) => e);
-    expect(toMessage!(unsupported)).toMatch(/coming soon|not supported/i);
-    expect(toMessage!(unverifiable)).toMatch(/verif/i);
+  it("422 byo_provider_unsupported from the register fixture maps to the coming-soon message", async () => {
+    const fixture = loadServerFixture("byo", "provider-unsupported");
+    const unsupported = await clientReturning(fixture.response.status, fixture.response.body)
+      .registerByo("b1", fixture.request.body as { provider: string; endpoint: string; bucketFingerprint: string })
+      .catch((e) => e);
+    expect(byoErrorMessage(unsupported)).toMatch(/coming soon|not supported/i);
+  });
+
+  // PENDING FIXTURE: 409 byo_unverifiable is not in Riley's BYO export.
+  it("PENDING FIXTURE: 409 byo_unverifiable keeps the fallback verification message", () => {
+    expect(byoErrorMessage(new ApiError(409, "byo_unverifiable", "x"))).toMatch(/verif/i);
   });
 });
