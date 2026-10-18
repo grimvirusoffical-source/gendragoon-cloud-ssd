@@ -14,7 +14,7 @@ Customers have logical workspaces inside one shared `CUSTOMER_BUCKET`. They do n
 
 ## Billing
 
-Caps, the monthly fee, grandfathering, and lapse are decided on the server. `packages/core` does not recompute them and does not include `feeIsOneTime` on client types. The client renders `GET /v2/access` and HTTP 423.
+Caps, the monthly fee, grandfathering, and lapse are decided on the server. `packages/core` does not recompute them and does not include `feeIsOneTime` on client types. The client renders lock fields on the workspace list and HTTP 423. There is no `/v2/access` route.
 
 `planSummary(access)` copies `activeCount` to `used`, `cap` to `limit`, and `locked`. It copies `paidThroughMs`, `renewsAtMs`, and `lifetime` only when the server sent them. It does not invent a grace period or a lifetime rule.
 
@@ -22,13 +22,13 @@ The live catalog still sells an extra project as a one-time activation (`additio
 
 ## Lock
 
-When `GET /v2/access` says the account is locked:
+When a workspace record or HTTP 423 says the account is locked:
 
 - Cloud data stays readable and downloadable. Deletes still succeed.
 - Writes return **HTTP 423** `{ "error": "workspace_lock", "reason", "overBy", "unpaidWorkspaceIds" }`. `reason` is `over_cap`, `lapsed`, `over_cap_and_lapsed`, `scope_unavailable`, or `merge_in_progress`. The client throws `WorkspaceLockedError` with those fields and the account state machine moves to delete-or-merge. The lock screen renders the fixture fields. It does not show that payload as a generic error.
 - The user deletes or merges until the next access payload is unlocked.
 
-Proposed `GET /v2/access` (also fine as fields on `GET /v2/workspaces`):
+Lock fields travel on `GET /v2/workspaces` (there is no `/v2/access`):
 
 ```json
 {
@@ -180,7 +180,7 @@ The URL must be non-empty. A missing or blank URL is sent as `{}` and is **400**
 2. The client hashes `provider + endpoint + bucket` into `bucketFingerprint` and calls `POST .../byo/register`. The bucket name itself is not stored on the server. A provider the server will not register returns 422 `byo_provider_unsupported`.
 3. `POST .../byo/challenge` returns `{ nonce, expiresAtMs, ttlMs }`. The client writes `.gendragoon-challenge/<nonce>` and creates a short-lived presigned GET on the device.
 4. `POST .../byo/verify` sends `{ presignedUrl }`. The workspace stays inactive on failure. Connecting the storage again repeats steps 2–4.
-5. The workspace fee and any performance add-on are whatever `GET /v2/access` reports. The provider's own permissions are only the challenge. Ownership of the GenDragoon workspace remains `accountHash`.
+5. The workspace fee and lock come from the workspace list and HTTP 423. There is no `/v2/access` route. The provider's own permissions are only the challenge. Ownership of the GenDragoon workspace remains `accountHash`.
 
 ## Managed bucket links
 
@@ -189,21 +189,23 @@ Clients never hold GCP credentials. After Firebase sign-in the backend checks th
 `POST /v2/workspaces/:id/storage-urls`
 
 ```json
-{ "operations": [{ "op": "upload", "oid": "<opaque>", "sizeBytes": 1024 }] }
+{ "op": "put", "objects": ["<opaque-id>"] }
 ```
 
-`op` is `upload`, `resumable`, `download`, or `delete`. The response is workspace-prefix scoped and expires in at most 15 minutes:
+`op` is `get`, `put`, or `delete`. The client maps an upload intent to `put` and a download intent to `get`. A manifest put sends `ifGeneration` as the exact decimal string from `urls[].generation`. `"0"` creates the object. The same string is the `x-goog-if-generation-match` header. The client does not parse it into a JavaScript number. The response is workspace-prefix scoped and expires in at most 15 minutes:
 
 ```json
 {
-  "prefix": "customers/<accountHash>/workspaces/<id>/",
+  "bucket": "gd-customer",
+  "prefix": "customer/<accountHash>/managed/<id>/objects/",
+  "mode": "write",
+  "op": "put",
   "expiresAt": "<iso, <= 15 min>",
-  "access": "read-write",
-  "links": [{ "op": "upload", "oid": "<opaque>", "method": "PUT", "url": "https://storage.googleapis.com/...", "expiresAt": "<iso>" }]
+  "urls": [{ "object": "<opaque-id>", "url": "https://storage.googleapis.com/...", "method": "PUT", "expiresAt": "<iso>", "generation": "42" }]
 }
 ```
 
-A locked workspace (over cap or unpaid) gets `access: "read-only"` and download links only. An upload or resumable request in that state is a write and returns HTTP 423 `workspace_lock`. The signed URL itself must be `https`, must not carry userinfo, and must contain `prefix`. The client then PUTs ciphertext to that URL with no `Authorization` header.
+A locked workspace gets `mode: "read"` and GET links only. A put or delete in that state is HTTP 423 `workspace_lock`. Get stays available. The signed URL must be `https`, must not carry userinfo, and must contain `prefix`. The client PUTs ciphertext to that URL with no `Authorization` header. The sealed manifest object id is the reserved string `manifest`. There is no resumable storage op.
 
 Object ids are random. Filenames live only in an AES-256-GCM manifest sealed with the per-workspace key. See `docs/SECURITY.md`.
 
@@ -217,9 +219,7 @@ Body, exactly:
 { "confirm": "DELETE" }
 ```
 
-The client does not send `reauthenticatedAt` or the ID token in that body. It still requires a Firebase sign-in whose `auth_time` claim is newer than 5 minutes. A refreshed token's `iat` does not count. If the last sign-in is older, the server returns **401** `{ "code": "reauth_required" }`. The client sends the user to sign in again and retries. It does not wipe local keys. A **401** with no error code follows that same path: the user goes to sign-in, any saved job id and status token stay in SecureStore, and local keys stay.
-
-A session that cannot be used returns **401** `{ "code": "invalid_token" }`. The client signs out and leaves local keys in place.
+The client does not send `reauthenticatedAt` or the ID token in that body. It still requires a Firebase sign-in whose `auth_time` claim is newer than 5 minutes. A refreshed token's `iat` does not count. If the last sign-in is older, the server returns **401** `{ "error": "reauth_required" }`. The client sends the user to sign in again and retries. It does not wipe local keys. A **401** with no error code follows that same path: the user goes to sign-in, any saved job id and status token stay in SecureStore, and local keys stay. When both `error` and `code` are present, a non-empty `error` is the machine code.
 
 Response **202**:
 
@@ -229,13 +229,17 @@ Response **202**:
 
 A repeat delete returns **410** `{ "error": "account_deleted", "jobId": "<id>", "statusToken": "<token>" }`. It does not return 401. The client polls that job id with the status token from the 410. It does not wipe local data because of the 410 itself.
 
-`GET /v2/account/deletions/:jobId` is the plural path. The client sends `Authorization: Bearer <statusToken>` and does not send the Firebase ID token on that poll. The job id and status token are stored in the injected SecureStore as soon as the 202 or 410 is accepted. A later launch calls `resumeAccountDeletion` and polls the saved job. It sends DELETE again only when SecureStore has no saved job id and status token. The client polls with backoff until the status is `done` or `failed`, or until a two-minute timeout. `queued` and `running` keep polling. `done` cancels every Stripe subscription, deletes managed-bucket objects, deletes the Firebase user and account records, and leaves BYO buckets untouched. The client wipes local workspace keys and BYO secrets only after `done`, then clears the saved job id and status token and signs out. `failed` stops without a wipe and clears the saved job. A **404** `{ "error": "not_found" }` while polling is a retryable error (`DeletionNotFoundError`). The saved job id and status token stay. They are cleared after `done` (which also wipes local keys) or when the user dismisses the job with `dismissAccountDeletion`. Settings uses a two-step confirm before this call.
+`GET /v2/account/deletions/:jobId` is the plural path. The job id and status token are opaque non-empty strings. A poll that has a saved status token sends `Authorization: Bearer <statusToken>`. A poll that is still using the owner's Firebase token sends that token instead. Both are stored in the injected SecureStore as soon as the 202 or 410 is accepted. A later launch calls `resumeAccountDeletion`, which polls the saved status token and does not send DELETE.
+
+`queued` and `running` keep polling. `done` wipes local workspace keys and BYO secrets, then clears the saved job. `failed` stops without a wipe and keeps the job. `retryable: true` offers Retry, which calls `retryDeletion` and sends DELETE again. A 202 with the same job id and a new status token replaces the saved token before polling resumes. `retryable: false`, or a repeat DELETE that returns **409** `{ "error": "deletion_not_retryable", "jobId" }`, surfaces `DeletionNotRetryableError` (it carries `jobId`) with `SUPPORT_CONTACT` (`{ value, isPlaceholder }`) and Dismiss. Dismiss calls `dismissDeletion` and clears the job without wiping. Any other status fails immediately as HTTP 409 `DELETION_STATUS_UNKNOWN`.
+
+A status GET that returns **401** `unauthorized`, `reauth_required`, a 401 with no code, or a status-token `invalid_token` stops, keeps the job, wipes nothing, and signals `onAuthFailure("reauth_required", error)`. After sign-in, `deleteAccountAndWipe` sends DELETE again, expects **410** `account_deleted` with the same job id and a fresh status token, saves that token, and resumes. The only sign-out is a Firebase-token poll that returns `invalid_token`: `onAuthFailure("signed_out", error)`, clear the session only, keep the job, and continue with the saved status token. Wipe still happens only on `done`. A **404** while polling is `DeletionNotFoundError` (`retryable: true`). The job stays. Retry after that 404 requires sign-in, then DELETE, then the fresh token from the 410. The only other DELETE while a job is saved is `retryDeletion`. Settings uses a two-step confirm before the first call.
 
 ## Workspace key envelope
 
 `GET /v2/workspaces/:id/key-envelope` and `PUT /v2/workspaces/:id/key-envelope`.
 
-The device that creates the workspace generates one random 256-bit workspace key. It derives a KEK from a recovery passphrase with Argon2id (scrypt if Argon2id throws) and wraps the key with AES-256-GCM. The envelope stores `version`, `kdf`, `salt`, `opsLimit`, `memLimit`, `iv`, and `wrappedKey`. The passphrase and the raw key stay off the server. A new device asks for the passphrase once, unwraps the key, and caches it in the OS keychain. Losing the passphrase loses the files. Per-file keys are wrapped by the workspace key. Filenames, wrapped keys, and sizes live in a sealed manifest. File bytes use chunked AES-GCM with one random nonce per chunk and the chunk index as additional data.
+The device that creates the workspace generates one random 256-bit workspace key and uploads the envelope with `If-None-Match: *`. The key is written to SecureStore only after HTTP 201. HTTP 409 `envelope_exists` means another device created it: the client fetches that envelope, unwraps it with the passphrase, adopts that key, and does not PUT again. An update sends `If-Match: "<version>"` with the next version. HTTP 412 `version_mismatch` refetches and re-wraps the same key. The workspace key does not change after it is created. The wire record is `{version, kdf, salt, iv, wrappedKey}`. `kdf` is `{alg:"argon2id", memoryKiB, iterations, parallelism}` or `{alg:"scrypt", N, r, p}`. `memoryKiB` is the libsodium byte limit divided by 1024, and `iterations` is the libsodium ops limit. The client rejects `memoryKiB` above 1048576 or `iterations` above 10 before deriving. Scrypt is used only when `alg` is `scrypt`. `salt`, `iv`, and `wrappedKey` are encoded as unpadded base64url. Decoding accepts that form and standard base64, with or without padding. `salt` is 16–64 bytes, `iv` is 12–32 bytes, and `wrappedKey` is at least 32 bytes. A bad field is HTTP 422 `envelope_invalid`. Scrypt `N` below 2, or `N` that is not a power of two, is rejected before derivation as HTTP 422 `kdf_params_invalid`. Per-file keys are wrapped by the workspace key. Filenames, wrapped keys, sizes, `chunkCount`, and `totalSize` live in a sealed manifest object named `manifest`. File bytes use chunked AES-GCM. Additional data binds the file id, the object id, the chunk index, the total chunk count, and a final-chunk flag. A replacement writes the new chunks, commits the manifest, and only then deletes the old objects.
 
 ## What the Windows client does not send
 

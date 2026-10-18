@@ -5,7 +5,7 @@
  */
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { ApiError, GenDragoonClient, WorkspaceLockedError, byoErrorMessage } from "../src/index.js";
+import { ApiError, DeletionNotRetryableError, GenDragoonClient, InvalidTokenError, ReauthRequiredError, WorkspaceLockedError, assertKeyEnvelope, byoErrorMessage } from "../src/index.js";
 import { listServerFixtures, loadServerFixture, type ServerFixture } from "./fixtures/server/load.js";
 
 const source = JSON.parse(readFileSync(new URL("./fixtures/server/SOURCE.json", import.meta.url), "utf8")) as {
@@ -70,14 +70,26 @@ describe("vendored server fixtures", () => {
   });
 
   const cases = listServerFixtures();
-  it("covers lock, workspaces, merge, byo, and ownership", () => {
+  it("covers lock, workspaces, merge, byo, ownership, deletion, storage-urls, and key-envelope", () => {
     expect(new Set(cases.map((item) => item.area))).toEqual(new Set([
       "workspace-lock",
       "workspaces",
       "merge",
       "byo",
       "ownership",
+      "account-deletion",
+      "storage-urls",
+      "key-envelope",
+      "errors",
     ]));
+  });
+
+  it("records the later fixture commits", () => {
+    const sources = (source as { sources?: { commit: string }[] }).sources ?? [];
+    const commits = sources.map((item) => item.commit);
+    expect(commits).toContain("9d0f056430450fa97ae513181c9fd48852fd63bf");
+    expect(commits).toContain("8267784a790bbe8418b3cbe36e8a4b91849b0e81");
+    expect(commits).toContain("24fba029b6674ee4410ececec11b0935ba713960");
   });
 
   it("a blank presignedUrl is omitted and verify-missing-url is presigned_url_required", async () => {
@@ -104,7 +116,43 @@ describe("vendored server fixtures", () => {
     expect(error).toMatchObject({ status: 422, code: "byo_provider_unsupported" });
   });
 
-  for (const { area, name, fixture } of cases) {
+  it("retry-after-failed keeps a non-empty status token and retry-not-retryable carries jobId", async () => {
+    const retry = loadServerFixture("account-deletion", "retry-after-failed");
+    const { client } = clientFor(retry);
+    const accepted = await client.deleteAccount({ reauthenticatedAt: new Date().toISOString() });
+    expect(accepted.jobId).toBe((retry.response.body as { jobId: string }).jobId);
+    expect(accepted.statusToken).toBe("<redacted>");
+    expect(accepted.statusToken && accepted.statusToken.length > 0).toBe(true);
+    const denied = loadServerFixture("account-deletion", "retry-not-retryable");
+    const error = await clientFor(denied).client.deleteAccount({ reauthenticatedAt: new Date().toISOString() }).catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(DeletionNotRetryableError);
+    expect(error).toMatchObject({ status: 409, code: "deletion_not_retryable", jobId: (denied.response.body as { jobId: string }).jobId });
+  });
+
+  it("status-invalid-token is a Firebase invalid_token and status-unauthorized is not sign-out", async () => {
+    const invalid = loadServerFixture("account-deletion", "status-invalid-token");
+    const jobId = invalid.request.path.split("/").pop() ?? "";
+    const invalidError = await clientFor(invalid).client.deletionStatus(jobId).catch((caught: unknown) => caught);
+    expect(invalidError).toBeInstanceOf(InvalidTokenError);
+    const unauthorized = loadServerFixture("account-deletion", "status-unauthorized");
+    const unauthorizedError = await clientFor(unauthorized).client.deletionStatus(jobId).catch((caught: unknown) => caught);
+    expect(unauthorizedError).toBeInstanceOf(ApiError);
+    expect(unauthorizedError).not.toBeInstanceOf(InvalidTokenError);
+    expect(unauthorizedError).not.toBeInstanceOf(ReauthRequiredError);
+    expect(unauthorizedError).toMatchObject({ status: 401, code: "unauthorized" });
+  });
+
+  it("payload-too-large is HTTP 413 and short salt or iv is envelope_invalid", async () => {
+    const tooLarge = loadServerFixture("errors", "payload-too-large");
+    expect(tooLarge.response).toEqual({ status: 413, body: { error: "payload_too_large" } });
+    const error = await clientFor(tooLarge).client.deleteAccount({ reauthenticatedAt: new Date().toISOString() }).catch((caught: unknown) => caught);
+    expect(error).toMatchObject({ status: 413, code: "payload_too_large" });
+    expect(() => assertKeyEnvelope(loadServerFixture("key-envelope", "salt-wrong-length").request.body)).toThrow(expect.objectContaining({ code: "envelope_invalid" }));
+    expect(() => assertKeyEnvelope(loadServerFixture("key-envelope", "iv-wrong-length").request.body)).toThrow(expect.objectContaining({ code: "envelope_invalid" }));
+  });
+
+  const driven = new Set(["workspace-lock", "workspaces", "merge", "byo", "ownership"]);
+  for (const { area, name, fixture } of cases.filter((item) => driven.has(item.area))) {
     it(`${area}/${name} is sent and read as the fixture`, async () => {
       const { client, seen } = clientFor(fixture);
       let result: unknown;

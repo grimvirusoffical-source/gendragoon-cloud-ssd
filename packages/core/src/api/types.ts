@@ -244,33 +244,39 @@ export interface AccessResponse {
   lifetime?: boolean;
 }
 
-export type StorageOp = "upload" | "download" | "resumable" | "delete";
-export type StorageAccess = "read-write" | "read-only";
+export type StorageOp = "get" | "put" | "delete";
+export type StorageMode = "read" | "write" | "delete";
 
-/** POST /v2/workspaces/:id/storage-urls. Object ids only. No names, keys, or GCP credentials. */
-export interface StorageOperation {
-  op: StorageOp;
-  oid: string;
-  sizeBytes?: number;
-}
-
+/**
+ * POST /v2/workspaces/:id/storage-urls.
+ * `{ op, objects }` only. Object ids are opaque. No names, keys, or GCP credentials.
+ * A manifest put sends `ifGeneration` as the exact decimal string from
+ * `urls[].generation`. `"0"` creates the object. It is never a JavaScript number.
+ */
 export interface StorageUrlRequest {
-  operations: StorageOperation[];
+  op: StorageOp;
+  objects: string[];
+  ifGeneration?: string;
 }
 
-export interface StorageLink {
-  op: StorageOp;
-  oid: string;
-  method: "GET" | "PUT" | "POST" | "DELETE";
+/** Signed object URL. Older probes call this a storage link. */
+export type StorageLink = StorageObjectUrl;
+
+export interface StorageObjectUrl {
+  object: string;
   url: string;
+  method: "GET" | "PUT" | "DELETE";
   expiresAt: string;
+  generation?: string;
 }
 
 export interface StorageUrlResponse {
+  bucket?: string;
   prefix: string;
+  mode: StorageMode;
+  op: StorageOp;
   expiresAt: string;
-  access: StorageAccess;
-  links: StorageLink[];
+  urls: StorageObjectUrl[];
 }
 
 /**
@@ -293,21 +299,40 @@ export interface DeleteAccountAccepted {
 
 export interface AccountDeletionStatus {
   jobId: string;
-  status: "accepted" | "running" | "succeeded" | "done" | "failed";
+  status: "queued" | "running" | "done" | "failed" | (string & {});
   stripeSubscriptionsCancelled?: number;
   managedObjectsDeleted?: number;
   byoWorkspacesLeftIntact?: number;
   firebaseUserDeleted?: boolean;
   confirmation?: string;
+  /** Present on `failed`. Retry is offered only when this is true. */
+  retryable?: boolean;
 }
 
-/** PUT/GET /v2/workspaces/:id/key-envelope. No passphrase and no raw key. */
+/** Argon2id parameters on the wire. `memoryKiB` is libsodium's byte memLimit / 1024. `iterations` is opsLimit. */
+export interface Argon2idKdf {
+  alg: "argon2id";
+  memoryKiB: number;
+  iterations: number;
+  parallelism: number;
+}
+
+/** Scrypt parameters. Used only when `alg` is `scrypt`. */
+export interface ScryptKdf {
+  alg: "scrypt";
+  N: number;
+  r: number;
+  p: number;
+}
+
+/**
+ * PUT/GET /v2/workspaces/:id/key-envelope.
+ * salt, iv, and wrappedKey are base64url. No passphrase and no raw key.
+ */
 export interface KeyEnvelope {
-  version: 1;
-  kdf: "argon2id" | "scrypt";
+  version: number;
+  kdf: Argon2idKdf | ScryptKdf;
   salt: string;
-  opsLimit: number;
-  memLimit: number;
   iv: string;
   wrappedKey: string;
 }

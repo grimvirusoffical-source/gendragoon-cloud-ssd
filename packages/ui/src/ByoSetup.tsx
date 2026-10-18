@@ -2,13 +2,14 @@ import { COMING_SOON_BYO_PROVIDERS, LAUNCH_BYO_PROVIDERS, type ByoProviderId } f
 import { useState } from "react";
 
 export function ByoSetup(props: {
-  onChallenge: (input: { provider: ByoProviderId; endpoint: string; bucket: string }) => void;
+  onChallenge: (input: { provider: ByoProviderId; endpoint: string; bucket: string; accessKeyId?: string; secretAccessKey?: string }) => void;
   onStoreSecret?: (secret: string) => void;
   message: string | null;
 }) {
   const [provider, setProvider] = useState<ByoProviderId>("r2");
   const [endpoint, setEndpoint] = useState("https://example.r2.cloudflarestorage.com");
   const [bucket, setBucket] = useState("library");
+  const [accessKeyId, setAccessKeyId] = useState("");
   const [secret, setSecret] = useState("");
   return (
     <section data-testid="byo-setup">
@@ -50,7 +51,10 @@ export function ByoSetup(props: {
         <label className="field">Bucket
           <input data-testid="byo-bucket" value={bucket} onChange={(event) => setBucket(event.target.value)} />
         </label>
-        <label className="field">Access key
+        <label className="field">Access Key ID
+          <input data-testid="byo-access-key-id" autoComplete="off" value={accessKeyId} onChange={(event) => setAccessKeyId(event.target.value)} />
+        </label>
+        <label className="field">Secret Access Key
           <input data-testid="byo-secret" type="password" placeholder="Stored only in the OS keychain" autoComplete="off" value={secret} onChange={(event) => setSecret(event.target.value)} />
         </label>
         <p className="help">
@@ -63,7 +67,7 @@ export function ByoSetup(props: {
             data-testid="byo-challenge"
             onClick={() => {
               if (secret) props.onStoreSecret?.(secret);
-              props.onChallenge({ provider, endpoint, bucket });
+              props.onChallenge({ provider, endpoint, bucket, accessKeyId, secretAccessKey: secret });
             }}
           >
             Verify ownership

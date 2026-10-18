@@ -1,4 +1,4 @@
-import { AccountDeletedError, ApiError, DeletionNotFoundError, ReauthRequiredError, WorkspaceLockedError } from "./api/errors.js";
+import { AccountDeletedError, ApiError, DeletionNotFoundError, ReauthRequiredError, WorkspaceLockedError, isInvalidToken } from "./api/errors.js";
 import type { AccountDeletionStatus } from "./api/types.js";
 import type { LockAssessment } from "./policy.js";
 import { wipeWorkspaceKeys, type SecretStore, type SecureStore } from "./seal.js";
@@ -76,9 +76,13 @@ const DELETION_BACKOFF_MS = [250, 500, 1000, 2000, 4000, 8000];
 const DELETION_TIMEOUT_MS = 120_000;
 const DELETION_JOB_KEY = "account-deletion:job-id";
 const DELETION_TOKEN_KEY = "account-deletion:status-token";
+const DELETION_RECOVERY_KEY = "account-deletion:needs-token-recovery";
 
-function deletionFinished(status: AccountDeletionStatus["status"]): boolean {
-  return status === "done" || status === "failed";
+/** Shell hook while a deletion poll is still running. */
+export type DeletionAuthSignal = "signed_out" | "reauth_required";
+
+function deletionContinues(status: string | undefined): boolean {
+  return status === "queued" || status === "running";
 }
 
 interface DeletionClient {
@@ -94,44 +98,85 @@ interface DeletionJob {
 /**
  * Accepts DELETE /v2/account, then polls GET /v2/account/deletions/:jobId
  * until the job is `done` or `failed`, or the timeout is reached.
- * Local keys are removed only after `done`. A 401 (`reauth_required`,
- * `invalid_token`, or a 401 with no error code) leaves them in place and
- * leaves any saved job id and status token in SecureStore. A 401 with no
- * error code sends the user to sign in, the same as `reauth_required`.
- * A 404 while polling surfaces `DeletionNotFoundError` (`retryable`) and
- * keeps the saved job. The saved job is cleared after `done`, after
- * `failed`, or when the user calls `dismissAccountDeletion`.
- * A repeat delete that returns 410 `account_deleted` is polled by the job
- * id in that body and does not wipe on the 410 itself.
- * When SecureStore already has a job id and status token, that job is polled
- * and DELETE is not sent again. A repeat DELETE returns 410, never 401.
+ * Local keys are removed only after `done`. The saved job is cleared only
+ * after `done` or `dismissDeletion`. `failed` keeps the job and does not wipe.
+ * A statusToken poll that returns `invalid_token` stops, keeps the job, and
+ * signals `reauth_required`. A Firebase-token poll that returns `invalid_token`
+ * signals `signed_out`, keeps the job, and continues with the saved statusToken.
+ * DELETE is sent again only by `retryDeletion` (failed + retryable) and by
+ * this function after sign-in when the saved status token was rejected or the
+ * status poll returned 404.
  */
-export async function deleteAccountAndWipe(input: {
-  client: DeletionClient;
-  reauthenticatedAt: string;
-  idToken?: string;
-  workspaceIds: readonly string[];
-  secrets: SecretStore;
-  secureStore?: SecureStore;
-  now?: number;
-  sleep?: (ms: number) => Promise<void>;
-  timeoutMs?: number;
-  backoffMs?: readonly number[];
-}): Promise<AccountDeletionStatus> {
+export async function deleteAccountAndWipe(input: DeletionRunInput): Promise<AccountDeletionStatus> {
   const saved = await loadDeletionJob(input.secureStore);
-  const job = saved ?? await startDeletion(input);
+  const recover = await loadRecovery(input.secureStore);
+  let job: DeletionJob;
+  let credential: PollCredential = "status";
+  if (!saved) {
+    job = await startDeletion(input).catch(async (error: unknown) => {
+      if (isInvalidToken(error)) {
+        await input.onAuthFailure?.("signed_out", error);
+        await input.clearSession?.();
+      }
+      throw error;
+    });
+  } else if (recover || !input.onAuthFailure) {
+    // Sign-in recovery: the status token was rejected or the status was 404,
+    // or the caller is repeating DELETE after signing in.
+    const fresh = await startDeletion(input).catch(async (error: unknown) => {
+      if (isInvalidToken(error)) {
+        await input.onAuthFailure?.("signed_out", error);
+        await input.clearSession?.();
+      }
+      throw error;
+    });
+    if (fresh.jobId !== saved.jobId) {
+      throw new ApiError(409, "DELETION_JOB_MISMATCH", "The server did not resume the saved deletion job");
+    }
+    if (!fresh.statusToken) {
+      throw new ApiError(502, "DELETION_UNCONFIRMED", "Account deletion did not return a status token");
+    }
+    job = { jobId: saved.jobId, statusToken: fresh.statusToken };
+    await clearRecovery(input.secureStore);
+  } else {
+    job = saved;
+    credential = "firebase";
+  }
   if (input.secureStore && job.statusToken) {
     await saveDeletionJob(input.secureStore, job.jobId, job.statusToken);
   }
   return pollDeletion({
+    ...pollInput(input),
     client: input.client,
     job,
-    workspaceIds: input.workspaceIds,
-    secrets: input.secrets,
-    secureStore: input.secureStore,
-    sleep: input.sleep ?? ((ms: number) => new Promise((resolve) => setTimeout(resolve, ms))),
-    timeoutMs: input.timeoutMs ?? DELETION_TIMEOUT_MS,
-    backoffMs: input.backoffMs ?? DELETION_BACKOFF_MS,
+    credential,
+  });
+}
+
+/**
+ * Repeat DELETE for a saved job that failed with `retryable: true`.
+ * HTTP 202 keeps the same job id, stores the new statusToken, and resumes polling.
+ * HTTP 409 `deletion_not_retryable` keeps the saved job and does not wipe.
+ */
+export async function retryDeletion(input: DeletionRunInput): Promise<AccountDeletionStatus> {
+  const saved = await loadDeletionJob(input.secureStore);
+  if (!saved?.statusToken || !input.secureStore) {
+    throw new ApiError(409, "DELETION_JOB_MISSING", "There is no saved account deletion to retry");
+  }
+  const fresh = await startDeletion(input);
+  if (fresh.jobId !== saved.jobId) {
+    throw new ApiError(409, "DELETION_JOB_MISMATCH", "The server did not resume the saved deletion job");
+  }
+  if (!fresh.statusToken) {
+    throw new ApiError(502, "DELETION_UNCONFIRMED", "Account deletion did not return a status token");
+  }
+  const job = { jobId: saved.jobId, statusToken: fresh.statusToken };
+  await saveDeletionJob(input.secureStore, job.jobId, job.statusToken);
+  return pollDeletion({
+    ...pollInput(input),
+    client: input.client,
+    job,
+    credential: "status",
   });
 }
 
@@ -149,18 +194,16 @@ export async function resumeAccountDeletion(input: {
   sleep?: (ms: number) => Promise<void>;
   timeoutMs?: number;
   backoffMs?: readonly number[];
+  clearSession?: () => Promise<void> | void;
+  onAuthFailure?: (signal: DeletionAuthSignal, error: unknown) => void;
 }): Promise<AccountDeletionStatus | null> {
   const saved = await loadDeletionJob(input.secureStore);
   if (!saved?.statusToken) return null;
   return pollDeletion({
+    ...pollInput(input),
     client: input.client,
     job: saved,
-    workspaceIds: input.workspaceIds,
-    secrets: input.secrets,
-    secureStore: input.secureStore,
-    sleep: input.sleep ?? ((ms: number) => new Promise((resolve) => setTimeout(resolve, ms))),
-    timeoutMs: input.timeoutMs ?? DELETION_TIMEOUT_MS,
-    backoffMs: input.backoffMs ?? DELETION_BACKOFF_MS,
+    credential: "status",
   });
 }
 
@@ -178,32 +221,103 @@ async function startDeletion(input: {
   return acceptDeletion(input.client, { reauthenticatedAt: at, idToken: input.idToken });
 }
 
+type PollCredential = "firebase" | "status";
+
+interface DeletionRunInput {
+  client: DeletionClient;
+  reauthenticatedAt: string;
+  idToken?: string;
+  workspaceIds: readonly string[];
+  secrets: SecretStore;
+  secureStore?: SecureStore;
+  now?: number;
+  sleep?: (ms: number) => Promise<void>;
+  timeoutMs?: number;
+  backoffMs?: readonly number[];
+  /** Clears the Firebase session only. The saved deletion job stays. */
+  clearSession?: () => Promise<void> | void;
+  /** Called without aborting the poll. `signed_out` continues with the statusToken. */
+  onAuthFailure?: (signal: DeletionAuthSignal, error: unknown) => void;
+}
+
+function pollInput(input: DeletionRunInput | {
+  workspaceIds: readonly string[];
+  secrets: SecretStore;
+  secureStore?: SecureStore;
+  sleep?: (ms: number) => Promise<void>;
+  timeoutMs?: number;
+  backoffMs?: readonly number[];
+  clearSession?: () => Promise<void> | void;
+  onAuthFailure?: (signal: DeletionAuthSignal, error: unknown) => void;
+}): Omit<Parameters<typeof pollDeletion>[0], "client" | "job" | "credential"> {
+  return {
+    workspaceIds: input.workspaceIds,
+    secrets: input.secrets,
+    secureStore: input.secureStore,
+    sleep: input.sleep ?? ((ms: number) => new Promise((resolve) => setTimeout(resolve, ms))),
+    timeoutMs: input.timeoutMs ?? DELETION_TIMEOUT_MS,
+    backoffMs: input.backoffMs ?? DELETION_BACKOFF_MS,
+    clearSession: input.clearSession,
+    onAuthFailure: input.onAuthFailure,
+  };
+}
+
 async function pollDeletion(input: {
   client: {
     deletionStatus(jobId: string, statusToken?: string): Promise<AccountDeletionStatus>;
   };
   job: DeletionJob;
+  credential: PollCredential;
   workspaceIds: readonly string[];
   secrets: SecretStore;
   secureStore?: SecureStore;
   sleep: (ms: number) => Promise<void>;
   timeoutMs: number;
   backoffMs: readonly number[];
+  clearSession?: () => Promise<void> | void;
+  onAuthFailure?: (signal: DeletionAuthSignal, error: unknown) => void;
 }): Promise<AccountDeletionStatus> {
   let waited = 0;
   let attempt = 0;
-  let latest: AccountDeletionStatus;
+  let credential = input.credential;
+  let switchedToStatus = false;
+  let latest: AccountDeletionStatus | undefined;
   for (;;) {
     try {
-      latest = input.job.statusToken
+      const useStatus = credential === "status" && !!input.job.statusToken;
+      latest = useStatus
         ? await input.client.deletionStatus(input.job.jobId, input.job.statusToken)
         : await input.client.deletionStatus(input.job.jobId);
     } catch (error) {
-      // 404 keeps the saved job. 401 (including a body with no error code) does too.
-      if (error instanceof ApiError && error.status === 404) throw new DeletionNotFoundError();
+      latest = undefined;
+      if (error instanceof ApiError && error.status === 404) {
+        await markRecovery(input.secureStore);
+        throw new DeletionNotFoundError();
+      }
+      // Only a Firebase-token invalid_token signs out. Polling then continues
+      // with the saved status token. Every other status-GET 401 asks for sign-in.
+      if (isInvalidToken(error) && credential !== "status") {
+        await input.onAuthFailure?.("signed_out", error);
+        await input.clearSession?.();
+        if (input.job.statusToken && !switchedToStatus) {
+          credential = "status";
+          switchedToStatus = true;
+          continue;
+        }
+        throw error;
+      }
+      if (error instanceof ApiError && error.status === 401) {
+        await markRecovery(input.secureStore);
+        const reauth = credential === "status" && isInvalidToken(error) ? new ReauthRequiredError() : error;
+        await input.onAuthFailure?.("reauth_required", reauth);
+        throw reauth;
+      }
       throw error;
     }
-    if (deletionFinished(latest.status)) break;
+    if (latest && (latest.status === "done" || latest.status === "failed")) break;
+    if (latest && !deletionContinues(latest.status)) {
+      throw new ApiError(409, "DELETION_STATUS_UNKNOWN", "Account deletion status is not recognized");
+    }
     const wait = input.backoffMs[Math.min(attempt, input.backoffMs.length - 1)] ?? input.backoffMs[input.backoffMs.length - 1] ?? 8000;
     attempt += 1;
     if (waited + wait > input.timeoutMs) {
@@ -212,10 +326,9 @@ async function pollDeletion(input: {
     await input.sleep(wait);
     waited += wait;
   }
+  if (!latest) throw new ApiError(504, "DELETION_TIMEOUT", "Account deletion did not finish before the timeout");
   if (latest.status === "done") {
     await wipeWorkspaceKeys(input.secrets, input.workspaceIds);
-  }
-  if (latest.status === "done" || latest.status === "failed") {
     await clearDeletionJob(input.secureStore);
   }
   return latest;
@@ -255,14 +368,35 @@ async function clearDeletionJob(store?: SecureStore): Promise<void> {
   if (!store) return;
   await store.delete(DELETION_JOB_KEY);
   await store.delete(DELETION_TOKEN_KEY);
+  await store.delete(DELETION_RECOVERY_KEY);
+}
+
+async function markRecovery(store?: SecureStore): Promise<void> {
+  if (!store) return;
+  await store.set(DELETION_RECOVERY_KEY, new TextEncoder().encode("1"));
+}
+
+async function clearRecovery(store?: SecureStore): Promise<void> {
+  if (!store) return;
+  await store.delete(DELETION_RECOVERY_KEY);
+}
+
+async function loadRecovery(store?: SecureStore): Promise<boolean> {
+  if (!store) return false;
+  return decodeSecret(await store.get(DELETION_RECOVERY_KEY)) !== null;
 }
 
 /**
  * Forget a saved deletion job without wiping workspace keys or BYO secrets.
- * Used when the user dismisses a retryable poll failure such as HTTP 404.
+ * Used when the user dismisses a failed or retryable deletion.
  */
-export async function dismissAccountDeletion(store: SecureStore): Promise<void> {
+export async function dismissDeletion(store: SecureStore): Promise<void> {
   await clearDeletionJob(store);
+}
+
+/** Same as `dismissDeletion`. */
+export async function dismissAccountDeletion(store: SecureStore): Promise<void> {
+  await dismissDeletion(store);
 }
 
 function decodeSecret(value: unknown): string | null {

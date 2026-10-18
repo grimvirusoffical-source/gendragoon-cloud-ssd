@@ -14,5 +14,16 @@ export {
 } from "./github.js";
 export type { GitHubAsset, GitHubRelease, FeedConfig, FetchLike } from "./github.js";
 
-export { ChecksumError, verifySha256, runUpdate, settleHealth, relaunchIfIdle } from "./update.js";
+export {
+  ChecksumError,
+  HEALTH_WINDOW_MS,
+  NSIS_SILENT_ARGS,
+  publicReleaseFeed,
+  relaunchIfIdle,
+  runUpdate,
+  settleHealth,
+  silentInstallPlan,
+  updateWouldLoop,
+  verifySha256,
+} from "./update.js";
 export type { InstalledVersion, UpdateOutcome, UpdateHooks } from "./update.js";

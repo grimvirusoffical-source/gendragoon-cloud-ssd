@@ -1,7 +1,7 @@
-import { WorkspaceLockedError } from "./api/errors.js";
-import type { StorageLink, StorageUrlRequest, StorageUrlResponse } from "./api/types.js";
+import { ApiError, WorkspaceLockedError } from "./api/errors.js";
+import type { StorageObjectUrl, StorageUrlRequest, StorageUrlResponse } from "./api/types.js";
 
-/** Backend owner cap for V4 and resumable session URLs. */
+/** Backend owner cap for V4 signed URLs. */
 export const SIGNED_URL_MAX_MS = 15 * 60 * 1000;
 
 /** DELETE /v2/account accepts a Firebase re-auth newer than this. */
@@ -64,56 +64,75 @@ function decodeJwtPayload(token: string): IdTokenClaims | null {
 }
 
 /**
- * Locked accounts may ask for download links only. Upload and resumable
- * session URLs are writes; the server answers those with HTTP 423.
+ * Locked accounts may ask for download links only.
+ * Put and delete are writes. There is no resumable op.
+ * A manifest put always sends `ifGeneration` as a decimal string. The first save sends `"0"`.
  */
+export function canonicalGeneration(value: string): boolean {
+  return /^(0|[1-9][0-9]*)$/.test(value);
+}
+
 export function storageOperations(input: {
-  intent: "upload" | "download" | "delete";
+  intent: "upload" | "download" | "delete" | "get" | "put";
   oid: string;
-  sizeBytes?: number;
   locked: boolean;
+  /** Ignored on the wire. Callers still pass the plaintext size. */
+  sizeBytes?: number;
+  ifGeneration?: string;
 }): StorageUrlRequest {
   if (!input.oid || input.oid.includes("/") || input.oid.includes("..")) {
     throw new Error("Object id must stay inside the workspace prefix");
   }
-  if (input.locked && input.intent === "upload") throw new WorkspaceLockedError();
-  if (input.intent === "download" || input.locked) {
-    return { operations: [{ op: "download", oid: input.oid }] };
+  const op = input.intent === "upload" ? "put" : input.intent === "download" ? "get" : input.intent;
+  if (input.locked && (op === "put" || op === "delete")) throw new WorkspaceLockedError();
+  const request: StorageUrlRequest = { op, objects: [input.oid] };
+  if (input.oid === "manifest") {
+    const generation = input.ifGeneration ?? "0";
+    if (!canonicalGeneration(generation)) {
+      throw new Error("Manifest generation must be a non-negative decimal string");
+    }
+    request.ifGeneration = generation;
+  } else if (input.ifGeneration !== undefined) {
+    if (!canonicalGeneration(input.ifGeneration)) {
+      throw new Error("Manifest generation must be a non-negative decimal string");
+    }
+    request.ifGeneration = input.ifGeneration;
   }
-  if (input.intent === "delete") return { operations: [{ op: "delete", oid: input.oid }] };
-  return {
-    operations: [
-      { op: "upload", oid: input.oid, sizeBytes: input.sizeBytes },
-      { op: "resumable", oid: input.oid, sizeBytes: input.sizeBytes },
-    ],
-  };
+  return request;
 }
 
 export function assertStorageUrlResponse(response: StorageUrlResponse, now = Date.now()): void {
   if (!response || typeof response.prefix !== "string" || !response.prefix || response.prefix.includes("..")) {
     throw new Error("Storage links are missing a workspace prefix");
   }
-  assertFresh(response.expiresAt, now);
-  if (response.access !== "read-write" && response.access !== "read-only") {
+  if (response.mode !== "read" && response.mode !== "write" && response.mode !== "delete") {
     throw new Error("Storage link access is not recognized");
   }
-  if (!Array.isArray(response.links)) throw new Error("Storage links are missing");
-  for (const link of response.links) {
+  if (response.op !== "get" && response.op !== "put" && response.op !== "delete") {
+    throw new Error("Storage link access is not recognized");
+  }
+  assertFresh(response.expiresAt, now);
+  if (!Array.isArray(response.urls) || response.urls.length === 0) throw new Error("Storage links are missing");
+  for (const link of response.urls) {
     assertFresh(link.expiresAt, now);
     assertScopedUrl(link.url, response.prefix);
-    if (response.access === "read-only" && link.op !== "download") {
+    if (!link.object) throw new Error("Storage links are missing");
+    if (response.mode === "read" && link.method !== "GET") {
       throw new Error("Locked workspace storage links are download-only");
+    }
+    if (link.method !== "GET" && link.method !== "PUT" && link.method !== "DELETE") {
+      throw new Error("Storage link access is not recognized");
     }
   }
 }
 
-/** PUT or POST ciphertext to a signed URL. No Authorization header and no key material. */
+/** PUT ciphertext to a signed URL. No Authorization header and no key material. */
 export async function putSignedObject(
-  link: StorageLink,
+  link: StorageObjectUrl,
   bytes: Uint8Array,
   fetchImpl: typeof fetch = fetch,
 ): Promise<void> {
-  if (link.op !== "upload" && link.op !== "resumable") {
+  if (link.method !== "PUT") {
     throw new Error("Download links cannot accept uploads");
   }
   let response: Response;
@@ -121,6 +140,9 @@ export async function putSignedObject(
     response = await fetchImpl(link.url, { method: link.method, body: bytes });
   } catch {
     throw new Error("Signed upload failed");
+  }
+  if (response.status === 412) {
+    throw new ApiError(412, "stale_generation", "The manifest generation changed. Fetch it and merge before writing again.");
   }
   if (!response.ok) throw new Error("Signed upload failed");
 }

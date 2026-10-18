@@ -1,4 +1,4 @@
-import { parseReleaseManifest, type ReleaseManifest } from "./manifest.js";
+import { isPrerelease, manifestChannel, parseReleaseManifest, type ReleaseManifest, type UpdateChannel } from "./manifest.js";
 
 export interface GitHubAsset {
   name: string;
@@ -24,6 +24,8 @@ export interface FeedConfig {
    * The token must never be logged, bundled, or written into a manifest.
    */
   readToken?: () => Promise<string | undefined>;
+  /** Public feeds use `stable` and do not pass a token. Prereleases are omitted. */
+  channel?: UpdateChannel;
 }
 
 export interface FetchLike {
@@ -92,7 +94,11 @@ export async function fetchReleaseManifests(config: FeedConfig, deps: FetchLike 
   if (!response.ok) throw new Error(`GitHub releases request failed (${response.status})`);
   const releases = (await response.json()) as GitHubRelease[];
   const checksums = await loadChecksums(releases, fetchImpl);
-  return manifestsFromGitHub(releases, config.assetPattern, checksums);
+  const manifests = manifestsFromGitHub(releases, config.assetPattern, checksums);
+  if (config.channel === "stable") {
+    return manifests.filter((manifest) => manifestChannel(manifest) === "stable" && !isPrerelease(manifest.version));
+  }
+  return manifests;
 }
 
 async function loadChecksums(releases: readonly GitHubRelease[], fetchImpl: typeof fetch): Promise<Record<string, string>> {

@@ -1,0 +1,29 @@
+{
+  "request": {
+    "body": {
+      "iv": "AwMDAwMDAwMDAwMD",
+      "kdf": {
+        "alg": "argon2id",
+        "iterations": 1,
+        "memoryKiB": 67108864,
+        "parallelism": 1
+      },
+      "salt": "AgICAgICAgICAgICAgICAg",
+      "version": 3,
+      "wrappedKey": "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcH"
+    },
+    "headers": {
+      "authorization": "<redacted>",
+      "content-type": "application/json",
+      "if-match": "\"2\""
+    },
+    "method": "PUT",
+    "path": "/v2/workspaces/11111111-1111-4111-8111-000000000001/key-envelope"
+  },
+  "response": {
+    "body": {
+      "error": "kdf_params_invalid"
+    },
+    "status": 422
+  }
+}

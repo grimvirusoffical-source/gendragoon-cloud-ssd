@@ -212,6 +212,57 @@ export function challengeObjectKey(nonce: string): string {
   return `${CHALLENGE_PREFIX}${nonce}`;
 }
 
+export interface S3ChallengeCredentials {
+  endpoint: string;
+  region?: string;
+  bucket: string;
+  accessKeyId: string;
+  secretAccessKey: string;
+  sessionToken?: string;
+}
+
+export async function presignChallengeGet(input: S3ChallengeCredentials & { key: string; expiresInSeconds?: number }): Promise<string> {
+  const { GetObjectCommand, S3Client } = await import("@aws-sdk/client-s3");
+  const { getSignedUrl } = await import("@aws-sdk/s3-request-presigner");
+  const expiresIn = input.expiresInSeconds ?? Math.floor(CHALLENGE_URL_MAX_MS / 1000);
+  if (expiresIn <= 0 || expiresIn * 1000 > CHALLENGE_URL_MAX_MS) {
+    throw new Error("Challenge URL must be a short-lived presigned GET");
+  }
+  const client = new S3Client({
+    region: input.region ?? "us-east-1",
+    endpoint: input.endpoint,
+    forcePathStyle: true,
+    credentials: {
+      accessKeyId: input.accessKeyId,
+      secretAccessKey: input.secretAccessKey,
+      sessionToken: input.sessionToken,
+    },
+  });
+  return getSignedUrl(client, new GetObjectCommand({ Bucket: input.bucket, Key: input.key }), { expiresIn });
+}
+
+export function createSigV4ChallengeWriter(input: S3ChallengeCredentials): ByoObjectWriter {
+  return {
+    async write(key, body) {
+      const { PutObjectCommand, S3Client } = await import("@aws-sdk/client-s3");
+      const client = new S3Client({
+        region: input.region ?? "us-east-1",
+        endpoint: input.endpoint,
+        forcePathStyle: true,
+        credentials: {
+          accessKeyId: input.accessKeyId,
+          secretAccessKey: input.secretAccessKey,
+          sessionToken: input.sessionToken,
+        },
+      });
+      await client.send(new PutObjectCommand({ Bucket: input.bucket, Key: key, Body: body }));
+    },
+    presignGet(key, expiresInMs) {
+      return presignChallengeGet({ ...input, key, expiresInSeconds: Math.max(1, Math.floor(expiresInMs / 1000)) });
+    },
+  };
+}
+
 export interface ByoObjectWriter {
   write(key: string, body: string): Promise<void>;
   /** Short-lived GET for exactly `key`, signed on the device. */

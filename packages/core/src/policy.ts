@@ -2,8 +2,8 @@
  * Workspace records the client renders.
  *
  * Caps, the monthly fee, grandfathering, and lapse are decided on the server.
- * This module does not recompute them. Paint `GET /v2/access` and treat HTTP
- * 423 `workspace_lock` as the delete-or-merge lock.
+ * This module does not recompute them. Treat HTTP 423 `workspace_lock`
+ * as the delete-or-merge lock. There is no /v2/access route.
  */
 
 export type ProjectStatus =

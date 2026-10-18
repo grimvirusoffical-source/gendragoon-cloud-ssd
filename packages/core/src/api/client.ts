@@ -1,9 +1,8 @@
 import { assertNoCredentialFields, BYO_PRESIGNED_URL_MESSAGE, BYO_UNSUPPORTED_MESSAGE, BYO_UNVERIFIABLE_MESSAGE } from "../byo.js";
 import { assertKeyEnvelope } from "../envelope.js";
-import { AccountDeletedError, ApiError, DeletionNotFoundError, InvalidTokenError, ReauthRequiredError, WorkspaceLockedError, deletionAuthFailure, isAccountDeleted, isInvalidToken, isReauthRequired } from "./errors.js";
+import { AccountDeletedError, ApiError, DeletionNotFoundError, DeletionNotRetryableError, InvalidTokenError, ReauthRequiredError, SUPPORT_CONTACT, WorkspaceLockedError, deletionAuthFailure, isAccountDeleted, isInvalidToken, isReauthRequired } from "./errors.js";
 import { assertStorageUrlResponse, reauthIsRecent, reauthenticatedAtForDelete } from "../storage.js";
 import type {
-  AccessResponse,
   BillingStatusResponse,
   ByoChallengeResponse,
   ByoProofRequest,
@@ -36,8 +35,10 @@ export {
   AccountDeletedError,
   ApiError,
   DeletionNotFoundError,
+  DeletionNotRetryableError,
   InvalidTokenError,
   ReauthRequiredError,
+  SUPPORT_CONTACT,
   WorkspaceLockedError,
   deletionAuthFailure,
   isAccountDeleted,
@@ -184,7 +185,7 @@ export class GenDragoonClient {
   }
 
   /**
-   * Short-lived V4 or resumable URLs scoped to the workspace prefix.
+   * Short-lived V4 URLs scoped to the workspace prefix.
    * A locked workspace is download-only. Writes from the server come back as HTTP 423.
    */
   async storageUrls(id: string, body: StorageUrlRequest): Promise<StorageUrlResponse> {
@@ -209,9 +210,16 @@ export class GenDragoonClient {
    * Plural path. Poll until `done` or `failed`.
    * A status token authenticates this GET. The Firebase ID token is not sent with it.
    */
-  deletionStatus(jobId: string, statusToken?: string): Promise<AccountDeletionStatus> {
+  async deletionStatus(jobId: string, statusToken?: string): Promise<AccountDeletionStatus> {
     const headers = statusToken ? { Authorization: `Bearer ${statusToken}` } : undefined;
-    return this.request("GET", `/v2/account/deletions/${encodeURIComponent(jobId)}`, undefined, headers);
+    try {
+      return await this.request("GET", `/v2/account/deletions/${encodeURIComponent(jobId)}`, undefined, headers);
+    } catch (error) {
+      // A status token that the server rejects is sign-in, not sign-out.
+      // The Firebase-token poll still surfaces InvalidTokenError.
+      if (statusToken && isInvalidToken(error)) throw new ReauthRequiredError();
+      throw error;
+    }
   }
 
   /** Server stores this envelope and nothing else about the workspace key. */
@@ -223,7 +231,10 @@ export class GenDragoonClient {
 
   async putKeyEnvelope(id: string, envelope: KeyEnvelope): Promise<KeyEnvelope> {
     assertKeyEnvelope(envelope);
-    return this.request("PUT", `/v2/workspaces/${encodeURIComponent(id)}/key-envelope`, envelope);
+    const headers: Record<string, string> = envelope.version <= 1
+      ? { "If-None-Match": "*" }
+      : { "If-Match": `"${envelope.version - 1}"` };
+    return this.request("PUT", `/v2/workspaces/${encodeURIComponent(id)}/key-envelope`, envelope, headers);
   }
 
   /** Proposed. Recurring workspace fee, distinct from one-time project activation. */
@@ -280,11 +291,6 @@ export class GenDragoonClient {
   async submitByoProof(id: string, body: { presignedUrl?: string; presignedGetUrl?: string }): Promise<ByoProofResponse> {
     const presignedUrl = body?.presignedUrl ?? body?.presignedGetUrl ?? "";
     return this.verifyByo(id, { presignedUrl });
-  }
-
-  /** Proposed. Server-computed lock. Clients render this instead of deciding access. */
-  access(): Promise<AccessResponse> {
-    return this.request("GET", "/v2/access");
   }
 
   async download(workspaceId: string, file: Pick<CloudFile, "id">): Promise<Response> {
@@ -385,6 +391,33 @@ function toError(status: number, parsed: unknown): ApiError {
   if (machine === "presigned_url_required") {
     return new ApiError(status || 400, "presigned_url_required", BYO_PRESIGNED_URL_MESSAGE);
   }
+  if (machine === "version_mismatch") {
+    return new ApiError(status || 412, "version_mismatch", "The key envelope version changed. Fetch it and re-wrap the same key.");
+  }
+  if (machine === "envelope_exists") {
+    return new ApiError(status || 409, "envelope_exists", "This workspace already has a key envelope.");
+  }
+  if (machine === "byo_external") {
+    return new ApiError(status || 409, "byo_external", "This workspace uses its own bucket.");
+  }
+  if (machine === "deletion_not_retryable") {
+    const jobId = typeof record.jobId === "string" ? record.jobId : "";
+    return new DeletionNotRetryableError(jobId);
+  }
+  if (status === 412 || machine === "stale_version" || machine === "stale_generation") {
+    return new ApiError(status || 412, machine || "stale_generation", "The saved version is stale. Fetch it again before writing.");
+  }
+  if (status === 413 || machine === "payload_too_large") {
+    return new ApiError(status || 413, "payload_too_large", "The key envelope is larger than 4 KB.");
+  }
+  if (status === 422 && (machine === "kdf_params_invalid" || machine === "envelope_invalid")) {
+    return new ApiError(422, machine, machine === "envelope_invalid"
+      ? "Key envelope is unreadable"
+      : "Key derivation parameters are not allowed.");
+  }
+  if (machine === "manifest_generation_required") {
+    return new ApiError(status || 400, "manifest_generation_required", "Manifest upload requires the current generation.");
+  }
   // Fallback only. Riley's BYO fixtures do not include 409 byo_unverifiable.
   if (status === 409 && machine === "byo_unverifiable") {
     return new ApiError(409, "byo_unverifiable", BYO_UNVERIFIABLE_MESSAGE);
@@ -401,12 +434,10 @@ function toError(status: number, parsed: unknown): ApiError {
 }
 
 /**
- * Riley's fixtures and PR #6 put the machine code in `error` and omit `code`.
- * Older tests put a sentence (or a different token) in `error` and the machine
- * code in `code`. A token-shaped `error` wins when `code` is absent or equal.
+ * When `error` is a non-empty string it is the machine code, including a
+ * sentence or mixed case. `code` is used only when `error` is absent.
  */
 function machineCode(errorField: string, codeField: string): string {
-  const token = /^[A-Za-z0-9_]+$/.test(errorField);
-  if (token && (!codeField || errorField === codeField)) return errorField;
+  if (errorField.length > 0) return errorField;
   return codeField;
 }

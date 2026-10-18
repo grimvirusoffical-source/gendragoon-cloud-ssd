@@ -12,6 +12,11 @@ export function SettingsView(props: {
   reauthRequired?: boolean;
   onSignInAgain?: () => void;
   onPassphrase?: (passphrase: string) => void;
+  deletionMessage?: string | null;
+  deletionRetryable?: boolean;
+  supportContact?: string | null;
+  onRetryDeletion?: () => void;
+  onDismissDeletion?: () => void;
 }) {
   const [step, setStep] = useState<"closed" | "review" | "confirm">("closed");
   return (
@@ -89,6 +94,24 @@ export function SettingsView(props: {
                 Delete account permanently
               </button>
               <button type="button" className="btn-ghost" onClick={() => setStep("closed")}>Back</button>
+            </div>
+          </div>
+        ) : null}
+        {props.deletionMessage ? (
+          <div className="stack" data-testid="delete-account-notice">
+            <p className="help">{props.deletionMessage}</p>
+            {props.supportContact ? (
+              <p className="help" data-testid="delete-account-support">Contact {props.supportContact}</p>
+            ) : null}
+            <div className="actions">
+              {props.deletionRetryable ? (
+                <button type="button" className="btn" data-testid="delete-account-retry" disabled={props.deleting} onClick={props.onRetryDeletion}>
+                  Retry
+                </button>
+              ) : null}
+              <button type="button" className="btn-ghost" data-testid="delete-account-dismiss" onClick={props.onDismissDeletion}>
+                Dismiss
+              </button>
             </div>
           </div>
         ) : null}

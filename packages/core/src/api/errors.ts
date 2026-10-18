@@ -43,6 +43,32 @@ export function isReauthRequired(error: unknown): error is ReauthRequiredError {
   return error instanceof ApiError && error.status === 401 && error.code === "reauth_required";
 }
 
+/**
+ * Support address shown with a deletion that cannot be retried.
+ * Placeholder until the real address is published.
+ * Jordan's apps read this exact export: `{ value, isPlaceholder }`.
+ */
+export const SUPPORT_CONTACT: { value: string; isPlaceholder: boolean } = {
+  value: "placeholder@example.com",
+  isPlaceholder: true,
+};
+
+/**
+ * HTTP 409 `{ error: "deletion_not_retryable", jobId }` on a repeat DELETE.
+ * The saved job stays until `dismissDeletion`. Nothing is wiped.
+ */
+export class DeletionNotRetryableError extends ApiError {
+  readonly jobId: string;
+  readonly retryable = false;
+  readonly supportContact = SUPPORT_CONTACT;
+
+  constructor(jobId: string) {
+    super(409, "deletion_not_retryable", `Account deletion cannot be retried. Contact ${SUPPORT_CONTACT.value}.`);
+    this.name = "DeletionNotRetryableError";
+    this.jobId = jobId;
+  }
+}
+
 /** HTTP 401 `invalid_token`. The session cannot be used. Local keys stay. */
 export class InvalidTokenError extends ApiError {
   constructor() {

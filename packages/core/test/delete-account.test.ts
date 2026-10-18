@@ -12,6 +12,7 @@ import {
   reauthenticatedAtForDelete,
   workspaceKeyId,
 } from "../src/index.js";
+import { loadServerFixture } from "./fixtures/server/load.js";
 
 function jsonResponse(status: number, body: unknown): Response {
   return new Response(JSON.stringify(body), {
@@ -84,7 +85,7 @@ describe("DELETE /v2/account contract", () => {
   it("polls the plural deletions path until done and does not wipe on succeeded", async () => {
     const secrets = new MemorySecretStore();
     await secrets.set(workspaceKeyId("w1"), new Uint8Array([1]));
-    const states = ["succeeded", "done"] as const;
+    const states = ["queued", "done"] as const;
     let reads = 0;
     const result = await deleteAccountAndWipe({
       client: {
@@ -116,7 +117,7 @@ describe("DELETE /v2/account contract", () => {
       getToken: () => "fresh-token",
       fetch: async () => {
         calls += 1;
-        return jsonResponse(401, { code: "reauth_required", error: "sign in again" });
+        return jsonResponse(401, loadServerFixture("account-deletion", "reauth-required").response.body);
       },
     });
     const error = await deleteAccountAndWipe({
@@ -137,7 +138,7 @@ describe("DELETE /v2/account contract", () => {
     const client = new GenDragoonClient({
       baseUrl: "https://api.example.test",
       getToken: () => "stale-token",
-      fetch: async () => jsonResponse(401, { code: "invalid_token", error: "expired" }),
+      fetch: async () => jsonResponse(401, loadServerFixture("account-deletion", "invalid-token").response.body),
     });
     const error = await deleteAccountAndWipe({
       client,
@@ -150,10 +151,50 @@ describe("DELETE /v2/account contract", () => {
     expect(await secrets.get(workspaceKeyId("w1"))).not.toBeNull();
   });
 
+  it("status GET 401 unauthorized, reauth_required, or no code signals reauth_required and keeps the job", async () => {
+    const bodies: unknown[] = [{ error: "unauthorized" }, { error: "reauth_required" }, {}];
+    for (const body of bodies) {
+      const secrets = new MemorySecretStore();
+      await secrets.set(workspaceKeyId("w1"), new Uint8Array([1]));
+      const secureStore = new MemorySecretStore();
+      const signals: Array<{ signal: string; error: unknown }> = [];
+      let gets = 0;
+      const client = new GenDragoonClient({
+        baseUrl: "https://api.example.test",
+        getToken: () => "firebase-token",
+        fetch: async (_input, init) => {
+          if (init?.method === "DELETE") {
+            return jsonResponse(202, { jobId: "job-1", status: "deleting", statusToken: "status-token" });
+          }
+          gets += 1;
+          return jsonResponse(401, body);
+        },
+      });
+      const error = await deleteAccountAndWipe({
+        client,
+        reauthenticatedAt: new Date().toISOString(),
+        workspaceIds: ["w1"],
+        secrets,
+        secureStore,
+        sleep: async () => {
+          throw new Error("polling continued");
+        },
+        onAuthFailure: (signal, err) => {
+          signals.push({ signal, error: err });
+        },
+      }).catch((caught: unknown) => caught);
+      expect(gets).toBe(1);
+      expect(signals).toEqual([{ signal: "reauth_required", error }]);
+      expect(await secrets.get(workspaceKeyId("w1"))).not.toBeNull();
+      expect(await secureStore.get("account-deletion:job-id")).not.toBeNull();
+      expect(await secureStore.get("account-deletion:status-token")).not.toBeNull();
+    }
+  });
+
   it("polls a 410 account_deleted job and wipes only after done", async () => {
     const secrets = new MemorySecretStore();
     await secrets.set(workspaceKeyId("w1"), new Uint8Array([9]));
-    const states = ["accepted", "done"] as const;
+    const states = ["queued", "done"] as const;
     let reads = 0;
     const seen: string[] = [];
     const client = new GenDragoonClient({

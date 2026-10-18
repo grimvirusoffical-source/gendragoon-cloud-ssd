@@ -23,6 +23,14 @@ interface SodiumPwhash {
     opsLimit: number,
     memLimit: number,
   ): Uint8Array;
+  crypto_pwhash_scryptsalsa208sha256_ll(
+    password: Uint8Array,
+    salt: Uint8Array,
+    N: number,
+    r: number,
+    p: number,
+    length: number,
+  ): Uint8Array;
   memzero(bytes: Uint8Array): void;
 }
 
