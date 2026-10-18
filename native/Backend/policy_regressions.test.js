@@ -25,14 +25,14 @@ function fixture(){
 function downgraded(f){for(let n=1;n<=20;n++)f.put(idFor(n),n===1?qualifier:{});f.db.rows.set(f.path(idFor(1)),{...f.record(idFor(1)),storageActive:false,performanceActive:false});}
 
 // ---- 1. Ownership ----
-test("ownership: a project whose accountHash is another account is 403 even under the caller's path",async()=>{
-  const f=fixture();f.put(idFor(1),{accountHash:other});
-  await assert.rejects(f.service.get(f.req,idFor(1)),{status:403,code:"PROJECT_FORBIDDEN"});
+// Ownership = accountHash (accountKey for legacy free project). No shared workspaces at launch.
+test("ownership: a different account gets 404 on someone else's workspace",async()=>{
+  const f=fixture();f.put(idFor(1));
+  await assert.rejects(f.service.get({user:{uid:"other"}},idFor(1)),{status:404,code:"PROJECT_NOT_FOUND"});
 });
-test("ownership: a read-only member (shared, not owner) gets 403",{todo:"no membership/role model in projects.js yet; ownerUid check must reject non-owner members"},async()=>{
-  const f=fixture();f.put(idFor(1),{accountHash:other,members:{[owner]:"reader"}});
-  await assert.rejects(f.service.get(f.req,idFor(1)),{status:403});
-  assert.fail("needs explicit member-role fixture once the membership model exists");
+test("ownership: a record with a foreign accountHash returns 404, not 403 (must not reveal existence)",{todo:"EXPECTED FAIL until Riley's fix: get() returns 403 PROJECT_FORBIDDEN today"},async()=>{
+  const f=fixture();f.put(idFor(1),{accountHash:other});
+  await assert.rejects(f.service.get(f.req,idFor(1)),{status:404});
 });
 
 // ---- 4. Cap re-check / downgrade lock ----
