@@ -514,8 +514,8 @@ describe("deletion fixtures", () => {
     expect(deletionSessionAction(error)).toBe("sign-out");
   });
 
-  it("RELEASE BLOCKER: the support contact shim is still a placeholder", () => {
-    expect(SUPPORT_CONTACT).toEqual({ value: "placeholder@example.com", isPlaceholder: true });
+  it("the support contact is the real shared support address", () => {
+    expect(SUPPORT_CONTACT).toEqual({ value: "support@infected-nation.com", isPlaceholder: false });
   });
 
   it("not-retryable deletion asks the user to contact support and hides the sign-in helper", async () => {
