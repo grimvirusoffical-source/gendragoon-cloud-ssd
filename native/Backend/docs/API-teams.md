@@ -1,6 +1,6 @@
 # Teams API (`feature/teams`)
 
-All routes need a signed-in account (same auth as `/v2/projects`). Errors use `{error: CODE, message?}`. A non-member gets **404 `TEAM_NOT_FOUND`** for every team route, so a team's existence never leaks. Team data is server-only: `firestore.rules` denies all client access.
+All routes need a signed-in account (same auth as `/v2/projects`). Errors use `{error: CODE, message?}`. A non-member gets **404 `TEAM_NOT_FOUND`** for every team route, so a team's existence never leaks. Membership (and, on owner routes, ownership: `403 TEAM_OWNER_ONLY`) is checked before the request body is validated, so a bad body never turns that 404 into a 400. Team data is server-only: `firestore.rules` denies all client access.
 
 ## Tiers (approved 2026-10-19)
 
@@ -105,7 +105,10 @@ Rule: **an owner must transfer the team or delete it first** when other active m
 The `teams` step (`teams_account.js`):
 
 - A team whose only active member is the owner is deleted with the account, including team workspace files.
-- Every other membership: the member record is deleted, the color lock freed, `memberCount` lowered, the user's personal-workspace shares removed, and **each chat message they wrote is emptied** (`text`, `card`, author hash and member id removed; shown as "Deleted member", `kind: "removed"`, `removed.by: "account"`). Message `seq` numbers stay so polling doesn't skip.
-- The audit log is kept (it holds per-team pseudonymous member ids only) and gets `member.account_deleted`; the hash chain still verifies.
+- How teams are found: every team the account ever touched, not only its current ones. Sources: `gd_accounts/<hash>/teams` (active memberships), `gd_accounts/<hash>/team_history` (written on create/join and **kept** by leave, kick and ban), teams it pays for, and collection-group queries on `members.accountHash`, `messages.authorHash` and `shares.ownerHash` (they also cover records older than `team_history`). These need the collection-group single-field indexes in the repo-root `firestore.indexes.json`; deploy them before release. A failed query fails the step so the job retries; nothing is skipped silently.
+- Every other team, whether the user is still active, left, was kicked or was banned: the member record (any status) is deleted, the color lock freed, `memberCount` lowered (only if still active; leave/kick/ban already lowered it), the user's personal-workspace shares removed, and **each chat message they wrote is emptied** (`text`, `card`, author hash and member id removed; shown as "Deleted member", `kind: "removed"`, `removed.by: "account"`). Message `seq` numbers stay so polling doesn't skip.
+- A ban still in force leaves only a pseudonymous tombstone at `gd_teams/<id>/bans/<memberId>`: `{memberId, reason, untilMs, accountDeleted: true, atMs}`. `memberId` is the per-team hash, so it can't be linked back to the account. The account hash, display name, color and message text are gone. (A deleted account can't rejoin; a new account has a new hash.) The tombstone goes when the team is deleted.
+- After the step, no `gd_teams/…` or `gd_team_…` row contains the account hash, and the account's `teams` and `team_history` index docs are deleted. The step is idempotent.
+- The audit log is kept (it holds per-team pseudonymous member ids only, including earlier kick/ban entries with their reasons) and gets `member.account_deleted`; the hash chain still verifies.
 - A team or team workspace the user still pays for after a transfer is marked `canceled` with `payerHash: null` (the Stripe step of the same job cancels the subscription). Its files stay readable for the team (`plansEverPaid`) until the new owner checks out.
 - Abuse reports the user filed or that name them stay in the platform queue (owner page retention rules apply).

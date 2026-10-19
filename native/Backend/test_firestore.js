@@ -53,7 +53,16 @@ function memoryFirestore(initial=[]){
        const docs=matchesRows.slice(0,maximum).map(snap);return {docs,empty:docs.length===0,size:docs.length};
      }};return query;
  }
- const db={collection,doc,rows,transactionCount:0,runTransaction(fn){
+ // Collection-group query: every document whose parent collection is named `name`.
+ function collectionGroup(name,filters=[],maximum=Infinity){
+   return {where:(key,op,value)=>collectionGroup(name,[...filters,{key,op,value}],maximum),limit:n=>collectionGroup(name,filters,n),
+     get:async()=>{
+       const keys=[...rows.keys()].filter(key=>{const parts=key.split("/");return parts.length%2===0&&parts.at(-2)===name;})
+         .filter(key=>filters.every(filter=>matches(rows.get(key),filter)));
+       const docs=keys.slice(0,maximum).map(snap);return {docs,empty:docs.length===0,size:docs.length};
+     }};
+ }
+ const db={collection,collectionGroup,doc,rows,transactionCount:0,runTransaction(fn){
    const run=tail.then(async()=>{
      db.transactionCount++;const writes=[];
      const tx={get:async ref=>{if(writes.length)throw Error("Firestore reads must precede writes");return ref.get();},

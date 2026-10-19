@@ -4,16 +4,28 @@
       "collectionGroup": "supportRequests",
       "queryScope": "COLLECTION",
       "fields": [
-        { "fieldPath": "notify.state", "order": "ASCENDING" },
-        { "fieldPath": "notify.nextAttemptAt", "order": "ASCENDING" }
+        {
+          "fieldPath": "notify.state",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "notify.nextAttemptAt",
+          "order": "ASCENDING"
+        }
       ]
     },
     {
       "collectionGroup": "supportRequests",
       "queryScope": "COLLECTION",
       "fields": [
-        { "fieldPath": "notify.state", "order": "ASCENDING" },
-        { "fieldPath": "notify.staleDueAt", "order": "ASCENDING" }
+        {
+          "fieldPath": "notify.state",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "notify.staleDueAt",
+          "order": "ASCENDING"
+        }
       ]
     }
   ],
@@ -23,8 +35,14 @@
       "fieldPath": "namesExpireAt",
       "ttl": false,
       "indexes": [
-        { "order": "ASCENDING", "queryScope": "COLLECTION" },
-        { "order": "DESCENDING", "queryScope": "COLLECTION" }
+        {
+          "order": "ASCENDING",
+          "queryScope": "COLLECTION"
+        },
+        {
+          "order": "DESCENDING",
+          "queryScope": "COLLECTION"
+        }
       ]
     },
     {
@@ -32,8 +50,68 @@
       "fieldPath": "expireAt",
       "ttl": false,
       "indexes": [
-        { "order": "ASCENDING", "queryScope": "COLLECTION" },
-        { "order": "DESCENDING", "queryScope": "COLLECTION" }
+        {
+          "order": "ASCENDING",
+          "queryScope": "COLLECTION"
+        },
+        {
+          "order": "DESCENDING",
+          "queryScope": "COLLECTION"
+        }
+      ]
+    },
+    {
+      "collectionGroup": "members",
+      "fieldPath": "accountHash",
+      "indexes": [
+        {
+          "order": "ASCENDING",
+          "queryScope": "COLLECTION"
+        },
+        {
+          "order": "DESCENDING",
+          "queryScope": "COLLECTION"
+        },
+        {
+          "order": "ASCENDING",
+          "queryScope": "COLLECTION_GROUP"
+        }
+      ]
+    },
+    {
+      "collectionGroup": "messages",
+      "fieldPath": "authorHash",
+      "indexes": [
+        {
+          "order": "ASCENDING",
+          "queryScope": "COLLECTION"
+        },
+        {
+          "order": "DESCENDING",
+          "queryScope": "COLLECTION"
+        },
+        {
+          "order": "ASCENDING",
+          "queryScope": "COLLECTION_GROUP"
+        }
+      ]
+    },
+    {
+      "collectionGroup": "shares",
+      "fieldPath": "ownerHash",
+      "indexes": [
+        {
+          "order": "ASCENDING",
+          "queryScope": "COLLECTION"
+        },
+        {
+          "order": "DESCENDING",
+          "queryScope": "COLLECTION"
+        },
+        {
+          "order": "ASCENDING",
+          "queryScope": "COLLECTION_GROUP"
+        }
       ]
     }
   ]

@@ -196,3 +196,81 @@ test("account deletion job: teams step runs first and the whole job finishes",as
  assert.equal(f.db.rows.has("gd_teams/"+id+"/members/"+hash("test-c")),false);
  assert.equal((await f.request("/v2/teams/"+id+"/chat")).body.messages[0].displayName,"Deleted member");
 });
+
+// QA B1: teams the user left, was kicked from or was banned from must be cleaned too.
+const rowsWith=(f,needle)=>[...f.db.rows.entries()].filter(([k,v])=>(k.startsWith("gd_teams/")||k.startsWith("gd_team_"))&&JSON.stringify([k,v]).includes(needle));
+async function formerMember(t,how,{legacy=false}={}){
+ const f=await fixture(t);const id=await f.activeTeam(1);
+ await f.join(id,"test-b","orange-500");await f.join(id,"test-c","blue-500");
+ const b=await memberIdOf(f,id,"test-b");
+ await f.request("/v2/teams/"+id+"/chat",{text:"former member secret"},"test-b");
+ await f.request("/v2/teams/"+id+"/chat",{text:"still here"},"test-c");
+ const before=f.db.rows.get("gd_teams/"+id).memberCount;
+ const r=how==="left"?await f.request("/v2/teams/"+id+"/leave",{},"test-b")
+  :await f.request("/v2/teams/"+id+"/members/"+b+"/"+how,how==="ban"?{reason:"spam"}:{reason:"off topic"});
+ assert.equal(r.status,200,JSON.stringify(r.body));
+ assert.equal(f.db.rows.has("gd_accounts/"+hash("test-b")+"/teams/"+id),false,"active index already gone");
+ assert.ok(rowsWith(f,hash("test-b")).length>0,"the former-member record still names the account before deletion");
+ // Legacy data written before team_history existed is found by the collection-group queries alone.
+ if(legacy)f.db.rows.delete("gd_accounts/"+hash("test-b")+"/team_history/"+id);
+ else assert.ok(f.db.rows.has("gd_accounts/"+hash("test-b")+"/team_history/"+id),"leave/kick/ban keep the history entry");
+ const out=await deleteAccountTeams(f.db,hash("test-b"));
+ assert.deepEqual(out,{deletedTeams:[],leftTeams:[id]});
+ assert.deepEqual(rowsWith(f,hash("test-b")).map(([k])=>k),[],"no team row references the account hash");
+ assert.equal(JSON.stringify([...f.db.rows.entries()]).includes("former member secret"),false,"message text gone");
+ assert.equal([...f.db.rows.keys()].some(k=>k.startsWith("gd_accounts/"+hash("test-b")+"/team")),false,"indexes cleared");
+ assert.equal(f.db.rows.get("gd_teams/"+id).memberCount,before-1,"count lowered once, at leave/kick/ban, not again");
+ const msgs=(await f.request("/v2/teams/"+id+"/chat",undefined,"test-c")).body.messages;
+ const gone=msgs.find(m=>m.kind==="removed");
+ assert.equal(gone.displayName,"Deleted member");assert.equal(gone.text,"");assert.equal(gone.color,null);assert.equal(gone.memberId,null);
+ assert.equal(msgs.find(m=>m.kind==="text").text,"still here");
+ const log=(await f.request("/v2/teams/"+id+"/audit")).body.entries;
+ assert.equal(log.at(-1).action,"member.account_deleted");assert.ok(verify(f,id),"hash chain intact");
+ assert.deepEqual(await deleteAccountTeams(f.db,hash("test-b")),{deletedTeams:[],leftTeams:[]},"idempotent");
+ return {f,id,b};
+}
+test("account deletion: a member who LEFT the team: member record, messages and indexes are scrubbed (QA T9)",async t=>{
+ const {f,id}=await formerMember(t,"left");
+ assert.deepEqual([...f.db.rows.keys()].filter(k=>k.startsWith("gd_teams/"+id+"/bans/")),[]);
+});
+test("account deletion: a KICKED member is scrubbed",async t=>{await formerMember(t,"kick");});
+test("account deletion: a BANNED member is scrubbed; only a pseudonymous ban tombstone remains (QA T10)",async t=>{
+ const {f,id,b}=await formerMember(t,"ban");
+ const bans=[...f.db.rows.entries()].filter(([k])=>k.startsWith("gd_teams/"+id+"/bans/"));
+ assert.deepEqual(bans.map(([k])=>k),["gd_teams/"+id+"/bans/"+b]);
+ assert.deepEqual(Object.keys(bans[0][1]).sort(),["accountDeleted","atMs","memberId","reason","untilMs"]);
+ assert.equal(bans[0][1].reason,"spam");
+ const log=(await f.request("/v2/teams/"+id+"/audit")).body.entries;
+ assert.ok(log.some(e=>e.action==="member.ban"&&e.target===b),"the moderation record stays in the audit log under the per-team id");
+});
+test("account deletion: legacy former-member records with no history entry are found by collection-group queries",async t=>{
+ await formerMember(t,"left",{legacy:true});
+});
+test("account deletion: a failed message read fails the step instead of skipping data",async t=>{
+ const f=await fixture(t);const id=await f.activeTeam(1);
+ await f.join(id,"test-b","red-500");await f.request("/v2/teams/"+id+"/leave",{},"test-b");
+ const db=Object.create(f.db);
+ db.collectionGroup=()=>({where:()=>({get:async()=>{throw Object.assign(new Error("index missing"),{code:9});}})});
+ await assert.rejects(deleteAccountTeams(db,hash("test-b")),/index missing/);
+});
+
+// QA L1: owner routes check membership before the body, so non-members get the documented 404.
+test("owner routes: non-members get 404 TEAM_NOT_FOUND whatever the body, same as for a team that doesn't exist",async t=>{
+ const f=await fixture(t);const id=await f.activeTeam(1);
+ await f.join(id,"test-b","red-500");
+ const cases=[["/transfer",{memberId:"x",color:"nope"}],["/transfer",{memberId:"x",color:"red-500"}],["/transfer",{}],
+  ["/members/x/kick",{}],["/members/x/ban",{}],["/members/x/mute",{reason:"r",until:1}],["/members/x/mute",{}],
+  ["/members/x/unmute",{}],["/members/x/role",{role:"owner"}]];
+ for(const [p,body] of cases)for(const team of [id,idFor(998)]){
+  const r=await f.request("/v2/teams/"+team+p,body,"test-c");
+  assert.equal(r.status,404,p+" "+JSON.stringify(r.body));assert.equal(r.body.error,"TEAM_NOT_FOUND");
+ }
+ // A member who isn't the owner learns they aren't the owner, not that the body is wrong.
+ for(const [p,body] of cases){
+  const r=await f.request("/v2/teams/"+id+p,body,"test-b");
+  assert.equal(r.status,403,p+" "+JSON.stringify(r.body));assert.equal(r.body.error,"TEAM_OWNER_ONLY");
+ }
+ // The owner still gets body validation.
+ assert.equal((await f.request("/v2/teams/"+id+"/transfer",{memberId:"x",color:"nope"})).body.error,"INVALID_COLOR");
+ assert.equal((await f.request("/v2/teams/"+id+"/members/x/kick",{})).body.error,"REASON_REQUIRED");
+});

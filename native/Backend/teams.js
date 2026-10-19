@@ -86,6 +86,8 @@ function createTeamService({db,stamp,hash,stripe,env={},prices={},ensureCustomer
  const teamRef=id=>teams.doc(id);
  const members=id=>teamRef(id).collection("members");
  const myTeams=owner=>db.collection("gd_accounts").doc(owner).collection("teams");
+ // Every team this account was ever in. Leave, kick and ban keep it; account deletion reads and clears it.
+ const teamHistory=owner=>db.collection("gd_accounts").doc(owner).collection("team_history");
  const personalRef=(owner,id)=>db.collection("gd_accounts").doc(owner).collection("workspaces").doc(id);
  const rate=new Map();
  const safeTeamId=id=>typeof id==="string"&&UUID.test(id);
@@ -180,6 +182,7 @@ function createTeamService({db,stamp,hash,stripe,env={},prices={},ensureCustomer
      tx.set(members(id).doc(owner),{memberId,accountHash:owner,role:"owner",status:"active",color,
        displayName:displayNameFrom(body),joinedAtMs:now()});
      tx.set(myTeams(owner).doc(id),{role:"owner",joinedAtMs:now()});
+     tx.set(teamHistory(owner).doc(id),{firstJoinedAtMs:now()});
      return {resumed:false};
    });
    const m=await membership(req,id);
@@ -271,6 +274,7 @@ function createTeamService({db,stamp,hash,stripe,env={},prices={},ensureCustomer
      tx.set(members(id).doc(owner),{memberId,accountHash:owner,role:"member",status:"active",color,displayName,joinedAtMs:now(),
        muted:false,mutedUntilMs:0,muteReason:null,bannedUntilMs:0,banReason:null});
      tx.set(myTeams(owner).doc(id),{role:"member",joinedAtMs:now()});
+     tx.set(teamHistory(owner).doc(id),{firstJoinedAtMs:now()});
      tx.update(teamRef(id),{memberCount:(team.memberCount||0)+1,updatedAt:stamp(),...head});
      tx.update(inv.ref,{uses:i.uses+1});
      return {teamId:id,alreadyMember:false};
@@ -567,6 +571,8 @@ function createTeamService({db,stamp,hash,stripe,env={},prices={},ensureCustomer
    return target;
  }
  async function moderate(req,id,action,targetId,body={}){
+   // Membership and ownership first, so non-members get 404 whatever the body says.
+   requireOwner(await membership(req,id));
    const reason=action==="unmute"?cleanText(body.reason,REASON_MAX)||"Mute lifted":requireReason(body.reason);
    const untilMs=["mute","ban"].includes(action)?duration(body.until,now()):0;
    let shares=null;
@@ -625,6 +631,7 @@ function createTeamService({db,stamp,hash,stripe,env={},prices={},ensureCustomer
  }
  // Roles: owner; member (read + write team files); viewer (read team files only). Owner sets them.
  async function setRole(req,id,memberId,body={}){
+   requireOwner(await membership(req,id));
    const role=body.role;
    if(!["member","viewer"].includes(role))throw new ProjectError(400,"Choose member or viewer","INVALID_ROLE");
    return db.runTransaction(async tx=>{
@@ -640,6 +647,7 @@ function createTeamService({db,stamp,hash,stripe,env={},prices={},ensureCustomer
  // Ownership transfer. Billing stays with the current payer until it lapses or the
  // payer deletes their account; then the new owner checks out (reconcile allows the takeover).
  async function transfer(req,id,body={}){
+   requireOwner(await membership(req,id,{writing:true}));
    const ownerShade=validColor(body.ownerShade||"purple-500","owner");
    const myColor=validColor(body.color,"member");
    return db.runTransaction(async tx=>{
