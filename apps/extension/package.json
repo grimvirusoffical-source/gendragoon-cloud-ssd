@@ -1,0 +1,26 @@
+{
+  "name": "@gendragoon/extension",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "GenDragoon Cloud SSD browser extension (Chrome, Edge, Firefox, Opera), one codebase.",
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "build": "node scripts/build.mjs",
+    "test": "vitest run",
+    "test:load": "node scripts/headless-load.mjs",
+    "lint:firefox": "web-ext lint --source-dir dist/firefox",
+    "package": "node scripts/build.mjs --zip"
+  },
+  "dependencies": {
+    "@gendragoon/core": "workspace:*",
+    "@gendragoon/ui": "workspace:*"
+  },
+  "devDependencies": {
+    "esbuild": "0.25.4",
+    "puppeteer-core": "24.8.2",
+    "typescript": "5.8.3",
+    "vitest": "3.1.4",
+    "web-ext": "8.3.0"
+  }
+}

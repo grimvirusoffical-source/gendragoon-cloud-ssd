@@ -1,0 +1,34 @@
+@import "@gendragoon/ui/tokens.css";
+
+body { margin: 0; width: 340px; background: var(--bg); color: var(--text); font: 14px/1.45 "Segoe UI Variable", "Segoe UI", system-ui, sans-serif; -webkit-font-smoothing: antialiased; }
+@keyframes pop-in { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+@keyframes shimmer { from { transform: translateX(-100%); } to { transform: translateX(100%); } }
+.theme-anim, .theme-anim * { transition: background-color var(--dur-slow), color var(--dur-slow), border-color var(--dur-slow) !important; }
+.popup { padding: 14px; background: radial-gradient(420px 200px at 90% -20%, var(--glow), transparent 65%), var(--bg); display: flex; flex-direction: column; gap: 10px; }
+.brand { display: flex; align-items: center; gap: 10px; padding: 2px 2px 4px; }
+.brand h1 { margin: 0; font-size: 13px; letter-spacing: .1em; font-weight: 800; }
+.brand p { margin: 2px 0 0; color: var(--muted); font-size: 11px; letter-spacing: .14em; }
+.panel { position: relative; background: var(--card); border: 1px solid var(--card-border); border-radius: 14px; padding: 12px 14px; box-shadow: 0 10px 24px var(--shadow); animation: pop-in var(--dur-slow) var(--ease-out) both; }
+.panel::before { content: ""; position: absolute; left: 14px; right: 14px; top: -1px; height: 1px; background: linear-gradient(90deg, transparent, var(--purple-hot), transparent); opacity: .55; }
+h2 { margin: 0 0 8px; font-size: 13px; letter-spacing: .02em; }
+.help { margin: 0; color: var(--muted); font-size: 12.5px; }
+.row { display: flex; align-items: center; gap: 8px; }
+.dot { width: 9px; height: 9px; border-radius: 99px; background: var(--ok); box-shadow: 0 0 0 4px color-mix(in srgb, var(--ok) 18%, transparent); }
+.dot.off { background: var(--danger); box-shadow: 0 0 0 4px color-mix(in srgb, var(--danger) 18%, transparent); }
+.btn-ghost { margin-top: 10px; background: transparent; color: var(--text); border: 1px solid var(--ghost-border); border-radius: 10px; padding: 7px 12px; font: inherit; font-weight: 600; cursor: pointer; transition: transform var(--dur-fast) var(--ease-out), background-color var(--dur-fast), border-color var(--dur-fast); }
+.btn-ghost:hover { background: var(--soft); border-color: var(--purple); }
+.btn-ghost:active { transform: scale(.98); }
+:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+label.field { display: flex; flex-direction: column; gap: 6px; color: var(--muted); font-size: 12.5px; }
+input { background: var(--input); border: 1px solid var(--input-border); border-radius: 10px; padding: 9px 11px; color: var(--text); font: inherit; outline: none; transition: border-color var(--dur-fast), box-shadow var(--dur-base); }
+input:focus { border-color: var(--purple); box-shadow: 0 0 0 3px var(--soft); }
+#sort-result { margin-top: 8px; }
+.chip { display: inline-block; border-radius: 999px; padding: 3px 10px; background: var(--soft); color: var(--chip); font-weight: 600; animation: pop-in var(--dur-base) var(--ease-out); }
+.segmented { display: inline-flex; padding: 3px; gap: 2px; border-radius: 12px; background: var(--input); border: 1px solid var(--input-border); }
+.segmented button { border: 0; background: transparent; color: var(--muted); padding: 6px 12px; border-radius: 9px; font: inherit; font-weight: 600; cursor: pointer; transition: background-color var(--dur-base) var(--ease-out), color var(--dur-fast); }
+.segmented button.active { background: var(--purple); color: var(--on-purple); box-shadow: 0 4px 14px var(--glow); }
+.skeleton-group { display: flex; flex-direction: column; gap: 8px; }
+.skeleton { position: relative; overflow: hidden; border-radius: 7px; background: var(--skeleton); }
+.skeleton::after { content: ""; position: absolute; inset: 0; background: linear-gradient(90deg, transparent, var(--skeleton-shine), transparent); animation: shimmer 1.4s var(--ease-in-out) infinite; }
+footer { color: var(--faint); font-size: 11.5px; text-align: center; }
+footer a { color: var(--kicker); }
