@@ -115,7 +115,7 @@ function installedBilling({app,db,bucket,admin,firebaseAuth,firebaseAuthWithoutT
  app.get("/v2/billing/status",(_req,res)=>{
   res.json({checkoutEnabled:state.enabled&&readiness.ok,
     stripeMode:env.STRIPE_ENVIRONMENT==="test"?"test":env.STRIPE_ENVIRONMENT==="live"?"live":"unconfigured",
-    availableKinds:["storage","performance","bundle","bring-your-own-cloud","remove-ads",...(billing.projects.paymentAvailable()?["project-creation"]:[])],
+    availableKinds:["storage","performance","bundle","remove-ads",...(billing.projects.paymentAvailable()?["project-creation"]:[])],
     projectCreationEnabled:billing.projects.paymentAvailable()&&readiness.ok,
     webhookConfigured:state.hasHook,runtimeStorageVerified:readiness.checked,
     liveStorageProvisioned:env.PAID_STORAGE_READY==="approved",

@@ -24,7 +24,7 @@ export class BrowserCloud {
      cache:'no-store',credentials:'omit',redirect:'error',
      headers:{Authorization:'Bearer '+auth,Accept:'application/json',...(json===undefined?{}:{'Content-Type':'application/json'}),...headers}});
     if(response.ok)return response;
-    const error=await response.json().catch(()=>({}));last=new CloudError(error.error||'Cloud request failed ('+response.status+').',response.status);
+    const error=await response.json().catch(()=>({}));last=new CloudError(error.error||'Cloud request failed ('+response.status+').',response.status);if(typeof error.error==='string')last.code=error.error;if(typeof error.message==='string')last.detail=error.message;
     if(![401,408,429,500,502,503,504].includes(response.status))throw last;
    }catch(error){if(error.name==='AbortError')throw error;if(error instanceof CloudError&&![0,401,408,429,500,502,503,504].includes(error.status))throw error;last=error;}
    if(attempt<4)await new Promise((resolve,reject)=>{

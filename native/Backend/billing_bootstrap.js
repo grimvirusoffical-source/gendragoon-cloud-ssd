@@ -188,7 +188,7 @@ function installBillingBootstrap(options){
   if(!activated&&(req.path==='/v2/billing/status'||req.path==='/billing/stripe-webhook'))await attempt();
   if(!activated&&req.method==='GET'&&req.path==='/v2/billing/status')return res.json({
    checkoutEnabled:false,stripeMode:'live',webhookConfigured:false,liveStorageProvisioned:false,runtimeStorageVerified:false,
-   availableKinds:['storage','performance','bundle','bring-your-own-cloud','remove-ads'],...setup,
+   availableKinds:['storage','performance','bundle','remove-ads'],...setup,
    message:setup.activationState==='waiting_for_secrets'?'Account owner must add the two prepared Stripe secrets in Google Secret Manager. Activation runs automatically after that.':'Stripe setup is being verified; no payment can be taken yet.'
   });
   return router(req,res,next);
