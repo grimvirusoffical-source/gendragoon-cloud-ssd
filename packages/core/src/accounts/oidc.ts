@@ -5,7 +5,8 @@
  * flow) and hands the redirect back to `completeSignIn`.
  */
 export const REDXAI_CLIENT_ID = "gendragoon";
-export const REDXAI_SCOPES = "openid profile email offline_access";
+/** The v1 contract scopes. The token endpoint always returns a rotating refresh token. */
+export const REDXAI_SCOPES = "openid profile email";
 
 export interface OidcConfig {
   issuer: string;

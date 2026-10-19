@@ -27,6 +27,9 @@ export interface TermsDocument {
   text: string;
   falseInfoWarning: string;
   no2faWarning: string;
+  /** Red-XAI Accounts serves the Privacy Policy with the Terms. */
+  privacyVersion?: string;
+  privacyText?: string;
 }
 
 export interface TosGrant {
@@ -57,6 +60,12 @@ export interface AccountView {
   tosCurrent: string;
   tosAcceptedMs: number;
   pending: AccountPending[];
+  /** Present on Red-XAI Accounts `Me`. */
+  id?: string;
+  adultVerified?: boolean;
+  roles?: string[];
+  createdMs?: number;
+  owner?: boolean;
 }
 
 export interface SignupResult {
@@ -64,6 +73,8 @@ export interface SignupResult {
   pending: AccountPending[];
   totp?: { secret: string; otpauthUri: string };
   phoneMasked?: string;
+  /** Red-XAI Accounts `/v1/signup` returns the new `rxa_s_` session. */
+  session?: string;
 }
 
 export class AccountsApiError extends Error {
