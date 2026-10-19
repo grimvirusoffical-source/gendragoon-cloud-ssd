@@ -105,7 +105,9 @@ func opts(maxLevel C.int) *gd.Options {
 	return &gd.Options{Gate: gd.LevelGate(gd.Level(maxLevel))}
 }
 
-func ctx() (context.Context, context.CancelFunc) { return context.WithTimeout(context.Background(), callTimeout) }
+func ctx() (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.Background(), callTimeout)
+}
 
 func handle[T any](h C.uint64_t) (T, bool) {
 	var zero T
