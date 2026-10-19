@@ -17,33 +17,62 @@ function expectedCatalog(){
  }
  out['one_time|remove_ads']={cents:499,interval:null};return out;
 }
+// Retired for new charges ($5 workspace/BYO fee, one-time project activation). They may be archived in
+// Stripe; their IDs are still needed to reconcile in-flight legacy subscriptions and payments.
+const isRetired=key=>key.startsWith('workspace|')||key.startsWith('byo|')||key==='one_time|project_creation';
+// Team tiers: optional. Added when the Price exists, so teams become purchasable only after it is created.
+function optionalTeamCatalog(){
+ const {TEAM_TIERS,teamPriceKey,teamCents}=require('./teams'),out={};
+ for(const tier of Object.keys(TEAM_TIERS))for(const interval of ['month','year'])out[teamPriceKey(tier,interval)]={cents:teamCents(tier,interval),interval};
+ return out;
+}
+// Active matches win; a retired key may fall back to its single archived Price.
+function pick(key,matches){
+ const active=matches.filter(p=>p.active===true);
+ return active.length||!isRetired(key)?active:matches.filter(p=>p.active!==true);
+}
 function validateCatalog(prices,products,{projectPriceId}={}){
  const out={},productMap=new Map(products.map(p=>[p.id,p]));
- for(const [key,expected]of Object.entries(expectedCatalog())){
-  const lookup='gdssd_'+key.split('|').join('_')+'_v1';
-  const matches=prices.filter(p=>p.metadata?.service==='GenDragoonSSD'&&(p.metadata.catalogKey===key||p.lookup_key===lookup));
-  if(matches.length!==1)throw Error('CATALOG_COUNT:'+key);
-  const p=matches[0],product=productMap.get(typeof p.product==='string'?p.product:p.product?.id);
-  if(!p.active||!p.livemode||p.currency!=='usd'||p.unit_amount!==expected.cents||product?.active!==true)throw Error('CATALOG_VALUE:'+key);
+ const checkValue=(key,p,expected)=>{
+  const product=productMap.get(typeof p.product==='string'?p.product:p.product?.id),archivedRetired=isRetired(key)&&p.active!==true;
+  if(!(p.active||archivedRetired)||!p.livemode||p.currency!=='usd'||p.unit_amount!==expected.cents||!(product?.active===true||(archivedRetired&&product)))throw Error('CATALOG_VALUE:'+key);
   if(expected.interval?!(p.recurring?.interval===expected.interval&&p.recurring.interval_count===1):p.type!=='one_time')throw Error('CATALOG_INTERVAL:'+key);
   if(!/^price_[A-Za-z0-9]+$/.test(p.id))throw Error('CATALOG_ID:'+key);
+ };
+ for(const [key,expected]of Object.entries(optionalTeamCatalog())){
+  const lookup='gdssd_'+key.split('|').join('_')+'_v1';
+  const matches=prices.filter(p=>p.active===true&&p.metadata?.service==='GenDragoonSSD'&&(p.metadata.catalogKey===key||p.lookup_key===lookup));
+  if(!matches.length)continue;
+  if(matches.length!==1)throw Error('CATALOG_COUNT:'+key);
+  checkValue(key,matches[0],expected);out[key]=matches[0].id;
+ }
+ for(const [key,expected]of Object.entries(expectedCatalog())){
+  const lookup='gdssd_'+key.split('|').join('_')+'_v1';
+  const matches=pick(key,prices.filter(p=>p.metadata?.service==='GenDragoonSSD'&&(p.metadata.catalogKey===key||p.lookup_key===lookup)));
+  if(matches.length!==1)throw Error('CATALOG_COUNT:'+key);
+  const p=matches[0];
+  checkValue(key,p,expected);
   out[key]=p.id;
  }
  // Add the new one-time project Price only when explicitly configured or
  // uniquely tagged. Missing configuration must not break legacy subscriptions.
- const projectMatches=prices.filter(p=>projectPriceId?p.id===projectPriceId:
-   p.metadata?.service==='GenDragoonSSD'&&(p.metadata.catalogKey==='one_time|project_creation'||p.lookup_key==='gdssd_one_time_project_creation_v2'));
+ const projectMatches=pick('one_time|project_creation',prices.filter(p=>projectPriceId?p.id===projectPriceId:
+   p.metadata?.service==='GenDragoonSSD'&&(p.metadata.catalogKey==='one_time|project_creation'||p.lookup_key==='gdssd_one_time_project_creation_v2')));
  if(projectPriceId||projectMatches.length){
    if(projectMatches.length!==1)throw Error('CATALOG_COUNT:one_time|project_creation');
    const p=projectMatches[0],product=productMap.get(typeof p.product==='string'?p.product:p.product?.id);
-   if(!p.active||!p.livemode||p.type!=='one_time'||p.recurring||p.currency!=='usd'||p.unit_amount!==500||
-      p.billing_scheme!=='per_unit'||product?.active!==true||!/^price_[A-Za-z0-9]+$/.test(p.id))throw Error('CATALOG_VALUE:one_time|project_creation');
+   const archived=p.active!==true;
+   if(!p.livemode||p.type!=='one_time'||p.recurring||p.currency!=='usd'||p.unit_amount!==500||
+      p.billing_scheme!=='per_unit'||!(product?.active===true||(archived&&product))||!/^price_[A-Za-z0-9]+$/.test(p.id))throw Error('CATALOG_VALUE:one_time|project_creation');
    out['one_time|project_creation']=p.id;
  }
  return out;
 }
-function projectCheckoutReady(catalog,hook){
- return !!catalog['one_time|project_creation']&&
+function projectCheckoutReady(catalog,hook,prices=null){
+ // An archived project Price can still reconcile old payments but must never open a new Checkout.
+ const id=catalog['one_time|project_creation'];
+ if(prices&&!prices.some(p=>p.id===id&&p.active===true))return false;
+ return !!id&&
    (hook.enabled_events?.includes('*')===true||['checkout.session.completed','checkout.session.async_payment_succeeded',
      'checkout.session.async_payment_failed','charge.refunded','charge.dispute.created'].every(name=>hook.enabled_events?.includes(name)));
 }
@@ -100,7 +129,8 @@ function installBillingBootstrap(options){
   const account=await stripe.accounts.retrieve();
   if(account.id!==ACCOUNT||account.charges_enabled!==true)throw Error('ACCOUNT_NOT_READY');
   const [prices,products,hook]=await Promise.all([
-   stripe.prices.list({limit:100,active:true}).autoPagingToArray({limit:1000}),
+   // Include archived Prices: retired legacy keys may be archived and still need reconciling.
+   stripe.prices.list({limit:100}).autoPagingToArray({limit:5000}),
    stripe.products.list({limit:100}).autoPagingToArray({limit:1000}),stripe.webhookEndpoints.retrieve(HOOK_ID)
   ]);
   const catalog=validateCatalog(prices,products,{projectPriceId:env.STRIPE_PROJECT_CREATION_PRICE_ID});
@@ -122,7 +152,7 @@ function installBillingBootstrap(options){
   const values={STRIPE_SECRET_KEY:secrets.key,STRIPE_WEBHOOK_SECRET:secrets.webhook,
    STRIPE_ENVIRONMENT:'live',STRIPE_CHECKOUT_ENABLED:'true',PAID_STORAGE_READY:'approved',STRIPE_RUNTIME_PROBE:'true',
    STRIPE_PRICE_CATALOG_JSON:JSON.stringify(catalog),STRIPE_PORTAL_CONFIGURATION_ID:portal.id,PUBLIC_URL:PUBLIC,
-   STRIPE_PROJECT_CHECKOUT_READY:projectCheckoutReady(catalog,hook)?'true':'false'};
+   STRIPE_PROJECT_CHECKOUT_READY:projectCheckoutReady(catalog,hook,prices)?'true':'false'};
   const previous=Object.fromEntries(Object.keys(values).map(key=>[key,process.env[key]]));
   try{
    for(const [key,value]of Object.entries(values))process.env[key]=value;
@@ -152,4 +182,4 @@ function installBillingBootstrap(options){
  });
  return {attempt,state:()=>({...setup,activated})};
 }
-module.exports={installBillingBootstrap,expectedCatalog,validateCatalog,projectCheckoutReady,validateUnpaidCheckoutTemplates,crc32c};
+module.exports={installBillingBootstrap,expectedCatalog,optionalTeamCatalog,isRetired,validateCatalog,projectCheckoutReady,validateUnpaidCheckoutTemplates,crc32c};

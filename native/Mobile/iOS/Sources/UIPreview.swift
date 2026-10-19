@@ -49,6 +49,9 @@ enum UIPreview {
                 Button("Delete account",role:.destructive){delete()}.disabled(cloud.busy||cloud.transferring).accessibilityIdentifier("delete-account")
                 Button("Sign out",role:.destructive){cloud.pause();close();session.signOut()}.disabled(cloud.busy)
             }
+            Section("About"){
+                Text(AboutCopy.ownership).font(.footnote).foregroundStyle(.secondary).textSelection(.enabled).accessibilityIdentifier("about-ownership")
+            }
             if ByoFeature.showInSettings {
                 Section("Bring-your-own storage"){
                     TextField("S3-compatible endpoint",text:$endpoint).textInputAutocapitalization(.never).autocorrectionDisabled()

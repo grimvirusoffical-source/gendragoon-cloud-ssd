@@ -53,6 +53,10 @@ The runtime pins Stripe Node23.0.0 and API `2026-09-30.endive`, verified on2026-
 
 Stripe Tax requires actual active registrations before enabling `automatic_tax`; this release does not silently enable tax or claim registration coverage. See [Stripe recurring tax setup](https://docs.stripe.com/billing/taxes/collect-taxes) and [webhook fulfillment](https://docs.stripe.com/checkout/fulfillment).
 
+### Archiving retired Prices and adding team Prices (live bootstrap)
+
+The live bootstrap lists **all** Prices, including archived ones. The retired keys (`workspace|month`, `workspace|year`, `byo|month`, `byo|year`, `one_time|project_creation`) may be archived in Stripe. The bootstrap still resolves their IDs (exactly one per key; an active Price wins) so legacy subscriptions and payments keep reconciling, and an archived project Price never sets `STRIPE_PROJECT_CHECKOUT_READY=true`. Every other key must stay active. Team tier Prices (`team|<tier>|<interval>`, metadata `service:GenDragoonSSD`, lookup key `gdssd_team_<tier>_<interval>_v1`) are optional: they join `STRIPE_PRICE_CATALOG_JSON` automatically once they exist and are exact, and teams stay unpurchasable until then. With `STRIPE_VAULT_BOOTSTRAP=live` the catalog is built from Stripe on activation, so no Price IDs are set by hand. `scripts/stripe_prices_to_create.js --dry-run --live` / `--apply --live --confirm-live` creates the 19 approved Prices idempotently by lookup key.
+
 ## Transfers
 
 The service retains v1 free-workspace and v2 paid-workspace routes for existing clients. Version 3 transfers add account-scoped manifests, resumable chunks, verified range downloads, quota reservation, and entitlement-controlled concurrency. A free workspace contains 2,000,000,000 bytes and one transfer worker. Performance tiers grant actual concurrency limits enforced by the transfer governor; they do not guarantee internet bandwidth or disk speed.
@@ -88,6 +92,8 @@ python3 native/Backend/deploy_free.py --project gendragood-ssd --region us-centr
 ```
 
 The deployment command uses the active Google application-default account through a temporary file readable only by the current user. No credential value is printed. Use `--customer-bucket` or `--service-account` only when intentionally configuring or changing those service properties. Keep real `customer-storage.json` outside version control; `customer-storage.example.json` documents its purpose without a production customer bucket name.
+
+Client IP: `free_server.js` sets Express `trust proxy` to `TRUST_PROXY_HOPS` (default `1`, Cloud Run's front end; `0` to `3` allowed, anything else refuses to start), so `req.ip` is the address Cloud Run appended to `X-Forwarded-For` and a value the client forged there is ignored. The per-IP limits (password reset, provider connect redeem) count on it.
 
 `SUPPORT_DISCORD_WEBHOOK_URL` is loaded from Secret Manager in production and is never written in this repo. `free_server.js` exits before it listens if that variable is missing or is not an `https://discord.com/api/webhooks/` URL when `NODE_ENV=production`. Whenever Cloud Run sets `K_SERVICE`, that gate stays on even if `NODE_ENV` is `development`, `dev`, or `test`. `deploy_free.py` sets `NODE_ENV=production` on every Cloud Run deploy. The error names the variable and does not print the value, so Cloud Run keeps serving the previous revision. `npm run predeploy:check` is an optional extra that confirms the secret exists (`gcloud secrets versions describe`) without printing it. It is not the promotion gate.
 

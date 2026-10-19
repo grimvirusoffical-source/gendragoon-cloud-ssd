@@ -29,7 +29,18 @@ function firestore(){
 // Property access connects. Requiring this module does not.
 const db=new Proxy({},{get(_target,prop){const real=firestore();const value=real[prop];return typeof value==="function"?value.bind(real):value;}});
 const bucket=new Storage({projectId:process.env.STORAGE_PROJECT_ID}).bucket(process.env.CUSTOMER_BUCKET);
+// Cloud Run's front end is one proxy hop: it appends the address it received the request from to
+// X-Forwarded-For. Trusting exactly that one hop makes req.ip the real client address, while any
+// X-Forwarded-For value the client sent itself is ignored. TRUST_PROXY_HOPS overrides the count
+// (0 when the server is reached directly, for example in local runs).
+function trustProxyHops(env=process.env){
+ const v=env.TRUST_PROXY_HOPS;
+ if(v===undefined||v==="")return 1;
+ if(!/^[0-3]$/.test(v))throw Error("TRUST_PROXY_HOPS must be 0, 1, 2 or 3");
+ return Number(v);
+}
 const app=express();
+app.set("trust proxy",trustProxyHops());
 app.disable("x-powered-by");app.use((req,res,next)=>{
   res.set({"Cache-Control":"no-store","X-Content-Type-Options":"nosniff",
     "Referrer-Policy":"no-referrer","X-Frame-Options":"DENY"});
@@ -90,11 +101,23 @@ require("./key_envelope").registerKeyEnvelope({app,db,firebaseAuth,hash:accountK
 require("./storage_urls").registerStorageUrls({app,db,bucket,firebaseAuth,hash:accountKey,now:()=>Date.now()});
 const paidStorage=require("./paid_storage").registerPaidStorage({app,db,bucket,firebaseAuth,accountKey,FieldValue,apiKeys,getAuth});
 require("./transfer_v3").registerTransferV3({app,db,bucket,firebaseAuth,accountKey,FieldValue,apiKeys,getAuth,freeGovernor:governor,paidGovernor:paidStorage.governor});
-// Storage provider API for RedX (/provider/v1). OFF unless PROVIDER_V1_ENABLED=true, and provider_v1.js is not in
-// deploy_free.py's runtime allow-list yet, so no deploy can enable it by accident. A binding's quota is a snapshot of
+// Storage provider API for RedX (/provider/v1). OFF unless PROVIDER_V1_ENABLED=true. provider_v1.js is shipped
+// (account deletion uses deleteAccountProviderData) but its routes are mounted only behind this flag. A binding's quota is a snapshot of
 // the workspace quota at connect time; charging it against the workspace's own usedBytes is pricing decision 13.2 (open).
+// Support email (password resets, account notices) from support@infected-nation.com, through the Node port of
+// Rotten Apple's shared mailer (support_email.js, docs/SUPPORT_EMAIL.md). OFF unless SUPPORT_EMAIL_ENABLED=true;
+// the SMTP password is read only from SUPPORT_EMAIL_PASSWORD at send time and is never logged.
+// support_email.js is in deploy_free.py's allow-list; it is required only when enabled.
+let supportNotify=null;
+if(process.env.SUPPORT_EMAIL_ENABLED==="true"){
+ const supportEmail=require("./support_email");
+ const log=(event,fields)=>console.log(JSON.stringify({event,...fields}));
+ const sender=supportEmail.senderFromEnv(process.env,{log:{record:e=>log("mail."+e.status,e)}});
+ supportEmail.registerPasswordReset({app,adminAuth:getAuth(),sender,continueUrl:process.env.PASSWORD_RESET_CONTINUE_URL||undefined,log});
+ supportNotify=supportEmail.createNotifier({sender,adminAuth:getAuth(),log});
+}
 if(process.env.PROVIDER_V1_ENABLED==="true"){
- require("./provider_v1").registerProviderV1({app,db,blobs:require("./provider_blobstore").gcsBlobStore(bucket),firebaseAuth,accountKey,
+ require("./provider_v1").registerProviderV1({app,db,blobs:require("./provider_blobstore").gcsBlobStore(bucket),firebaseAuth,accountKey,notify:supportNotify,
   async resolveWorkspace(uid,workspaceId){
    const ref=workspaceId==="free"?workspaceRef(uid):db.collection("gd_accounts").doc(accountKey(uid)).collection("workspaces").doc(workspaceId);
    if(workspaceId!=="free"&&!/^[0-9a-f-]{36}$/.test(workspaceId))return null;
@@ -351,4 +374,4 @@ function start(port=Number(process.env.PORT||8080)){
  return app.listen(port,()=>console.log("GenDragoon free storage API ready"));
 }
 if(require.main===module)start();
-module.exports={app,QUOTA,CHUNK,safeName,validID,lockedWrite,start};
+module.exports={app,QUOTA,CHUNK,safeName,validID,lockedWrite,start,trustProxyHops};
