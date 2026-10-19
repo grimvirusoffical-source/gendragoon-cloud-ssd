@@ -11,3 +11,6 @@ export { watch, type ChangeEvent, type EventType, type WatchOptions } from "./ev
 export { Connector, connectLink, newPKCE, pkceChallenge, type ClientInfo, type Connection, type PKCE } from "./connect.js";
 export { AccountClient, parseConnectLink, type Binding, type ConnectRequest, type Grant } from "./account.js";
 export { toHex, fromHex, toB64u, fromB64u } from "./bytes.js";
+export { TeamsClient, verifyAuditChain, type AuditEntry, type ChatCard, type ChatMessage, type ChatPage, type Checkout, type ColorChoices, type CreateTeamRequest,
+  type CreateWorkspaceRequest, type Invite, type InvitePreview, type JoinRequest, type MemberColor, type SharedWorkspace, type Team, type TeamMember, type TeamRole,
+  type TeamView, type TeamWorkspace, type TeamWorkspaces, type TransferRequest } from "./teams.js";
