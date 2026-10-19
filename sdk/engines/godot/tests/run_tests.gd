@@ -59,9 +59,9 @@ func _run() -> void:
 	await _case("Unit.Paths", func(): _t_paths())
 	var base := OS.get_environment("GD_SDK_BASE")
 	if base.is_empty():
-		_skip_case("Contract.C01_C04_Subset", "set GD_SDK_BASE")
+		_skip_case("Contract.Subset", "set GD_SDK_BASE")
 	else:
-		await _case("Contract.C01_C04_Subset", func(): await _t_contract(base))
+		await _case("Contract.Subset", func(): await _t_contract(base))
 	var origin := OS.get_environment("GD_TEAMS_ORIGIN")
 	if origin.is_empty():
 		_skip_case("Teams.Subset", "set GD_TEAMS_ORIGIN")
@@ -112,6 +112,12 @@ func _t_pkce(v: Dictionary) -> void:
 
 func _t_gate() -> void:
 	_ok(Gate.parse_level("L3") == 3 and Gate.parse_level("x") == -1, "parse_level")
+	_ok(Gate.effective_for("", 3) == 0 and Gate.effective_for("  ", 3) == 0 and Gate.effective_for("banana", 3) == 0, "empty or unreadable env locks to L0")
+	_ok(Gate.effective_for("L2", 3) == 2 and Gate.effective_for(" l2\n", 3) == 2 and Gate.effective_for("L4", 3) == 3, "env only lowers the cap")
+	_ok(Gate.check("keyEnvelope.create", 2).is_empty() and not Gate.check("keyEnvelope.replace", 2).is_empty(), "first key at L2, replacing it at L3")
+	_ok(Gate.check("files.deleteSlot", 2).is_empty() and not Gate.check("files.delete", 2).is_empty(), "slot delete at L2, file delete at L3")
+	_ok(not Gate.check("blobs.delete", 2).is_empty() and not Gate.check("manifests.delete", 2).is_empty(), "raw deletes at L3")
+	_ok(not Gate.check("storage.wipe", 3).is_empty() and not Gate.check("files.deleteFolder", 2).is_empty(), "wipe L4, deleteFolder L3")
 	_ok(Gate.check("files.read", 2).is_empty(), "L2 reads files")
 	_ok(not Gate.check("crypto.exportMasterKey", 3).is_empty(), "L3 cannot export the master key")
 	_ok(not Gate.check("teams.delete", 3).is_empty(), "L3 cannot delete a team")
@@ -164,12 +170,77 @@ func _t_contract(base: String) -> void:
 	_ok((await d.read_file("slots/two.sav")).is_not_found(), "C04 deleted file is gone")
 	var u := await c.usage()
 	_ok(u.ok and int(u.value["quotaBytes"]) > 0, "C07 usage")
-	var locked := GendragoonClient.new(base, c.api_key)
-	locked.max_level = 2
-	root.add_child(locked)
-	var k2 := GendragoonKeyring.new(locked)
-	_ok(not (await k2.export_master_key()).ok, "C08 L4 export refused")
-	locked.queue_free()
+	c.queue_free()
+	await _c07_quota(base)
+	await _c08_gate()
+	await _c15_cloud_save_at_l2(base)
+
+
+func _connect(base: String, ws: String, max_level := 3) -> GendragoonClient:
+	var uid := "godot" + B.hex(B.random(4))
+	var g := await _post_json(base + "/connect/grants", {"workspaceId": ws, "scopes": ["blobs:rw"], "requester": {"name": "Godot contract"}}, "Bearer dev-user:" + uid)
+	var c := GendragoonClient.new(base)
+	c.max_level = max_level
+	root.add_child(c)
+	var conn := await Connect.redeem_grant(c, String(g.get("grant", "")), "Godot contract")
+	_ok(conn.ok, "connected to " + ws)
+	return c
+
+
+func _c07_quota(base: String) -> void:
+	var c := await _connect(base, "small")
+	var d := GendragoonDrive.new(c, "big")
+	var big := PackedByteArray()
+	big.resize(100 << 10)
+	var w := await d.write_file("too-big.bin", big)
+	_ok(not w.ok and w.is_quota_exceeded() and w.error == "quota_exceeded", "C07 write above the quota is quota_exceeded")
+	var u := await c.usage()
+	_ok(u.ok and int(u.value["quotaBytes"]) == 64 << 10 and int(u.value["usedBytes"]) <= int(u.value["quotaBytes"]), "C07 usage within the quota")
+	_ok(u.ok and u.value.has("objectCount"), "C07 usage reports objects")
+	c.queue_free()
+
+
+## An L2 client is refused L3 and L4 calls before any request: the client points at a closed port, so a request
+## would fail with "network" instead of "level".
+func _c08_gate() -> void:
+	var c := GendragoonClient.new("http://127.0.0.1:9", "gdpk_" + "0".repeat(16) + "_" + "A".repeat(43))
+	c.max_level = 2
+	root.add_child(c)
+	var d := GendragoonDrive.new(c, "x")
+	var calls := {
+		"files.deleteFolder": func(): return await d.delete_folder("a"),
+		"files.delete": func(): return await d.delete("a.txt"),
+		"blobs.delete": func(): return await c.delete_blob("0".repeat(64)),
+		"manifests.delete": func(): return await c.delete_manifest(d.manifest_key),
+		"crypto.exportMasterKey": func(): return await GendragoonKeyring.new(c).export_master_key(),
+	}
+	for id in calls:
+		var r: GendragoonResult = await calls[id].call()
+		_ok(not r.ok and r.error == "level" and r.status == 0, "C08 %s refused at L2 before any request" % id)
+	c.queue_free()
+
+
+## C15: what a cloud-save component does on a fresh binding at the engine default level (L2).
+func _c15_cloud_save_at_l2(base: String) -> void:
+	var c := await _connect(base, "ws", 2)
+	var keys := GendragoonKeyring.new(c)
+	_ok((await keys.unlock("slot passphrase")).is_not_found(), "C15 no key before the first save")
+	_ok((await keys.create("slot passphrase")).ok, "C15 first key at L2")
+	var again := await GendragoonKeyring.new(c).create("other passphrase")
+	_ok(not again.ok and again.status == 412, "C15 second create is 412")
+	var rep := await keys.change_passphrase("new passphrase")
+	_ok(not rep.ok and rep.error == "level", "C15 replacing the key refused at L2")
+	var d := GendragoonDrive.new(c, "saves", keys)
+	_ok((await d.write_file("slots/one.sav", "first".to_utf8_buffer())).ok, "C15 save")
+	_ok((await d.write_file("slots/one.sav", "second".to_utf8_buffer())).ok, "C15 overwrite in place")
+	var got := await d.read_file("slots/one.sav")
+	_ok(got.ok and (got.value as PackedByteArray).get_string_from_utf8() == "second", "C15 read overwritten slot")
+	_ok((await d.mkdir("slots/sub")).ok, "C15 mkdir")
+	_ok((await d.delete_slot("slots", "sub")).is_not_found(), "C15 slot delete never removes a folder")
+	for bad in ["", "sub/x.sav", "..", "."]:
+		_ok((await d.delete_slot("slots", bad)).error == "invalid", "C15 invalid slot " + bad)
+	_ok((await d.delete_slot("slots", "one.sav")).ok, "C15 delete slot")
+	_ok((await d.read_file("slots/one.sav")).is_not_found(), "C15 deleted slot is gone")
 	c.queue_free()
 
 

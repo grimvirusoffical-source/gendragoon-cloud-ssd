@@ -326,7 +326,7 @@ func move(from: String, to: String) -> GendragoonResult:
 		return "")
 
 
-## Removes one file or one empty folder. Level L2, risk destructive.
+## Removes one file or one empty folder. Level L3, risk destructive. Cloud saves at L2 use delete_slot.
 func delete(p: String) -> GendragoonResult:
 	var g := _gate("files.delete")
 	if g:
@@ -343,6 +343,32 @@ func delete(p: String) -> GendragoonResult:
 				return "invalid:folder \"%s\" is not empty" % p
 		doc["folders"].erase(p)
 		return "")
+
+
+## Removes one save slot: the file folder/slot, where slot is a single path segment. It never removes a folder, a
+## nested file or anything outside folder, and it only changes this drive's manifest (the slot's blobs stay until
+## garbage collection). Its reach is the same as overwriting that slot, which L2 already allows, so it is level L2,
+## risk destructive.
+func delete_slot(folder: String, slot: String) -> GendragoonResult:
+	var g := _gate("files.deleteSlot")
+	if g:
+		return g
+	var p := slot_path(folder, slot)
+	if p.is_empty():
+		return Result.failure("invalid", "invalid slot name \"%s\"" % slot)
+	return await _update(func(doc):
+		if not doc["files"].has(p):
+			return "not_found:" + p
+		doc["files"].erase(p)
+		return "")
+
+
+## folder/slot for a save slot, or "" when slot is not one path segment or the path is invalid.
+static func slot_path(folder: String, slot: String) -> String:
+	if slot.is_empty() or slot.contains("/"):
+		return ""
+	var p := slot if folder.is_empty() else folder + "/" + slot
+	return p if check_path(p).is_empty() else ""
 
 
 ## Removes a folder and everything in it; value is the number of files removed. Level L3, risk bulk-destructive.

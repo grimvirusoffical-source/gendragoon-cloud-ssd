@@ -137,7 +137,7 @@ func get_blob(id: String) -> GendragoonResult:
 	return Result.success(body)
 
 
-## Level L2, risk destructive.
+## Level L3, risk destructive.
 func delete_blob(id: String) -> GendragoonResult:
 	if not B.is_hex64(id):
 		return Result.failure("invalid", "blob id must be 64 lower-case hex characters")
@@ -206,7 +206,7 @@ func put_manifest(key: String, data: PackedByteArray, if_absent := false, if_gen
 	return Result.success({"created": r.value["status"] == 201, "generation": _etag(r)}) if r.ok else r
 
 
-## Level L2, risk destructive.
+## Level L3, risk destructive.
 func delete_manifest(key: String) -> GendragoonResult:
 	if not B.is_hex64(key):
 		return Result.failure("invalid", "manifest key must be 64 lower-case hex characters")

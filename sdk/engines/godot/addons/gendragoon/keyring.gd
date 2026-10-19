@@ -64,7 +64,8 @@ func unlock(passphrase: String) -> GendragoonResult:
 	return Result.success()
 
 
-## Generates a master key and stores its envelope (create-only). Level L3, risk key.
+## Generates a master key and stores its first recovery envelope. Create-only: it fails with status 412
+## (precondition_failed) when an envelope already exists, so it can never replace one. Level L2, risk key.
 func create(passphrase: String) -> GendragoonResult:
 	var why := _client.check("keyEnvelope.create")
 	if not why.is_empty():
