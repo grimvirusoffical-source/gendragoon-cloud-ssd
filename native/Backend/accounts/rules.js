@@ -98,7 +98,7 @@ function checkBirthDate(value,{now,minAge}={}){
  const dob=parseBirthDate(value);
  if(!dob)return fail("dob_invalid");
  const age=ageOn(dob,now);
- if(age<0)return fail("dob_invalid");
+ if(age<0)return fail("dob_range");
  if(age>AGE_MAX)return fail("dob_range");
  if(age<effectiveMinAge(minAge))return fail("under_min_age");
  return ok;

@@ -20,7 +20,7 @@ const MESSAGES={
  two_factor_required:"Enter your two-factor code to continue.",
  username_taken:"That username is taken.",email_taken:"That email is already used by another account.",
  email_domain:"That email domain can't receive mail.",email_disposable:"Disposable email addresses can't be used. Use your own email or a business address.",email_unverifiable:"We couldn't check that email domain. Try again in a moment.",
- under_min_age:"You must be at least 13 to make an account.",sms_unavailable:"Text-message codes aren't available yet.",
+ under_min_age:"You must be at least 13 to make an account.",dob_range:"Your date of birth can't be in the future or more than 100 years ago.",sms_unavailable:"Text-message codes aren't available yet.",
  sms_send_failed:"We couldn't send the text message. Try again in a moment.",phone_undeliverable:"We can't send text messages to that number.",
  code_invalid:"That code isn't right.",rate_limited:"Too many tries. Wait a moment and try again.",
  quick_signin_email:"Your sign-in provider hasn't confirmed this email address.",
@@ -344,7 +344,10 @@ function registerAccounts({app,store,identify,createPasswordUser,deletePasswordU
  // factor set up and passed for this session.
  async function gate(user){
   const id=user.__identity||{provider:"firebase",authTime:user.auth_time};
-  const profile=await profileFor({...id,uid:user.uid});
+  let profile;
+  // A refused profile (e.g. a Red-XAI token without an allowed age band) keeps the contract error shape on the gate.
+  try{profile=await profileFor({...id,uid:user.uid});}
+  catch(error){if(error?.status&&error.code)throw Object.assign(error,{expose:MESSAGES[error.code]||error.code.replace(/_/g," "),accountError:true});throw error;}
   const pending=pendingFor(profile,id);
   if(pending.length===0)return profile;
   const code={account_setup:"account_setup_required",tos:"tos_required","2fa_setup":"two_factor_setup_required","2fa":"two_factor_required"}[pending[0]];
