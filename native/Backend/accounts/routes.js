@@ -24,6 +24,7 @@ const MESSAGES={
  sms_send_failed:"We couldn't send the text message. Try again in a moment.",phone_undeliverable:"We can't send text messages to that number.",
  code_invalid:"That code isn't right.",rate_limited:"Too many tries. Wait a moment and try again.",
  quick_signin_email:"Your sign-in provider hasn't confirmed this email address.",
+ managed_by_redxai:"This is managed in your Red-XAI Account.",
 };
 const httpError=(status,code,field,extra)=>Object.assign(new Error(code),{status,code,field,extra});
 const sha=v=>crypto.createHash("sha256").update(String(v)).digest("hex");
@@ -68,10 +69,23 @@ function registerAccounts({app,store,identify,createPasswordUser,deletePasswordU
  function pendingFor(profile,id){
   if(!profile)return ["account_setup"];
   const p=[];
-  if(profile.tosVersion!==terms.version)p.push("tos");
+  // Red-XAI accounts accept the Gendragoon Terms centrally; the token's app_tos_version says which version.
+  const accepted=id?.provider==="redxai"?id.appTosVersion:profile.tosVersion;
+  if(accepted!==terms.version)p.push("tos");
   if(profile.twoFactorState==="pending")p.push("2fa_setup");
   else if(profile.twoFactorState==="active"&&!sessionVerified(profile,id))p.push("2fa");
   return p;
+ }
+ // Red-XAI Accounts already ran every sign-up rule (username, 13+, false-information warning, 2FA choice, both
+ // Terms), so a Red-XAI account gets its Gendragoon profile on first use, built from the access token.
+ async function profileFor(id){
+  const existing=await store.get(id.uid);
+  if(existing||id.provider!=="redxai")return existing;
+  if(id.ageBand!=="13to17"&&id.ageBand!=="18plus")throw httpError(403,"under_min_age","dob");
+  const t=now();
+  return store.provision(id.uid,{uid:id.uid,username:id.username||null,usernameFolded:null,email:id.email?R.normalizeEmail(id.email):null,emailKey:null,
+   emailVerified:id.emailVerified===true,dob:null,ageBand:id.ageBand,twoFactor:"central",twoFactorState:"off",tosVersion:id.appTosVersion||null,
+   tosAcceptedMs:null,tosApp:"redxai",identity:{provider:"redxai",issuer:id.issuer,sub:id.sub},signupApp:"redxai",mfaVerified:[],createdMs:t,updatedMs:t});
  }
  function view(profile,id){
   const dob=R.birthDateFromIso(profile.dob||"");
@@ -79,7 +93,7 @@ function registerAccounts({app,store,identify,createPasswordUser,deletePasswordU
   return {username:profile.username,email:profile.email,emailVerified:profile.emailVerified===true,
    age,ageBand:age===null?profile.ageBand||null:age>=18?"18plus":"13to17",
    twoFactor:profile.twoFactor,twoFactorState:profile.twoFactorState,phoneMasked:profile.phoneMasked||null,
-   tosVersion:profile.tosVersion,tosCurrent:terms.version,tosAcceptedMs:profile.tosAcceptedMs,
+   tosVersion:id?.provider==="redxai"?id.appTosVersion:profile.tosVersion,tosCurrent:terms.version,tosAcceptedMs:profile.tosAcceptedMs,
    identity:profile.identity?.provider||"firebase",createdMs:profile.createdMs,pending:pendingFor(profile,id)};
  }
 
@@ -238,22 +252,12 @@ function registerAccounts({app,store,identify,createPasswordUser,deletePasswordU
  router.post("/complete",wrap(async(req,res)=>{
   const id=await who(req);
   limit("signup",ipOf(req));
-  if(await store.get(id.uid))throw httpError(409,"account_exists");
+  if(id.provider!=="redxai"&&await store.get(id.uid))throw httpError(409,"account_exists");
   const body={...(req.body||{})};
   if(id.provider==="redxai"){
-   // Red-XAI Accounts already enforced the sign-up rules; Gendragoon re-checks what its tokens carry.
-   const u=R.checkUsername(id.username||"");if(!u.ok)throw httpError(400,u.code,"username");
-   if(id.ageBand!=="13to17"&&id.ageBand!=="18plus")throw httpError(403,"under_min_age","dob");
-   if(id.emailVerified!==true)throw httpError(403,"quick_signin_email","email");
-   if(body.acknowledgeFalseInfo!==true)throw httpError(400,"false_info_ack_required","acknowledgeFalseInfo");
-   const grant=tosGate.verifyAgreed(body.tosGrant);if(!grant.ok)throw httpError(grant.code==="tos_changed"?409:400,grant.code,"tosGrant");
-   const t=now();
-   const profile={uid:id.uid,username:id.username,usernameFolded:R.usernameKey(id.username),email:R.normalizeEmail(id.email),emailKey:R.emailKey(id.email),
-    emailVerified:true,dob:null,ageBand:id.ageBand,twoFactor:"central",twoFactorState:"off",tosVersion:grant.version,tosAcceptedMs:grant.agreedMs,
-    tosReadMs:grant.readMs,tosApp:"gendragoon",tosHistory:[{version:grant.version,acceptedMs:grant.agreedMs}],falseInfoWarnedMs:t,
-    identity:{provider:"redxai",issuer:id.issuer,sub:id.sub},signupApp:"gendragoon",mfaVerified:[],createdMs:t,updatedMs:t};
-   await store.create(id.uid,profile,{usernameFolded:profile.usernameFolded,emailKey:profile.emailKey,grantId:grant.id,grantExpiresMs:grant.expiresMs});
-   return res.status(201).json({account:view(profile,id),pending:pendingFor(profile,id)});
+   // Nothing to complete: the profile is made from the token (profileFor). Kept for apps that still call it.
+   const profile=await profileFor(id);
+   return res.status(200).json({account:view(profile,id),pending:pendingFor(profile,id)});
   }
   if(id.emailVerified!==true||!id.email)throw httpError(403,"quick_signin_email","email");
   if(R.normalizeEmail(body.email||"")!==R.normalizeEmail(id.email))throw httpError(400,"email_mismatch","email");
@@ -264,13 +268,14 @@ function registerAccounts({app,store,identify,createPasswordUser,deletePasswordU
  }));
 
  router.get("/me",wrap(async(req,res)=>{
-  const id=await who(req);const profile=await store.get(id.uid);
+  const id=await who(req);const profile=await profileFor(id);
   if(!profile)return res.status(404).json({error:"account_setup_required",message:MESSAGES.account_setup_required,pending:["account_setup"],
    quick:{email:id.email||null,emailVerified:id.emailVerified===true,provider:id.provider}});
   res.json(view(profile,id));
  }));
  router.post("/me/tos",wrap(async(req,res)=>{
   const id=await who(req);
+  if(id.provider==="redxai")throw httpError(409,"managed_by_redxai");
   const grant=tosGate.verifyAgreed(req.body?.grant);if(!grant.ok)throw httpError(grant.code==="tos_changed"?409:400,grant.code,"grant");
   const profile=await store.get(id.uid);if(!profile)throw httpError(403,"account_setup_required");
   await store.acceptTerms(id.uid,{tosVersion:grant.version,tosAcceptedMs:grant.agreedMs,tosReadMs:grant.readMs,
@@ -338,8 +343,8 @@ function registerAccounts({app,store,identify,createPasswordUser,deletePasswordU
  // Gate for every other signed-in route: the profile must exist, carry the current Terms, and have its second
  // factor set up and passed for this session.
  async function gate(user){
-  const profile=await store.get(user.uid);
   const id=user.__identity||{provider:"firebase",authTime:user.auth_time};
+  const profile=await profileFor({...id,uid:user.uid});
   const pending=pendingFor(profile,id);
   if(pending.length===0)return profile;
   const code={account_setup:"account_setup_required",tos:"tos_required","2fa_setup":"two_factor_setup_required","2fa":"two_factor_required"}[pending[0]];

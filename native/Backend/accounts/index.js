@@ -3,7 +3,10 @@
 //   ACCOUNTS_SEAL_KEY   32 random bytes, base64 (seals 2FA secrets and phone numbers, signs ToS grants). Required in production.
 //   ACCOUNTS_MIN_AGE    optional; values below 13 are raised to 13.
 //   REDXAI_ISSUER       optional; Red-XAI Accounts issuer URL. When set, Red-XAI tokens are accepted.
-//   REDXAI_CLIENT_ID    the OAuth client id Gendragoon is registered under (default "gendragoon").
+//   REDXAI_AUDIENCES    comma-separated client ids whose access tokens are accepted (default "gendragoon", the public
+//                       client the apps sign in with). REDXAI_CLIENT_ID is the older single-value name.
+//   REDXAI_BACKEND_CLIENT_ID / REDXAI_BACKEND_CLIENT_SECRET  the confidential "gendragoon-backend" client used for the
+//                       back-channel (account status, event feed); see backchannel.js.
 //   TWILIO_*            optional; turns on phone 2FA codes through Twilio (see sms.js). Unset keeps Phone unavailable.
 //   SMS_PROVIDER=mock   staging only (see sms.js).
 const crypto=require("node:crypto");
@@ -17,6 +20,10 @@ const {registerAccounts}=require("./routes");
 
 function deriveKey(sealKey,label){return crypto.createHmac("sha256",sealKey).update("gendragoon-accounts:"+label).digest();}
 
+function redxaiAudiences(env){
+ const list=String(env.REDXAI_AUDIENCES||env.REDXAI_CLIENT_ID||"gendragoon").split(",").map(v=>v.trim()).filter(Boolean);
+ return list.length?list:["gendragoon"];
+}
 function installAccounts({app,db,accountKey,firebaseAuth,env=process.env,now=()=>Date.now(),emailChecker,sms,fetchImpl}){
  const raw=env.ACCOUNTS_SEAL_KEY?Buffer.from(env.ACCOUNTS_SEAL_KEY,"base64"):null;
  const configured=Boolean(raw&&raw.length===32);
@@ -24,7 +31,7 @@ function installAccounts({app,db,accountKey,firebaseAuth,env=process.env,now=()=
  const sealKey=configured?raw:crypto.randomBytes(32);
  const store=createAccountStore({db,accountKey});
  const identity=createIdentity({firebaseVerify:token=>firebaseAuth().verifyIdToken(token),store,
-  issuer:env.REDXAI_ISSUER||null,audience:env.REDXAI_CLIENT_ID||"gendragoon",fetchImpl,now});
+  issuer:env.REDXAI_ISSUER||null,audience:redxaiAudiences(env),fetchImpl,now});
  const accounts=registerAccounts({app,store,identify:identity.identify,
   async createPasswordUser(email,password){
    try{return (await firebaseAuth().createUser({email,password,emailVerified:false})).uid;}
@@ -47,4 +54,4 @@ function accountsStartup(env=process.env){
  if(smsProblem)return {exit:false,warn:true,message:"Phone two-factor codes are off: "+smsProblem};
  return {exit:false};
 }
-module.exports={installAccounts,accountsStartup};
+module.exports={installAccounts,accountsStartup,redxaiAudiences};

@@ -36,6 +36,13 @@ function createAccountStore({db,accountKey}){
    tx.create(refs.g,{expiresMs:grantExpiresMs});
   });
  }
+ // A Red-XAI account seen for the first time: the profile only. Username and email uniqueness belong to Red-XAI
+ // Accounts, so no local index entries are made (they would collide with Firebase-era names).
+ async function provision(uid,profile){
+  const ref=profileRef(uid);
+  await db.runTransaction(async tx=>{const s=await tx.get(ref);if(!s.exists)tx.create(ref,profile);});
+  return get(uid);
+ }
  async function update(uid,patch){await profileRef(uid).set(patch,{merge:true});}
  // Re-accepting new Terms spends a grant too.
  async function acceptTerms(uid,patch,{grantId,grantExpiresMs}){
@@ -61,13 +68,13 @@ function createAccountStore({db,accountKey}){
  async function remove(uid){
   const p=await get(uid);
   if(!p)return false;
-  await usernames.doc(p.usernameFolded).delete().catch(()=>{});
-  await emails.doc(sha(p.emailKey)).delete().catch(()=>{});
+  if(p.usernameFolded)await usernames.doc(p.usernameFolded).delete().catch(()=>{});
+  if(p.emailKey)await emails.doc(sha(p.emailKey)).delete().catch(()=>{});
   if(p.identity?.issuer&&p.identity?.sub)await links.doc(sha(p.identity.issuer+"|"+p.identity.sub)).delete().catch(()=>{});
   await profileRef(uid).delete();
   return true;
  }
- return {get,usernameTaken,emailTaken,create,update,acceptTerms,resolveLink,link,remove};
+ return {get,usernameTaken,emailTaken,create,provision,update,acceptTerms,resolveLink,link,remove};
 }
 // Used by account deletion, which knows only the account hash.
 async function deleteProfileByHash(db,owner){

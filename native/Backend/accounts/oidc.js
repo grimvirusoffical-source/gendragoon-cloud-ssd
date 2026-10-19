@@ -15,8 +15,11 @@ function decodeUnverified(token){
  try{return {header:b64json(parts[0]),payload:b64json(parts[1])};}catch(_){return null;}
 }
 
-function createOidcVerifier({issuer,audience,fetchImpl=globalThis.fetch,now=()=>Date.now(),cacheMs=10*60_000}){
- if(!issuer||!audience)throw Error("issuer and audience required");
+// audience: one client id or a list. With typ:"at+jwt" only access tokens (RFC 9068) whose client_id is one of the
+// audiences are accepted, which is what Red-XAI Accounts v1.1 issues (aud = client_id = the requesting app).
+function createOidcVerifier({issuer,audience,typ,fetchImpl=globalThis.fetch,now=()=>Date.now(),cacheMs=10*60_000}){
+ const audiences=(Array.isArray(audience)?audience:[audience]).filter(Boolean);
+ if(!issuer||audiences.length===0)throw Error("issuer and audience required");
  const iss=issuer.replace(/\/+$/,"");
  let keys=new Map(),fetchedAt=0,inflight=null,jwksUri=null;
  async function getJson(url){
@@ -54,6 +57,7 @@ function createOidcVerifier({issuer,audience,fetchImpl=globalThis.fetch,now=()=>
   const {header,payload}=decoded;
   const alg=ALGS[header.alg];
   if(!alg||typeof header.kid!=="string")throw new TokenError("token_alg");
+  if(typ&&String(header.typ||"").toLowerCase()!==typ&&String(header.typ||"").toLowerCase()!=="application/"+typ)throw new TokenError("token_type");
   const entry=await keyFor(header.kid);
   if(!entry||entry.jwk.kty!==alg.kty||(entry.jwk.alg&&entry.jwk.alg!==header.alg))throw new TokenError("token_key");
   const [h,p,s]=token.split(".");
@@ -62,7 +66,8 @@ function createOidcVerifier({issuer,audience,fetchImpl=globalThis.fetch,now=()=>
   const t=Math.floor(now()/1000);
   if(payload.iss!==iss)throw new TokenError("token_issuer");
   const aud=Array.isArray(payload.aud)?payload.aud:[payload.aud];
-  if(!aud.includes(audience))throw new TokenError("token_audience");
+  if(!aud.some(a=>audiences.includes(a)))throw new TokenError("token_audience");
+  if(typ==="at+jwt"&&!audiences.includes(payload.client_id))throw new TokenError("token_client");
   if(!Number.isFinite(payload.exp)||payload.exp+SKEW_S<t)throw new TokenError("token_expired");
   if(Number.isFinite(payload.nbf)&&payload.nbf-SKEW_S>t)throw new TokenError("token_not_yet_valid");
   if(Number.isFinite(payload.iat)&&payload.iat-SKEW_S>t)throw new TokenError("token_not_yet_valid");
@@ -70,7 +75,7 @@ function createOidcVerifier({issuer,audience,fetchImpl=globalThis.fetch,now=()=>
   if(nonce!==undefined&&payload.nonce!==nonce)throw new TokenError("token_nonce");
   return payload;
  }
- return {verify,issuer:iss,audience};
+ return {verify,issuer:iss,audience:audiences[0],audiences};
 }
 // True when the token claims to come from this issuer (cheap routing before verification).
 function issuedBy(token,issuer){const d=decodeUnverified(token);return Boolean(d&&d.payload&&d.payload.iss===String(issuer).replace(/\/+$/,""));}

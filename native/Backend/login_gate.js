@@ -55,8 +55,9 @@ function createLoginGate({verifyIdToken,fetchTerms,decorate,accountsGate}={}){
     if(res.headersSent)return;
     const status=Number.isInteger(error?.status)?error.status:401;
     const message=typeof error?.expose==="string"?error.expose:(status===403?"Google provider required":"Invalid or expired Firebase login");
-    const body={error:message};
-    if(Array.isArray(error?.pending)){body.code=error.code;body.pending=error.pending;}
+    // Account steps use the Red-XAI Accounts v1.1 error shape: {error:<code>, message, pending}. `code` repeats the
+    // code for clients built against the earlier shape. Other failures keep {error:<message>} for older apps.
+    const body=Array.isArray(error?.pending)?{error:error.code,message,code:error.code,pending:error.pending}:{error:message};
     res.status(status).json(body);
    });
   };

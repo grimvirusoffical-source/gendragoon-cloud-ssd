@@ -6,30 +6,18 @@
 // existing Firebase users, so their workspaces carry over). An unlinked subject gets the uid "rxa:<sub>".
 const {createOidcVerifier,issuedBy}=require("./oidc");
 
+// Red-XAI Accounts v1.1 access tokens (typ at+jwt, aud = client_id = "gendragoon") carry every claim Gendragoon
+// needs: preferred_username, email, email_verified, age_band, amr, auth_time, sid and app_tos_version (the
+// Gendragoon Terms version this account accepted centrally). No userinfo round trip is needed.
 function createIdentity({firebaseVerify,store,issuer,audience,fetchImpl=globalThis.fetch,now=()=>Date.now()}){
- const oidc=issuer?createOidcVerifier({issuer,audience,fetchImpl,now}):null;
- const userinfoCache=new Map();
- // The v1 access token carries sub, aud, scope, sid; profile claims come from userinfo when absent (cached per sid).
- async function profileClaims(token,claims){
-  if(claims.preferred_username&&claims.email!==undefined)return claims;
-  const key=claims.sid||claims.jti||token.slice(-24);
-  const hit=userinfoCache.get(key);
-  if(hit&&hit.until>now())return {...hit.claims,...claims};
-  const res=await fetchImpl(oidc.issuer+"/oauth2/userinfo",{headers:{authorization:"Bearer "+token,accept:"application/json"},signal:AbortSignal.timeout(8000)});
-  if(!res.ok)throw Object.assign(Error("userinfo_unavailable"),{code:"userinfo_unavailable"});
-  const info=await res.json();
-  if(info.sub!==claims.sub)throw Object.assign(Error("userinfo_subject"),{code:"userinfo_subject"});
-  if(userinfoCache.size>5000)userinfoCache.clear();
-  userinfoCache.set(key,{claims:info,until:now()+5*60_000});
-  return {...info,...claims};
- }
+ const oidc=issuer?createOidcVerifier({issuer,audience,typ:"at+jwt",fetchImpl,now}):null;
  async function identify(token){
   if(oidc&&issuedBy(token,oidc.issuer)){
-   const verified=await oidc.verify(token);
-   const c=await profileClaims(token,verified);
+   const c=await oidc.verify(token);
    const linked=store?await store.resolveLink(oidc.issuer,c.sub):null;
    return {uid:linked||"rxa:"+c.sub,provider:"redxai",issuer:oidc.issuer,sub:c.sub,email:c.email||null,emailVerified:c.email_verified===true,
-    username:c.preferred_username||null,ageBand:c.age_band||null,amr:Array.isArray(c.amr)?c.amr:[],authTime:c.auth_time??null,sid:c.sid||null,signInProvider:"redxai"};
+    username:c.preferred_username||null,ageBand:c.age_band||null,adultVerified:c.adult_verified===true,amr:Array.isArray(c.amr)?c.amr:[],
+    authTime:c.auth_time??null,sid:c.sid||null,appTosVersion:typeof c.app_tos_version==="string"?c.app_tos_version:null,signInProvider:"redxai"};
   }
   const u=await firebaseVerify(token);
   if(!u||typeof u.uid!=="string"||!u.uid)throw Error("invalid token");

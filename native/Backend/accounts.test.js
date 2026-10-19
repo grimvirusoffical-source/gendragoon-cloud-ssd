@@ -453,13 +453,16 @@ function issuerFixture(){
   if(url===ISS+"/oauth2/userinfo")return json(userinfo[opts.headers.authorization.slice(7)]||{});
   return {ok:false,json:async()=>({})};
  };
- function sign(payload,{kid="k1",key=privateKey,alg="ES256"}={}){
+ function sign(payload,{kid="k1",key=privateKey,alg="ES256",typ="at+jwt"}={}){
   const enc=v=>Buffer.from(JSON.stringify(v)).toString("base64url");
-  const head=enc({alg,kid,typ:"JWT"}),body=enc(payload);
+  const head=enc({alg,kid,typ}),body=enc(payload);
   const sig=alg==="none"?"":crypto.sign("sha256",Buffer.from(head+"."+body),{key,dsaEncoding:"ieee-p1363"}).toString("base64url");
   return head+"."+body+"."+sig;
  }
- const claims=(over={})=>({iss:ISS,aud:"gendragoon",sub:"rxa_ABC",exp:Math.floor(NOW/1000)+600,iat:Math.floor(NOW/1000),scope:"openid profile email",sid:"s1",...over});
+ // A Red-XAI Accounts v1.1 access token (typ at+jwt): every claim Gendragoon reads is in the token.
+ const claims=(over={})=>({iss:ISS,aud:"gendragoon",client_id:"gendragoon",sub:"rxa_ABC",exp:Math.floor(NOW/1000)+600,iat:Math.floor(NOW/1000),
+  scope:"openid profile email",sid:"s1",jti:"j1",auth_time:Math.floor(NOW/1000),amr:["pwd"],preferred_username:"dragon_rider",
+  email:"josh@example.com",email_verified:true,age_band:"18plus",adult_verified:false,app_tos_version:"gendragoon-tos-2026-10-19",...over});
  return {ISS,fetchImpl,sign,claims,keys,setUserinfo:(token,v)=>{userinfo[token]=v;},fetches:()=>jwksFetches};
 }
 
@@ -492,11 +495,11 @@ test("Red-XAI tokens: a new signing key is picked up after rotation",async()=>{
  assert.equal((await v.verify(token)).sub,"rxa_ABC");
 });
 
-test("Red-XAI sign-in: Gendragoon re-checks the claims, needs its own Terms, honors amr, and links existing Firebase accounts",async()=>{
+test("Red-XAI sign-in (v1.1): profile from the access token, Terms from app_tos_version, amr honored, Firebase accounts link",async()=>{
  const f=issuerFixture();
  const db=memoryFirestore();const store=createAccountStore({db,accountKey});
  const identity=createIdentity({firebaseVerify:async token=>{const [,uid]=token.split(".");return {uid,auth_time:1,email:"old@example.com",email_verified:true,firebase:{sign_in_provider:"google.com"}};},
-  store,issuer:f.ISS,audience:"gendragoon",fetchImpl:f.fetchImpl,now:()=>NOW});
+  store,issuer:f.ISS,audience:["gendragoon"],fetchImpl:f.fetchImpl,now:()=>NOW});
  const app=express();
  const accounts=registerAccounts({app,store,identify:identity.identify,createPasswordUser:async()=>{throw Error("unused");},deletePasswordUser:async()=>{},
   emailChecker:createEmailChecker({resolver:fakeResolver(DNS)}),sms:null,sealer:createSealer(crypto.randomBytes(32).toString("base64")),
@@ -506,35 +509,41 @@ test("Red-XAI sign-in: Gendragoon re-checks the claims, needs its own Terms, hon
  const server=await new Promise(r=>{const s=app.listen(0,"127.0.0.1",()=>r(s));});
  const base="http://127.0.0.1:"+server.address().port;
  const call=async(method,path,body,token)=>{const res=await fetch(base+path,{method,headers:{"content-type":"application/json",...(token?{authorization:"Bearer "+token}:{})},body:body&&JSON.stringify(body)});return {status:res.status,body:await res.json()};};
- const grant=async()=>{const tos=await call("GET","/v1/accounts/tos");const read=await call("POST","/v1/accounts/tos/read",{version:tos.body.version});return (await call("POST","/v1/accounts/tos/agree",{grant:read.body.grant})).body.grant;};
  try{
-  // The v1 access token has no profile claims; they come from userinfo.
+  // Signed up centrally (Terms, rules, warning, 2FA choice all done there): usable at once, no /complete step.
   const access=f.sign(f.claims());
-  f.setUserinfo(access,{sub:"rxa_ABC",preferred_username:"dragon_rider",email:"josh@example.com",email_verified:true,age_band:"18plus"});
   let r=await call("GET","/v1/protected",undefined,access);
-  assert.equal(r.status,403);assert.equal(r.body.code,"account_setup_required");
-  r=await call("POST","/v1/accounts/complete",{acknowledgeFalseInfo:true},access);
-  assert.equal(r.body.error,"tos_required");
-  r=await call("POST","/v1/accounts/complete",{acknowledgeFalseInfo:true,tosGrant:await grant()},access);
-  assert.equal(r.status,201,JSON.stringify(r.body));
-  r=await call("GET","/v1/protected",undefined,access);
-  assert.equal(r.status,200);assert.equal(r.body.uid,"rxa:rxa_ABC");
+  assert.equal(r.status,200,JSON.stringify(r.body));assert.equal(r.body.uid,"rxa:rxa_ABC");
   const profile=await store.get("rxa:rxa_ABC");
   assert.equal(profile.identity.provider,"redxai");assert.equal(profile.ageBand,"18plus");assert.equal(profile.dob,null);
+  assert.equal(profile.usernameFolded,null,"no local username index: uniqueness is central");
+  r=await call("GET","/v1/accounts/me",undefined,access);
+  assert.equal(r.status,200);assert.equal(r.body.username,"dragon_rider");assert.equal(r.body.tosVersion,"gendragoon-tos-2026-10-19");assert.deepEqual(r.body.pending,[]);
+  r=await call("POST","/v1/accounts/complete",{},access);
+  assert.equal(r.status,200,"complete is a no-op for Red-XAI accounts");
+  assert.equal((await call("POST","/v1/accounts/me/tos",{grant:"x"},access)).body.error,"managed_by_redxai");
 
-  // A token whose username breaks Gendragoon's rules, or with no age band, is refused.
-  const bad=f.sign(f.claims({sub:"rxa_BAD",sid:"s2"}));
-  f.setUserinfo(bad,{sub:"rxa_BAD",preferred_username:"_bad_name_",email:"b@example.com",email_verified:true,age_band:"18plus"});
-  assert.equal((await call("POST","/v1/accounts/complete",{acknowledgeFalseInfo:true,tosGrant:await grant()},bad)).body.error,"username_edges");
-  const young=f.sign(f.claims({sub:"rxa_KID",sid:"s3"}));
-  f.setUserinfo(young,{sub:"rxa_KID",preferred_username:"young_player",email:"k@example.com",email_verified:true});
-  assert.equal((await call("POST","/v1/accounts/complete",{acknowledgeFalseInfo:true,tosGrant:await grant()},young)).body.error,"under_min_age");
+  // Gendragoon Terms not (or no longer) accepted centrally: the contract error shape, code in `error`.
+  const stale=f.sign(f.claims({sid:"s6",app_tos_version:"gendragoon-tos-2026-01-01"}));
+  r=await call("GET","/v1/protected",undefined,stale);
+  assert.equal(r.status,403);assert.equal(r.body.error,"tos_required");assert.equal(r.body.code,"tos_required");assert.deepEqual(r.body.pending,["tos"]);assert.ok(r.body.message);
+  const none=f.sign(f.claims({sid:"s7",app_tos_version:undefined}));
+  assert.equal((await call("GET","/v1/protected",undefined,none)).body.error,"tos_required");
+
+  // No age band (under 13 can't exist centrally, but Gendragoon checks anyway): refused, nothing stored.
+  const young=f.sign(f.claims({sub:"rxa_KID",sid:"s3",age_band:undefined}));
+  r=await call("GET","/v1/protected",undefined,young);
+  assert.equal(r.status,403);assert.equal(await store.get("rxa:rxa_KID"),null);
+
+  // Only v1.1 access tokens for the gendragoon client: not ID tokens, not other apps' tokens.
+  assert.equal((await call("GET","/v1/protected",undefined,f.sign(f.claims({sid:"s8"}),{typ:"JWT"}))).status,401,"ID token refused");
+  assert.equal((await call("GET","/v1/protected",undefined,f.sign(f.claims({sid:"s9",aud:"rotten-apple",client_id:"rotten-apple"})))).status,401);
+  assert.equal((await call("GET","/v1/protected",undefined,f.sign(f.claims({sid:"s10",client_id:"rotten-apple"})))).status,401,"client_id must match");
 
   // Migration: an existing Firebase account links its Red-XAI Account and keeps its uid (and workspaces).
   await store.create("legacyUid",{uid:"legacyUid",username:"legacy_user",usernameFolded:"legacy_user",email:"old@example.com",emailKey:"old@example.com",
    twoFactor:"none",twoFactorState:"off",tosVersion:"gendragoon-tos-2026-10-19",identity:{provider:"firebase"}},{usernameFolded:"legacy_user",emailKey:"old@example.com",grantId:"g-legacy",grantExpiresMs:1});
-  const rxLegacy=f.sign(f.claims({sub:"rxa_OLD",sid:"s4",amr:["pwd","otp"]}));
-  f.setUserinfo(rxLegacy,{sub:"rxa_OLD",preferred_username:"legacy_user",email:"old@example.com",email_verified:true,age_band:"18plus"});
+  const rxLegacy=f.sign(f.claims({sub:"rxa_OLD",sid:"s4",amr:["pwd","otp"],preferred_username:"legacy_user",email:"old@example.com"}));
   r=await call("POST","/v1/accounts/link/redxai",{redxaiToken:rxLegacy},"fb.legacyUid");
   assert.equal(r.status,200,JSON.stringify(r.body));
   r=await call("GET","/v1/protected",undefined,rxLegacy);
@@ -546,8 +555,8 @@ test("Red-XAI sign-in: Gendragoon re-checks the claims, needs its own Terms, hon
   await store.update("legacyUid",{twoFactor:"app",twoFactorState:"active"});
   assert.equal((await call("GET","/v1/protected",undefined,rxLegacy)).status,200);
   const noMfa=f.sign(f.claims({sub:"rxa_OLD",sid:"s5",amr:["pwd"]}));
-  f.setUserinfo(noMfa,{sub:"rxa_OLD",preferred_username:"legacy_user",email:"old@example.com",email_verified:true,age_band:"18plus"});
-  assert.equal((await call("GET","/v1/protected",undefined,noMfa)).body.code,"two_factor_required");
+  r=await call("GET","/v1/protected",undefined,noMfa);
+  assert.equal(r.body.error,"two_factor_required");assert.equal(r.body.code,"two_factor_required");
  }finally{server.close();}
 });
 
