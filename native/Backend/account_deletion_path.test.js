@@ -1,5 +1,5 @@
 "use strict";
-// Contract pin for the account-deletion status path (Avery's final ruling):
+// Contract pin for the account-deletion status path (final ruling):
 //   GET /v2/account/deletions/:jobId   (plural)  -> served
 //   GET /v2/account/deletion/:jobId    (singular) -> NOT served (404)
 // Stub service only: no network, keys, or Stripe.

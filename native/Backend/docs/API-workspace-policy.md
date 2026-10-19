@@ -1,6 +1,6 @@
 # Workspace policy API
 
-Server-side rules for GenDragoon workspaces. This note is the source Avery can fold into `gendragoon-apps/docs/API.md`. It describes the behavior implemented in `workspace_policy.js` and the routes that call it. No live Stripe price ids, secrets, or customer data belong in this document or in source.
+Server-side rules for GenDragoon workspaces. It describes the behavior implemented in `workspace_policy.js` and the routes that call it. No live Stripe price ids, secrets, or customer data belong in this document or in source.
 
 ## Constants
 

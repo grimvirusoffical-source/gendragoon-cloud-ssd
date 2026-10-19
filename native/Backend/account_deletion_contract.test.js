@@ -1,5 +1,5 @@
 "use strict";
-// QA deletion contract (Morgan) against the production wiring:
+// QA deletion contract against the production wiring:
 // free_server's createLoginGate -> billing_gateway.installedBilling -> account_delete.
 // Firebase is modelled like production Admin Auth: the login gate's
 // verifyIdToken checks the JWT only (free_server does not pass checkRevoked),
@@ -284,7 +284,7 @@ test("contract 7: 401 reauth_required vs invalid_token; a repeat DELETE never re
  }finally{h.close();}
 });
 
-// ---- F2 (Avery's ruling): each job keeps a SET of valid statusToken hashes,
+// ---- F2 (review ruling): each job keeps a SET of valid statusToken hashes,
 // capped at 5, each with its own 7-day expiry; a 6th drops the oldest. Tokens
 // from a repeat 202 or 410 never invalidate earlier ones. Only hashes stored.
 const tokenHash=t=>crypto.createHash("sha256").update(t).digest("hex");
@@ -473,7 +473,7 @@ test("contract 15 (F3/F4): a repeat-202 token is persisted before the 202 is ret
  }finally{h.close();}
 });
 
-// ---- Job lease (Riley, PR #6): the job-doc transaction grants a 60 s lease;
+// ---- Job lease (PR #6): the job-doc transaction grants a 60 s lease;
 // only the holder runs the job, renews it every batch and stops if it loses it;
 // after expiry another instance resumes from the last completed batch.
 const LEASE_MS=60_000;
@@ -836,10 +836,9 @@ test("two concurrent retries of a failed job keep one job and one runner",async(
 });
 
 // ---------------------------------------------------------------------------
-// Deletion support request (PR #6 56b7f6b, head d33970c). Final spec: Avery,
-// Riley, Casey. POST /v2/account/deletions/:jobId/support-request, no body,
+// Deletion support request (PR #6 56b7f6b, head d33970c). Final spec. POST /v2/account/deletions/:jobId/support-request, no body,
 // Bearer statusToken only, works signed out; the server reads uid from the job.
-// Casey's branch test/pr6-support-request (cc4ee9c) covers emulator concurrency,
+// A separate test branch covers emulator concurrency,
 // the deep redaction sweep, 30-day cleanup and stale/notify retry timing; these
 // contracts cover one response per fixture and status code, signed-out auth,
 // the old route, one stub-webhook payload, the prod start gate and a repo guard.

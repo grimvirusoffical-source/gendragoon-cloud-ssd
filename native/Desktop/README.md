@@ -77,7 +77,7 @@ content preserved for recovery. Uploaded cloud files and the user's original
 application remain unchanged. Save changed application data before restoring a
 fresh verified copy for another launch.
 
-## Validation and limits
+## Tests and limits
 
 Run the tests from the repository root:
 
@@ -90,20 +90,12 @@ dependencies and start a loopback-only instance of the real transfer router with
 in-memory Google Cloud/Firestore fixtures. They never contact production, alter a
 Stripe plan or delete user files.
 
-At code commit `18b54fcd21698239e7ca2775cd8e3b3c41d3ae38`, both the
-[push](https://github.com/grimvirusoffical-source/gendragoon-cloud-ssd/actions/runs/39023761715)
-and [PR](https://github.com/grimvirusoffical-source/gendragoon-cloud-ssd/actions/runs/39023766003)
-workflows passed all seven jobs. The Desktop suite ran 36 tests: Linux passed 35
-with one Windows-only skip; Windows passed 32 with four platform-specific skips.
-The real Windows Job Object launch and unchanged-cache removal passed, including
-the corrected path/descriptor metadata comparisons.
-
 Coverage includes a multi-chunk round trip through the actual router, per-file
 corruption, path traversal, reserved Windows paths, symbolic links, source changes,
 cache tampering, active leases, native executable lifecycle and concurrent folder
 restores. Changed, unexpected and late-added cache data is retained. These bounded
 tests do not certify every third-party app or provide an independent penetration
-test. See [the validation record](../VALIDATION.md) for exact scope and evidence.
+test.
 
 This is a command-line client, not a finished Windows/Linux graphical application.
 Signed installers, platform-specific updater delivery, service/FUSE mounting and
