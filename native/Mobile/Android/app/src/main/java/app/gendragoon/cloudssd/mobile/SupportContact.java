@@ -5,15 +5,14 @@ import java.net.URLEncoder;
 
 /**
  * Mirrors {@code packages/core} {@code SUPPORT_CONTACT} in gendragoon-apps.
- * RELEASE BLOCKER until grim supplies the real contact. {@link #IS_PLACEHOLDER} must be false
- * before a release ships. Release CI runs {@code gradle :app:testReleaseUnitTest}, which fails
- * {@code SupportContactReleaseTest} while this flag is true. Debug unit tests only check that
- * the placeholder is still the shared value.
+ * Josh's shared support address. {@link #IS_PLACEHOLDER} must stay false: release CI runs
+ * {@code gradle :app:testReleaseUnitTest}, and {@code SupportContactReleaseTest} fails if a
+ * placeholder is reinstalled.
  */
 public final class SupportContact {
-    /** Shared-core placeholder. Not a deliverable address. */
-    public static final String ADDRESS="SUPPORT_CONTACT_PLACEHOLDER@invalid";
-    public static final boolean IS_PLACEHOLDER=true;
+    /** Shared support address (matches packages/core SUPPORT_CONTACT). */
+    public static final String ADDRESS="support@infected-nation.com";
+    public static final boolean IS_PLACEHOLDER=false;
 
     private SupportContact(){}
 

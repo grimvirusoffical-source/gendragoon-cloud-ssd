@@ -722,8 +722,8 @@ public final class AccountDeletionTest {
     }
 
     @Test public void notRetryableFailureShowsSupportAndDismissWipesNothing() throws Exception {
-        assertTrue(SupportContact.IS_PLACEHOLDER);
-        assertEquals("SUPPORT_CONTACT_PLACEHOLDER@invalid",SupportContact.ADDRESS);
+        assertFalse(SupportContact.IS_PLACEHOLDER);
+        assertEquals("support@infected-nation.com",SupportContact.ADDRESS);
         AccountActions.HttpBody dead=fixture("status-failed-not-retryable");
         AccountDeletion failed=AccountDeletion.resume(DeletionReceipt.of(dead.jobId,TOKEN));
         failed.pollThrough(new Script().respond(dead));
@@ -934,7 +934,7 @@ public final class AccountDeletionTest {
         assertFalse(limited.opensMailto());
         assertTrue(DeletionSupport.interpret(503,"",false).opensMailto());
         assertTrue(DeletionSupport.interpret(0,"",true).opensMailto());
-        assertTrue(SupportContact.mailto(job).startsWith("mailto:SUPPORT_CONTACT_PLACEHOLDER@invalid"));
+        assertTrue(SupportContact.mailto(job).startsWith("mailto:support@infected-nation.com"));
     }
 
     @Test public void support404ShowsMailtoAndNeverSignIn(){
@@ -965,7 +965,7 @@ public final class AccountDeletionTest {
         assertFalse(flow.message.contains("Sign in"));
         assertTrue(flow.showSupport);
         assertFalse(flow.requestsWipe());
-        assertTrue(SupportContact.mailto(flow.jobId).startsWith("mailto:SUPPORT_CONTACT_PLACEHOLDER@invalid"));
+        assertTrue(SupportContact.mailto(flow.jobId).startsWith("mailto:support@infected-nation.com"));
     }
 
     /** PR #6 at {@code 0486412}: {@code support-unauthorized.json}. Required, no auth header at all. */
@@ -1122,7 +1122,7 @@ public final class AccountDeletionTest {
             assertNotEquals(AccountDeletion.Step.SIGNED_OUT,flow.step);
             assertFalse(flow.clearSession);
             assertNull(AccountActions.pollCall("/v2/account/deletions/"+dead.jobId,blank));
-            assertTrue(SupportContact.mailto(dead.jobId).startsWith("mailto:SUPPORT_CONTACT_PLACEHOLDER@invalid"));
+            assertTrue(SupportContact.mailto(dead.jobId).startsWith("mailto:support@infected-nation.com"));
         }
     }
 

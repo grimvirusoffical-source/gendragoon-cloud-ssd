@@ -1,15 +1,16 @@
 import Foundation
 
-/// Mirrors `packages/core` `SUPPORT_CONTACT` in gendragoon-apps.
-/// RELEASE BLOCKER until grim supplies the real contact. `isPlaceholder` must be false
-/// before a release ships. Release CI runs
-/// `xcodebuild test -configuration Release`; `testReleaseBuildRejectsPlaceholderSupportContact`
-/// fails while this flag is true. Debug test runs only check that the placeholder is still
-/// the shared value.
+enum AboutCopy {
+    static let ownership = "Gendragoon is developed and maintained by Red-XAI LLC. Red-XAI LLC is wholly owned by GRIM-VIRUS, an independent recording artist who leads development under the alias MainDirectory. © Red-XAI LLC. All rights reserved."
+    static let copyright = "© Red-XAI LLC"
+}
+
+/// Mirrors `packages/core` `SUPPORT_CONTACT` in gendragoon-apps: Josh's shared support address.
+/// `isPlaceholder` must stay false; `testReleaseBuildRejectsPlaceholderSupportContact` fails
+/// if a placeholder is reinstalled.
 enum SupportContact {
-    /// Shared-core placeholder. Not a deliverable address.
-    static let address="SUPPORT_CONTACT_PLACEHOLDER@invalid"
-    static let isPlaceholder=true
+    static let address="support@infected-nation.com"
+    static let isPlaceholder=false
     /// Mailto for the Contact support button. The job id is the subject.
     static func mailto(jobId:String?)->URL? {
         let id=jobId ?? ""

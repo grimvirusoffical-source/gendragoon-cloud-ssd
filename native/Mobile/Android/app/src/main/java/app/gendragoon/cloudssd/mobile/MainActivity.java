@@ -236,7 +236,7 @@ public final class MainActivity extends AppCompatActivity {
     private void account(){
         FirebaseUser user=auth.getCurrentUser();if(user==null)return;
         LinearLayout box=vertical();box.setPadding(dp(8),dp(4),dp(8),dp(4));
-        box.addView(button("About GenDragoon",()->new MaterialAlertDialogBuilder(this).setTitle("GenDragoon").setMessage("Cloud files, folders and application packages. Your workspace quotas and transfer limits are verified by the server. Mobile updates are distributed through the app store. Android manages installed apps independently of the GenDragoon cache.").setPositiveButton("Done",null).show()));
+        box.addView(button("About GenDragoon",()->new MaterialAlertDialogBuilder(this).setTitle("GenDragoon").setMessage("Cloud files, folders and application packages. Your workspace quotas and transfer limits are verified by the server. Mobile updates are distributed through the app store. Android manages installed apps independently of the GenDragoon cache.\n\n"+About.OWNERSHIP).setPositiveButton("Done",null).show()));
         box.addView(button("Reset App",this::resetApp));
         box.addView(button("Privacy Notice",()->startActivity(new Intent(Intent.ACTION_VIEW,Uri.parse(CloudApi.ORIGIN+"/mobile/privacy.txt")))));
         if(ByoFeature.showInSettings())box.addView(button("Bring-your-own storage",this::showByo));
