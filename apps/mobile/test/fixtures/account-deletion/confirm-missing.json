@@ -1,0 +1,20 @@
+Source-SHA: d33970cbf0175a74898c37a8a624a92b1c1a5a94
+Source-Path: fixtures/account-deletion/confirm-missing.json
+
+{
+  "request": {
+    "body": {},
+    "headers": {
+      "authorization": "<redacted>",
+      "content-type": "application/json"
+    },
+    "method": "DELETE",
+    "path": "/v2/account"
+  },
+  "response": {
+    "body": {
+      "error": "confirm_required"
+    },
+    "status": 400
+  }
+}

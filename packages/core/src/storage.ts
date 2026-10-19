@@ -34,7 +34,20 @@ export function reauthenticatedAtForDelete(input: { reauthenticatedAt?: string; 
   return input.reauthenticatedAt ?? "";
 }
 
-function decodeJwtPayload(token: string): { auth_time?: unknown; iat?: unknown } | null {
+interface IdTokenClaims {
+  auth_time?: unknown;
+  iat?: unknown;
+  sub?: unknown;
+}
+
+/** Firebase ID token `sub`. This is the account uid stored with a deletion job. */
+export function accountUidFromIdToken(token: string): string | null {
+  const sub = decodeJwtPayload(token)?.sub;
+  if (typeof sub !== "string" || sub.length === 0) return null;
+  return sub;
+}
+
+function decodeJwtPayload(token: string): IdTokenClaims | null {
   const segment = token.split(".")[1];
   if (!segment) return null;
   try {
@@ -44,7 +57,7 @@ function decodeJwtPayload(token: string): { auth_time?: unknown; iat?: unknown }
     for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
     const parsed = JSON.parse(new TextDecoder().decode(bytes)) as unknown;
     if (!parsed || typeof parsed !== "object") return null;
-    return parsed as { auth_time?: unknown; iat?: unknown };
+    return parsed as IdTokenClaims;
   } catch {
     return null;
   }

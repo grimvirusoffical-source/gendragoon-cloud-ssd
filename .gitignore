@@ -18,3 +18,7 @@ coverage/
 *.tsbuildinfo
 apps/desktop/release/
 apps/red-xai-updater/release/
+apps/mobile/android/
+apps/mobile/ios/
+apps/mobile/.expo/
+apps/mobile/dist/

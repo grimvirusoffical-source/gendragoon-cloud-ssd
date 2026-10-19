@@ -130,6 +130,7 @@ export {
   REAUTH_WINDOW_MS,
   reauthIsRecent,
   authTimeMsFromIdToken,
+  accountUidFromIdToken,
   reauthenticatedAtForDelete,
   storageOperations,
   assertStorageUrlResponse,
@@ -154,6 +155,7 @@ export {
   bytesToBase64,
   bytesToBase64Url,
   base64UrlToBytes,
+  base64ToBytes,
 } from "./seal.js";
 export {
   PASSPHRASE_LOSS_WARNING,

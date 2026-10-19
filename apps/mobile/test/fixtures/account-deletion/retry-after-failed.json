@@ -1,0 +1,24 @@
+Source-SHA: d33970cbf0175a74898c37a8a624a92b1c1a5a94
+Source-Path: fixtures/account-deletion/retry-after-failed.json
+
+{
+  "request": {
+    "body": {
+      "confirm": "DELETE"
+    },
+    "headers": {
+      "authorization": "<redacted>",
+      "content-type": "application/json"
+    },
+    "method": "DELETE",
+    "path": "/v2/account"
+  },
+  "response": {
+    "body": {
+      "jobId": "00000000-0000-4000-8000-000000000004",
+      "status": "queued",
+      "statusToken": "<redacted>"
+    },
+    "status": 202
+  }
+}

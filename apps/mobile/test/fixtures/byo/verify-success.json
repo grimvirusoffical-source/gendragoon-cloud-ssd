@@ -1,0 +1,24 @@
+Source-SHA: da3927627fee76103981714f9f8ffa954843b74b
+Source-Path: fixtures/byo/verify-success.json
+
+{
+  "request": {
+    "body": {
+      "presignedUrl": "https://bucket.s3.us-east-1.amazonaws.com/.gendragoon-challenge/0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20?X-Amz-Signature=fixture"
+    },
+    "headers": {
+      "authorization": "<redacted>",
+      "content-type": "application/json"
+    },
+    "method": "POST",
+    "path": "/v2/workspaces/11111111-1111-4111-8111-000000000001/byo/verify"
+  },
+  "response": {
+    "body": {
+      "bucketFingerprint": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+      "verified": true,
+      "workspaceId": "11111111-1111-4111-8111-000000000001"
+    },
+    "status": 200
+  }
+}

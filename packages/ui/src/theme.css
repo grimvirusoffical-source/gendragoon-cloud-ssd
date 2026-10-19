@@ -1,3 +1,4 @@
+/* Token values match packages/ui/src/theme.ts. Mobile imports that module, not this file. */
 :root {
   color-scheme: dark;
   --bg: #100e17;

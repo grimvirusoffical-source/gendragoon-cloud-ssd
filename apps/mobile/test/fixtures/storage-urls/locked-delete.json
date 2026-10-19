@@ -1,0 +1,30 @@
+Source-SHA: 8267784a790bbe8418b3cbe36e8a4b91849b0e81
+Source-Path: fixtures/storage-urls/locked-delete.json
+
+{
+  "request": {
+    "body": {
+      "objects": [
+        "manifest"
+      ],
+      "op": "delete"
+    },
+    "headers": {
+      "authorization": "<redacted>",
+      "content-type": "application/json"
+    },
+    "method": "POST",
+    "path": "/v2/workspaces/11111111-1111-4111-8111-000000000001/storage-urls"
+  },
+  "response": {
+    "body": {
+      "error": "workspace_lock",
+      "overBy": 0,
+      "reason": "lapsed",
+      "unpaidWorkspaceIds": [
+        "11111111-1111-4111-8111-000000000001"
+      ]
+    },
+    "status": 423
+  }
+}
