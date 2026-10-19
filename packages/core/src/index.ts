@@ -98,6 +98,7 @@ export {
   ApiError,
   DeletionNotFoundError,
   DeletionNotRetryableError,
+  TeamOwnerMustTransferError,
   InvalidTokenError,
   ReauthRequiredError,
   SUPPORT_CONTACT,

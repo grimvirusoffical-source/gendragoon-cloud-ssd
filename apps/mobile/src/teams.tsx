@@ -1,3 +1,4 @@
+import * as Device from "expo-device";
 import {
   ApiError,
   TEAM_MESSAGES,
@@ -27,11 +28,25 @@ import { useStyles, useTheme } from "./themeContext";
 import { Banner, Button, Field, Screen, SectionLabel, Title } from "./ui";
 
 /** Default chat name: the device model (Android) or the device type (iOS). Changeable in Members. */
-export function mobileDeviceName(): string {
+type DeviceInfo = { deviceName?: string | null; modelName?: string | null; manufacturer?: string | null };
+// iOS 16+ reports a generic "iPhone"/"iPad" as deviceName unless the app has Apple's
+// user-assigned-device-name entitlement, so a generic value falls through to the model.
+const GENERIC_NAME = /^(iphone|ipad|ipod( touch)?)$/i;
+
+/** Chat name default: the device's own name ("Josh's Pixel"), else its model ("Pixel 9", "iPhone 16 Pro"). */
+export function mobileDeviceName(device: DeviceInfo = Device): string {
+  const own = device.deviceName?.trim();
+  if (own && !GENERIC_NAME.test(own)) return defaultDisplayName(own);
+  const model = device.modelName?.trim();
+  if (model) {
+    const maker = device.manufacturer?.trim();
+    const withMaker = Platform.OS === "android" && maker && !model.toLowerCase().startsWith(maker.toLowerCase()) ? `${maker} ${model}` : model;
+    return defaultDisplayName(withMaker);
+  }
+  if (own) return defaultDisplayName(own);
   const c = (Platform.constants ?? {}) as { Brand?: string; Model?: string };
   if (Platform.OS === "android" && c.Model) return defaultDisplayName(`${c.Brand ? `${c.Brand} ` : ""}${c.Model}`);
-  if (Platform.OS === "ios") return (Platform as { isPad?: boolean }).isPad ? "iPad" : "iPhone";
-  return "Member";
+  return defaultDisplayName(null);
 }
 
 function errorText(error: unknown): string {

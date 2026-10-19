@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { GenDragoonClient, TEAM_TIERS, availableMemberColors, defaultDisplayName, latestSeq, mergeMessages, moderationUntil, parseChatEvents, parseInviteCode, teamPrice, type ChatMessage } from "../src/index.js";
+import { GenDragoonClient, TeamOwnerMustTransferError, TEAM_TIERS, availableMemberColors, defaultDisplayName, latestSeq, mergeMessages, moderationUntil, parseChatEvents, parseInviteCode, teamPrice, type ChatMessage } from "../src/index.js";
 
 const msg = (seq: number, text = "m" + seq): ChatMessage => ({ seq, memberId: "m", displayName: "A", color: "red-500", colorHex: "#ef4444", kind: "text", text, card: null, createdAtMs: seq, mine: false });
 
@@ -56,5 +56,28 @@ describe("teams client", () => {
     expect(calls.map((c) => `${c.method} ${c.url.replace("https://api.example", "")}`)).toEqual([
       "POST /v2/teams/join", "PATCH /v2/teams/t1/me", "POST /v2/teams/t1/chat", "POST /v2/teams/t1/members/m1/mute", "DELETE /v2/teams/t1/shares/w1"]);
     expect(calls[3]?.body).toEqual({ reason: "Spam", until: null });
+  });
+  it("role, transfer and delete-team routes", async () => {
+    const calls: Array<{ url: string; method: string; body: unknown }> = [];
+    const fetchImpl = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+      calls.push({ url: String(url), method: init?.method ?? "GET", body: init?.body ? JSON.parse(String(init.body)) : undefined });
+      return new Response(JSON.stringify({ ok: true }), { status: 200, headers: { "Content-Type": "application/json" } });
+    });
+    const client = new GenDragoonClient({ baseUrl: "https://api.example", getToken: async () => "tok", fetch: fetchImpl as unknown as typeof fetch });
+    await client.setTeamMemberRole("t1", "m2", "viewer");
+    await client.transferTeam("t1", { memberId: "m2", color: "red-500" });
+    await client.deleteTeam("t1", "Studio");
+    expect(calls.map((c) => `${c.method} ${c.url.replace("https://api.example", "")}`)).toEqual([
+      "POST /v2/teams/t1/members/m2/role", "POST /v2/teams/t1/transfer", "POST /v2/teams/t1/delete"]);
+    expect(calls.map((c) => c.body)).toEqual([{ role: "viewer" }, { memberId: "m2", color: "red-500" }, { confirmName: "Studio" }]);
+  });
+  it("account deletion blocked by owned teams becomes TeamOwnerMustTransferError with the team names", async () => {
+    const fetchImpl = vi.fn(async () => new Response(JSON.stringify({ error: "team_owner_must_transfer",
+      teams: [{ teamId: "t1", name: "Studio", otherMembers: 2 }], message: "x" }), { status: 409, headers: { "Content-Type": "application/json" } }));
+    const client = new GenDragoonClient({ baseUrl: "https://api.example", getToken: async () => "tok", fetch: fetchImpl as unknown as typeof fetch });
+    const error = await client.deleteAccount({ reauthenticatedAt: new Date().toISOString() }).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(TeamOwnerMustTransferError);
+    expect((error as TeamOwnerMustTransferError).teams).toEqual([{ teamId: "t1", name: "Studio", otherMembers: 2 }]);
+    expect((error as Error).message).toMatch(/Transfer ownership of Studio or delete it/);
   });
 });

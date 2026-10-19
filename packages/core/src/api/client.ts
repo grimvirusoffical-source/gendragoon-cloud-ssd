@@ -2,7 +2,8 @@ import type { CreateWorkspaceRequest } from "../workspace-plans.js";
 import { parseChatEvents, type ChatMessage, type CreateTeamRequest, type JoinTeamRequest, type ModerationAction, type SharedWorkspace, type Team, type TeamColorChoices, type TeamInvite, type TeamMember, type TeamTierId, type TeamWorkspace, type WorkspaceCard } from "../teams.js";
 import { assertNoCredentialFields, BYO_PRESIGNED_URL_MESSAGE, BYO_UNSUPPORTED_MESSAGE, BYO_UNVERIFIABLE_MESSAGE } from "../byo.js";
 import { assertKeyEnvelope } from "../envelope.js";
-import { AccountDeletedError, ApiError, DeletionNotFoundError, DeletionNotRetryableError, InvalidTokenError, ReauthRequiredError, SUPPORT_CONTACT, WorkspaceLockedError, deletionAuthFailure, isAccountDeleted, isInvalidToken, isReauthRequired } from "./errors.js";
+import { AccountDeletedError, ApiError, DeletionNotFoundError, DeletionNotRetryableError,
+  TeamOwnerMustTransferError, InvalidTokenError, ReauthRequiredError, SUPPORT_CONTACT, WorkspaceLockedError, deletionAuthFailure, isAccountDeleted, isInvalidToken, isReauthRequired } from "./errors.js";
 import { parseWorkspacePrice } from "../policy.js";
 import { PROVIDER_BASE_PATH, parseProviderAuthorization, parseProviderBindings, parseProviderGrant, type ProviderAuthorization, type ProviderBinding, type ProviderConnectRequest, type ProviderGrant, type ProviderRevokeResult, type ProviderScope } from "../provider.js";
 import { assertStorageUrlResponse, reauthIsRecent, reauthenticatedAtForDelete } from "../storage.js";
@@ -41,6 +42,7 @@ export {
   ApiError,
   DeletionNotFoundError,
   DeletionNotRetryableError,
+  TeamOwnerMustTransferError,
   InvalidTokenError,
   ReauthRequiredError,
   SUPPORT_CONTACT,
@@ -142,6 +144,15 @@ export class GenDragoonClient {
     return this.request("POST", `/v2/teams/${encodeURIComponent(id)}/workspaces/${encodeURIComponent(workspaceId)}/checkout`, {});
   }
 
+  setTeamMemberRole(id: string, memberId: string, role: "member" | "viewer"): Promise<{ memberId: string; role: "member" | "viewer" }> {
+    return this.request("POST", `/v2/teams/${encodeURIComponent(id)}/members/${encodeURIComponent(memberId)}/role`, { role });
+  }
+  transferTeam(id: string, body: { memberId: string; color: string; ownerShade?: string }): Promise<{ transferred: true; ownerMemberId: string }> {
+    return this.request("POST", `/v2/teams/${encodeURIComponent(id)}/transfer`, body);
+  }
+  deleteTeam(id: string, confirmName: string): Promise<{ deleted: true; canceledSubscriptions: number }> {
+    return this.request("POST", `/v2/teams/${encodeURIComponent(id)}/delete`, { confirmName });
+  }
   listTeams(): Promise<{ teams: Team[] }> {
     return this.request("GET", "/v2/teams");
   }
@@ -594,6 +605,15 @@ function toError(status: number, parsed: unknown): ApiError {
   }
   if (machine === "byo_external") {
     return new ApiError(status || 409, "byo_external", "This workspace uses its own bucket.");
+  }
+  if (machine === "team_owner_must_transfer") {
+    const raw = (parsed as { teams?: unknown })?.teams;
+    const teams = Array.isArray(raw)
+      ? raw.filter((t): t is { teamId: string; name: string; otherMembers: number } =>
+        !!t && typeof t === "object" && typeof (t as { teamId?: unknown }).teamId === "string")
+        .map((t) => ({ teamId: t.teamId, name: typeof t.name === "string" ? t.name : "", otherMembers: Number(t.otherMembers) || 0 }))
+      : [];
+    return new TeamOwnerMustTransferError(teams);
   }
   if (machine === "deletion_not_retryable") {
     const jobId = typeof record.jobId === "string" ? record.jobId : "";

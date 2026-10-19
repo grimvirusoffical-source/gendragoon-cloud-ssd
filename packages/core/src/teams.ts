@@ -23,7 +23,7 @@ export interface TeamMember {
   displayName: string;
   color: string;
   colorHex: string | null;
-  role: "owner" | "member";
+  role: "owner" | "member" | "viewer";
   muted: { until: number | null; reason: string | null } | null;
 }
 
@@ -37,7 +37,7 @@ export interface Team {
   priceCents: number;
   subscriptionStatus: string;
   subscriptionActive: boolean;
-  role: "owner" | "member";
+  role: "owner" | "member" | "viewer";
   me: TeamMember;
   members?: TeamMember[];
 }
@@ -54,6 +54,11 @@ export interface TeamWorkspace {
   projectStatus: "pending_payment" | "team_subscription_required" | "active";
   quotaGB: number;
   needsCustomSetup: boolean;
+  /** Bytes stored. Files use the personal-workspace routes with this id. */
+  usedBytes?: number;
+  storageRoutes?: { v3: string; v2: string } | null;
+  /** "read" for viewers: list and download only. */
+  access?: "read" | "write";
 }
 
 export interface SharedWorkspace {
@@ -112,6 +117,14 @@ export const TEAM_MESSAGES: Record<string, string> = {
   TEAM_PRICE_UNCONFIGURED: "Team checkout isn't open yet. Your team is saved.",
   TEAM_CHECKOUT_UNAVAILABLE: "Team checkout isn't open yet. Your team is saved.",
   REASON_REQUIRED: "A reason is required. It is shown to the member.",
+  TEAM_ROLE_READ_ONLY: "Viewers can open team files but not change them.",
+  TEAM_STORAGE_INACTIVE: "This team workspace's plans aren't active yet.",
+  INVALID_ROLE: "Choose member or viewer.",
+  CONFIRM_NAME_REQUIRED: "Type the team name to confirm.",
+  TEAM_DELETE_UNAVAILABLE: "Team deletion isn't available right now. Try again later.",
+  TEAM_BILLING_CANCEL_FAILED: "Couldn't cancel the team's billing. Nothing was deleted. Try again.",
+  TEAM_OWNER_ONLY: "Only the team owner can do this.",
+  team_owner_must_transfer: "Transfer ownership of your teams or delete them before deleting your account.",
 };
 
 export function teamPrice(tier: TeamTierId, interval: PlanInterval): number {

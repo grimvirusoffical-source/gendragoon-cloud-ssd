@@ -122,3 +122,16 @@ export class AccountDeletedError extends ApiError {
 export function isAccountDeleted(error: unknown): error is AccountDeletedError {
   return error instanceof AccountDeletedError && error.jobId.length > 0;
 }
+
+/** DELETE /v2/account: the user owns teams that still have other members (cloud-ssd docs/API-teams.md). */
+export class TeamOwnerMustTransferError extends ApiError {
+  readonly teams: Array<{ teamId: string; name: string; otherMembers: number }>;
+
+  constructor(teams: Array<{ teamId: string; name: string; otherMembers: number }>) {
+    const names = teams.map((t) => t.name).filter(Boolean);
+    super(409, "team_owner_must_transfer",
+      `Transfer ownership of ${names.length ? names.join(", ") : "your teams"} or delete ${names.length === 1 ? "it" : "them"} before deleting your account. Nothing was deleted.`);
+    this.name = "TeamOwnerMustTransferError";
+    this.teams = teams;
+  }
+}
