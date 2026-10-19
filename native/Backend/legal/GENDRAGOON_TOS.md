@@ -1,5 +1,7 @@
 <!--
 Draft: requires attorney review before launch.
+Open placeholders, each marked [PLACEHOLDER: ...]: venue county (Section 21), arbitration provider (Section 20.2),
+DMCA agent mailing address (Section 13.2). Governing law is New Mexico. The DMCA agent must also be registered with the U.S. Copyright Office.
 The server strips this comment; it is never shown in the apps. Change the Version line whenever the text
 changes in substance, so every account is asked to read and agree again.
 -->
@@ -139,7 +141,7 @@ Our Privacy Policy explains what information we collect and how we use and prote
 
 13.1 We respect intellectual property rights and respond to notices of alleged infringement under the U.S. Digital Millennium Copyright Act (DMCA). To file a notice, send our designated agent a written notice that includes: (a) your physical or electronic signature; (b) identification of the copyrighted work you claim is infringed; (c) identification of the material you claim is infringing and enough information for us to locate it; (d) your contact information; (e) a statement that you have a good-faith belief that the use is not authorized by the copyright owner, its agent or the law; and (f) a statement, under penalty of perjury, that the information in the notice is accurate and that you are the copyright owner or authorized to act on the owner's behalf.
 
-13.2 Send notices to: Copyright Agent, Red-XAI LLC, support@infected-nation.com, [mailing address to be added].
+13.2 Send notices to: Copyright Agent, Red-XAI LLC, support@infected-nation.com, [PLACEHOLDER: DMCA agent mailing address to be added].
 
 13.3 If your content was removed after a DMCA notice and you believe it was removed by mistake or misidentification, you may send a counter-notice containing the information required by 17 U.S.C. § 512(g)(3).
 
@@ -177,7 +179,7 @@ We may update these Terms from time to time. Each version has a version identifi
 
 20.1 **Informal resolution first.** Before starting arbitration or a lawsuit, you and we agree to try to resolve any dispute informally for at least 30 days. Send a written description of the dispute to support@infected-nation.com, and we will send ours to the email address on your account.
 
-20.2 **Agreement to arbitrate.** If we cannot resolve a dispute informally, you and Red-XAI LLC agree that any dispute, claim or controversy arising out of or relating to these Terms or the Service will be resolved by final and binding individual arbitration, not in court, except that either party may (a) bring an individual claim in small claims court if it qualifies, and (b) seek an injunction in court to stop infringement or misuse of intellectual property. The arbitration will be administered by [arbitration provider to be confirmed] under its consumer arbitration rules then in effect. The Federal Arbitration Act governs this Section 20.
+20.2 **Agreement to arbitrate.** If we cannot resolve a dispute informally, you and Red-XAI LLC agree that any dispute, claim or controversy arising out of or relating to these Terms or the Service will be resolved by final and binding individual arbitration, not in court, except that either party may (a) bring an individual claim in small claims court if it qualifies, and (b) seek an injunction in court to stop infringement or misuse of intellectual property. The arbitration will be administered by [PLACEHOLDER: arbitration provider to be confirmed] under its consumer arbitration rules then in effect. The Federal Arbitration Act governs this Section 20.
 
 20.3 **Class-action waiver.** YOU AND RED-XAI LLC AGREE THAT EACH MAY BRING CLAIMS AGAINST THE OTHER ONLY IN AN INDIVIDUAL CAPACITY, AND NOT AS A PLAINTIFF OR CLASS MEMBER IN ANY PURPORTED CLASS, COLLECTIVE, CONSOLIDATED OR REPRESENTATIVE PROCEEDING. The arbitrator may not consolidate more than one person's claims and may award relief only in favor of the individual party seeking relief and only to the extent needed to provide relief warranted by that party's individual claim.
 
@@ -189,7 +191,7 @@ We may update these Terms from time to time. Each version has a version identifi
 
 ## 21. Governing law and venue
 
-These Terms are governed by the laws of [State to be confirmed], United States, without regard to its conflict-of-laws rules, except that the Federal Arbitration Act governs Section 20. Subject to Section 20, the state and federal courts located in [County and State to be confirmed] have exclusive jurisdiction, and you and we consent to personal jurisdiction there. If you are a consumer living in a country that gives you the right to bring proceedings in your own courts or under your own laws, nothing here takes that right away.
+These Terms are governed by the laws of the State of New Mexico, United States, without regard to its conflict-of-laws rules, except that the Federal Arbitration Act governs Section 20. Subject to Section 20, the state courts located in [PLACEHOLDER: county to be confirmed] County, New Mexico, and the United States District Court for the District of New Mexico have exclusive jurisdiction, and you and we consent to personal jurisdiction there. If you are a consumer living in a country that gives you the right to bring proceedings in your own courts or under your own laws, nothing here takes that right away.
 
 ## 22. General terms
 
