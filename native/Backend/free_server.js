@@ -90,14 +90,15 @@ require("./transfer_v3").registerTransferV3({app,db,bucket,firebaseAuth,accountK
 // Storage provider API for RedX (/provider/v1). OFF unless PROVIDER_V1_ENABLED=true, and provider_v1.js is not in
 // deploy_free.py's runtime allow-list yet, so no deploy can enable it by accident. A binding's quota is a snapshot of
 // the workspace quota at connect time; charging it against the workspace's own usedBytes is pricing decision 13.2 (open).
-// Support email (password resets, account notices) from support@infected-nation.com. OFF unless
-// SUPPORT_EMAIL_ENABLED=true; the SMTP password comes only from SUPPORT_EMAIL_PASSWORD and is never logged.
+// Support email (password resets, account notices) from support@infected-nation.com, through the Node port of
+// Rotten Apple's shared mailer (support_email.js, docs/SUPPORT_EMAIL.md). OFF unless SUPPORT_EMAIL_ENABLED=true;
+// the SMTP password is read only from SUPPORT_EMAIL_PASSWORD at send time and is never logged.
 // support_email.js is not in deploy_free.py's allow-list yet, so it is required only when enabled.
 let supportNotify=null;
 if(process.env.SUPPORT_EMAIL_ENABLED==="true"){
  const supportEmail=require("./support_email");
- const sender=supportEmail.senderFromEnv(process.env);
  const log=(event,fields)=>console.log(JSON.stringify({event,...fields}));
+ const sender=supportEmail.senderFromEnv(process.env,{log:{record:e=>log("mail."+e.status,e)}});
  supportEmail.registerPasswordReset({app,adminAuth:getAuth(),sender,continueUrl:process.env.PASSWORD_RESET_CONTINUE_URL||undefined,log});
  supportNotify=supportEmail.createNotifier({sender,adminAuth:getAuth(),log});
 }

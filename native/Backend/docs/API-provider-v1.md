@@ -37,6 +37,18 @@ Any grant/code failure is `400 invalid_grant` (unknown, used, expired, wrong kin
 
 `GET /key-envelope` (`blobs:r`) and `PUT /key-envelope` (`blobs:rw`): RedX's master key wrapped with a recovery passphrase on the RedX host. Same record, KDF bounds, forbidden-field check and version rules as `/v2/workspaces/:id/key-envelope` (shared `parseEnvelope`/`precondition` from `key_envelope.js`): `If-None-Match: *` creates (`409 envelope_exists` if present), `If-Match: "<n>"` replaces with version `n+1` (`412 version_mismatch` otherwise), neither is `428 precondition_required`. Removed when the binding is purged.
 
+### Read-only share keys
+
+A writer key (`blobs:rw`) can mint read-only keys for its own binding so a recipient can fetch the chunks of a file shared with them (the SDKs encrypt the file key to the recipient; the server never sees it).
+
+| Route | Result |
+|---|---|
+| `POST /keys` `{"label": "…", "ttlDays": 1–90}` (default 30) | `201 {keyId, apiKey, scopes: ["blobs:r"], label, expiresAt}`; at most 20 live share keys per binding (`409 too_many_keys`), `400 bad_ttl` |
+| `GET /keys` | `{keys: [{keyId, scopes, label, createdAt, expiresAt, revoked}]}`; never returns a secret |
+| `DELETE /keys/:keyId` | `204`; revoked immediately; `404 not_found` for another binding's key |
+
+A share key can read blobs and manifests and call `/usage`, `/health` and `/capabilities`. It cannot write, mint or list keys, rotate itself, or read the key envelope (`403 insufficient_scope`). Revoking the binding revokes its share keys.
+
 ## Usage, health, capabilities
 
 `GET /usage` → `{usedBytes, quotaBytes, objectCount, workspaceId, changeSeq, lastChangeAt}`; `GET /health`; `GET /capabilities` (no auth; includes `events`).

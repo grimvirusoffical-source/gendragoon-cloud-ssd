@@ -195,7 +195,7 @@ function registerProviderV1({app,db,blobs,firebaseAuth,accountKey,resolveWorkspa
    }
    const wait=bindingLimit("b:"+binding.id);
    if(wait){res.set("Retry-After",String(wait));return fail(res,429,"rate_limited");}
-   req.binding=binding;req.keyId=m[1];req.keyScopes=k.scopes;
+   req.binding=binding;req.keyId=m[1];req.keyScopes=k.scopes;req.keyKind=k.kind||"binding";
    if((lastTouch.get(binding.id)||0)+60000<t){
     lastTouch.set(binding.id,t);
     db.collection(COLL.bindings).doc(binding.id).update({lastUsedAtMs:t}).catch(()=>{});
@@ -205,8 +205,9 @@ function registerProviderV1({app,db,blobs,firebaseAuth,accountKey,resolveWorkspa
  }
  const canWrite=(req,res,next)=>req.keyScopes?.includes("blobs:rw")?next():fail(res,403,"insufficient_scope");
  const canRead=(req,res,next)=>(req.keyScopes?.includes("blobs:rw")||req.keyScopes?.includes("blobs:r"))?next():fail(res,403,"insufficient_scope");
+ const notShareKey=(req,res,next)=>req.keyKind==="share"?fail(res,403,"insufficient_scope"):next();
 
- router.post("/connect/rotate",keyAuth,async(req,res)=>{
+ router.post("/connect/rotate",keyAuth,notShareKey,async(req,res)=>{
   try{
    const keyId=crypto.randomBytes(8).toString("hex"),secret=b64url(32),t=now();
    await db.runTransaction(async tx=>{
@@ -220,6 +221,45 @@ function registerProviderV1({app,db,blobs,firebaseAuth,accountKey,resolveWorkspa
    res.status(201).json({apiKey:"gdpk_"+keyId+"_"+secret,keyExpiresAt:new Date(t+KEY_TTL_MS).toISOString(),
     previousKeyValidUntil:new Date(t+ROTATE_GRACE_MS).toISOString()});
   }catch(e){if(e?.code==="rotated")return fail(res,409,"already_rotated");fail(res,503,"provider_unavailable");}
+ });
+
+ // ---- read-only share keys -----------------------------------------------------------------------------------
+ // A writer can mint read-only keys for the same binding so another device or person can read what it shares
+ // (the SDKs encrypt each shared file's key to the recipient, so a share key alone decrypts nothing). Share keys
+ // cannot write, cannot mint keys, cannot read the key envelope, and are revoked with the binding.
+ const MAX_SHARE_KEYS=20;
+ router.post("/keys",keyAuth,canWrite,notShareKey,express.json({limit:"2kb"}),async(req,res)=>{
+  const label=cleanText(req.body?.label,80);
+  const ttlDays=req.body?.ttlDays===undefined?30:Number(req.body.ttlDays);
+  if(!Number.isInteger(ttlDays)||ttlDays<1||ttlDays>90)return fail(res,400,"bad_ttl");
+  try{
+   const live=await db.collection(COLL.keys).where("bindingId","==",req.binding.id).limit(200).get();
+   const t=now();
+   if(live.docs.filter(d=>d.data().kind==="share"&&!d.data().revokedAtMs&&d.data().expiresAtMs>t).length>=MAX_SHARE_KEYS)
+    return fail(res,409,"too_many_keys");
+   const keyId=crypto.randomBytes(8).toString("hex"),secret=b64url(32),expiresAtMs=t+ttlDays*86400000;
+   await db.collection(COLL.keys).doc(keyId).create({bindingId:req.binding.id,digest:sha256hex(secret),scopes:["blobs:r"],kind:"share",
+    label,createdAtMs:t,expiresAtMs,revokedAtMs:null,graceUntilMs:null});
+   audit("key.share_create",{bindingId:req.binding.id,ownerHash:req.binding.ownerHash});
+   res.status(201).json({keyId,apiKey:"gdpk_"+keyId+"_"+secret,scopes:["blobs:r"],label,expiresAt:new Date(expiresAtMs).toISOString()});
+  }catch(_){fail(res,503,"provider_unavailable");}
+ });
+ router.get("/keys",keyAuth,canWrite,notShareKey,async(req,res)=>{
+  try{
+   const docs=await db.collection(COLL.keys).where("bindingId","==",req.binding.id).limit(200).get();
+   res.json({keys:docs.docs.filter(d=>d.data().kind==="share").map(d=>{const k=d.data();return {keyId:d.id,scopes:k.scopes,label:k.label||"",
+    createdAt:new Date(k.createdAtMs).toISOString(),expiresAt:new Date(k.expiresAtMs).toISOString(),revoked:Boolean(k.revokedAtMs)};})});
+  }catch(_){fail(res,503,"provider_unavailable");}
+ });
+ router.delete("/keys/:keyId",keyAuth,canWrite,notShareKey,async(req,res)=>{
+  if(!/^[0-9a-f]{16}$/.test(req.params.keyId))return fail(res,404,"not_found");
+  try{
+   const ref=db.collection(COLL.keys).doc(req.params.keyId),s=await ref.get();
+   if(!s.exists||s.data().bindingId!==req.binding.id||s.data().kind!=="share")return fail(res,404,"not_found");
+   if(!s.data().revokedAtMs)await ref.update({revokedAtMs:now()});
+   audit("key.share_revoke",{bindingId:req.binding.id,ownerHash:req.binding.ownerHash});
+   res.status(204).end();
+  }catch(_){fail(res,503,"provider_unavailable");}
  });
 
  // ---- quota accounting --------------------------------------------------------------------------------------
@@ -389,7 +429,7 @@ function registerProviderV1({app,db,blobs,firebaseAuth,accountKey,resolveWorkspa
  // ---- per-binding key envelope (G9) ------------------------------------------------------------------------
  // RedX's master key wrapped with a recovery passphrase on the RedX host. Same record, bounds and version rules as
  // /v2/workspaces/:id/key-envelope (key_envelope.js): the server only ever sees the opaque wrapped key.
- router.get("/key-envelope",keyAuth,canRead,async(req,res)=>{
+ router.get("/key-envelope",keyAuth,canRead,notShareKey,async(req,res)=>{
   try{const s=await db.collection(COLL.envelopes).doc(req.binding.id).get();
    if(!s.exists)return fail(res,404,"not_found");
    const env=keyEnvelope.parseEnvelope(s.data().envelope);
@@ -452,7 +492,7 @@ function registerProviderV1({app,db,blobs,firebaseAuth,accountKey,resolveWorkspa
  async function revokeBinding(id){
   const t=now();
   await db.collection(COLL.bindings).doc(id).update({revokedAtMs:t});
-  const keys=await db.collection(COLL.keys).where("bindingId","==",id).limit(50).get();
+  const keys=await db.collection(COLL.keys).where("bindingId","==",id).limit(500).get();
   for(const k of keys.docs)if(!k.data().revokedAtMs)await k.ref.update({revokedAtMs:t});
  }
  async function bindingDoc(id){const s=await db.collection(COLL.bindings).doc(id).get();if(!s.exists)throw Error("no binding");return s.data();}

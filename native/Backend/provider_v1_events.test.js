@@ -69,3 +69,26 @@ test("connect and revoke send notices without keys; a mail failure does not fail
   assert.equal(t.notices[1].details.dataDeleted,false);
  }finally{t.close();}
 });
+
+test("read-only share keys: read the same binding, cannot write, mint keys or read the envelope; revocable",async()=>{
+ const t=await rig();try{
+  const blob=Buffer.from("shared chunk");
+  await t.call("/blobs/"+sha(blob),{method:"PUT",key:t.key,body:blob});
+  const env={version:1,kdf:{alg:"scrypt",N:16384,r:8,p:1},salt:Buffer.alloc(16,1).toString("base64url"),iv:Buffer.alloc(12,2).toString("base64url"),wrappedKey:Buffer.alloc(48,3).toString("base64url")};
+  assert.equal((await t.call("/key-envelope",{method:"PUT",key:t.key,body:env,headers:{"if-none-match":"*"}})).status,201);
+  const made=await t.call("/keys",{method:"POST",key:t.key,body:{label:"Sam's laptop",ttlDays:7}});
+  assert.equal(made.status,201);
+  const share=await made.json();
+  assert.match(share.apiKey,/^gdpk_[0-9a-f]{16}_/);assert.deepEqual(share.scopes,["blobs:r"]);
+  assert.equal((await t.call("/blobs/"+sha(blob),{key:share.apiKey})).status,200);
+  assert.equal((await t.call("/blobs/"+sha(Buffer.from("x")),{method:"PUT",key:share.apiKey,body:Buffer.from("x")})).status,403);
+  assert.equal((await t.call("/keys",{method:"POST",key:share.apiKey,body:{}})).status,403);
+  assert.equal((await t.call("/key-envelope",{key:share.apiKey})).status,403);
+  assert.equal((await t.call("/connect/rotate",{method:"POST",key:share.apiKey})).status,403);
+  const list=await (await t.call("/keys",{key:t.key})).json();
+  assert.equal(list.keys.length,1);assert.equal(list.keys[0].label,"Sam's laptop");assert.ok(!JSON.stringify(list).includes(share.apiKey.split("_")[2]));
+  assert.equal((await t.call("/keys/"+share.keyId,{method:"DELETE",key:t.key})).status,204);
+  assert.equal((await t.call("/blobs/"+sha(blob),{key:share.apiKey})).status,401);
+  assert.equal((await t.call("/keys",{method:"POST",key:t.key,body:{ttlDays:91}})).status,400);
+ }finally{t.close();}
+});

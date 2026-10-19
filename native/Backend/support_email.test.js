@@ -1,6 +1,6 @@
 "use strict";
-// Support email: SMTP client against an in-process fake server on 127.0.0.1 (no real mail is sent), the
-// password-reset route and account notices with a recording sender.
+// Support email (Node port of rottenapple/mailer): SMTP against an in-process fake server on 127.0.0.1 with a
+// throwaway certificate (no real mail is sent), templates, the password-reset route and notices.
 const test=require("node:test");
 const assert=require("node:assert/strict");
 const net=require("node:net");
@@ -13,7 +13,8 @@ const {execFileSync}=require("node:child_process");
 const express=require("express");
 const mail=require("./support_email");
 
-const PASSWORD="s3cret-Pa55word!";
+const PASSWORD="s3cret-App-Pa55word";
+const ENV={SUPPORT_EMAIL_PASSWORD:PASSWORD};
 
 function selfSigned(){
  const dir=fs.mkdtempSync(path.join(os.tmpdir(),"gd-smtp-"));
@@ -22,33 +23,27 @@ function selfSigned(){
  return {key:fs.readFileSync(path.join(dir,"k.pem")),cert:fs.readFileSync(path.join(dir,"c.pem"))};
 }
 const CERT=selfSigned();
+const skip=!CERT&&"openssl not available";
 
-// mode: "plain" (no STARTTLS offered), "starttls", "tls"; auth: "PLAIN" | "LOGIN"
-function fakeSmtp({mode="starttls",auth="PLAIN",rejectAuth=false,echoAuth=false}={}){
+// mode: "starttls" | "nostarttls" | "tls"; rcpt: reply code for RCPT TO
+function fakeSmtp({mode="starttls",rcpt=250,auth=235}={}){
  const sessions=[];
  function start(socket,secure){
-  const s={lines:[],data:"",secure,authed:false,tlsAtAuth:null};sessions.push(s);
-  let inData=false,buf="",loginStep=0,sock=socket;
+  const s={lines:[],data:"",secure,tlsAtAuth:null};sessions.push(s);
+  let inData=false,buf="",sock=socket;
   const say=l=>sock.write(l+"\r\n");
-  const ehlo=()=>{const caps=["250-fake.test"];if(mode==="starttls"&&!s.secure)caps.push("250-STARTTLS");caps.push("250 AUTH "+auth);caps.forEach(say);};
   function onData(d){
-   buf+=d.toString();
-   let i;
+   buf+=d.toString();let i;
    while((i=buf.indexOf("\r\n"))>=0){
     const line=buf.slice(0,i);buf=buf.slice(i+2);
     if(inData){if(line==="."){inData=false;say("250 queued");}else s.data+=line+"\r\n";continue;}
     s.lines.push(line);
-    if(loginStep===1){loginStep=2;say("334 UGFzc3dvcmQ6");continue;}
-    if(loginStep===2){loginStep=0;s.authed=!rejectAuth;s.tlsAtAuth=s.secure;say(rejectAuth?"535 bad":"235 ok");continue;}
-    if(/^EHLO/.test(line))ehlo();
-    else if(line==="STARTTLS"){
-     say("220 go");sock.off("data",onData);
-     const t=new tls.TLSSocket(sock,{isServer:true,key:CERT.key,cert:CERT.cert});
-     t.on("secure",()=>{s.secure=true;});t.on("data",onData);t.on("error",()=>{});sock=t;return;
-    }
-    else if(/^AUTH PLAIN /.test(line)){s.authed=!rejectAuth;s.tlsAtAuth=s.secure;say(rejectAuth?(echoAuth?"535 bad "+line:"535 bad"):"235 ok");}
-    else if(line==="AUTH LOGIN"){loginStep=1;say("334 VXNlcm5hbWU6");}
-    else if(/^MAIL FROM/.test(line)||/^RCPT TO/.test(line))say(s.authed?"250 ok":"530 auth first");
+    if(/^EHLO/.test(line)){say("250-fake.test");if(mode==="starttls"&&!s.secure)say("250-STARTTLS");say("250 AUTH PLAIN LOGIN");}
+    else if(line==="STARTTLS"){say("220 go");sock.off("data",onData);
+     const t=new tls.TLSSocket(sock,{isServer:true,key:CERT.key,cert:CERT.cert});t.on("secure",()=>{s.secure=true;});t.on("data",onData);t.on("error",()=>{});sock=t;return;}
+    else if(/^AUTH PLAIN /.test(line)){s.tlsAtAuth=s.secure;say(auth===235?"235 ok":auth+" bad credentials "+line);}
+    else if(/^MAIL FROM/.test(line))say("250 ok");
+    else if(/^RCPT TO/.test(line))say(rcpt===250?"250 ok":rcpt+" 5.1.1 no such user");
     else if(line==="DATA"){inData=true;say("354 go");}
     else if(line==="QUIT"){say("221 bye");sock.end();}
     else say("500 ?");
@@ -60,135 +55,142 @@ function fakeSmtp({mode="starttls",auth="PLAIN",rejectAuth=false,echoAuth=false}
  const server=mode==="tls"?tls.createServer({key:CERT.key,cert:CERT.cert},c=>start(c,true)):net.createServer(c=>start(c,false));
  return new Promise(r=>server.listen(0,"127.0.0.1",()=>r({port:server.address().port,sessions,close:()=>server.close()})));
 }
-const trust=()=>({ca:CERT.cert});
-const decodeBody=data=>Buffer.from(data.split("\r\n\r\n").slice(1).join("").replace(/\r\n/g,""),"base64").toString("utf8");
+const cfg=(port,extra={})=>({...mail.defaultInfectedNation(),host:"127.0.0.1",port,...extra});
+const trust={tlsOptions:{ca:CERT?.cert}};
+const qpDecode=s=>Buffer.from(s.replace(/=\r\n/g,"").replace(/=([0-9A-F]{2})/g,(_,h)=>String.fromCharCode(parseInt(h,16))),"latin1").toString("utf8");
 
-test("STARTTLS + AUTH PLAIN: authenticates only after TLS, renders a clean message",{skip:!CERT&&"openssl not available"},async()=>{
- const srv=await fakeSmtp({mode:"starttls"});
+test("same defaults as mailer.DefaultInfectedNation; no password field",()=>{
+ assert.deepEqual(mail.defaultInfectedNation(),{host:"smtp.gmail.com",port:587,security:"starttls",username:"support@infected-nation.com",
+  from:"support@infected-nation.com",fromName:"Infected Nation Support"});
+ assert.throws(()=>mail.createMailer({...mail.defaultInfectedNation(),password:"x"}),/no password field/);
+ assert.throws(()=>mail.createMailer({...mail.defaultInfectedNation(),security:"none"}),/no plaintext mode/);
+});
+
+test("STARTTLS: authenticates only after TLS; message matches the Go mailer's format",{skip},async()=>{
+ const srv=await fakeSmtp();const log=mail.memLog();
  try{
-  const sender=mail.createSmtpSender({host:"127.0.0.1",port:srv.port,password:PASSWORD,tlsOptions:trust()});
-  assert.deepEqual(await sender.send({to:"josh@example.com",subject:"Reset your GenDragoon password",body:"line one\nline two"}),{accepted:true});
+  const m=mail.createMailer(cfg(srv.port),{log,env:ENV,...trust});
+  await m.send({to:"josh@example.com",subject:"Grüße from GenDragoon",body:"line one\nline two = done",template:"test"});
   const s=srv.sessions[0];
-  assert.equal(s.tlsAtAuth,true,"AUTH happened on the TLS socket");
+  assert.equal(s.tlsAtAuth,true);
   const plain=s.lines.find(l=>l.startsWith("AUTH PLAIN "));
   assert.equal(Buffer.from(plain.slice(11),"base64").toString(),"\0support@infected-nation.com\0"+PASSWORD);
-  assert.ok(s.lines.includes("MAIL FROM:<support@infected-nation.com>"));
-  assert.ok(s.lines.includes("RCPT TO:<josh@example.com>"));
+  assert.ok(s.lines.includes("MAIL FROM:<support@infected-nation.com>")&&s.lines.includes("RCPT TO:<josh@example.com>"));
   assert.match(s.data,/^From: "Infected Nation Support" <support@infected-nation\.com>\r\n/);
-  assert.match(s.data,/\r\nSubject: Reset your GenDragoon password\r\n/);
-  assert.equal(decodeBody(s.data),"line one\r\nline two");
+  assert.match(s.data,/\r\nSubject: =\?utf-8\?q\?/);
+  assert.match(s.data,/\r\nContent-Transfer-Encoding: quoted-printable\r\nAuto-Submitted: auto-generated\r\n/);
+  assert.equal(qpDecode(s.data.split("\r\n\r\n").slice(1).join("\r\n\r\n")).trimEnd(),"line one\r\nline two = done");
+  assert.deepEqual(log.events().map(e=>[e.status,e.to,e.template]),[["sent","j***@example.com","test"]]);
+  assert.equal(log.events()[0].toHash.length,16);
  }finally{srv.close();}
 });
 
-test("implicit TLS (465) + AUTH LOGIN",{skip:!CERT&&"openssl not available"},async()=>{
- const srv=await fakeSmtp({mode:"tls",auth:"LOGIN"});
+test("implicit TLS (465)",{skip},async()=>{
+ const srv=await fakeSmtp({mode:"tls"});
  try{
-  const sender=mail.createSmtpSender({host:"127.0.0.1",port:srv.port,secure:"tls",password:PASSWORD,tlsOptions:trust()});
-  await sender.send({to:"a@example.com",subject:"Hello",body:"x"});
-  const s=srv.sessions[0];
-  assert.ok(s.lines.includes(Buffer.from(PASSWORD).toString("base64")));
-  assert.equal(s.tlsAtAuth,true);
+  await mail.createMailer(cfg(srv.port,{security:"tls"}),{env:ENV,...trust}).send({to:"a@example.com",subject:"Hi",body:"x"});
+  assert.equal(srv.sessions[0].tlsAtAuth,true);
  }finally{srv.close();}
 });
 
-test("refuses to authenticate without TLS; untrusted certificates fail",{skip:!CERT&&"openssl not available"},async()=>{
- const srv=await fakeSmtp({mode:"plain"});
- const tlsSrv=await fakeSmtp({mode:"starttls"});
+test("refuses a server without STARTTLS and an untrusted certificate before any credential",{skip},async()=>{
+ const plain=await fakeSmtp({mode:"nostarttls"}),good=await fakeSmtp();const log=mail.memLog();
  try{
-  const sender=mail.createSmtpSender({host:"127.0.0.1",port:srv.port,password:PASSWORD});
-  await assert.rejects(sender.send({to:"a@example.com",subject:"Hi",body:"x"}),e=>e.code==="smtp_tls_required");
-  assert.ok(!srv.sessions[0].lines.some(l=>l.startsWith("AUTH")),"no AUTH attempted in clear");
-  const untrusted=mail.createSmtpSender({host:"127.0.0.1",port:tlsSrv.port,password:PASSWORD});
-  await assert.rejects(untrusted.send({to:"a@example.com",subject:"Hi",body:"x"}),e=>e.code==="smtp_tls"||e.code==="smtp_closed");
-  assert.ok(!tlsSrv.sessions[0].lines.some(l=>l.startsWith("AUTH")));
- }finally{srv.close();tlsSrv.close();}
+  await assert.rejects(mail.createMailer(cfg(plain.port),{env:ENV,log}).send({to:"a@example.com",subject:"Hi",body:"x"}),e=>e.code==="ErrNoTLS");
+  await assert.rejects(mail.createMailer(cfg(good.port),{env:ENV}).send({to:"a@example.com",subject:"Hi",body:"x"}),/STARTTLS/);
+  for(const s of [...plain.sessions,...good.sessions])assert.ok(!s.lines.some(l=>l.startsWith("AUTH")));
+  assert.equal(log.events()[0].status,"error");
+ }finally{plain.close();good.close();}
 });
 
-test("the password never appears in errors, inspect output, JSON or logs",{skip:!CERT&&"openssl not available"},async()=>{
- const srv=await fakeSmtp({mode:"starttls",rejectAuth:true,echoAuth:true});
- const logged=[];const orig={log:console.log,error:console.error,warn:console.warn};
- for(const k of Object.keys(orig))console[k]=(...a)=>logged.push(a.map(String).join(" "));
+test("a permanent 5xx is a bounce and is logged as bounced",{skip},async()=>{
+ const srv=await fakeSmtp({rcpt:550});const log=mail.memLog();
  try{
-  const sender=mail.createSmtpSender({host:"127.0.0.1",port:srv.port,password:PASSWORD,tlsOptions:trust()});
-  let err;try{await sender.send({to:"a@example.com",subject:"Hi",body:"x"});}catch(e){err=e;}
-  assert.equal(err.code,"smtp_refused");
+  await assert.rejects(mail.createMailer(cfg(srv.port),{env:ENV,log,...trust}).send({to:"gone@example.com",subject:"Hi",body:"x"}),
+   e=>e instanceof mail.Bounce&&e.smtpCode===550);
+  assert.deepEqual(log.events().map(e=>[e.status,e.code]),[["bounced",550]]);
+ }finally{srv.close();}
+});
+
+test("the password is read at send time, required, and never appears in errors, logs or inspect output",{skip},async()=>{
+ const srv=await fakeSmtp({auth:535});const log=mail.memLog();const printed=[];
+ const orig={log:console.log,error:console.error,warn:console.warn};
+ for(const k of Object.keys(orig))console[k]=(...a)=>printed.push(a.map(String).join(" "));
+ try{
+  const env={};
+  const m=mail.createMailer(cfg(srv.port),{env,log,...trust});
+  await assert.rejects(m.send({to:"a@example.com",subject:"Hi",body:"x"}),e=>e.code==="ErrNoPassword");
+  env.SUPPORT_EMAIL_PASSWORD=PASSWORD;
+  let err;try{await m.send({to:"a@example.com",subject:"Hi",body:"x"});}catch(e){err=e;}
+  assert.match(err.message,/sign-in to the SMTP server failed/);
   const b64=Buffer.from("\0support@infected-nation.com\0"+PASSWORD).toString("base64");
-  for(const text of [err.message,String(err.stack),util.inspect(sender),JSON.stringify(sender),util.inspect(err),...logged]){
-   assert.ok(!text.includes(PASSWORD)&&!text.includes(b64),"leak in: "+text.slice(0,80));
-  }
+  for(const t of [err.message,String(err.stack),util.inspect(m),JSON.stringify(m.config()),JSON.stringify(log.events()),...printed])
+   assert.ok(!t.includes(PASSWORD)&&!t.includes(b64),"leak: "+t.slice(0,80));
  }finally{Object.assign(console,orig);srv.close();}
 });
 
-test("plaintext is allowed only on loopback when a test asks for it",async()=>{
- const srv=await fakeSmtp({mode:"plain"});
- try{
-  const sender=mail.createSmtpSender({host:"127.0.0.1",port:srv.port,password:PASSWORD,allowPlaintextLoopback:true});
-  await sender.send({to:"a@example.com",subject:"Hi",body:"x"});
-  assert.equal(srv.sessions[0].authed,true);
-  assert.throws(()=>mail.createSmtpSender({host:"smtp.example.com",password:""}),/password is required/);
- }finally{srv.close();}
+test("refuses injection and several recipients; rate limits per recipient and overall",async()=>{
+ const log=mail.memLog();let t=1_800_000_000_000;
+ const m=mail.createMailer({...mail.defaultInfectedNation(),host:"127.0.0.1",port:1},{env:{},log,now:()=>t});
+ for(const to of ["a@example.com\r\nBcc: x@example.com","a@example.com, b@example.com","Josh <a@example.com>"])
+  await assert.rejects(m.send({to,subject:"s",body:"b"}),e=>e.code==="ErrBadMessage");
+ await assert.rejects(m.send({to:"a@example.com",subject:"s\r\nBcc: x@example.com",body:"b"}),e=>e.code==="ErrBadMessage");
+ for(let i=0;i<5;i++)await assert.rejects(m.send({to:"a@example.com",subject:"s",body:"b"}),e=>e.code==="ErrNoPassword");
+ await assert.rejects(m.send({to:"a@example.com",subject:"s",body:"b"}),e=>e.code==="ErrRateLimited");
+ t+=3_600_000;
+ await assert.rejects(m.send({to:"a@example.com",subject:"s",body:"b"}),e=>e.code==="ErrNoPassword");
+ assert.deepEqual([...new Set(log.events().map(e=>e.status))].sort(),["error","rate_limited","refused"]);
 });
 
-test("message rendering blocks header injection and encodes non-ASCII",()=>{
- assert.throws(()=>mail.renderMessage({from:mail.SUPPORT_ADDRESS,to:"a@example.com\r\nBcc: x@example.com",subject:"s",body:"b"}),e=>e.code==="invalid_address");
- const m=mail.renderMessage({from:mail.SUPPORT_ADDRESS,to:"a@example.com",subject:"Bonjour\r\nBcc: x@example.com",body:".\n.."});
- assert.ok(!/\r\nBcc:/.test(m));
- assert.match(mail.renderMessage({from:mail.SUPPORT_ADDRESS,to:"a@example.com",subject:"Grüße",body:"b"}),/Subject: =\?UTF-8\?B\?/);
+test("templates: the shared built-ins, GenDragoon's replacement and additions, missing fields are errors",()=>{
+ const base=mail.templates(),gd=mail.gendragoonTemplates();
+ assert.deepEqual(base.names(),["appeal_update","email_verify","moderation_notice","password_reset","test","twofa_setup_link"]);
+ assert.match(base.render("password_reset","a@example.com",{Product:"X",Code:"123",MinutesValid:10,Support:"s@x.com"}).body,/Your code: 123/);
+ assert.throws(()=>base.render("password_reset","a@example.com",{Product:"X"}),/missing template field/);
+ const m=gd.render("password_reset","a@example.com",{Product:"GenDragoon",Link:"https://l",MinutesValid:60,Support:"support@infected-nation.com"});
+ assert.equal(m.template,"password_reset");assert.match(m.body,/https:\/\/l/);
+ assert.throws(()=>gd.render("nope","a@example.com",{}),/no template/);
 });
 
-test("senderFromEnv: off by default, needs host and SUPPORT_EMAIL_PASSWORD",()=>{
+test("senderFromEnv: off by default; refuses to start without the password variable",()=>{
  assert.equal(mail.senderFromEnv({}),null);
- assert.throws(()=>mail.senderFromEnv({SUPPORT_EMAIL_ENABLED:"true",SUPPORT_SMTP_HOST:"smtp.example.com"}),/SUPPORT_EMAIL_PASSWORD/);
- const s=mail.senderFromEnv({SUPPORT_EMAIL_ENABLED:"true",SUPPORT_SMTP_HOST:"smtp.example.com",SUPPORT_EMAIL_PASSWORD:PASSWORD});
- assert.deepEqual(s.describe(),{host:"smtp.example.com",port:587,secure:"starttls",user:"support@infected-nation.com",from:"support@infected-nation.com"});
- assert.ok(!util.inspect(s).includes(PASSWORD));
+ assert.throws(()=>mail.senderFromEnv({SUPPORT_EMAIL_ENABLED:"true"}),/SUPPORT_EMAIL_PASSWORD/);
+ const s=mail.senderFromEnv({SUPPORT_EMAIL_ENABLED:"true",SUPPORT_EMAIL_PASSWORD:PASSWORD});
+ assert.equal(s.config().host,"smtp.gmail.com");assert.ok(!JSON.stringify(s.config()).includes(PASSWORD));
 });
 
 async function resetRig(users={"josh@example.com":"uid-josh"}){
- const app=express();const sender=mail.recordingSender();const logs=[];let t=1_800_000_000_000;
- const adminAuth={async generatePasswordResetLink(email){if(!users[email])throw Object.assign(Error("no user"),{code:"auth/user-not-found"});return "https://gendragoon.example/reset?oobCode=abc&e="+users[email];}};
- mail.registerPasswordReset({app,adminAuth,sender,now:()=>t,log:(e,f)=>logs.push([e,f])});
+ const app=express();const sender=mail.recordingSender();const logs=[];
+ const adminAuth={async generatePasswordResetLink(email){if(!users[email])throw Object.assign(Error("no user"),{code:"auth/user-not-found"});return "https://gendragoon.example/reset?oobCode=abc";}};
+ mail.registerPasswordReset({app,adminAuth,sender,log:(e,f)=>logs.push([e,f])});
  const server=await new Promise(r=>{const s=app.listen(0,"127.0.0.1",()=>r(s));});
  const post=body=>fetch("http://127.0.0.1:"+server.address().port+"/v1/auth/password-reset",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify(body)});
- const settle=()=>new Promise(r=>setTimeout(r,30));
- return {sender,logs,post,settle,advance:ms=>{t+=ms;},close:()=>server.close()};
+ return {sender,logs,post,settle:()=>new Promise(r=>setTimeout(r,30)),close:()=>server.close()};
 }
 
 test("password reset: same 202 for known and unknown addresses; only real accounts get mail",async()=>{
  const r=await resetRig();
  try{
   const a=await r.post({email:"josh@example.com"}),b=await r.post({email:"nobody@example.com"});
-  assert.equal(a.status,202);assert.equal(b.status,202);
-  assert.deepEqual(await a.json(),await b.json());
+  assert.equal(a.status,202);assert.equal(b.status,202);assert.deepEqual(await a.json(),await b.json());
   await r.settle();
   assert.equal(r.sender.sent.length,1);
-  assert.equal(r.sender.sent[0].to,"josh@example.com");
-  assert.match(r.sender.sent[0].body,/https:\/\/gendragoon\.example\/reset\?oobCode=abc/);
-  assert.match(r.sender.sent[0].body,/support@infected-nation\.com/);
-  assert.ok(!JSON.stringify(r.logs).includes("josh@example.com"),"logs hold a hash, not the address");
+  assert.equal(r.sender.sent[0].template,"password_reset");
+  assert.match(r.sender.sent[0].body,/oobCode=abc/);assert.match(r.sender.sent[0].body,/support@infected-nation\.com/);
+  assert.ok(!JSON.stringify(r.logs).includes("josh@example.com"));
   assert.equal((await r.post({email:"not an email"})).status,400);
- }finally{r.close();}
-});
-
-test("password reset: per-address throttle is silent, per-IP limit is 429",async()=>{
- const r=await resetRig();
- try{
-  for(let i=0;i<5;i++)assert.equal((await r.post({email:"josh@example.com"})).status,202);
-  await r.settle();
-  assert.equal(r.sender.sent.length,3,"three per address per hour");
-  for(let i=0;i<5;i++)await r.post({email:"x"+i+"@example.com"});
+  for(let i=0;i<10;i++)await r.post({email:"x"+i+"@example.com"});
   assert.equal((await r.post({email:"y@example.com"})).status,429);
  }finally{r.close();}
 });
 
-test("notices resolve the address at send time and never fail the caller",async()=>{
+test("notices render through the shared templates and never fail the caller",async()=>{
  const sender=mail.recordingSender();
  const adminAuth={async getUser(uid){if(uid==="u1")return {email:"josh@example.com"};throw Error("not found");}};
  const notify=mail.createNotifier({sender,adminAuth});
  assert.deepEqual(await notify("u1","provider.connected",{client:{name:"RedX",host:"studio-mac"}}),{sent:true});
- assert.match(sender.sent[0].subject,/connected/);
- assert.match(sender.sent[0].body,/RedX \(studio-mac\)/);
+ assert.equal(sender.sent[0].template,"provider_connected");assert.match(sender.sent[0].body,/RedX \(studio-mac\)/);
  assert.deepEqual(await notify("u2","provider.revoked",{}),{sent:false,reason:"no_user"});
- const failing=mail.createNotifier({sender:{send:async()=>{throw Object.assign(Error("down"),{code:"smtp_connect"});}},adminAuth});
+ const failing=mail.createNotifier({sender:{send:async()=>{throw Object.assign(Error("down"),{code:"error"});}},adminAuth});
  assert.deepEqual(await failing("u1","provider.revoked",{client:{name:"RedX"},dataDeleted:true}),{sent:false,reason:"send_failed"});
 });
