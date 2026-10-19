@@ -1,6 +1,6 @@
 {
   "name": "@gendragoon/extension",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
   "description": "GenDragoon Cloud SSD browser extension (Chrome, Edge, Firefox, Opera), one codebase.",
@@ -10,7 +10,8 @@
     "test": "vitest run",
     "test:load": "node scripts/headless-load.mjs",
     "lint:firefox": "web-ext lint --source-dir dist/firefox",
-    "package": "node scripts/build.mjs --zip"
+    "package": "node scripts/build.mjs --zip",
+    "store-assets": "node scripts/store-assets.mjs"
   },
   "dependencies": {
     "@gendragoon/core": "workspace:*",

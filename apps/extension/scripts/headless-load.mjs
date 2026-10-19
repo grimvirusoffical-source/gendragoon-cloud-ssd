@@ -1,4 +1,4 @@
-/* global process, console, document, getComputedStyle, URL, setTimeout */
+/* global process, console, document, getComputedStyle, URL, setTimeout, Image */
 /**
  * Loads each Chromium-family zip (chrome, edge, opera) as a real unpacked extension in headless Chrome,
  * opens the popup, and drives it. Firefox is linted separately with web-ext (see package.json).
@@ -59,6 +59,42 @@ for (const browser of ["chrome", "edge", "opera"]) {
     await new Promise((r) => setTimeout(r, 500));
     check(`${browser}: System follows the (light) OS`, (await page.evaluate(() => getComputedStyle(document.body).backgroundColor)) === "rgb(246, 244, 251)");
     check(`${browser}: no script errors`, errors.length === 0, errors.join("; "));
+
+    // Manifest localisation and icons as the browser resolved them.
+    const worker = await sw.worker();
+    const resolved = await worker.evaluate(() => { const m = chrome.runtime.getManifest(); return { name: m.name, description: m.description }; });
+    check(`${browser}: name and description resolve from _locales`, resolved.name === "GenDragoon Cloud SSD" && resolved.description.length > 20 && resolved.description.length <= 132, `${resolved.name} / ${resolved.description.length} chars`);
+    const iconSizes = await page.evaluate(async (base) => {
+      const out = {};
+      for (const size of [16, 32, 48, 64, 96, 128, 256]) {
+        const img = new Image(); img.src = `${base}/icons/gendragoon-${size}.png`;
+        await img.decode().catch(() => undefined); out[size] = img.naturalWidth;
+      }
+      return out;
+    }, `chrome-extension://${id}`);
+    check(`${browser}: icons load at every size`, Object.entries(iconSizes).every(([k, v]) => Number(k) === v), JSON.stringify(iconSizes));
+
+    // Options page: same theme store, status check, privacy copy, opened from the popup.
+    await page.goto(`chrome-extension://${id}/popup.html`, { waitUntil: "networkidle0" });
+    const opened = b.waitForTarget((t) => t.url() === `chrome-extension://${id}/options.html`, { timeout: 8000 });
+    await page.click("#open-settings");
+    const optionsTarget = await opened.catch(() => null);
+    check(`${browser}: popup "All settings" opens the options page`, optionsTarget !== null);
+    const options = optionsTarget ? await optionsTarget.page() : await b.newPage();
+    if (!optionsTarget) await options.goto(`chrome-extension://${id}/options.html`, { waitUntil: "networkidle0" });
+    const optErrors = [];
+    options.on("pageerror", (e) => optErrors.push(String(e)));
+    await options.setViewport({ width: 900, height: 900, deviceScaleFactor: 1 });
+    await options.reload({ waitUntil: "networkidle0" });
+    await options.waitForFunction(() => /Online|Offline/.test(document.getElementById("status")?.textContent ?? ""), { timeout: 12000 });
+    check(`${browser}: options shows the endpoint host and service status`, (await options.$eval("#endpoint", (n) => n.textContent)).endsWith("run.app"));
+    check(`${browser}: options says no browser permissions are requested`, /no browser permissions/.test(await options.$eval("body", (n) => n.textContent)));
+    check(`${browser}: options theme shares the popup choice (system, light OS)`, (await options.evaluate(() => getComputedStyle(document.body).backgroundColor)) === "rgb(246, 244, 251)");
+    await options.click("#theme button[data-theme='dark']");
+    await new Promise((r) => setTimeout(r, 500));
+    check(`${browser}: options Dark applies`, (await options.evaluate(() => getComputedStyle(document.body).backgroundColor)) === "rgb(13, 11, 20)");
+    await options.screenshot({ path: path.join(shotDir, `options-${browser}-dark.png`) });
+    check(`${browser}: options page has no script errors`, optErrors.length === 0, optErrors.join("; "));
   } finally {
     await b.close();
     await rm(dir, { recursive: true, force: true });

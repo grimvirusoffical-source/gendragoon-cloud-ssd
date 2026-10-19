@@ -12,10 +12,22 @@ for (const browser of BROWSERS as string[]) describe(`${browser} manifest`, () =
   const m = manifestFor(browser, "0.1.0");
   it("is a valid MV3 manifest with required store fields", () => {
     expect(m.manifest_version).toBe(3);
-    expect(m.name.length).toBeLessThanOrEqual(45);
-    expect(m.description.length).toBeLessThanOrEqual(132);
+    const messages = JSON.parse(readFileSync(path.join(root, "src/_locales/en/messages.json"), "utf8")) as Record<string, { message: string }>;
+    expect(m.name).toBe("__MSG_extName__");
+    expect(m.default_locale).toBe("en");
+    expect(messages.extName!.message.length).toBeLessThanOrEqual(45);
+    expect(messages.extShortName!.message.length).toBeLessThanOrEqual(12);
+    expect(messages.extDescription!.message.length).toBeLessThanOrEqual(132);
+    expect(m.options_ui).toEqual({ page: "options.html", open_in_tab: true });
+    expect(existsSync(path.join(root, "src/options.html"))).toBe(true);
     expect(m.version).toMatch(/^\d+(\.\d+){0,3}$/);
-    for (const size of ["16", "32", "48", "128"]) expect(existsSync(path.join(root, m.icons[size]))).toBe(true);
+    for (const size of ["16", "32", "48", "96", "128"]) expect(m.icons[size]).toBeTruthy();
+    for (const [size, file] of Object.entries(m.icons as Record<string, string>)) {
+      const png = readFileSync(path.join(root, file));
+      expect(png.subarray(1, 4).toString()).toBe("PNG");
+      expect(png.readUInt32BE(16)).toBe(Number(size)); // real, full-resolution render at exactly this size
+      expect(png.readUInt32BE(20)).toBe(Number(size));
+    }
     expect(existsSync(path.join(root, "src/popup.html"))).toBe(true);
   });
   it("asks for no API permissions and only the one service host", () => {
@@ -67,8 +79,8 @@ describe("service probe", () => {
   });
 });
 
-describe("popup html", () => {
-  const html = readFileSync(path.join(root, "src/popup.html"), "utf8");
+describe.each(["popup.html", "options.html"])("%s", (file) => {
+  const html = readFileSync(path.join(root, "src", file), "utf8");
   it("has no inline script (MV3 CSP) and no remote resources", () => {
     expect(html).not.toMatch(/<script(?![^>]*\bsrc=)[^>]*>/);
     expect(html).not.toMatch(/https?:\/\//);

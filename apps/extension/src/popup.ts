@@ -1,57 +1,33 @@
-import { applyThemePreference, loadThemePreference, saveThemePreference } from "../../../packages/ui/src/theme-runtime";
-import type { ThemePreference } from "../../../packages/ui/src/theme";
+import { applyThemePreference, loadThemePreference } from "../../../packages/ui/src/theme-runtime";
+import { mountThemeControl } from "./themeControl";
 import { API_BASE, PRIVACY_URL, SUPPORT_URL } from "./config";
 import { sortCategoryFor } from "./sorter";
-import { probeService, type ServiceStatus } from "./status";
+import { probeService } from "./status";
+import { renderChecking, renderStatus } from "./statusView";
 
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
 
-export function renderStatus(target: HTMLElement, status: ServiceStatus): void {
-  target.replaceChildren();
-  const row = document.createElement("div");
-  row.className = "row";
-  const dot = document.createElement("span");
-  dot.className = status.state === "online" ? "dot" : "dot off";
-  const text = document.createElement("span");
-  text.textContent = status.state === "online" ? `Online · ${status.ms} ms` : `Offline · ${status.reason}`;
-  row.append(dot, text);
-  target.append(row);
-}
-
-function renderTheme(): void {
-  const group = $("theme");
-  let current: ThemePreference = loadThemePreference();
-  applyThemePreference(current);
-  const options: [ThemePreference, string][] = [["dark", "Dark"], ["light", "Light"], ["system", "System"]];
-  const draw = () => {
-    group.replaceChildren(...options.map(([id, label]) => {
-      const button = document.createElement("button");
-      button.type = "button";
-      button.textContent = label;
-      button.setAttribute("role", "radio");
-      button.setAttribute("aria-checked", String(id === current));
-      button.dataset.theme = id;
-      if (id === current) button.className = "active";
-      button.addEventListener("click", () => {
-        current = id;
-        saveThemePreference(id);
-        applyThemePreference(id, undefined, { animate: true });
-        draw();
-      });
-      return button;
-    }));
-  };
-  draw();
-}
-
 async function refresh(): Promise<void> {
   const status = $("status");
-  renderStatus(status, await probeService(API_BASE));
+  const button = $<HTMLButtonElement>("refresh");
+  button.disabled = true;
+  renderChecking(status);
+  try {
+    renderStatus(status, await probeService(API_BASE));
+  } finally {
+    status.removeAttribute("aria-busy");
+    button.disabled = false;
+  }
+}
+
+function openSettings(): void {
+  const api = (globalThis as { browser?: { runtime?: { openOptionsPage?: () => unknown } }; chrome?: { runtime?: { openOptionsPage?: () => unknown } } });
+  (api.browser ?? api.chrome)?.runtime?.openOptionsPage?.();
 }
 
 function init(): void {
   applyThemePreference(loadThemePreference());
-  renderTheme();
+  mountThemeControl($("theme"));
   const link = (id: string, href: string) => { $<HTMLAnchorElement>(id).href = href; };
   link("support", SUPPORT_URL);
   link("privacy", PRIVACY_URL);
@@ -72,6 +48,7 @@ function init(): void {
     result.append("Goes in ", chip);
   });
   $("refresh").addEventListener("click", () => void refresh());
+  $("open-settings").addEventListener("click", openSettings);
   void refresh();
 }
 

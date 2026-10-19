@@ -32,3 +32,11 @@ input:focus { border-color: var(--purple); box-shadow: 0 0 0 3px var(--soft); }
 .skeleton::after { content: ""; position: absolute; inset: 0; background: linear-gradient(90deg, transparent, var(--skeleton-shine), transparent); animation: shimmer 1.4s var(--ease-in-out) infinite; }
 footer { color: var(--faint); font-size: 11.5px; text-align: center; }
 footer a { color: var(--kicker); }
+.btn-link { margin-top: 10px; display: block; background: none; border: 0; padding: 0; color: var(--kicker); font: inherit; font-weight: 600; cursor: pointer; text-decoration: underline; text-underline-offset: 3px; }
+.btn-link:hover { color: var(--text); }
+.btn-ghost:disabled { opacity: .6; cursor: progress; }
+.options-page { width: auto; min-height: 100vh; }
+.options { max-width: 560px; margin: 0 auto; padding: 28px 18px 40px; }
+.plain { margin: 0; padding-left: 18px; color: var(--muted); font-size: 12.5px; display: flex; flex-direction: column; gap: 6px; }
+code { background: var(--soft); border-radius: 6px; padding: 1px 6px; font-size: 12px; }
+@media (prefers-reduced-motion: reduce) { * { animation-duration: .001ms !important; animation-iteration-count: 1 !important; transition-duration: .001ms !important; } }

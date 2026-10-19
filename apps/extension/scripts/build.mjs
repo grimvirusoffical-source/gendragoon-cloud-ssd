@@ -19,7 +19,7 @@ for (const browser of BROWSERS) {
   const dir = path.join(outRoot, browser);
   await mkdir(dir, { recursive: true });
   await build({
-    entryPoints: { popup: path.join(root, "src/popup.ts"), background: path.join(root, "src/background.ts"), "popup-style": path.join(root, "src/popup.css") },
+    entryPoints: { popup: path.join(root, "src/popup.ts"), options: path.join(root, "src/options.ts"), background: path.join(root, "src/background.ts"), "popup-style": path.join(root, "src/popup.css") },
     outdir: dir, bundle: true, format: "iife", target: ["chrome114", "firefox128"], minify: true, sourcemap: false, legalComments: "none",
     define: { __API_BASE__: JSON.stringify(apiBase) }, loader: { ".png": "dataurl" }, logLevel: "warning",
   });
@@ -27,6 +27,8 @@ for (const browser of BROWSERS) {
   await cp(path.join(dir, "popup-style.css"), path.join(dir, "popup.css"));
   await rm(path.join(dir, "popup-style.css"));
   await cp(path.join(root, "src/popup.html"), path.join(dir, "popup.html"));
+  await cp(path.join(root, "src/options.html"), path.join(dir, "options.html"));
+  await cp(path.join(root, "src/_locales"), path.join(dir, "_locales"), { recursive: true });
   await cp(path.join(root, "icons"), path.join(dir, "icons"), { recursive: true });
   await writeFile(path.join(dir, "manifest.json"), `${JSON.stringify(manifestFor(browser, pkg.version, apiBase), null, 2)}\n`);
   if (zip) {
