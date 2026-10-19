@@ -79,6 +79,36 @@ def gd():
     return f"# {HEADER}\nclass_name GendragoonOperations\nextends RefCounted\n\nconst ALL := {{\n" + "\n".join(rows) + "\n}\n"
 
 
+
+def md():
+    groups = [("Provider API", lambda o: o["context"] == "app" and o["http"] and not o["id"].startswith("connect.")),
+              ("Files, sync, sharing and events", lambda o: o["context"] in ("app", "local") and not o["http"] and not o["id"].startswith("connect.")),
+              ("Keys", lambda o: o["context"] == "local" and o["id"].startswith("crypto.")),
+              ("Connect", lambda o: o["id"].startswith("connect.")),
+              ("Account (signed-in user)", lambda o: o["id"].startswith("account.")),
+              ("Teams (signed-in user)", lambda o: o["id"].startswith("teams."))]
+    out = [f"<!-- {HEADER} -->", "", "# Operations", "",
+           "Every SDK call names one of these operations. The gate refuses a call whose level is above the client's",
+           "cap before any request is made. Levels and risks are explained in [LEVELS.md](LEVELS.md).", ""]
+    seen = set()
+    for title, pick in groups:
+        rows = [o for o in OPS if o["id"] not in seen and pick(o)]
+        if not rows:
+            continue
+        out += [f"## {title}", "", "| Operation | Level | Risk | HTTP | Summary |", "|---|---|---|---|---|"]
+        for o in rows:
+            seen.add(o["id"])
+            m, p = http(o)
+            route = f"`{m} {p}`" if m else "(local)" if o["context"] == "local" else "(composite)"
+            out.append(f"| `{o['id']}` | {o['level']} | {o['risk']} | {route} | {o['summary']} |")
+        out.append("")
+    missing = [o["id"] for o in OPS if o["id"] not in seen]
+    if missing:
+        raise SystemExit("operations not in any docs group: " + ", ".join(missing))
+    return "\n".join(out)
+
+
+
 TARGETS = {
     "go/operations_gen.go": go,
     "js/src/operations.ts": ts,
@@ -86,6 +116,7 @@ TARGETS = {
     "swift/Sources/Gendragoon/Operations.swift": swift,
     "csharp/src/Gendragoon.Sdk/Operations.g.cs": cs,
     "engines/godot/addons/gendragoon/operations.gd": gd,
+    "docs/OPERATIONS.md": md,
 }
 
 
