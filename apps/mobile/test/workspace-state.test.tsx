@@ -4,7 +4,7 @@
  * reports the demoted workspace's graceEndsAt.
  */
 import { WorkspaceLockedError, type LockAssessment, type WorkspaceRecord } from "@gendragoon/core";
-import { fireEvent, render } from "@testing-library/react-native";
+import { fireEvent, render, within } from "@testing-library/react-native";
 import { LockScreen, WorkspacesScreen } from "../src/screens";
 import {
   accountLockCoversApp,
@@ -192,7 +192,9 @@ describe("workspace policy fixtures", () => {
       />,
     );
     expect(graceBanner(demoted.graceEndsAt)).toBe("Payment due, pay by Nov 20, 2023 to keep using this workspace.");
-    expect(screen.getByTestId(`workspace-grace-${demoted.workspaceId}`)).toHaveTextContent(graceBanner(demoted.graceEndsAt));
+    expect(screen.getByTestId(`workspace-grace-${demoted.workspaceId}`)).toHaveTextContent(graceBanner(demoted.graceEndsAt), { exact: false });
+    // The Pay action sits inside the grace banner.
+    expect(within(screen.getByTestId(`workspace-grace-${demoted.workspaceId}`)).getByTestId(`pay-grace-${demoted.workspaceId}`)).toBeTruthy();
     expect(screen.queryByTestId(`workspace-price-${demoted.workspaceId}`)).toBeNull();
     expect(screen.queryByText("$5.00")).toBeNull();
     expect(screen.getByTestId(`workspace-price-${made.response.body.freeWorkspaceId}`).props.children).toBe("Free");

@@ -11,7 +11,6 @@ import {
   byoErrorMessage,
   categorize,
   challengeObjectKey,
-  planMerge,
   planSummary,
   type LockAssessment,
   GenDragoonClient,
@@ -21,9 +20,9 @@ import {
   type TreeNode,
   type WorkspaceRecord,
 } from "@gendragoon/core";
-import { colors, space, type as typeScale } from "@gendragoon/ui/theme";
-import { useState } from "react";
-import { Linking, Pressable, StyleSheet, Text, TextInput, View } from "react-native";
+import { colors, space, tapTarget, type as typeScale } from "./theme";
+import { useEffect, useState } from "react";
+import { Linking, Pressable, StyleSheet, Text, View } from "react-native";
 import {
   applyAuthFailureSignal,
   deletionSessionAction,
@@ -46,9 +45,9 @@ import {
   workspaceQuoteExplanation,
 } from "./pricing";
 import { WORKSPACE_BUSY_MESSAGE, graceBanner, isDeletingWorkspace, isWorkspaceBusy } from "./workspaceState";
-import { SUPPORT_REQUEST_ALREADY, SUPPORT_REQUEST_SENT } from "./supportRequest";
+import { SUPPORT_DELETION_STILL_RUNNING, SUPPORT_REQUEST_ALREADY, SUPPORT_REQUEST_SENT } from "./supportRequest";
 import { supportContactTarget } from "./supportContact";
-import { Banner, Button, Screen, Title, cardStyle } from "./ui";
+import { Banner, Button, Field, ProgressCard, Screen, SectionLabel, Title, cardStyle } from "./ui";
 
 export function workspacesWithUnpaid<T extends { id: string }>(
   workspaces: readonly T[],
@@ -67,7 +66,7 @@ export function SignInScreen(props: {
     <Screen testID="sign-in-screen">
       <Title kicker="GenDragoon">Cloud SSD</Title>
       <Text style={styles.help}>Files stay encrypted on this device before they upload.</Text>
-      {props.blockedMessage ? <Banner testID="session-error">{props.blockedMessage}</Banner> : null}
+      {props.blockedMessage ? <Banner alert testID="session-error">{props.blockedMessage}</Banner> : null}
       <Button label="Sign in" testID="sign-in" onPress={props.onSignIn} />
       {props.googleEnabled ? <Text style={styles.help}>Google is configured for this build.</Text> : null}
     </Screen>
@@ -174,9 +173,12 @@ export function LockScreen(props: {
         <Text testID="lock-reason" style={styles.help}>{lockReasonMessage(props.lock.reason, props.lock.overBy)}</Text>
       ) : null}
       {props.lock?.reason === "merge_in_progress" ? (
-        <Text testID="merge-in-progress-detail" style={styles.help}>
-          Uploads and changes stay paused until the merge finishes.
-        </Text>
+        <ProgressCard
+          testID="merge-in-progress"
+          title="Merging workspaces"
+          detail="Uploads and changes stay paused until the merge finishes."
+          detailTestID="merge-in-progress-detail"
+        />
       ) : null}
       {rows.map((workspace) => (
         <Text key={workspace.id} testID={`lock-workspace-${workspace.id}`} style={styles.help}>
@@ -187,7 +189,7 @@ export function LockScreen(props: {
         <Text key={id} testID={`lock-unmatched-${id}`} style={styles.help}>{`${id} · unpaid`}</Text>
       ))}
       {payFirst ? <Button label="Pay to restore" testID="pay-to-restore" onPress={() => props.onPay?.()} /> : null}
-      <Button label="Review workspaces" tone={payFirst ? "ghost" : "primary"} testID="review-workspaces" onPress={props.onReview} />
+      <Button label="Review workspaces" tone={payFirst ? "secondary" : "primary"} testID="review-workspaces" onPress={props.onReview} />
     </Screen>
   );
 }
@@ -213,7 +215,7 @@ export function FileTree(props: {
   return (
     <Screen testID={props.mode === "backup" ? "backup-screen" : "files-screen"}>
       <Title kicker={props.mode === "backup" ? "Backup" : "Files"}>{props.mode === "backup" ? "Secure backup" : "Library"}</Title>
-      <Button label="Refresh" tone="ghost" onPress={props.onRefresh} testID="refresh" />
+      <Button label="Refresh" tone="ghost" compact accessibilityLabel="Refresh library" onPress={props.onRefresh} testID="refresh" />
       {[...groups.entries()].map(([category, nodes]) => (
         <View key={category} style={cardStyle()}>
           <Text style={styles.category}>{category}</Text>
@@ -253,7 +255,9 @@ export interface ServerMergeResult {
   copied: number;
 }
 
-export type ListedWorkspace = WorkspaceRecord & { feeWaived?: boolean };
+/** Server `projectStatus: "deleting"` is not on core's union yet (see `isDeletingWorkspace`). */
+export type ListedProjectStatus = NonNullable<WorkspaceRecord["projectStatus"]> | "deleting";
+export type ListedWorkspace = Omit<WorkspaceRecord, "projectStatus"> & { projectStatus?: ListedProjectStatus; feeWaived?: boolean };
 
 export function NewWorkspaceScreen(props: {
   /** Server quote for a hosted workspace. Not a client-side count. */
@@ -277,39 +281,48 @@ export function NewWorkspaceScreen(props: {
   const ready = name.trim().length > 0;
   return (
     <Screen testID="new-workspace-screen">
-      <Title kicker="Workspaces">New workspace</Title>
-      <Text style={styles.label}>Workspace name</Text>
-      <TextInput
-        accessibilityLabel="Workspace name"
-        placeholder="Workspace name"
-        placeholderTextColor={colors.muted}
-        style={styles.input}
+      <Title kicker="Workspaces" subtitle="Name it, then choose where its files live.">New workspace</Title>
+      <Field
+        label="Workspace name"
+        placeholder="e.g. Photos"
+        helper="Shown in your workspace list. You can rename it later."
+        autoCapitalize="words"
         value={name}
         onChangeText={setName}
         testID="workspace-name"
       />
-      <Text style={styles.label}>Storage</Text>
-      <Button
-        label="Hosted"
-        tone={storage === "hosted" ? "primary" : "ghost"}
-        testID="storage-hosted"
-        accessibilityLabel="Hosted storage"
-        onPress={() => setStorage("hosted")}
-      />
-      <Button
-        label="Bring your own storage"
-        tone={storage === "byo" ? "primary" : "ghost"}
-        testID="storage-byo"
-        accessibilityLabel="Bring your own storage"
-        onPress={() => setStorage("byo")}
-      />
+      <SectionLabel>Storage</SectionLabel>
+      <View accessibilityRole="radiogroup" accessibilityLabel="Storage" style={styles.choices}>
+        <Button
+          label="Hosted"
+          tone={storage === "hosted" ? "secondary" : "ghost"}
+          selected={storage === "hosted"}
+          testID="storage-hosted"
+          accessibilityLabel="Hosted storage"
+          accessibilityHint="GenDragoon stores the files for you."
+          onPress={() => setStorage("hosted")}
+        />
+        <Button
+          label="Bring your own storage"
+          tone={storage === "byo" ? "secondary" : "ghost"}
+          selected={storage === "byo"}
+          testID="storage-byo"
+          accessibilityLabel="Bring your own storage"
+          accessibilityHint="Use your own S3-compatible bucket."
+          onPress={() => setStorage("byo")}
+        />
+      </View>
+      <Text style={styles.help}>
+        {storage === "hosted" ? "GenDragoon stores and encrypts this workspace's files." : "Files go to your own S3-compatible bucket."}
+      </Text>
       {storage === "byo" ? (
-        <View testID="create-byo-providers">
+        <View testID="create-byo-providers" accessibilityRole="radiogroup" accessibilityLabel="Storage provider" style={styles.choices}>
           {LAUNCH_BYO_PROVIDERS.map((provider) => (
             <Button
               key={provider.id}
               label={provider.label}
-              tone={providerId === provider.id ? "primary" : "ghost"}
+              tone={providerId === provider.id ? "secondary" : "ghost"}
+              selected={providerId === provider.id}
               testID={`create-byo-${provider.id}`}
               accessibilityLabel={provider.label}
               onPress={() => setProviderId(provider.id)}
@@ -356,14 +369,31 @@ export function WorkspacesScreen(props: {
   const showPrice = props.pricingEnabled ?? WORKSPACE_PRICING_ENABLED;
   const feeText = additionalWorkspaceFeeText(props.additionalMonthlyCents);
   const rows = workspacesWithUnpaid(props.workspaces, props.unpaidIds);
-  const [sourceId, setSourceId] = useState(rows[0]?.id ?? "");
-  const [targetId, setTargetId] = useState(rows[1]?.id ?? rows[0]?.id ?? "");
+  const [pickedSourceId, setSourceId] = useState(rows[0]?.id ?? "");
+  const [pickedTargetId, setTargetId] = useState(rows[1]?.id ?? "");
+  /**
+   * Picks are checked against `rows` on every render. A pick that is missing
+   * (refresh, deletion elsewhere, or a list that loaded after mount) resets to
+   * the first valid row, so a merge is never sent with an id that is not listed.
+   */
+  const rowIds = new Set(rows.map((row) => row.id));
+  const pickable = rows.filter((row) => !isDeletingWorkspace(row));
+  const sourceId = rowIds.has(pickedSourceId) ? pickedSourceId : pickable[0]?.id ?? "";
+  const targetId = rowIds.has(pickedTargetId) && pickedTargetId !== sourceId
+    ? pickedTargetId
+    : pickable.find((row) => row.id !== sourceId)?.id ?? "";
+  useEffect(() => {
+    if (pickedSourceId !== sourceId) setSourceId(sourceId);
+    if (pickedTargetId !== targetId) setTargetId(targetId);
+  }, [pickedSourceId, pickedTargetId, sourceId, targetId]);
+  /** Merging needs two distinct workspaces. */
+  const mergeable = rows.length >= 2;
+  /** Server preview, error, or result stay visible, e.g. after a merge leaves one workspace. */
+  const mergeOutcome = Boolean(props.serverPreview || props.mergeError || props.mergeResult?.merged || props.mergedFiles?.length);
   const [pendingDeleteId, setPendingDeleteId] = useState<string | null>(null);
   const [busyMessage, setBusyMessage] = useState<string | null>(null);
   const deletingIds = new Set(rows.filter((workspace) => isDeletingWorkspace(workspace)).map((workspace) => workspace.id));
-  const localPreview = props.serverPreview || !sourceId || !targetId || sourceId === targetId
-    ? []
-    : planMerge([{ path: "Photos/cat.jpg" }], rows.find((row) => row.id === sourceId)?.name ?? "source", ["Photos/cat.jpg"]);
+  const canMerge = Boolean(sourceId && targetId) && sourceId !== targetId && !deletingIds.has(sourceId) && !deletingIds.has(targetId);
   async function confirmDelete(id: string) {
     try {
       await props.onDelete(id);
@@ -379,7 +409,7 @@ export function WorkspacesScreen(props: {
     <Screen testID="workspaces-screen">
       <Title kicker="Workspaces">Your spaces</Title>
       {feeText ? <Banner testID="workspace-fee">{feeText}</Banner> : null}
-      {busyMessage ? <Banner testID="workspace-busy">{busyMessage}</Banner> : null}
+      {busyMessage ? <Banner alert testID="workspace-busy">{busyMessage}</Banner> : null}
       {props.capMessage ? <Banner testID="workspace-cap">{props.capMessage}</Banner> : null}
       {rows.map((workspace) => {
         const deleting = deletingIds.has(workspace.id);
@@ -397,22 +427,30 @@ export function WorkspacesScreen(props: {
               accessibilityRole="button"
               accessibilityLabel={`Open ${workspace.name}`}
               testID={`open-${workspace.id}`}
+              style={styles.openRow}
               onPress={() => props.onOpen?.(workspace.id)}
             >
               <Text testID={`workspace-name-${workspace.id}`} style={styles.category}>{workspace.name}</Text>
             </Pressable>
-            {deleting ? <Text testID={`workspace-deleting-${workspace.id}`} style={styles.help}>Deleting...</Text> : null}
-            {inGrace ? <Banner testID={`workspace-grace-${workspace.id}`}>{graceBanner(graceMs)}</Banner> : null}
-            {price ? <Text testID={`workspace-price-${workspace.id}`} style={styles.help}>{price}</Text> : null}
+            {deleting ? <ProgressCard testID={`workspace-deleting-${workspace.id}`} title="Deleting..." /> : null}
             {inGrace ? (
-              <Button
-                label="Pay"
-                testID={`pay-grace-${workspace.id}`}
-                accessibilityLabel={`Pay ${workspace.name}`}
-                disabled={deleting}
-                onPress={() => props.onPay?.(workspace.id)}
-              />
+              <Banner
+                testID={`workspace-grace-${workspace.id}`}
+                action={(
+                  <Button
+                    label="Pay"
+                    compact
+                    testID={`pay-grace-${workspace.id}`}
+                    accessibilityLabel={`Pay ${workspace.name}`}
+                    disabled={deleting}
+                    onPress={() => props.onPay?.(workspace.id)}
+                  />
+                )}
+              >
+                {graceBanner(graceMs)}
+              </Banner>
             ) : null}
+            {price ? <Text testID={`workspace-price-${workspace.id}`} style={styles.help}>{price}</Text> : null}
             {workspace.unpaid && !inGrace ? (
               <Button
                 label="Pay to restore"
@@ -456,16 +494,20 @@ export function WorkspacesScreen(props: {
           </View>
         );
       })}
+      {mergeable || mergeOutcome ? (<>
+      <SectionLabel>Merge workspaces</SectionLabel>
+      <Text style={styles.help}>Copies every file from the source into the target. Name clashes are renamed, never overwritten.</Text>
+      {mergeable && !props.serverPreview ? (
+        <Text testID="merge-preview-hint" style={styles.help}>{canMerge ? "The server lists every file and any rename before anything is copied." : "Choose two workspaces to preview a merge."}</Text>
+      ) : null}
       {props.serverPreview ? (
-        <View testID="merge-preview">
+        <View testID="merge-preview" style={cardStyle()}>
           {props.serverPreview.files.map((file) => (
             <Text key={file.name} style={styles.help}>{`${file.name} → ${file.renamedTo}`}</Text>
           ))}
         </View>
-      ) : (
-        <Text style={styles.help}>{localPreview[0] ? `${localPreview[0].sourcePath} → ${localPreview[0].targetPath}` : "Choose two workspaces to preview a merge."}</Text>
-      )}
-      {props.mergeError ? <Banner testID="merge-error">{props.mergeError}</Banner> : null}
+      ) : null}
+      {props.mergeError ? <Banner alert testID="merge-error">{props.mergeError}</Banner> : null}
       {props.mergeResult?.merged ? (
         <Text testID="merge-result" style={styles.help}>
           {`Merged ${props.mergeResult.copied} into ${props.mergeResult.workspaceId}${props.mergeResult.sourceDeleted ? ". Source deleted." : ""}`}
@@ -474,30 +516,38 @@ export function WorkspacesScreen(props: {
       {props.mergedFiles?.map((file) => (
         <Text key={file.id} testID={`merged-file-${file.id}`} style={styles.help}>{file.name}</Text>
       ))}
-      <Text style={styles.label}>Source</Text>
-      <View testID="merge-source">
+      </>) : null}
+      {mergeable ? (<>
+      <Text style={styles.label}>From (source)</Text>
+      <View testID="merge-source" accessibilityRole="radiogroup" accessibilityLabel="Merge source" style={styles.choices}>
         {rows.map((workspace) => (
           <Button
             key={`source-${workspace.id}`}
             label={workspace.name}
-            tone={sourceId === workspace.id ? "primary" : "ghost"}
+            tone={sourceId === workspace.id ? "secondary" : "ghost"}
+            selected={sourceId === workspace.id}
             testID={`merge-source-${workspace.id}`}
             accessibilityLabel={`Merge source ${workspace.name}`}
             disabled={deletingIds.has(workspace.id)}
-            onPress={() => setSourceId(workspace.id)}
+            onPress={() => {
+              setSourceId(workspace.id);
+              if (targetId === workspace.id) setTargetId(rows.find((row) => row.id !== workspace.id)?.id ?? "");
+            }}
           />
         ))}
       </View>
-      <Text style={styles.label}>Target</Text>
-      <View testID="merge-target">
+      <Text style={styles.label}>Into (target)</Text>
+      <View testID="merge-target" accessibilityRole="radiogroup" accessibilityLabel="Merge target" style={styles.choices}>
         {rows.map((workspace) => (
           <Button
             key={`target-${workspace.id}`}
             label={workspace.name}
-            tone={targetId === workspace.id ? "primary" : "ghost"}
+            tone={targetId === workspace.id ? "secondary" : "ghost"}
+            selected={targetId === workspace.id}
             testID={`merge-target-${workspace.id}`}
             accessibilityLabel={`Merge target ${workspace.name}`}
-            disabled={deletingIds.has(workspace.id)}
+            accessibilityHint={workspace.id === sourceId ? "Already selected as the source" : undefined}
+            disabled={deletingIds.has(workspace.id) || workspace.id === sourceId}
             onPress={() => setTargetId(workspace.id)}
           />
         ))}
@@ -505,9 +555,13 @@ export function WorkspacesScreen(props: {
       <Button
         label="Merge"
         testID="merge-workspaces"
-        disabled={!sourceId || !targetId || sourceId === targetId || deletingIds.has(sourceId) || deletingIds.has(targetId)}
-        onPress={() => props.onMerge(sourceId, targetId)}
+        accessibilityLabel="Merge source into target"
+        disabled={!canMerge}
+        onPress={() => {
+          if (canMerge) props.onMerge(sourceId, targetId);
+        }}
       />
+      </>) : null}
     </Screen>
   );
 }
@@ -618,7 +672,7 @@ export function ConnectStorageScreen(props: {
       {props.verified?.verified ? (
         <Text testID="byo-verified" style={styles.help}>{props.verified.workspaceId}</Text>
       ) : null}
-      {errorText ? <Banner testID="byo-error">{errorText}</Banner> : null}
+      {errorText ? <Banner alert testID="byo-error">{errorText}</Banner> : null}
     </Screen>
   );
 }
@@ -641,26 +695,28 @@ export function PassphraseScreen(props: {
   const ready = longEnough && value === again && ack;
   return (
     <Screen testID="passphrase-screen">
-      <Title kicker="Recovery">Set a passphrase</Title>
+      <Title kicker="Recovery" subtitle="This passphrase unlocks your encrypted files on every device.">Set a passphrase</Title>
       <Banner>{PASSPHRASE_LOSS_WARNING}</Banner>
-      <Text style={styles.label}>Passphrase</Text>
-      <TextInput
-        accessibilityLabel="Passphrase"
-        placeholder="Passphrase"
-        placeholderTextColor={colors.muted}
+      <Field
+        label="Passphrase"
+        placeholder="At least 8 characters"
+        helper="Use a few unrelated words. It never leaves this device unencrypted."
         secureTextEntry={!revealed}
-        style={styles.input}
+        autoCapitalize="none"
+        autoComplete="new-password"
+        textContentType="newPassword"
         value={value}
         onChangeText={setValue}
         testID="passphrase"
       />
-      <Text style={styles.label}>Confirm passphrase</Text>
-      <TextInput
-        accessibilityLabel="Confirm passphrase"
-        placeholder="Confirm passphrase"
-        placeholderTextColor={colors.muted}
+      <Field
+        label="Confirm passphrase"
+        placeholder="Type it again"
+        helper="Must match exactly."
+        error={mismatch ? "Passphrases don't match" : null}
         secureTextEntry={!revealed}
-        style={styles.input}
+        autoCapitalize="none"
+        textContentType="newPassword"
         value={again}
         onChangeText={setAgain}
         testID="passphrase-confirm"
@@ -676,7 +732,6 @@ export function PassphraseScreen(props: {
       <Text testID="passphrase-hint" style={styles.help}>
         {longEnough ? "At least 8 characters." : "Use at least 8 characters."}
       </Text>
-      {mismatch ? <Text testID="passphrase-mismatch" style={styles.error}>Passphrases don't match</Text> : null}
       <Pressable
         accessibilityRole="checkbox"
         accessibilityLabel="I understand I can lose my files"
@@ -685,7 +740,9 @@ export function PassphraseScreen(props: {
         onPress={() => setAck((checked) => !checked)}
         style={styles.checkRow}
       >
-        <Text style={styles.category}>{ack ? "☑" : "☐"}</Text>
+        <View style={[styles.checkbox, ack ? styles.checkboxOn : null]}>
+          {ack ? <Text style={styles.checkMark}>✓</Text> : null}
+        </View>
         <Text style={styles.help}>I understand I can lose my files</Text>
       </Pressable>
       <Button label="Save passphrase" testID="passphrase-save" disabled={!ready} onPress={() => props.onSubmit(value)} />
@@ -758,6 +815,7 @@ export function DeleteAccountScreen(props: {
   jobId?: string;
   /** Overrides the build flag in tests. Production reads `DELETION_SUPPORT_ENDPOINT_ENABLED`. */
   supportEndpointEnabled?: boolean;
+  /** Same API base the rest of the app uses (`MobileRoot`). Empty means no support request is sent. */
   apiBase?: string;
   supportFetch?: typeof fetch;
 }) {
@@ -854,32 +912,49 @@ export function DeleteAccountScreen(props: {
   async function contact() {
     const jobId = notice?.jobId ?? "";
     const enabled = props.supportEndpointEnabled ?? DELETION_SUPPORT_ENDPOINT_ENABLED;
-    if (enabled) {
+    // Without a configured API base there is no server to ask, so mail support directly.
+    const apiBase = props.apiBase?.trim();
+    if (enabled && apiBase) {
+      let result: Awaited<ReturnType<typeof requestDeletionSupport>> | null = null;
       try {
-        const result = await requestDeletionSupport(jobId, {
+        result = await requestDeletionSupport(jobId, {
           client: new GenDragoonClient({
-            baseUrl: props.apiBase ?? "https://api.example.test",
+            baseUrl: apiBase,
             getToken: async () => "",
             fetch: props.supportFetch,
           }),
           secureStore: props.secrets,
         });
-        if (result.kind === "received") {
-          setSupportNotice(SUPPORT_REQUEST_SENT);
+      } catch {
+        // Any throw here (unexpected 2xx/3xx, body read error) still has to reach
+        // a human, and never sign-in: fall through to the support email.
+        result = null;
+      }
+      if (result?.kind === "received") {
+        setSupportNotice(SUPPORT_REQUEST_SENT);
+        return;
+      }
+      if (result?.kind === "already_sent") {
+        setSupportNotice(SUPPORT_REQUEST_ALREADY);
+        return;
+      }
+      if (result?.kind === "not_needed") {
+        const state = result.status.status;
+        if (state === "running" || state === "queued") {
+          // A 409 whose refresh says the job is still going.
+          setSupportNotice(SUPPORT_DELETION_STILL_RUNNING);
           return;
         }
-        if (result.kind === "already_sent") {
-          setSupportNotice(SUPPORT_REQUEST_ALREADY);
-          return;
-        }
-        if (result.kind === "not_needed") {
+        if (state === "done") {
           applyStatus(result.status);
           return;
         }
+        // Avery's ruling: a refresh that comes back failed (or anything else)
+        // means support is needed after all. Core returns `fallback` for this;
+        // an older core's not_needed + failed falls through to the email too.
+      }
+      if (result?.kind === "fallback") {
         await Linking.openURL(supportContactTarget(result.contact.value, jobId));
-        return;
-      } catch (error) {
-        showFailure(error);
         return;
       }
     }
@@ -892,11 +967,11 @@ export function DeleteAccountScreen(props: {
         <Text testID="deletion-signin-help" style={styles.help}>Sign in again if this sign-in is more than five minutes old. Local keys are removed only when deletion is done.</Text>
       )}
       {blocked ? <Banner>Delete account is disabled during transfers.</Banner> : null}
-      {notice ? (
-        <Banner testID={notice.progress ? "deletion-progress" : "deletion-error"}>{notice.message}</Banner>
-      ) : null}
-      {supportNotice === SUPPORT_REQUEST_SENT ? <Banner testID="support-request-sent">{SUPPORT_REQUEST_SENT}</Banner> : null}
-      {supportNotice === SUPPORT_REQUEST_ALREADY ? <Banner testID="support-request-already">{SUPPORT_REQUEST_ALREADY}</Banner> : null}
+      {notice?.progress ? <ProgressCard testID="deletion-progress" title={notice.message} /> : null}
+      {notice && !notice.progress ? <Banner alert testID="deletion-error">{notice.message}</Banner> : null}
+      {supportNotice === SUPPORT_REQUEST_SENT ? <Banner tone="info" testID="support-request-sent">{SUPPORT_REQUEST_SENT}</Banner> : null}
+      {supportNotice === SUPPORT_DELETION_STILL_RUNNING ? <Banner tone="info" testID="support-deletion-running">{SUPPORT_DELETION_STILL_RUNNING}</Banner> : null}
+      {supportNotice === SUPPORT_REQUEST_ALREADY ? <Banner tone="info" testID="support-request-already">{SUPPORT_REQUEST_ALREADY}</Banner> : null}
       {notice?.support && __DEV__ && SUPPORT_CONTACT.isPlaceholder ? (
         <Text testID="support-placeholder-note" style={styles.devNote}>placeholder contact</Text>
       ) : null}
@@ -905,6 +980,7 @@ export function DeleteAccountScreen(props: {
       {notice?.support ? (
         <Button
           label="Contact support"
+          tone={notice.retry ? "secondary" : "primary"}
           testID="contact-support"
           accessibilityLabel="Contact support"
           onPress={() => void contact()}
@@ -937,7 +1013,7 @@ export function SettingsHome(props: {
       {props.connectEnabled && props.onConnect ? (
         <Button label="Connect storage" tone="ghost" testID="open-connect" onPress={props.onConnect} />
       ) : null}
-      <Button label="Delete account" tone="danger" testID="delete-account" disabled={props.deleteDisabled} onPress={props.onDelete} />
+      <Button label="Delete account" tone="danger" compact testID="delete-account" disabled={props.deleteDisabled} onPress={props.onDelete} />
       <Button label="Sign out" tone="ghost" testID="sign-out" onPress={props.onSignOut} />
     </Screen>
   );
@@ -946,18 +1022,13 @@ export function SettingsHome(props: {
 const styles = StyleSheet.create({
   help: { color: colors.muted, fontSize: typeScale.helpSize },
   label: { color: colors.text, fontSize: typeScale.bodySize },
-  error: { color: colors.dangerText, fontSize: typeScale.helpSize },
-  checkRow: { flexDirection: "row", alignItems: "center", gap: space.sm, minHeight: 44 },
+  checkRow: { flexDirection: "row", alignItems: "center", gap: space.sm, minHeight: tapTarget },
+  checkbox: { width: 22, height: 22, borderRadius: 6, borderWidth: 1.5, borderColor: colors.controlBorder, alignItems: "center", justifyContent: "center" },
+  checkboxOn: { backgroundColor: colors.primary, borderColor: colors.primary },
+  checkMark: { color: colors.primaryText, fontSize: 14, fontWeight: "700" },
+  choices: { gap: space.sm },
   devNote: { color: colors.muted, fontSize: 12 },
   category: { color: colors.text, fontSize: typeScale.bodySize },
+  openRow: { minHeight: tapTarget, justifyContent: "center" },
   soon: { color: colors.muted, fontSize: typeScale.helpSize },
-  input: {
-    minHeight: 44,
-    borderWidth: 1,
-    borderColor: colors.line,
-    borderRadius: 12,
-    color: colors.text,
-    paddingHorizontal: space.md,
-    backgroundColor: colors.input,
-  },
 });

@@ -1,5 +1,5 @@
 import { treeNode, type SecretStore, type WorkspaceRecord } from "@gendragoon/core";
-import { colors } from "@gendragoon/ui/theme";
+import { colors } from "./theme";
 import { StyleSheet, View } from "react-native";
 import {
   ConnectStorageScreen,

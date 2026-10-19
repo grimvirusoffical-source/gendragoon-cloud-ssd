@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import path from "node:path";
 import { GenDragoonClient, MemorySecretStore, SUPPORT_CONTACT, requestDeletionSupport } from "@gendragoon/core";
 import { fireEvent, render, waitFor } from "@testing-library/react-native";
 import { Linking } from "react-native";
@@ -45,6 +47,7 @@ function responseFor(status: number, body: unknown): Response {
 async function ask(job: string, fetchImpl: typeof fetch) {
   const secrets = new MemorySecretStore();
   await secrets.set("account-deletion:status-token", new TextEncoder().encode(TOKEN));
+  await secrets.set("account-deletion:job-id", new TextEncoder().encode(job));
   return requestDeletionSupport(job, {
     client: new GenDragoonClient({
       baseUrl: "https://api.example.test",
@@ -103,18 +106,70 @@ describe("deletion support request", () => {
 
   it("409 support_not_needed asks for a status refresh and 429 does not mail", async () => {
     const refreshJob = jobIdOf(unneeded.request.path);
-    const refresh = await ask(refreshJob, (async (url: string | URL | Request, init?: RequestInit) => {
-      if (init?.method === "GET") {
-        return responseFor(200, { jobId: refreshJob, status: "failed", retryable: true });
-      }
+    const on409 = (status: number, body: unknown) => (async (_url: string | URL | Request, init?: RequestInit) => {
+      if (init?.method === "GET") return responseFor(status, body);
       return responseFor(unneeded.response.status, unneeded.response.body);
-    }) as typeof fetch);
-    expect(refresh).toEqual({
-      kind: "not_needed",
-      status: { jobId: refreshJob, status: "failed", retryable: true },
-    });
+    }) as typeof fetch;
+    // Core rule (ccde5bf): the refresh must be for this jobId with status
+    // queued, running, done or failed. failed, any other status, or a
+    // mismatched body is `fallback`.
+    for (const state of ["queued", "running", "done"]) {
+      expect(await ask(refreshJob, on409(200, { jobId: refreshJob, status: state }))).toEqual({
+        kind: "not_needed",
+        status: { jobId: refreshJob, status: state },
+      });
+    }
+    for (const body of [
+      { jobId: refreshJob, status: "failed", retryable: true },
+      { jobId: refreshJob, status: "cancelled" },
+      { jobId: "00000000-0000-4000-8000-0000000000ff", status: "running" },
+      { status: "running" },
+    ]) {
+      expect(await ask(refreshJob, on409(200, body))).toEqual({ kind: "fallback", contact: SUPPORT_CONTACT });
+    }
     const already = await ask(jobId, (async () => responseFor(limited.response.status, limited.response.body)) as typeof fetch);
     expect(already).toEqual({ kind: "already_sent", retryAfterSec: limited.response.body.retryAfterSec });
+  });
+
+  it("409 whose refresh is for a different jobId opens the support email on screen", async () => {
+    const refreshJob = jobIdOf(unneeded.request.path);
+    const openURL = jest.spyOn(Linking, "openURL").mockResolvedValue(undefined as never);
+    openURL.mockClear();
+    const secrets = new MemorySecretStore();
+    await secrets.set("account-deletion:status-token", new TextEncoder().encode(TOKEN));
+    await secrets.set("account-deletion:job-id", new TextEncoder().encode(refreshJob));
+    const onReauth = jest.fn();
+    const onError = jest.fn();
+    const screen = await render(
+      <DeleteAccountScreen
+        frame="not-retryable"
+        jobId={refreshJob}
+        supportEndpointEnabled
+        apiBase="https://api.example.test"
+        supportFetch={(async (_url: string | URL | Request, init?: RequestInit) =>
+          init?.method === "GET"
+            ? responseFor(200, { jobId: "00000000-0000-4000-8000-0000000000ff", status: "running" })
+            : responseFor(unneeded.response.status, unneeded.response.body)) as typeof fetch}
+        activeTransfers={0}
+        secrets={secrets}
+        workspaceIds={["ws-1"]}
+        idToken=""
+        client={{
+          async deleteAccount() { return { jobId: refreshJob }; },
+          async deletionStatus() { return { jobId: refreshJob, status: "failed" }; },
+        }}
+        onReauth={onReauth}
+        onSignedOut={() => undefined}
+        onDone={() => undefined}
+        onError={onError}
+      />,
+    );
+    fireEvent.press(screen.getByTestId("contact-support"));
+    await waitFor(() => expect(openURL).toHaveBeenCalledWith(supportContactTarget(SUPPORT_CONTACT.value, refreshJob)));
+    expect(screen.queryByTestId("support-deletion-running")).toBeNull();
+    expect(onReauth).not.toHaveBeenCalled();
+    expect(onError).not.toHaveBeenCalled();
+    openURL.mockRestore();
   });
 
   it("a network error or HTTP 5xx falls back, and the screen mails when the flag is off", async () => {
@@ -128,6 +183,7 @@ describe("deletion support request", () => {
     const openURL = jest.spyOn(Linking, "openURL").mockResolvedValue(undefined as never);
     const secrets = new MemorySecretStore();
     await secrets.set("account-deletion:status-token", new TextEncoder().encode(TOKEN));
+    await secrets.set("account-deletion:job-id", new TextEncoder().encode(jobId));
     const screen = await render(
       <DeleteAccountScreen
         frame="not-retryable"
@@ -160,6 +216,7 @@ describe("deletion support request", () => {
     const openURL = jest.spyOn(Linking, "openURL").mockResolvedValue(undefined as never);
     const secrets = new MemorySecretStore();
     await secrets.set("account-deletion:status-token", new TextEncoder().encode(TOKEN));
+    await secrets.set("account-deletion:job-id", new TextEncoder().encode(jobId));
     const screen = await render(
       <DeleteAccountScreen
         frame="not-retryable"
@@ -200,6 +257,7 @@ describe("deletion support request", () => {
     const onReauth = jest.fn();
     const secrets = new MemorySecretStore();
     await secrets.set("account-deletion:status-token", new TextEncoder().encode(TOKEN));
+    await secrets.set("account-deletion:job-id", new TextEncoder().encode(jobId));
     const screen = await render(
       <DeleteAccountScreen
         frame="not-retryable"
@@ -233,6 +291,26 @@ describe("deletion support request", () => {
     openURL.mockRestore();
   });
 
+  it("a saved job id that doesn't match sends nothing and falls back to mail", async () => {
+    let calls = 0;
+    const secrets = new MemorySecretStore();
+    await secrets.set("account-deletion:status-token", new TextEncoder().encode(TOKEN));
+    await secrets.set("account-deletion:job-id", new TextEncoder().encode("00000000-0000-4000-8000-0000000000ff"));
+    const result = await requestDeletionSupport(jobId, {
+      client: new GenDragoonClient({
+        baseUrl: "https://api.example.test",
+        getToken: async () => "",
+        fetch: (async () => {
+          calls += 1;
+          return responseFor(202, received.response.body);
+        }) as typeof fetch,
+      }),
+      secureStore: secrets,
+    });
+    expect(result).toEqual({ kind: "fallback", contact: SUPPORT_CONTACT });
+    expect(calls).toBe(0);
+  });
+
   it("401 unauthorized from support-unauthorized mails and never asks for sign-in", async () => {
     const fixture = loadFixture<{ error: string }>("account-deletion/support-unauthorized.json");
     expect(fixture.sourceSha).toBe(SUPPORT_UNAUTHORIZED_SHA);
@@ -240,6 +318,21 @@ describe("deletion support request", () => {
     expect(fixture.request.method).toBe("POST");
     expect(fixture.request.body).toBeNull();
     expect(fixture.response).toEqual({ status: 401, body: { error: "unauthorized" } });
+    // Required: the mobile copy matches core's vendored copy (cloud-ssd 0486412) on content.
+    // It is not byte-for-byte: like every mobile fixture it starts with a Source-SHA /
+    // Source-Path header and a blank line, which are dropped before comparing.
+    expect(readFileSync(path.join(__dirname, "fixtures/account-deletion/support-unauthorized.json"), "utf8").split("\n").slice(0, 3)).toEqual([
+      `Source-SHA: ${SUPPORT_UNAUTHORIZED_SHA}`,
+      "Source-Path: fixtures/account-deletion/support-unauthorized.json",
+      "",
+    ]);
+    const vendored = readFileSync(
+      path.join(__dirname, "../../../packages/core/test/fixtures/server/account-deletion/support-unauthorized.json"),
+      "utf8",
+    );
+    const mobileText = readFileSync(path.join(__dirname, "fixtures/account-deletion/support-unauthorized.json"), "utf8");
+    expect(mobileText.split("\n").slice(3).join("\n")).toBe(vendored);
+    expect(Object.keys(fixture.request.headers)).toHaveLength(0);
     const unauthorizedJob = jobIdOf(fixture.request.path);
     const unauthorized = await ask(
       unauthorizedJob,
@@ -251,6 +344,7 @@ describe("deletion support request", () => {
     const onReauth = jest.fn();
     const secrets = new MemorySecretStore();
     await secrets.set("account-deletion:status-token", new TextEncoder().encode(TOKEN));
+    await secrets.set("account-deletion:job-id", new TextEncoder().encode(unauthorizedJob));
     const mailto = supportContactTarget(SUPPORT_CONTACT.value, unauthorizedJob);
     expect(mailto).toBe(`mailto:${SUPPORT_CONTACT.value}?subject=${encodeURIComponent(`Account deletion ${unauthorizedJob}`)}`);
     const screen = await render(
@@ -286,12 +380,14 @@ describe("deletion support request", () => {
     openURL.mockRestore();
   });
 
-  it("409 refreshes deletion status and 429 shows the already-sent message", async () => {
+  it("409 refreshes deletion status (failed mails support) and 429 shows the already-sent message", async () => {
     const openURL = jest.spyOn(Linking, "openURL").mockResolvedValue(undefined as never);
     const secrets = new MemorySecretStore();
     await secrets.set("account-deletion:status-token", new TextEncoder().encode(TOKEN));
     let statusCalls = 0;
     const refreshJob = jobIdOf(unneeded.request.path);
+    // Core only posts when the saved job id matches the one on screen.
+    await secrets.set("account-deletion:job-id", new TextEncoder().encode(refreshJob));
     const refresh = await render(
       <DeleteAccountScreen
         frame="not-retryable"
@@ -324,10 +420,14 @@ describe("deletion support request", () => {
       />,
     );
     fireEvent.press(refresh.getByTestId("contact-support"));
-    await waitFor(() => expect(refresh.getByTestId("deletion-retry")).toBeTruthy());
+    // Avery's ruling: a 409 whose refresh comes back failed still needs a human,
+    // so the screen mails support instead of switching to Retry.
+    await waitFor(() => expect(openURL).toHaveBeenCalledWith(supportContactTarget(SUPPORT_CONTACT.value, refreshJob)));
     expect(statusCalls).toBe(1);
-    expect(openURL).not.toHaveBeenCalled();
+    expect(refresh.queryByTestId("support-deletion-running")).toBeNull();
+    openURL.mockClear();
 
+    await secrets.set("account-deletion:job-id", new TextEncoder().encode(jobId));
     const already = await render(
       <DeleteAccountScreen
         frame="not-retryable"
