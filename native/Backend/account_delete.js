@@ -137,6 +137,7 @@ function classifyDeletionError(error){
   if(stripeType(item)==="api_error"||(status>=500&&status<=599))
    return {permanent:false,failureReason:"upstream_unavailable"};
  }
+ if(items.some(item=>item?.code==="team_owner_must_transfer"))return {permanent:false,failureReason:"team_owner_must_transfer"};
  return {permanent:false,failureReason:"deletion_step_failed"};
 }
 function plainJob(job){
@@ -381,7 +382,7 @@ function createAccountDeletion({db,stripe,bucket,auth,byoProviders,hash,now,noti
   if(!stored)return;
   const steps={...(stored.steps||{}),...(job.steps||{})};
   steps.prefixes={...(stored.steps?.prefixes||{}),...(job.steps?.prefixes||{})};
-  for(const key of ["stripe","stripeListed","objects","metadata","firebase"])
+  for(const key of ["teams","stripe","stripeListed","objects","metadata","firebase"])
    if(stored.steps?.[key]||job.steps?.[key])steps[key]=true;
   job.steps=steps;
   job.canceledIds=[...new Set([...(stored.canceledIds||[]),...(job.canceledIds||[])])];
@@ -719,6 +720,7 @@ function createAccountDeletion({db,stripe,bucket,auth,byoProviders,hash,now,noti
   job.firebaseStatus="deleted";
  }
  function nextBatch(job){
+  if(!job.steps?.teams)return "teams";
   if(!job.steps?.stripe)return "stripe";
   const owner=job.accountHash;
   const customer="customer/"+owner+"/";
@@ -730,6 +732,10 @@ function createAccountDeletion({db,stripe,bucket,auth,byoProviders,hash,now,noti
   return "done";
  }
  async function performBatch(job,kind){
+  if(kind==="teams"){
+   await require("./teams_account").deleteAccountTeams(db,job.accountHash,{bucket,now:clock});
+   job.steps={...job.steps,teams:true};return;
+  }
   if(kind==="stripe"){
    await ensureSubscriptions(job);
    const pending=(job.subscriptionIds||[]).filter(id=>!(job.canceledIds||[]).includes(id));
@@ -840,6 +846,10 @@ function createAccountDeletion({db,stripe,bucket,auth,byoProviders,hash,now,noti
    if(typeof req.body!=="object"||Array.isArray(req.body)||req.body.confirm!=="DELETE")
     throw refusal(400,"confirm_required");
   }
+  // A team owner with other members must transfer or delete the team first.
+  // Checked before anything is deleted; the teams step re-checks inside the job.
+  const blockingTeams=await require("./teams_account").ownedTeamsBlocking(db,owner);
+  if(blockingTeams.length)throw refusal(409,"team_owner_must_transfer",{teams:blockingTeams});
   if(existing?.status==="failed"&&existing.retryable!==true){
    throw refusal(409,"deletion_not_retryable",{jobId:existing.jobId});
   }
@@ -1217,6 +1227,10 @@ function registerAccountDeletion({app,firebaseAuth,...deps}){
    const code=error?.code||"account_deletion_failed";
    const body={error:status===401&&code!=="reauth_required"?"invalid_token":code};
    if((status===410||status===409)&&typeof error?.jobId==="string")body.jobId=error.jobId;
+   if(code==="team_owner_must_transfer"&&Array.isArray(error?.teams)){
+    body.teams=error.teams;
+    body.message="Transfer ownership of these teams or delete them before deleting your account.";
+   }
    if(status===410&&typeof error?.statusToken==="string")body.statusToken=error.statusToken;
    if(status>=500)console.error("account deletion request failed",code);
    res.setHeader("Cache-Control","private, no-store");

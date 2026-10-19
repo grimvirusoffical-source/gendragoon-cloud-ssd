@@ -159,6 +159,9 @@ function createProjectService({db,stamp,hash,stripe,env={},prices={},ensureCusto
    const intended=selection?validateSelection(selection):{};
    // Validate supplied plans early so a bad request fails before the transaction.
    const supplied=plans?validatePlans(plans,{custom}):null;
+   // Team workspaces share the storage routes, so their ids can't be reused here.
+   if(!legacyFree&&(await db.collection("gd_team_workspace_index").doc(id).get()).exists)
+     throw new ProjectError(409,"This creation intent belongs to another workspace","INTENT_CONFLICT");
    return db.runTransaction(async tx=>{
      const state=await snapshot(owner,tx),p=policy(state,req),previous=state.records.find(w=>w.id===id);
      if(previous){

@@ -81,7 +81,7 @@ function newCode(){
  return raw.slice(0,4)+"-"+raw.slice(4,8)+"-"+raw.slice(8,12);
 }
 
-function createTeamService({db,stamp,hash,stripe,env={},prices={},ensureCustomer,now=()=>Date.now()}){
+function createTeamService({db,stamp,hash,stripe,env={},prices={},ensureCustomer,bucket=null,now=()=>Date.now()}){
  const teams=db.collection("gd_teams");
  const teamRef=id=>teams.doc(id);
  const members=id=>teamRef(id).collection("members");
@@ -173,7 +173,7 @@ function createTeamService({db,stamp,hash,stripe,env={},prices={},ensureCustomer
        if(prior.data().ownerHash!==owner||prior.data().name!==name)throw new ProjectError(409,"This creation intent belongs to another team","INTENT_CONFLICT");
        return {resumed:true};
      }
-     const team={name,ownerHash:owner,tier,interval:iv,memberCount:1,subscriptionStatus:complimentary?"owner":"pending",
+     const team={name,ownerHash:owner,payerHash:owner,tier,interval:iv,memberCount:1,subscriptionStatus:complimentary?"owner":"pending",
        ownerComplimentary:complimentary,chatSeq:0,auditSeq:0,auditHead:null,createdAt:stamp(),updatedAt:stamp()};
      const head=audit(tx,id,team,{action:"team.create",actor:memberId,source:"owner"});
      tx.create(teamRef(id),{...team,...head});
@@ -337,7 +337,10 @@ function createTeamService({db,stamp,hash,stripe,env={},prices={},ensureCustomer
    return {id,teamId:w.teamId,name:w.name,scope:"team",billingModel:"plans",customStorage:w.customStorage===true,
      requiredPlans:w.requiredPlans,plansStatus:w.plansComplimentary?"owner":(w.plansStatus||"pending"),
      quotaGB:plansOk&&w.requiredPlans.storage==="managed"?STORAGE[w.requiredPlans.storageTier].gb:0,
-     needsCustomSetup:w.customStorage===true&&w.customStorageConfigured!==true};
+     needsCustomSetup:w.customStorage===true&&w.customStorageConfigured!==true,
+     usedBytes:w.usedBytes||0,
+     // Files use the personal-workspace routes with this id: /v3/cloud/<id>, /v2/workspaces/<id>/cloud.
+     storageRoutes:w.customStorage===true?null:{v3:"/v3/cloud/"+id,v2:"/v2/workspaces/"+id+"/cloud"}};
  }
  function workspaceStatus(team,w){
    const plansOk=w.plansComplimentary===true||ENTITLED.has(w.plansStatus);
@@ -349,7 +352,8 @@ function createTeamService({db,stamp,hash,stripe,env={},prices={},ensureCustomer
    const m=await membership(req,id);
    const [ws,shares]=await Promise.all([teamRef(id).collection("workspaces").get(),teamRef(id).collection("shares").get()]);
    const all=await activeMembers(id),byHash=new Map(all.map(x=>[x.accountHash,x]));
-   const team=ws.docs.map(d=>({...teamWorkspaceView(d.id,d.data()),projectStatus:workspaceStatus(m.team,d.data())}));
+   const access=m.me.role==="viewer"?"read":"write";
+   const team=ws.docs.map(d=>({...teamWorkspaceView(d.id,d.data()),projectStatus:workspaceStatus(m.team,d.data()),access}));
    const shared=[];
    for(const s of shares.docs){
      const share=s.data(),sharer=byHash.get(share.ownerHash);
@@ -373,14 +377,18 @@ function createTeamService({db,stamp,hash,stripe,env={},prices={},ensureCustomer
    const wid=body.intentId.toLowerCase(),ref=teamRef(id).collection("workspaces").doc(wid);
    const complimentary=m.team.ownerComplimentary===true;
    const result=await db.runTransaction(async tx=>{
-     const prior=await tx.get(ref);
+     const idxRef=db.collection("gd_team_workspace_index").doc(wid);
+     const [prior,idx,mine]=await Promise.all([tx.get(ref),tx.get(idxRef),tx.get(personalRef(m.owner,wid))]);
      if(prior.exists){
        const p=prior.data();
        if(p.name!==name||Object.keys(plans).some(k=>p.requiredPlans[k]!==plans[k]))throw new ProjectError(409,"This creation intent belongs to another workspace","INTENT_CONFLICT");
        return {data:p,resumed:true};
      }
+     // Workspace ids are global: the storage routes resolve /v3/cloud/<id> to exactly one workspace.
+     if(idx.exists||mine.exists)throw new ProjectError(409,"This creation intent belongs to another workspace","INTENT_CONFLICT");
+     tx.set(idxRef,{teamId:id});
      const data={teamId:id,name,createdBy:m.me.memberId,payerHash:m.owner,customStorage:storage==="custom",requiredPlans:plans,
-       plansStatus:complimentary?"owner":"pending",plansComplimentary:complimentary,workspaceFeeCents:0,createdAt:stamp(),updatedAt:stamp()};
+       plansStatus:complimentary?"owner":"pending",plansComplimentary:complimentary,workspaceFeeCents:0,usedBytes:0,reservedBytes:0,createdAt:stamp(),updatedAt:stamp()};
      tx.create(ref,data);
      tx.update(teamRef(id),audit(tx,id,m.team,{action:"workspace.create",actor:m.me.memberId,target:wid,source:"owner"}));
      return {data,resumed:false};
@@ -420,27 +428,33 @@ function createTeamService({db,stamp,hash,stripe,env={},prices={},ensureCustomer
    if(!/^[a-f0-9]{64}$/.test(meta.accountHash||"")||!safeTeamId(meta.teamId))return false;
    const [account,t]=await Promise.all([db.collection("gd_accounts").doc(meta.accountHash).get(),teamRef(meta.teamId).get()]);
    const customer=typeof sub.customer==="string"?sub.customer:sub.customer?.id;
-   if(!account.exists||account.data().stripeCustomerId!==customer||!t.exists||t.data().ownerHash!==meta.accountHash)return false;
+   if(!account.exists||account.data().stripeCustomerId!==customer||!t.exists)return false;
+   // The payer may differ from the owner after a transfer; the current owner may take over billing once it lapsed.
+   const tm=t.data(),fromOwner=tm.ownerHash===meta.accountHash;
    const items=sub.items?.data||[],status=String(sub.status||"");
    const exact=expected=>items.length===expected.length&&items.every(x=>x.quantity===undefined||x.quantity===1)&&
      expected.every(p=>typeof p==="string"&&items.filter(x=>x.price?.id===p).length===1);
    if(meta.kind==="team_subscription"){
-     const team=t.data();
-     if(team.subscriptionId&&team.subscriptionId!==sub.id)return false;
+     const team=tm,payer=team.payerHash===undefined?team.ownerHash:team.payerHash;
+     if(!fromOwner&&payer!==meta.accountHash)return false;
+     if(team.subscriptionId&&team.subscriptionId!==sub.id&&!(fromOwner&&!ENTITLED.has(team.subscriptionStatus)))return false;
      const price=items.length===1?items[0].price?.id:null;
      const tier=Object.keys(TEAM_TIERS).find(k=>["month","year"].some(iv=>prices[teamPriceKey(k,iv)]===price));
      const iv=tier&&["month","year"].find(v=>prices[teamPriceKey(tier,v)]===price);
      const ok=!!tier&&exact([price]);
-     await teamRef(meta.teamId).update({subscriptionId:sub.id,subscriptionStatus:ok?status:"mismatch",
+     await teamRef(meta.teamId).update({subscriptionId:sub.id,subscriptionStatus:ok?status:"mismatch",payerHash:meta.accountHash,
        ...(ok?{tier,interval:iv}:{}),updatedAt:stamp()});
      return true;
    }
    if(!UUID.test(meta.workspaceId||""))return false;
    const ref=teamRef(meta.teamId).collection("workspaces").doc(meta.workspaceId),w=await ref.get();
-   if(!w.exists||w.data().payerHash!==meta.accountHash)return false;
-   if(w.data().plansSubscriptionId&&w.data().plansSubscriptionId!==sub.id)return false;
-   const ok=exact(planPriceKeys(w.data().requiredPlans).map(k=>prices[k]));
-   await ref.update({plansSubscriptionId:sub.id,plansStatus:ok?status:"mismatch",updatedAt:stamp()});
+   if(!w.exists)return false;
+   const wd=w.data(),takeover=fromOwner&&!ENTITLED.has(wd.plansStatus);
+   if(wd.payerHash!==meta.accountHash&&!takeover)return false;
+   if(wd.plansSubscriptionId&&wd.plansSubscriptionId!==sub.id&&!takeover)return false;
+   const ok=exact(planPriceKeys(wd.requiredPlans).map(k=>prices[k]));
+   await ref.update({plansSubscriptionId:sub.id,plansStatus:ok?status:"mismatch",payerHash:meta.accountHash,
+     ...(ok&&ENTITLED.has(status)?{plansEverPaid:true}:{}),updatedAt:stamp()});
    return true;
  }
 
@@ -516,7 +530,7 @@ function createTeamService({db,stamp,hash,stripe,env={},prices={},ensureCustomer
  function messageView(x,revoked,viewer){
    const base={seq:x.seq,memberId:x.memberId,displayName:x.displayName,color:x.color,colorHex:colorHex(x.color),
      kind:x.kind,createdAtMs:x.createdAtMs,mine:x.authorHash===viewer};
-   if(x.deleted)return {...base,kind:"removed",text:"",card:null,removed:{reason:x.deleteReason,by:x.deletedBy==="auto"?"auto":"owner"}};
+   if(x.deleted)return {...base,kind:"removed",text:"",card:null,removed:{reason:x.deleteReason,by:x.deletedBy==="auto"?"auto":x.deletedBy==="account_deletion"?"account":"owner"}};
    let card=x.card;
    // A card for a personal workspace that is no longer shared must not leak its name.
    if(card?.scope==="personal"&&revoked.has(x.authorHash+"/"+card.workspaceId))card={scope:"personal",workspaceId:card.workspaceId,unavailable:true};
@@ -606,8 +620,60 @@ function createTeamService({db,stamp,hash,stripe,env={},prices={},ensureCustomer
    }
    return true;
  }
+ // Roles: owner; member (read + write team files); viewer (read team files only). Owner sets them.
+ async function setRole(req,id,memberId,body={}){
+   const role=body.role;
+   if(!["member","viewer"].includes(role))throw new ProjectError(400,"Choose member or viewer","INVALID_ROLE");
+   return db.runTransaction(async tx=>{
+     const m=await membership(req,id,{tx});requireOwner(m);
+     const target=await targetMember(tx,id,memberId);
+     if(target.role===role)return {memberId,role};
+     tx.update(members(id).doc(target.accountHash),{role});
+     tx.set(myTeams(target.accountHash).doc(id),{role,joinedAtMs:target.joinedAtMs||now()});
+     tx.update(teamRef(id),audit(tx,id,m.team,{action:"member.role",actor:m.me.memberId,target:memberId,reason:role,source:"owner"}));
+     return {memberId,role};
+   });
+ }
+ // Ownership transfer. Billing stays with the current payer until it lapses or the
+ // payer deletes their account; then the new owner checks out (reconcile allows the takeover).
+ async function transfer(req,id,body={}){
+   const ownerShade=validColor(body.ownerShade||"purple-500","owner");
+   const myColor=validColor(body.color,"member");
+   return db.runTransaction(async tx=>{
+     const m=await membership(req,id,{tx,writing:true});requireOwner(m);
+     const target=await targetMember(tx,id,body.memberId);
+     const lock=await tx.get(teamRef(id).collection("colors").doc(myColor));
+     if(lock.exists&&lock.data().memberId!==target.memberId)throw new ProjectError(409,"That color is taken. Pick another one.","COLOR_TAKEN");
+     tx.delete(teamRef(id).collection("colors").doc(target.color));
+     tx.set(teamRef(id).collection("colors").doc(myColor),{memberId:m.me.memberId});
+     tx.update(members(id).doc(target.accountHash),{role:"owner",color:ownerShade,muted:false,mutedUntilMs:0,muteReason:null});
+     tx.update(members(id).doc(m.owner),{role:"member",color:myColor});
+     tx.set(myTeams(target.accountHash).doc(id),{role:"owner",joinedAtMs:target.joinedAtMs||now()});
+     tx.set(myTeams(m.owner).doc(id),{role:"member",joinedAtMs:m.me.joinedAtMs||now()});
+     tx.update(teamRef(id),{ownerHash:target.accountHash,payerHash:m.team.payerHash===undefined?m.owner:m.team.payerHash,ownerComplimentary:false,updatedAt:stamp(),
+       ...audit(tx,id,m.team,{action:"team.transfer",actor:m.me.memberId,target:target.memberId,source:"owner"})});
+     return {transferred:true,ownerMemberId:target.memberId};
+   });
+ }
+ // Deletes the team, its chat, invites, team workspaces and their files. Cancels the
+ // team subscription and team workspace plans. The owner types the team name to confirm.
+ async function deleteTeam(req,id,body={}){
+   const m=await membership(req,id);requireOwner(m);
+   if(typeof body.confirmName!=="string"||body.confirmName.trim()!==m.team.name)
+     throw new ProjectError(400,"Type the team name to confirm","CONFIRM_NAME_REQUIRED");
+   if(!bucket)throw new ProjectError(503,"Team deletion is not available right now","TEAM_DELETE_UNAVAILABLE");
+   const ws=await teamRef(id).collection("workspaces").get();
+   const subs=[m.team.subscriptionId,...ws.docs.map(d=>d.data().plansSubscriptionId)].filter(x=>typeof x==="string"&&x);
+   for(const sub of subs){
+     try{await stripe.subscriptions.cancel(sub,{invoice_now:false,prorate:false});}
+     catch(e){if(e?.code!=="resource_missing"&&e?.statusCode!==404)throw new ProjectError(503,"Couldn't cancel the team's billing. Try again.","TEAM_BILLING_CANCEL_FAILED");}
+   }
+   await require("./teams_account").deleteTeamData(db,bucket,id);
+   return {deleted:true,canceledSubscriptions:subs.length};
+ }
  return {list,create,view,checkout,invite,revokeInvite,join,previewInvite,updateMe,leave,workspaces,createWorkspace,checkoutWorkspace,
-   reconcileSubscription,share,unshare,post,messages,readMessages,membership,moderate,report,auditLog,verifyAudit};
+   reconcileSubscription,share,unshare,post,messages,readMessages,membership,moderate,report,auditLog,verifyAudit,setRole,transfer,deleteTeam};
+
 }
 
 function catalog(){
@@ -647,6 +713,9 @@ function registerTeams({app,auth,agreed,service}){
  for(const action of ["mute","unmute","kick","ban"])
    app.post("/v2/teams/:id/members/:memberId/"+action,...mw,route(req=>service.moderate(req,req.params.id,action,req.params.memberId,req.body||{})));
  app.get("/v2/teams/:id/audit",...mw,route(req=>service.auditLog(req,req.params.id)));
+ app.post("/v2/teams/:id/members/:memberId/role",...mw,route(req=>service.setRole(req,req.params.id,req.params.memberId,req.body||{})));
+ app.post("/v2/teams/:id/transfer",...mw,route(req=>service.transfer(req,req.params.id,req.body||{})));
+ app.post("/v2/teams/:id/delete",...mw,route(req=>service.deleteTeam(req,req.params.id,req.body||{})));
  // Realtime: Server-Sent Events. The stream re-reads Firestore so it works on any
  // instance; clients that can't stream poll GET /chat?after=seq every 3 s instead.
  app.get("/v2/teams/:id/chat/stream",...mw,async(req,res)=>{

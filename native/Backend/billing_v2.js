@@ -55,14 +55,14 @@ function effectiveWorkers(workspace){
  return workspace.performanceActive===true && PERFORMANCE[workspace.performanceTier] ?
   Math.max(base,PERFORMANCE[workspace.performanceTier].workers):base;
 }
- function registerBillingV2({app,db,stripe,admin,auth,agreed,hash,prices,env=process.env,byoFetch=null}){
+ function registerBillingV2({app,db,stripe,admin,auth,agreed,hash,prices,env=process.env,byoFetch=null,bucket=null}){
  const stamp=()=>admin.firestore.FieldValue.serverTimestamp();
  const accounts=db.collection("gd_accounts");
  const accRef=req=>accounts.doc(hash(req.user.uid));
  const coll=req=>accRef(req).collection("workspaces");
  const safeWorkspaceId=safeProjectId;
  const projects=createProjectService({db,stamp,hash,stripe,env,prices,ensureCustomer,byoFetch});
- const teams=require("./teams").createTeamService({db,stamp,hash,stripe,env,prices,ensureCustomer});
+ const teams=require("./teams").createTeamService({db,stamp,hash,stripe,env,prices,ensureCustomer,bucket});
  if(app)require("./teams").registerTeams({app,auth,agreed,service:teams});
  function projectError(res,error){
    if(!(error instanceof ProjectError))return res.status(503).json({error:"PROJECT_UNAVAILABLE"});

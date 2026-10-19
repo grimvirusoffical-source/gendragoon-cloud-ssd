@@ -67,18 +67,32 @@ function registerPaidStorage({app,db,bucket,firebaseAuth,accountKey,FieldValue,a
    const userHash=accountKey(req.user.uid);
    const ref=db.collection("gd_accounts").doc(userHash).collection("workspaces").doc(id);
    const snap=await ref.get();
-   if(!snap.exists)return res.status(404).json({error:"Workspace not found"});
+   if(!snap.exists){
+    // Same route for team workspaces; API keys never open one.
+    let t=null;
+    if(req.authKind!=="api_key"){
+     try{t=await require("./team_storage").resolveTeamWorkspace(db,userHash,id,{method:req.method});}
+     catch(error){if(error.status)return res.status(error.status).json({error:error.message,code:error.code});throw error;}
+    }
+    if(!t)return res.status(404).json({error:"Workspace not found"});
+    if(t.scope.uploadsBlocked&&write)return res.status(423).json(t.scope.lock);
+    req.paid={ref:t.ref,workspace:t.view,prefix:t.scope.prefix,limit:t.scope.limit,workers:t.scope.workers,
+     uploadsBlocked:t.scope.uploadsBlocked,lock:t.scope.lock,accountProjects:null,governorKey:t.governorKey,
+     scope:data=>t.rescope(data),team:t};
+    return next();
+   }
    if(snap.data().accountHash!==userHash)return res.status(404).json({error:"Workspace not found"});
    let listed=null;
    try{listed=await listAccountProjects(db,userHash);}catch(_){listed=null;}
    const info=scopeFromWorkspace(snap.data(),userHash,id,Array.isArray(listed)?listed:null);
    if(!info)return res.status(403).json({error:"An active, provisioned project is required"});
    if(info.uploadsBlocked&&write)return res.status(423).json(info.lock);
-   req.paid={ref,workspace:snap.data(),...info,accountProjects:listed};
+   req.paid={ref,workspace:snap.data(),...info,accountProjects:listed,
+    scope:data=>scopeFromWorkspace(data,userHash,id,Array.isArray(listed)?listed:null)};
    next();
   }catch(_){res.status(503).json({error:"Paid workspace unavailable"})}
  },router);
- const w=req=>req.paid.ref,uid=req=>accountKey(req.user.uid)+"-"+req.params.workspaceId;
+ const w=req=>req.paid.ref,uid=req=>req.paid.governorKey||accountKey(req.user.uid)+"-"+req.params.workspaceId;
  async function releaseExpiredUploads(req){
   const jobs=await w(req).collection("uploads").where("status","==","active").limit(30).get();
   for(const doc of jobs.docs){
@@ -115,11 +129,11 @@ function registerPaidStorage({app,db,bucket,firebaseAuth,accountKey,FieldValue,a
    const docs=await w(req).collection("files").orderBy("createdAt","desc").limit(150).get();
    const fresh=await w(req).get();
    const d=fresh.data();
-   const current=scopeFromWorkspace(d,accountKey(req.user.uid),req.params.workspaceId,Array.isArray(req.paid.accountProjects)?req.paid.accountProjects:null);
+   const current=req.paid.scope(d);
    if(!current)return res.status(403).json({error:"Project is not active"});
    res.json({files:docs.docs.map(x=>({id:x.id,name:x.data().name,sizeBytes:x.data().sizeBytes})),
      quotaBytes:current.limit,usedBytes:d.usedBytes||0,
-     workers:require("./billing_v2").effectiveWorkers(d)});
+     workers:require("./billing_v2").effectiveWorkers(req.paid.team?req.paid.workspace:d)});
   }catch(_){res.status(503).json({error:"Paid file listing unavailable"})}
  });
  router.post("/uploads",express.json({limit:"4kb"}),async(req,res)=>{
@@ -134,7 +148,7 @@ function registerPaidStorage({app,db,bucket,firebaseAuth,accountKey,FieldValue,a
    await db.runTransaction(async tx=>{
     const snap=await tx.get(w(req));
     if(!snap.exists)return Promise.reject(Error("MISSING"));
-    const cur=scopeFromWorkspace(snap.data(),accountKey(req.user.uid),req.params.workspaceId,Array.isArray(req.paid.accountProjects)?req.paid.accountProjects:null);
+    const cur=req.paid.scope(snap.data());
     if(!cur)throw Error("NOT_ACTIVE");
     if(cur.uploadsBlocked)throw Object.assign(Error("WORKSPACE_LOCK"),{status:423,lock:cur.lock});
     if((snap.data().usedBytes||0)+(snap.data().reservedBytes||0)+size>cur.limit)throw Error("QUOTA");
@@ -206,7 +220,7 @@ function registerPaidStorage({app,db,bucket,firebaseAuth,accountKey,FieldValue,a
     if(Number(meta.size)!==job.sizeBytes)throw Error("Cloud size mismatch");
     await db.runTransaction(async tx=>{
      const [ws,session]=await Promise.all([tx.get(w(req)),tx.get(ref)]);
-     const currentScope=scopeFromWorkspace(ws.data(),accountKey(req.user.uid),req.params.workspaceId,Array.isArray(req.paid.accountProjects)?req.paid.accountProjects:null);
+     const currentScope=req.paid.scope(ws.data());
      if(!ws.exists||!currentScope)throw Error("Storage subscription inactive");
      if(currentScope.uploadsBlocked)throw Object.assign(Error("WORKSPACE_LOCK"),{status:423,lock:currentScope.lock});
      if(!session.exists||session.data().status!=="active")throw Error("Upload no longer active");
