@@ -1,6 +1,6 @@
 "use strict";
 const test=require('node:test'),assert=require('node:assert/strict'),express=require('express');
-const {expectedCatalog,validateCatalog,projectCheckoutReady,validateUnpaidCheckoutTemplates,crc32c,installBillingBootstrap}=require('./billing_bootstrap');
+const {liveStripeConfig,DEFAULTS,expectedCatalog,validateCatalog,projectCheckoutReady,validateUnpaidCheckoutTemplates,crc32c,installBillingBootstrap}=require('./billing_bootstrap');
 const {STRIPE_API_VERSION}=require('./billing_gateway');
 function data(){const product={id:'prod_gd',active:true};const prices=Object.entries(expectedCatalog()).map(([key,w],i)=>({id:'price_gd'+i,active:true,livemode:true,currency:'usd',unit_amount:w.cents,product:product.id,type:w.interval?'recurring':'one_time',recurring:w.interval?{interval:w.interval,interval_count:1}:null,metadata:{service:'GenDragoonSSD',catalogKey:key},lookup_key:'gdssd_'+key.split('|').join('_')+'_v1'}));return {prices,products:[product]};}
 test('bootstrap validates all 55 existing price entries without inventing prices',()=>{const d=data(),catalog=validateCatalog(d.prices,d.products);assert.equal(Object.keys(catalog).length,55);assert.equal(expectedCatalog()['workspace|month'].cents,500);assert.equal(expectedCatalog()['one_time|remove_ads'].cents,499);});
@@ -15,7 +15,7 @@ test('the optional project Price is distinct, one-time and exact; legacy55 price
  for(const patch of [{type:'recurring',recurring:{interval:'month'}},{unit_amount:499},{livemode:false},{billing_scheme:'tiered'}])
   assert.throws(()=>validateCatalog([...d.prices,{...project,...patch}],d.products),/CATALOG_VALUE/);
  assert.throws(()=>validateCatalog(d.prices,d.products,{projectPriceId:'price_missing'}),/CATALOG_COUNT/);
- assert.throws(()=>validateCatalog([...d.prices.slice(1),project],d.products),/CATALOG_COUNT/);
+ assert.throws(()=>validateCatalog([...d.prices.filter(p=>p.metadata.catalogKey!=='storage|standard|100GB|month'),project],d.products),/CATALOG_COUNT/);
 });
 test('project Checkout remains disabled until signed completion, asynchronous outcomes and revocation events are subscribed',()=>{
  const catalog={'one_time|project_creation':'price_project'},events=['checkout.session.completed','checkout.session.async_payment_succeeded','checkout.session.async_payment_failed','charge.refunded','charge.dispute.created'];
@@ -107,4 +107,47 @@ test('team Prices are optional: absent -> not in the catalog; present and exact 
 test('live activation lists archived Prices too (no active filter)',()=>{
  const src=require('node:fs').readFileSync(require.resolve('./billing_bootstrap'),'utf8');
  assert.match(src,/stripe\.prices\.list\(\{limit:100\}\)/);assert.doesNotMatch(src,/prices\.list\(\{limit:100,active:true\}\)/);
+});
+test('a Stripe account without the retired fee Prices (Red-XAI account) validates the 51 live keys; a partial retired set still fails',()=>{
+ const d=data(),fresh=d.prices.filter(p=>!isRetired(p.metadata.catalogKey));
+ const catalog=validateCatalog(fresh,d.products);
+ assert.equal(Object.keys(catalog).length,51);assert.ok(!Object.keys(catalog).some(isRetired));
+ // A required (non-retired) key is still mandatory.
+ assert.throws(()=>validateCatalog(fresh.filter(p=>p.metadata.catalogKey!=='performance|lite|month'),d.products),/CATALOG_COUNT:performance\|lite\|month/);
+ // Two retired Prices for one key are still ambiguous.
+ const w=d.prices.find(p=>p.metadata.catalogKey==='byo|month');
+ assert.throws(()=>validateCatalog([...fresh,w,{...w,id:'price_dup'}],d.products),/CATALOG_COUNT:byo\|month/);
+ // An archived retired Price is still picked up for legacy reconciliation.
+ assert.equal(validateCatalog([...fresh,{...w,active:false}],d.products)['byo|month'],w.id);
+});
+test('live Stripe config defaults to the Red-XAI account and its own secrets, and validates overrides',()=>{
+ assert.deepEqual({...liveStripeConfig({})},{account:'acct_1USFf5CtNDGcw0e6',apiSecret:'gendragoon-stripe-redxai-api',hookSecret:'gendragoon-stripe-redxai-webhook',hookId:'we_1USJZpCtNDGcw0e6MdCN9IYD'});
+ assert.equal(DEFAULTS.account,'acct_1USFf5CtNDGcw0e6');
+ const old=liveStripeConfig({STRIPE_ACCOUNT_ID:'acct_1TqS8eIpkwStQhHM',STRIPE_VAULT_API_SECRET:'gendragoon-stripe-live-api',STRIPE_VAULT_WEBHOOK_SECRET:'gendragoon-stripe-live-webhook',STRIPE_WEBHOOK_ENDPOINT_ID:'we_1UQgwBIpkwStQhHM7YZVubdd'});
+ assert.equal(old.account,'acct_1TqS8eIpkwStQhHM');assert.equal(old.apiSecret,'gendragoon-stripe-live-api');assert.equal(old.hookId,'we_1UQgwBIpkwStQhHM7YZVubdd');
+ for(const env of [{STRIPE_ACCOUNT_ID:'sk_live_x'},{STRIPE_VAULT_API_SECRET:'a/b'},{STRIPE_WEBHOOK_ENDPOINT_ID:'whsec_x'}])assert.throws(()=>liveStripeConfig(env),/INVALID_STRIPE_CONFIG/);
+});
+test('activation reads the configured secrets, checks the configured account and webhook, and hands the account id to billing',async()=>{
+ const seen={};const d=data(),fresh=d.prices.filter(p=>!isRetired(p.metadata.catalogKey));
+ const hook={id:DEFAULTS.hookId,livemode:true,status:'enabled',url:'https://gendragoon-free-10068843866.us-central1.run.app/billing/stripe-webhook',enabled_events:['*']};
+ const list=rows=>({autoPagingToArray:async()=>rows});
+ const stripe=accountId=>({accounts:{retrieve:async()=>({id:accountId,charges_enabled:true})},prices:{list:()=>list(fresh)},products:{list:()=>list(d.products)},
+  webhookEndpoints:{retrieve:async id=>{seen.hook=id;return hook;}},subscriptions:{list:async()=>({data:[]})},paymentIntents:{list:async()=>({data:[]})},charges:{list:async()=>({data:[]})},
+  billingPortal:{configurations:{list:async()=>({data:[{id:'bpc_1',active:true,metadata:{service:'GenDragoonSSD'}}]})}}});
+ const db={collection:()=>({doc:()=>({get:async()=>({exists:true,data:()=>({catalogHash:require('node:crypto').createHash('sha256').update(JSON.stringify(validateCatalog(fresh,d.products))).digest('hex')})}),set:async()=>{},delete:async()=>{}})})};
+ const bucket={file:()=>({save:async()=>{throw Object.assign(Error('no storage in this test'),{code:'TEST_NO_STORAGE'});},delete:async()=>{}})};
+ const keep={...process.env};
+ try{
+  for(const [accountId,ok] of [['acct_1USFf5CtNDGcw0e6',true],['acct_1TqS8eIpkwStQhHM',false]]){
+   const app=express();
+   const b=installBillingBootstrap({app,db,bucket,admin:{firestore:{FieldValue:{serverTimestamp:()=>0}}},env:{STRIPE_VAULT_BOOTSTRAP:'live',CUSTOMER_BUCKET:'x'},
+    readVaultSecrets:async names=>{seen.names=names;return {key:'sk_live_abc',webhook:'whsec_abc'};},createStripe:()=>stripe(accountId),
+    firebaseAuth:(q,r,n)=>n(),firebaseAuthWithoutTerms:(q,r,n)=>n(),accountKey:x=>x});
+   await b.attempt();
+   assert.equal(seen.names.apiSecret,'gendragoon-stripe-redxai-api');assert.equal(seen.names.hookSecret,'gendragoon-stripe-redxai-webhook');
+   assert.equal(b.state().activated,ok,accountId);
+   if(ok){assert.equal(seen.hook,'we_1USJZpCtNDGcw0e6MdCN9IYD');assert.equal(process.env.STRIPE_ACCOUNT_ID,'acct_1USFf5CtNDGcw0e6');}
+   else assert.equal(b.state().setupError,'ACCOUNT_NOT_READY');
+  }
+ }finally{for(const k of Object.keys(process.env))if(!(k in keep))delete process.env[k];Object.assign(process.env,keep);}
 });

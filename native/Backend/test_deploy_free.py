@@ -2,6 +2,7 @@
 import contextlib
 import io
 import json
+import os
 from pathlib import Path
 import tempfile
 import unittest
@@ -22,19 +23,29 @@ def require_closure(entry):
             continue
         seen.add(name)
         text = (base / name).read_text()
-        for target in re.findall(r"require\(\s*[\"']\./([^\"']+)[\"']\s*\)", text):
-            for candidate in (target, target + ".js", target + ".json"):
+        folder = Path(name).parent
+        for target in re.findall(r"require\(\s*[\"'](\.\.?/[^\"']+)[\"']\s*\)", text):
+            # Resolve like Node: relative to the requiring file, then .js, .json, or a folder's index.js.
+            joined = Path(os.path.normpath(folder / target)).as_posix()
+            for candidate in (joined, joined + ".js", joined + ".json", joined + "/index.js"):
                 if (base / candidate).is_file():
                     stack.append(candidate)
                     break
             else:
-                raise AssertionError(name + " requires missing ./" + target)
+                raise AssertionError(name + " requires missing " + target)
     return seen
+
+
+def staged_names():
+    """RUNTIME_FILES plus the folders stage_runtime copies whole (accounts/, legal/; tests excluded)."""
+    with tempfile.TemporaryDirectory() as directory:
+        deploy_free.stage_runtime(directory)
+        return {p.relative_to(directory).as_posix() for p in Path(directory).rglob("*") if p.is_file()}
 
 
 class RuntimeAllowlistTests(unittest.TestCase):
     def test_allowlist_covers_every_module_the_server_loads(self):
-        missing = sorted(require_closure("free_server.js") - set(deploy_free.RUNTIME_FILES))
+        missing = sorted(require_closure("free_server.js") - staged_names())
         self.assertEqual(missing, [], "add these to deploy_free.RUNTIME_FILES or the deployed revision will not start")
 
 
