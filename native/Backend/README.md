@@ -97,6 +97,48 @@ Client IP: `free_server.js` sets Express `trust proxy` to `TRUST_PROXY_HOPS` (de
 
 `SUPPORT_DISCORD_WEBHOOK_URL` is loaded from Secret Manager in production and is never written in this repo. `free_server.js` exits before it listens if that variable is missing or is not an `https://discord.com/api/webhooks/` URL when `NODE_ENV=production`. Whenever Cloud Run sets `K_SERVICE`, that gate stays on even if `NODE_ENV` is `development`, `dev`, or `test`. `deploy_free.py` sets `NODE_ENV=production` on every Cloud Run deploy. The error names the variable and does not print the value, so Cloud Run keeps serving the previous revision. `npm run predeploy:check` is an optional extra that confirms the secret exists (`gcloud secrets versions describe`) without printing it. It is not the promotion gate.
 
+### Accounts and two-factor sign-in
+
+Set these as Cloud Run environment variables; bind the secret ones from Secret Manager and never write their values in this repo.
+
+| Variable | Secret | Purpose |
+| --- | --- | --- |
+| `ACCOUNTS_SEAL_KEY` | yes | Required in production. 32 random bytes, base64. Seals 2FA secrets and phone numbers and signs Terms grants. |
+| `ACCOUNTS_MIN_AGE` | no | Optional. Values below 13 are raised to 13. |
+| `REDXAI_ISSUER` | no | Red-XAI Accounts issuer URL (for example `https://accounts.<domain>`). Turns on Red-XAI sign-in. |
+| `REDXAI_AUDIENCES` | no | Optional, comma-separated. Access-token audiences accepted; default `gendragoon` (the public app client). `REDXAI_CLIENT_ID` is still read as a one-value fallback. |
+| `REDXAI_BACKEND_CLIENT_ID` | no | Optional. Confidential back-channel client; default `gendragoon-backend`. |
+| `REDXAI_BACKEND_CLIENT_SECRET` | yes | Back-channel secret from `redxai-accounts app-secret gendragoon-backend`. Used only for HTTP Basic calls to `/v1/apps/accounts/{sub}/status` and `/v1/apps/events`. |
+| `TWILIO_ACCOUNT_SID` | no | Turns on phone 2FA codes through Twilio. |
+| `TWILIO_AUTH_TOKEN` | yes | Twilio credential. Alternatively set the API key pair below. |
+| `TWILIO_API_KEY_SID`, `TWILIO_API_KEY_SECRET` | the secret is | Twilio API key credential (preferred over the auth token). |
+| `TWILIO_MESSAGING_SERVICE_SID` | no | Sender. Preferred; otherwise set `TWILIO_FROM_NUMBER`. |
+| `TWILIO_FROM_NUMBER` | no | Sender number in E.164 form, used when no Messaging Service is set. |
+| `SMS_PROVIDER` | no | Optional. `twilio` forces Twilio; `mock` is for local and staging runs only. |
+| `ACCOUNTS_ALLOW_MOCK_SMS` | no | Staging only. Allows `SMS_PROVIDER=mock` with `NODE_ENV=production`. Never set it on the live service. |
+
+Phone 2FA is offered only when a complete Twilio setup is present: an account SID, one credential (auth token or API key pair) and one sender (Messaging Service SID or From number). Otherwise `GET /v1/accounts/rules` reports Phone as unavailable and phone sign-ups are refused with `sms_unavailable`. A half-finished Twilio setup does not stop the server; startup logs which variable is missing without printing any value. Codes are sent with the Twilio Messages API over HTTPS. They are generated, hashed, single-use, expire after 10 minutes, allow 5 tries, and are limited to 5 texts per account per hour. The automated tests use HTTP stubs and never send a text message.
+
+### Red-XAI Accounts (contract v1.1)
+
+- **Tokens.** The apps use the public client `gendragoon`. Red-XAI v1.1 access tokens are ES256 JWTs with header `typ: at+jwt` and `aud` = `client_id` = `gendragoon`. The backend checks the signature against the issuer's JWKS, the issuer, `typ: at+jwt`, the audience (`REDXAI_AUDIENCES`) and `client_id`. ID tokens (`typ: JWT`) are refused as API credentials, and nothing falls back to `/userinfo`. The confidential client `gendragoon-backend` is not an access-token audience. It only authenticates the back-channel.
+- **What Red-XAI now owns.** It owns username and email uniqueness (including Gmail dot and plus folding), age, disposable-email refusal, the Gendragoon Terms (`/v1/tos?app=gendragoon`, recorded per app and sent as the `app_tos_version` claim) and the false-information acknowledgement. A Red-XAI user's Gendragoon profile is created from the token claims on first use. `/v1/accounts/complete` is a no-op for them, and `/v1/accounts/me/tos` answers `409 managed_by_redxai`. When `app_tos_version` is older than the current Gendragoon Terms, `/me` reports `pending: ["tos"]`. The person re-accepts on the Red-XAI account page during the next sign-in. The backend still checks disposable domains itself (`accounts/disposable_domains.txt`, no runtime fetch) for the transitional `/v1/accounts` sign-up.
+- **In-app sign-up** uses the session grant (`grant_type=urn:red-xai:grant-type:session`, `subject_token=rxa_s_…`, scope `openid profile email`, single use, within 10 minutes, after any 2FA confirmation). No second sign-in in the browser.
+- **Back-channel.** `accounts/backchannel.js` (`backchannelFromEnv`) gives `status(sub)` and `events(since, limit)`. A scheduled events poller (deletions, suspensions) is not wired yet.
+- **Redirect URIs for `gendragoon`.** Red-XAI already registers `http://127.0.0.1/oauth2/callback` (desktop, any port; the path must be exactly `/oauth2/callback`) and `gendragoon://oauth2/callback` (iOS/Android). Add the extension redirects to `REDXAI_GENDRAGOON_REDIRECTS` on the Red-XAI service (comma-separated):
+  - Chrome Web Store: `https://<chrome item id>.chromiumapp.org/oauth2`
+  - Microsoft Edge Add-ons: `https://<edge product id>.chromiumapp.org/oauth2`
+  - Opera add-ons: `https://<opera extension id>.chromiumapp.org/oauth2`
+  - Firefox (AMO): `https://f162f677593098fb39ecc387bf97d845de3f3a34.extensions.allizom.org/oauth2`. This is the SHA-1 of the gecko id `gendragoon-cloud-ssd@gendragoon.app`. Recompute it if the AMO id changes: `printf %s '<id>' | sha1sum`.
+
+  Each store gives its own extension id when the extension is first published. To keep one id everywhere (and in unpacked development builds), put the store's public key in the manifest `key`. There is no Gendragoon web app, so no web origin is registered. The Cloud Run API takes bearer tokens and has no redirect.
+- **Moving Firebase accounts (owner import).** `POST /v1/owner/import {app: "gendragoon", users: [{username, email, dob, tosVersion?, tosAcceptedMs?, twoFactor?}]}` takes 1–500 users per call and needs an owner session that passed 2FA. It is not wired into this backend. To move people:
+  1. Export the Firebase users' username, email, date of birth and Terms record.
+  2. Import them in batches.
+  3. Each imported account has no password until the person uses Forgot password. Its first session is pending `tos`.
+  4. After the first Red-XAI sign-in, link the new `sub` to the existing Gendragoon uid through `/v1/accounts/link/redxai` so storage, billing and Teams carry over.
+  5. Don't import people under 13. Don't send email during a dry run.
+
 ## Validation
 
 ### Release blocker

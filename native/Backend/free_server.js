@@ -57,8 +57,11 @@ function workspaceRef(uid){return db.collection("tenants").doc(accountKey(uid)).
 const freeProjectPolicy=createProjectService({db,stamp:()=>FieldValue.serverTimestamp(),hash:accountKey});
 function filePrefix(uid){return "customer/"+accountKey(uid)+"/free"}
 function accountURL(uid){return "https://firestore.googleapis.com/v1/projects/gendragoonssd/databases/(default)/documents/accepted_terms/"+encodeURIComponent(uid)}
+// Gendragoon accounts (/v1/accounts): sign-up rules, Terms, 2FA, and Red-XAI Accounts tokens when REDXAI_ISSUER is set.
+const accounts=require("./accounts").installAccounts({app,db,accountKey,firebaseAuth:()=>{firestore();return getAuth();}});
 const loginGate=createLoginGate({
- verifyIdToken:token=>getAuth().verifyIdToken(token),
+ verifyIdToken:token=>accounts.identity.verifyForGate(token),
+ accountsGate:user=>accounts.gate(user),
  // Consent is verified against the *auth project's* Firestore rules, using the user's JWT.
  fetchTerms:(uid,token)=>fetch(accountURL(uid),{headers:{"Authorization":"Bearer "+token},signal:AbortSignal.timeout(8000)}),
  async decorate(req){
@@ -360,6 +363,9 @@ function start(port=Number(process.env.PORT||8080)){
   process.exit(gate.code||1);
  }
  if(gate.warn)console.warn(gate.message);
+ const accountsGate=require("./accounts").accountsStartup(process.env);
+ if(accountsGate.exit){console.error(accountsGate.message);process.exit(1);}
+ if(accountsGate.warn)console.warn(accountsGate.message);
  firestore();
  const timer=setInterval(()=>{
   Promise.resolve(deletion.sweepRegisteredSupportNotifications()).catch(()=>console.error("support_notify_sweep_failed"));

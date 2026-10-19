@@ -693,6 +693,7 @@ function createAccountDeletion({db,stripe,bucket,auth,byoProviders,hash,now,noti
   }
   await ignoreMissing(()=>db.collection("gd_accounts").doc(owner).delete());
   await ignoreMissing(()=>db.collection("tenants").doc(owner).delete());
+  await require("./accounts/store").deleteProfileByHash(db,owner);
   if(job.uid)await ignoreMissing(()=>db.collection("ad_purchases").doc(job.uid).delete());
   try{
    const keys=await db.collection("gd_api_keys").where("ownerHash","==",owner).get();

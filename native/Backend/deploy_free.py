@@ -40,6 +40,15 @@ def stage_runtime(destination):
             target = destination / "mobile" / relative
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(source, target)
+    # Account sign-up modules and the Terms of Service text (accounts/, legal/). Tests stay out.
+    for folder in ("accounts", "legal"):
+        for source in (BASE / folder).rglob("*"):
+            relative = source.relative_to(BASE)
+            if source.is_symlink() or not source.is_file() or source.name.endswith(".test.js") or any(part.startswith(".") for part in relative.parts):
+                continue
+            target = destination / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, target)
     (destination / ".gcloudignore").write_text("node_modules/\n.git/\n*.log\n")
     return sum(1 for source in destination.rglob("*") if source.is_file())
 
