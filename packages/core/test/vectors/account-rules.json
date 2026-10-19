@@ -1,0 +1,95 @@
+{
+  "now": "2026-10-19T12:00:00Z",
+  "username": [
+    ["dragon_rider", "ok"],
+    ["Dragon.Rider-9", "ok"],
+    ["abc12345", "ok"],
+    ["ab123456", "username_few_letters"],
+    ["12345678", "username_few_letters"],
+    ["dragon", "username_too_short"],
+    ["", "username_required"],
+    ["abcdefghijklmnopqrstuvwxyzabcdefg", "username_too_long"],
+    ["_dragonrider", "username_bad_edges"],
+    ["dragonrider.", "username_bad_edges"],
+    ["dragon rider", "username_bad_chars"],
+    ["dragön_rider", "username_bad_chars"],
+    ["dragon@rider", "username_bad_chars"],
+    ["drag--onrider", "ok"]
+  ],
+  "usernameKey": [["Dragon_Rider", "dragon_rider"], ["DRAGON.rider", "dragon.rider"]],
+  "password": [
+    ["Correct-Horse9", "ok"],
+    ["Short-1a", "password_length"],
+    ["alllowercase-123", "password_upper"],
+    ["ALLUPPERCASE-123", "password_lower"],
+    ["NoDigitsHere-x", "password_digit"],
+    ["NoSymbolsHere123", "password_symbol"],
+    ["Has\u0007Bell-12345", "password_bad_chars"],
+    ["", "password_required"],
+    ["Aa1!aaaaaaaa", "ok"],
+    ["Aa1!aaaaaaa", "password_length"]
+  ],
+  "passwordLong": [[665, "ok"], [666, "password_length"]],
+  "email": [
+    ["josh@infected-nation.com", "ok"],
+    ["  Josh@Example.COM ", "ok"],
+    ["first.last+tag@sub.company.co.uk", "ok"],
+    ["no-at-sign.com", "email_invalid"],
+    ["two@@example.com", "email_invalid"],
+    ["user@localhost", "email_invalid"],
+    ["user@-bad.com", "email_invalid"],
+    ["user@example.c", "email_invalid"],
+    [".dot@example.com", "email_invalid"],
+    ["dot.@example.com", "email_invalid"],
+    ["", "email_required"]
+  ],
+  "emailKey": [
+    ["Josh@Example.COM", "josh@example.com"],
+    ["J.o.s.h+games@gmail.com", "josh@gmail.com"],
+    ["josh@googlemail.com", "josh@gmail.com"],
+    ["j.osh+x@company.com", "j.osh+x@company.com"]
+  ],
+  "birthDate": [
+    ["10/19/2013", "ok"],
+    ["10/20/2013", "dob_under_min_age"],
+    ["01/01/2020", "dob_under_min_age"],
+    ["10/19/1926", "ok"],
+    ["10/18/1925", "dob_out_of_range"],
+    ["10/20/2026", "dob_future"],
+    ["02/29/2001", "dob_invalid"],
+    ["02/29/2000", "ok"],
+    ["13/01/2000", "dob_invalid"],
+    ["1/1/2000", "dob_invalid"],
+    ["2000-01-01", "dob_invalid"],
+    ["", "dob_required"]
+  ],
+  "minAge": [[0, 13], [5, 13], [13, 13], [18, 18], [150, 100]],
+  "phone": [["+1 555 123 4567", "ok"], ["+44 (20) 7946-0958", "ok"], ["5551234567", "phone_invalid"], ["+0123456789", "phone_invalid"]],
+  "signup": [
+    {
+      "fields": {"username": "dragon_rider", "email": "josh@example.com", "emailConfirm": "JOSH@example.com", "password": "Correct-Horse9", "passwordConfirm": "Correct-Horse9", "birthDate": "01/02/1990", "twoFactor": "totp", "falseInfoAcknowledged": true},
+      "requirePassword": true,
+      "errors": {}
+    },
+    {
+      "fields": {"username": "dragon_rider", "email": "josh@example.com", "emailConfirm": "josh@example.org", "password": "Correct-Horse9", "passwordConfirm": "Correct-Horse8", "birthDate": "01/02/1990", "twoFactor": "none", "falseInfoAcknowledged": false},
+      "requirePassword": true,
+      "errors": {"emailConfirm": "email_mismatch", "passwordConfirm": "password_mismatch", "twoFactor": "no_two_factor_ack_required", "falseInfo": "false_info_ack_required"}
+    },
+    {
+      "fields": {"username": "dragon_rider", "email": "josh@example.com", "emailConfirm": "josh@example.com", "birthDate": "01/02/1990", "twoFactor": "redxai_auth", "falseInfoAcknowledged": true},
+      "requirePassword": false,
+      "errors": {"twoFactor": "two_factor_unavailable"}
+    },
+    {
+      "fields": {"username": "short", "email": "josh@example.com", "emailConfirm": "josh@example.com", "birthDate": "", "twoFactor": "sms", "phone": "555", "falseInfoAcknowledged": true},
+      "requirePassword": false,
+      "errors": {"username": "username_too_short", "birthDate": "dob_required", "phone": "phone_invalid"}
+    },
+    {
+      "fields": {"username": "dragon_rider", "email": "josh@example.com", "emailConfirm": "josh@example.com", "birthDate": "01/02/1990", "twoFactor": "none", "noTwoFactorAcknowledged": true, "falseInfoAcknowledged": true},
+      "requirePassword": false,
+      "errors": {}
+    }
+  ]
+}
