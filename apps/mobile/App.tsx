@@ -7,7 +7,7 @@ import {
   type TreeNode,
   type WorkspaceRecord,
 } from "@gendragoon/core";
-import { colors } from "./src/theme";
+import { ThemeProvider, useTheme } from "./src/themeContext";
 import { NavigationContainer, createNavigationContainerRef } from "@react-navigation/native";
 import { createBottomTabNavigator } from "@react-navigation/bottom-tabs";
 import { createNativeStackNavigator } from "@react-navigation/native-stack";
@@ -96,6 +96,7 @@ export function MobileRoot(props: {
   apiBase?: string;
   initialRoute?: keyof RootStack;
 }) {
+  const { colors } = useTheme();
   const secrets = useMemo(() => props.secrets ?? createExpoSecureStore(), [props.secrets]);
   const apiBase = props.apiBase ?? process.env.EXPO_PUBLIC_API_BASE ?? "";
   const [idToken, setIdToken] = useState(freshPreviewToken);
@@ -325,17 +326,24 @@ export function MobileRoot(props: {
   );
 }
 
+function ThemeStatusBar() {
+  const { scheme } = useTheme();
+  return <StatusBar style={scheme === "dark" ? "light" : "dark"} />;
+}
+
 export function App() {
   const shot = webShot();
   return (
+    <ThemeProvider>
     <SafeAreaProvider>
-      <StatusBar style="light" />
+      <ThemeStatusBar />
       {shot ? <ShotFrame id={shot} /> : (
         <NavigationContainer ref={navigationRef}>
           <MobileRoot />
         </NavigationContainer>
       )}
     </SafeAreaProvider>
+    </ThemeProvider>
   );
 }
 

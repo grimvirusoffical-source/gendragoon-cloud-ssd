@@ -68,7 +68,7 @@ function createWindow(): BrowserWindow {
   const window = new BrowserWindow({
     width: 1440,
     height: 900,
-    backgroundColor: "#100e17",
+    backgroundColor: "#0d0b14",
     title: "GenDragoon Cloud SSD",
     webPreferences: {
       preload: path.join(here, "preload.js"),

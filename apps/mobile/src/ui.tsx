@@ -12,9 +12,11 @@ import {
   type TextInputProps,
   type ViewStyle,
 } from "react-native";
-import { colors, radii, space, tapTarget, type as typeScale } from "./theme";
+import { radii, space, tapTarget, type as typeScale, type MobileColors } from "./theme";
+import { useStyles, useTheme } from "./themeContext";
 
 export function Screen(props: { children: ReactNode; testID?: string }) {
+  const styles = useStyles(makeStyles);
   return (
     <ScrollView
       style={styles.screenScroll}
@@ -28,6 +30,7 @@ export function Screen(props: { children: ReactNode; testID?: string }) {
 }
 
 export function Title(props: { kicker?: string; children: string; subtitle?: string }) {
+  const styles = useStyles(makeStyles);
   return (
     <View style={styles.titleBlock}>
       {props.kicker ? <Text style={styles.kicker}>{props.kicker}</Text> : null}
@@ -60,6 +63,7 @@ export function Button(props: {
   /** Renders as a selected choice (radio) instead of a plain button. */
   selected?: boolean;
 } & Pick<PressableProps, "accessibilityHint">) {
+  const styles = useStyles(makeStyles);
   const tone = props.tone ?? "primary";
   const isChoice = typeof props.selected === "boolean";
   const textStyle = props.disabled
@@ -103,6 +107,7 @@ export type BannerTone = "warn" | "info" | "danger";
  * region so it does not interrupt. A danger banner is always an alert.
  */
 export function Banner(props: { children: ReactNode; testID?: string; tone?: BannerTone; action?: ReactNode; alert?: boolean }) {
+  const styles = useStyles(makeStyles);
   const tone = props.tone ?? "warn";
   const urgent = props.alert === true || tone === "danger";
   return (
@@ -126,6 +131,8 @@ export function Field(props: {
   testID?: string;
   helperTestID?: string;
 } & Pick<TextInputProps, "value" | "onChangeText" | "secureTextEntry" | "placeholder" | "autoCapitalize" | "autoComplete" | "textContentType">) {
+  const styles = useStyles(makeStyles);
+  const { colors } = useTheme();
   const hint = props.error ?? props.helper;
   const generatedId = useId();
   const labelId = props.testID ? `${props.testID}-label` : `field-${generatedId}-label`;
@@ -164,6 +171,8 @@ export function Field(props: {
 
 /** Running server operation, e.g. a merge. Announced politely, with a spinner. */
 export function ProgressCard(props: { title: string; detail?: string; testID?: string; detailTestID?: string }) {
+  const styles = useStyles(makeStyles);
+  const { colors } = useTheme();
   return (
     <View
       style={[styles.card, styles.progressCard]}
@@ -183,14 +192,17 @@ export function ProgressCard(props: { title: string; detail?: string; testID?: s
 }
 
 export function SectionLabel(props: { children: string }) {
+  const styles = useStyles(makeStyles);
   return <Text style={styles.label} accessibilityRole="header">{props.children}</Text>;
 }
 
-export function cardStyle(extra?: StyleProp<ViewStyle>): StyleProp<ViewStyle> {
-  return [styles.card, extra];
+/** Card style for the active theme. */
+export function useCardStyle(): (extra?: StyleProp<ViewStyle>) => StyleProp<ViewStyle> {
+  const styles = useStyles(makeStyles);
+  return (extra) => [styles.card, extra];
 }
 
-const styles = StyleSheet.create({
+const makeStyles = (colors: MobileColors) => StyleSheet.create({
   screenScroll: { flex: 1, backgroundColor: colors.bg },
   screen: {
     flexGrow: 1,

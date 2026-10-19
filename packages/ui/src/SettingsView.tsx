@@ -2,6 +2,7 @@ import { useState } from "react";
 import type { Settings, SortCategory } from "@gendragoon/core";
 import { SORT_CATEGORIES, SUPPORT_CONTACT } from "@gendragoon/core";
 import { PassphraseSetup } from "./PassphraseSetup.js";
+import { ThemeToggle } from "./ThemeToggle.js";
 
 /** Settings copy for a terminal deletion poll. `failed` with retryable false shows support and Dismiss. */
 export function deletionFailureNotice(result: { status: string; retryable?: boolean }): {
@@ -43,6 +44,13 @@ export function SettingsView(props: {
           <p className="sub">Pictures, Videos, Audio, Documents, Archives, Apps, and Other. Overrides are saved in Settings. Every client starts from the same sort-map.json.</p>
         </div>
       </header>
+      <div className="panel appearance-row" data-testid="appearance">
+        <div>
+          <h3>Appearance</h3>
+          <p className="help">Dark is the default. System follows your device and changes with it.</p>
+        </div>
+        <ThemeToggle />
+      </div>
       <div className="panel">
         {props.rows.map((row) => (
           <div className="map-row" key={row.extension}>

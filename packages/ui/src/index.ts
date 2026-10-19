@@ -8,3 +8,8 @@ export { SettingsView, deletionFailureNotice } from "./SettingsView.js";
 export { ByoSetup } from "./ByoSetup.js";
 export { UpdateControl, isUpdateBusy, updateLabel } from "./UpdateControl.js";
 export type { UpdateView } from "./UpdateControl.js";
+export { ThemeToggle, initTheme } from "./ThemeToggle.js";
+export { Skeleton, EmptyState, ErrorState, TransferStatus } from "./Feedback.js";
+export type { TransferPhase } from "./Feedback.js";
+export { THEME_STORAGE_KEY, applyThemePreference, loadThemePreference, saveThemePreference, isThemePreference, currentTheme } from "./theme-runtime.js";
+export type { ThemeName, ThemePreference } from "./theme.js";

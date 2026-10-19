@@ -22,7 +22,7 @@ export function AppShell(props: {
         <div className="brand">
           <div className="brand-mark" aria-hidden="true">
             <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
-              <path d="M4 13.5h12.2a2.8 2.8 0 0 0 .3-5.6 4.2 4.2 0 0 0-8.1-1.2A3.3 3.3 0 0 0 4 13.5Z" stroke="white" strokeWidth="1.6" />
+              <path d="M11.2 1.8 4.4 11h4.3l-.9 7.2L15.6 8.7h-4.4l0-6.9Z" fill="currentColor" />
             </svg>
           </div>
           <div>

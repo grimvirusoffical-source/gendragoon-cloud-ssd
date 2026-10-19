@@ -20,7 +20,7 @@ import {
   type TreeNode,
   type WorkspaceRecord,
 } from "@gendragoon/core";
-import { colors, space, tapTarget, type as typeScale } from "./theme";
+import { space, tapTarget, type as typeScale } from "./theme";
 import { useEffect, useState } from "react";
 import { Linking, Pressable, StyleSheet, Text, View } from "react-native";
 import {
@@ -47,7 +47,9 @@ import {
 import { WORKSPACE_BUSY_MESSAGE, graceBanner, isDeletingWorkspace, isWorkspaceBusy } from "./workspaceState";
 import { SUPPORT_DELETION_STILL_RUNNING, SUPPORT_REQUEST_ALREADY, SUPPORT_REQUEST_SENT } from "./supportRequest";
 import { supportContactTarget } from "./supportContact";
-import { Banner, Button, Field, ProgressCard, Screen, SectionLabel, Title, cardStyle } from "./ui";
+import { Banner, Button, Field, ProgressCard, Screen, SectionLabel, Title, useCardStyle } from "./ui";
+import { useStyles, useTheme } from "./themeContext";
+import type { MobileColors } from "./theme";
 
 export function workspacesWithUnpaid<T extends { id: string }>(
   workspaces: readonly T[],
@@ -62,6 +64,7 @@ export function SignInScreen(props: {
   googleEnabled: boolean;
   blockedMessage?: string | null;
 }) {
+  const styles = useStyles(makeStyles);
   return (
     <Screen testID="sign-in-screen">
       <Title kicker="GenDragoon">Cloud SSD</Title>
@@ -150,6 +153,7 @@ export function LockScreen(props: {
   onReview: () => void;
   onPay?: () => void;
 }) {
+  const styles = useStyles(makeStyles);
   const summary = props.access ? planSummary(props.access) : null;
   const unpaidIds = props.lock?.unpaidWorkspaceIds ?? props.access?.unpaidIds ?? [];
   const rows = workspacesWithUnpaid(props.workspaces, unpaidIds);
@@ -204,6 +208,8 @@ export function FileTree(props: {
   onBackup?: () => void;
   onRefresh: () => void;
 }) {
+  const styles = useStyles(makeStyles);
+  const cardStyle = useCardStyle();
   const actions = actionsForMode(props.mode, props.selected, { uploadsBlocked: props.locked });
   const groups = new Map<string, TreeNode[]>();
   for (const node of props.nodes) {
@@ -271,6 +277,7 @@ export function NewWorkspaceScreen(props: {
   initialStorage?: "hosted" | "byo";
   initialProviderId?: string | null;
 }) {
+  const styles = useStyles(makeStyles);
   const [name, setName] = useState(props.initialName ?? "");
   const [storage, setStorage] = useState<"hosted" | "byo">(props.initialStorage ?? "hosted");
   const [providerId, setProviderId] = useState<string | null>(props.initialProviderId ?? LAUNCH_BYO_PROVIDERS[0]?.id ?? null);
@@ -366,6 +373,8 @@ export function WorkspacesScreen(props: {
   /** Overrides `WORKSPACE_PRICING_ENABLED` in tests. */
   pricingEnabled?: boolean;
 }) {
+  const styles = useStyles(makeStyles);
+  const cardStyle = useCardStyle();
   const showPrice = props.pricingEnabled ?? WORKSPACE_PRICING_ENABLED;
   const feeText = additionalWorkspaceFeeText(props.additionalMonthlyCents);
   const rows = workspacesWithUnpaid(props.workspaces, props.unpaidIds);
@@ -570,6 +579,7 @@ export function SortScreen(props: {
   overrides: SortOverrides;
   onChange: (overrides: SortOverrides) => void;
 }) {
+  const styles = useStyles(makeStyles);
   const sample = "vacation.jpg";
   const category = categorize({ name: sample }, props.overrides);
   return (
@@ -609,6 +619,7 @@ export function ConnectStorageScreen(props: {
    */
   endsIncludedPricingCents?: number | null;
 }) {
+  const styles = useStyles(makeStyles);
   const [selected, setSelected] = useState<string | null>(null);
   const endedPrice = grandfatheringEndedPrice(props.registration);
   const [acceptedLoss, setAcceptedLoss] = useState(props.endsIncludedPricingCents == null);
@@ -686,6 +697,7 @@ export function PassphraseScreen(props: {
   initialChecked?: boolean;
   initialRevealed?: boolean;
 }) {
+  const styles = useStyles(makeStyles);
   const [value, setValue] = useState(props.initialPassphrase ?? "");
   const [again, setAgain] = useState(props.initialConfirm ?? "");
   const [ack, setAck] = useState(props.initialChecked ?? false);
@@ -819,6 +831,7 @@ export function DeleteAccountScreen(props: {
   apiBase?: string;
   supportFetch?: typeof fetch;
 }) {
+  const styles = useStyles(makeStyles);
   const [step, setStep] = useState<"review" | "confirm">(props.frame === "confirm" ? "confirm" : "review");
   const [notice, setNotice] = useState<DeletionNotice | null>(
     props.frame && props.frame !== "confirm" ? { ...deletionNotice(props.frame), jobId: props.jobId } : null,
@@ -997,6 +1010,28 @@ export function DeleteAccountScreen(props: {
   );
 }
 
+const THEME_OPTIONS: { id: "dark" | "light" | "system"; label: string }[] = [
+  { id: "dark", label: "Dark" },
+  { id: "light", label: "Light" },
+  { id: "system", label: "System" },
+];
+
+/** Dark / Light / System choice. Saved on the device and applied at once. */
+export function ThemePicker() {
+  const { preference, setPreference } = useTheme();
+  const styles = useStyles(makeStyles);
+  return (
+    <View style={styles.themeRow} accessibilityRole="radiogroup" testID="theme-picker">
+      <Text style={styles.label} accessibilityRole="header">Appearance</Text>
+      <View style={styles.themeButtons}>
+        {THEME_OPTIONS.map((option) => (
+          <Button key={option.id} label={option.label} tone="secondary" compact selected={preference === option.id} testID={`theme-${option.id}`} onPress={() => setPreference(option.id)} />
+        ))}
+      </View>
+    </View>
+  );
+}
+
 export function SettingsHome(props: {
   onSort: () => void;
   onConnect?: () => void;
@@ -1009,6 +1044,7 @@ export function SettingsHome(props: {
   return (
     <Screen testID="settings-screen">
       <Title kicker="Settings">Account</Title>
+      <ThemePicker />
       <Button label="Type sort" tone="ghost" testID="open-sort" onPress={props.onSort} />
       {props.connectEnabled && props.onConnect ? (
         <Button label="Connect storage" tone="ghost" testID="open-connect" onPress={props.onConnect} />
@@ -1019,8 +1055,10 @@ export function SettingsHome(props: {
   );
 }
 
-const styles = StyleSheet.create({
+const makeStyles = (colors: MobileColors) => StyleSheet.create({
   help: { color: colors.muted, fontSize: typeScale.helpSize },
+  themeRow: { gap: space.sm },
+  themeButtons: { flexDirection: "row", gap: space.sm, flexWrap: "wrap" },
   label: { color: colors.text, fontSize: typeScale.bodySize },
   checkRow: { flexDirection: "row", alignItems: "center", gap: space.sm, minHeight: tapTarget, minWidth: tapTarget },
   checkbox: { width: 22, height: 22, borderRadius: 6, borderWidth: 1.5, borderColor: colors.controlBorder, alignItems: "center", justifyContent: "center" },
