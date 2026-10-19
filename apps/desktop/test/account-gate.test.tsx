@@ -2,11 +2,10 @@
 import { describe, expect, it, vi } from "vitest";
 import { act } from "react";
 import { createRoot } from "react-dom/client";
-import { AccountsApiError, type AccountsClient } from "@gendragoon/core";
+import type { AccountsClient } from "@gendragoon/core";
 import { AccountGate, type AccountGateDeps } from "../src/renderer/AccountGate";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
-const TERMS = { version: "gendragoon-tos-2026-10-19", title: "Gendragoon Terms of Service", text: "Terms.", falseInfoWarning: "", no2faWarning: "" };
 
 function deps(gendragoon: Partial<AccountsClient>): AccountGateDeps {
   const central = { rules: async () => ({ minAge: 13, centralMinAge: 13, twoFactor: [] }) } as unknown as AccountsClient;
