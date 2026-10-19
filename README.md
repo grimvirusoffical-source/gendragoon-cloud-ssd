@@ -49,9 +49,13 @@ More detail: [native/README.md](native/README.md), [native/Backend/README.md](na
 
 Please report vulnerabilities privately; see [SECURITY.md](SECURITY.md). No user data, private API keys or cloud credentials belong in this repository.
 
+## About
+
+Gendragoon is developed and maintained by Red-XAI LLC. Red-XAI LLC is wholly owned by GRIM-VIRUS, an independent recording artist who leads development under the alias MainDirectory. © Red-XAI LLC. All rights reserved.
+
 ## License
 
-License: to be announced. All rights reserved until a license file is added.
+License: to be announced. © Red-XAI LLC. All rights reserved until a license file is added.
 
 ## Support
 

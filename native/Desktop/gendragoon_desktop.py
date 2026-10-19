@@ -31,6 +31,9 @@ import urllib.request
 import uuid
 import zipfile
 
+ABOUT_OWNERSHIP = "Gendragoon is developed and maintained by Red-XAI LLC. Red-XAI LLC is wholly owned by GRIM-VIRUS, an independent recording artist who leads development under the alias MainDirectory. © Red-XAI LLC. All rights reserved."
+COPYRIGHT = "© Red-XAI LLC"
+
 ORIGIN = "https://gendragoon-free-10068843866.us-central1.run.app"
 CHUNK = 8 * 1024 * 1024
 MANIFEST = "_gendragoon/manifest.json"
@@ -762,8 +765,8 @@ def recycle_original(source: Path, expected: dict):
 
 
 def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=["workspaces", "list", "upload", "restore", "launch", "evict", "capabilities"])
+    parser = argparse.ArgumentParser(description=__doc__, epilog=ABOUT_OWNERSHIP)
+    parser.add_argument("action", choices=["workspaces", "list", "upload", "restore", "launch", "evict", "capabilities", "about"])
     parser.add_argument("--workspace", default="free")
     parser.add_argument("--source", type=Path)
     parser.add_argument("--application-entrypoint", help="Relative native entrypoint inside a portable application folder; no installers")
@@ -773,6 +776,8 @@ def main():
     parser.add_argument("--keep-cache", action="store_true")
     parser.add_argument("--token-stdin", action="store_true", help="Read a bearer/API credential from stdin, never command-line arguments")
     args = parser.parse_args()
+    if args.action == "about":
+        return emit(ok=True, about=ABOUT_OWNERSHIP, copyright=COPYRIGHT)
     if args.action == "capabilities":
         system, arch = native_platform()
         return emit(ok=True, platform=system, architecture=arch, transferAPI="v3", portableApplications=True, files=True, folders=True, sparseApplicationStreaming=False, cleanup="managed cache after complete process-tree exit")
