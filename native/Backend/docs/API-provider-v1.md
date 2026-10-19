@@ -1,6 +1,6 @@
 # Storage provider API v1 (`/provider/v1`)
 
-Status: **implemented on branch `feature/provider-v1`, tested with in-memory fakes only. Not deployed.** Mounted only when `PROVIDER_V1_ENABLED=true`; `provider_v1.js` and `provider_blobstore.js` are deliberately not in `deploy_free.py`'s runtime allow-list yet. The GCS store (`gcsBlobStore`) has not been run against a real bucket or the Storage emulator.
+Status: **implemented on branch `feature/provider-v1`, tested with in-memory fakes only. Not deployed.** Mounted only when `PROVIDER_V1_ENABLED=true`; `provider_v1.js` and `provider_blobstore.js` are deliberately not in `deploy_free.py`'s runtime allow-list yet. The GCS store (`gcsBlobStore`) is tested with the real `@google-cloud/storage` client against `fake-gcs-server`; it has not run against a real bucket.
 
 Design: `/workspace/integration/GENDRAGOON-REDX.md` section 1.4 (joint design with RedX). It maps RedX's `engine/pack` `ChunkStore` and `ManifestStore` onto HTTP.
 
@@ -33,6 +33,10 @@ Any grant/code failure is `400 invalid_grant` (unknown, used, expired, wrong kin
 
 `GET/PUT/DELETE /manifests/:key`, `GET /manifests`. `PUT` is atomic. Preconditions: `If-None-Match: *` (create only) or `If-Match: "<etag>"` (compare-and-swap on the storage generation); neither = atomic overwrite. Losing a race is `412 precondition_failed`. Max 4 MiB.
 
+## Key envelope (per binding)
+
+`GET /key-envelope` (`blobs:r`) and `PUT /key-envelope` (`blobs:rw`): RedX's master key wrapped with a recovery passphrase on the RedX host. Same record, KDF bounds, forbidden-field check and version rules as `/v2/workspaces/:id/key-envelope` (shared `parseEnvelope`/`precondition` from `key_envelope.js`): `If-None-Match: *` creates (`409 envelope_exists` if present), `If-Match: "<n>"` replaces with version `n+1` (`412 version_mismatch` otherwise), neither is `428 precondition_required`. Removed when the binding is purged.
+
 ## Usage, health, capabilities
 
 `GET /usage` → `{usedBytes, quotaBytes, objectCount, workspaceId}`; `GET /health`; `GET /capabilities` (no auth).
@@ -63,9 +67,19 @@ Each binding has `quotaBytes` (snapshot of the workspace quota at connect time) 
 
 ## Tests
 
-- `provider_v1.test.js` (11 tests, `node --test`): both connect legs, replay and expiry, checksums, quota and refunds, 16 MiB cap, manifest CAS with 8 racing writers, pagination, scopes, tenant isolation, rotation grace, revoke and purge, rate limit, reconcile, no secrets in audit rows.
+- `provider_v1.test.js` (12 tests, `node --test`, including G9): both connect legs, replay and expiry, checksums, quota and refunds, 16 MiB cap, manifest CAS with 8 racing writers, pagination, scopes, tenant isolation, rotation grace, revoke and purge, rate limit, reconcile, no secrets in audit rows.
+- `provider_blobstore.test.js`: BlobStore contract on the memory fake and, with `GD_FAKE_GCS_BIN=/path/fake-gcs-server` (or `STORAGE_EMULATOR_HOST`), on `gcsBlobStore` via the real client, plus an end-to-end run of the routes on it. Skipped otherwise.
+- `provider_v1_deletion.test.js`: G7.
 - `contract/redxpack` (Go): a client with RedX's exact `ChunkStore`/`ManifestStore` method set, contract tests against the Node server (`scripts/provider_contract_server.js`, memory fakes), and with `-tags redx` (`REDX_DIR=… contract/redxpack/run_redx.sh`) RedX's real `pack.New(...)` doing put/get/verify/list/delete over this API.
+
+## Account deletion
+
+`account_delete.js` (metadata step) calls `deleteAccountProviderData(db, accountHash)`: bindings are revoked, then bindings, keys, key envelopes, grants and provider audit rows of that account are deleted. Objects live under `customer/<accountHash>/provider/`, inside the `customer/<accountHash>/` prefix the deletion job already removes. Tested in `provider_v1_deletion.test.js` (including a full deletion job). Workspace merge/archive flows do not touch bindings yet: a binding keeps its own namespace and quota snapshot.
+
+## Pricing decision needed (not invented here)
+
+Today a binding's quota is a **snapshot of the workspace's quota at connect time**, counted separately from the workspace's own files. Whether RedX data should count against the workspace's `usedBytes` (proposal P1 in the joint design 13.2), occupy a workspace slot (P2), be a separate add-on (P3), be metered (P4) or get a separate free allowance (P5) is **Josh's decision**. No price or allowance is set in code. Once decided, the change is confined to `adjust()` in `provider_v1.js` (charge the workspace document in the same transaction) and `resolveWorkspace` in `free_server.js`.
 
 ## Not done yet (see `/workspace/gd/RARXAI_AND_PROVIDER_PLAN.md` B.3)
 
-Per-binding key envelope (G9), account deletion and merge covering bindings (G7), Firestore sharded counters for very hot bindings, Storage-emulator test of `gcsBlobStore`, Gendragoon client UI, deploy (G12, needs Josh).
+Pricing decision above; merge/archive handling of bindings; sharded counters for very hot bindings; verifying DELETE preconditions on real GCS (the emulator ignores them); deploy (G12, needs Josh). Client UI: see the gendragoon-apps branch `feature/redx-connections`.

@@ -203,4 +203,6 @@ function registerKeyEnvelope(deps){
  });
  return svc;
 }
-module.exports={createKeyEnvelope,registerKeyEnvelope,deleteAccountKeyEnvelopes,MAX_ENVELOPE_BYTES};
+module.exports={createKeyEnvelope,registerKeyEnvelope,deleteAccountKeyEnvelopes,MAX_ENVELOPE_BYTES,
+ // Shared with /provider/v1 (per-binding envelopes) so both routes validate identically.
+ parseEnvelope,precondition,rejectForbidden};

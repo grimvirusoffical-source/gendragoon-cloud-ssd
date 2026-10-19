@@ -697,6 +697,8 @@ function createAccountDeletion({db,stripe,bucket,auth,byoProviders,hash,now,noti
    const keys=await db.collection("gd_api_keys").where("ownerHash","==",owner).get();
    for(const doc of keys.docs||[])await ignoreMissing(()=>doc.ref.delete());
   }catch(_){/* key registry absent */}
+  // /provider/v1 bindings, keys, envelopes, grants (objects are inside the customer/ prefix deleted earlier).
+  await require("./provider_v1").deleteAccountProviderData(db,owner);
   await db.collection("accepted_terms").doc(job.uid).delete().catch?.(()=>{});
  }
  async function probeFirebase(uid){

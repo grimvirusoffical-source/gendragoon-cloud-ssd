@@ -20,7 +20,9 @@ const SCOPES=["blobs:rw","blobs:r"];
 const HEX64=/^[0-9a-f]{64}$/;
 const KEY_RE=/^gdpk_([0-9a-f]{16})_([A-Za-z0-9_-]{43})$/;
 const B64URL43=/^[A-Za-z0-9_-]{43}$/;
-const COLL={grants:"gd_provider_grants",bindings:"gd_provider_bindings",keys:"gd_provider_keys",audit:"gd_provider_audit"};
+const COLL={grants:"gd_provider_grants",bindings:"gd_provider_bindings",keys:"gd_provider_keys",audit:"gd_provider_audit",
+ envelopes:"gd_provider_key_envelopes"};
+const keyEnvelope=require("./key_envelope");
 
 const sha256hex=b=>crypto.createHash("sha256").update(b).digest("hex");
 const b64url=n=>crypto.randomBytes(n).toString("base64url");
@@ -71,7 +73,7 @@ function registerProviderV1({app,db,blobs,firebaseAuth,accountKey,resolveWorkspa
  const lastTouch=new Map(),userActiveCache=new Map();
  const router=express.Router();
  const json=express.json({limit:"8kb"});
- const objectPrefix=b=>"customer/"+b.ownerHash+"/provider/"+b.id+"/";
+ const objectPrefix=b=>providerObjectRoot(b.ownerHash)+b.id+"/";
  const blobName=(b,id)=>objectPrefix(b)+"b/"+id;
  const manifestName=(b,key)=>objectPrefix(b)+"m/"+key;
 
@@ -370,6 +372,37 @@ function registerProviderV1({app,db,blobs,firebaseAuth,accountKey,resolveWorkspa
  });
  router.get("/manifests",keyAuth,canRead,(req,res)=>listIds(req,res,"m"));
 
+ // ---- per-binding key envelope (G9) ------------------------------------------------------------------------
+ // RedX's master key wrapped with a recovery passphrase on the RedX host. Same record, bounds and version rules as
+ // /v2/workspaces/:id/key-envelope (key_envelope.js): the server only ever sees the opaque wrapped key.
+ router.get("/key-envelope",keyAuth,canRead,async(req,res)=>{
+  try{const s=await db.collection(COLL.envelopes).doc(req.binding.id).get();
+   if(!s.exists)return fail(res,404,"not_found");
+   const env=keyEnvelope.parseEnvelope(s.data().envelope);
+   res.set("ETag",'"'+env.version+'"').json(env);
+  }catch(e){fail(res,e?.status&&e.status<500?e.status:503,e?.error||"provider_unavailable");}
+ });
+ router.put("/key-envelope",keyAuth,canWrite,express.json({limit:"8kb"}),async(req,res)=>{
+  try{
+   if(Buffer.byteLength(JSON.stringify(req.body||{}),"utf8")>keyEnvelope.MAX_ENVELOPE_BYTES)return fail(res,413,"payload_too_large");
+   const env=keyEnvelope.parseEnvelope(req.body);
+   const gate=keyEnvelope.precondition(req);
+   const ref=db.collection(COLL.envelopes).doc(req.binding.id);
+   await db.runTransaction(async tx=>{
+    const s=await tx.get(ref);
+    if(gate.create){if(s.exists)throw Object.assign(Error(),{status:409,error:"envelope_exists"});}
+    else if(!s.exists||s.data().envelope?.version!==gate.version||env.version!==gate.version+1)
+     throw Object.assign(Error(),{status:412,error:"version_mismatch"});
+    tx.set(ref,{bindingId:req.binding.id,ownerHash:req.binding.ownerHash,envelope:env,updatedAtMs:now()});
+   });
+   audit("key_envelope.put",{bindingId:req.binding.id,ownerHash:req.binding.ownerHash});
+   res.set("ETag",'"'+env.version+'"').status(gate.create?201:200).json({version:env.version});
+  }catch(e){
+   if(e?.type==="entity.too.large")return fail(res,413,"payload_too_large");
+   fail(res,e?.status&&e.status<500?e.status:503,e?.error||"provider_unavailable");
+  }
+ });
+
  // ---- usage, health, capabilities -----------------------------------------------------------------------------
  router.get("/usage",keyAuth,canRead,async(req,res)=>{
   try{const s=await db.collection(COLL.bindings).doc(req.binding.id).get();const b=s.data();
@@ -414,6 +447,7 @@ function registerProviderV1({app,db,blobs,firebaseAuth,accountKey,resolveWorkspa
    for(const it of page.items){if(await blobs.delete(it.name))n++;}
    if(!page.next)break;cursor=page.next;}
   await db.collection(COLL.bindings).doc(id).update({usedBytes:0,objectCount:0});
+  await db.collection(COLL.envelopes).doc(id).delete();
   return n;
  }
  // Recomputes usedBytes/objectCount from the bucket (repairs a crash between reservation and write).
@@ -429,4 +463,25 @@ function registerProviderV1({app,db,blobs,firebaseAuth,accountKey,resolveWorkspa
  app.use(prefix,router);
  return {router,revokeBinding,purgeBinding,reconcileBinding,capabilities,COLL};
 }
-module.exports={registerProviderV1,MAX_BLOB_BYTES,MAX_MANIFEST_BYTES,COLL};
+// Account deletion (G7): removes every provider record of one account. Objects need no extra step: they live under
+// customer/<accountHash>/provider/, inside the customer/<accountHash>/ prefix that account_delete.js already deletes.
+// Revoking first means a RedX host still holding a key gets 401 even if a later delete step fails.
+async function deleteAccountProviderData(db,ownerHash){
+ if(!db||typeof ownerHash!=="string"||!/^[a-f0-9]{64}$/.test(ownerHash))return {bindings:0};
+ const t=Date.now();let bindings=0;
+ const list=await db.collection(COLL.bindings).where("ownerHash","==",ownerHash).get();
+ for(const b of list.docs||[]){
+  await b.ref.update({revokedAtMs:b.data().revokedAtMs||t});
+  const keys=await db.collection(COLL.keys).where("bindingId","==",b.id).get();
+  for(const k of keys.docs||[])await k.ref.delete();
+  await db.collection(COLL.envelopes).doc(b.id).delete();
+  await b.ref.delete();bindings++;
+ }
+ for(const name of [COLL.grants,COLL.audit]){
+  const rows=await db.collection(name).where("ownerHash","==",ownerHash).get();
+  for(const r of rows.docs||[])await r.ref.delete();
+ }
+ return {bindings};
+}
+const providerObjectRoot=ownerHash=>"customer/"+ownerHash+"/provider/";
+module.exports={registerProviderV1,deleteAccountProviderData,providerObjectRoot,MAX_BLOB_BYTES,MAX_MANIFEST_BYTES,COLL};

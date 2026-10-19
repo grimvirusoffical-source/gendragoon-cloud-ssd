@@ -212,3 +212,27 @@ test("reconcile repairs counters from the bucket; audit rows never hold secrets"
   for(const row of keyRows)assert.ok(!row.includes(c.apiKey.split("_").slice(2).join("_")),"key secret not stored");
  }finally{t.close();}
 });
+
+test("G9 key envelope per binding: create-only, version CAS, validation, scope, purge",async()=>{
+ const t=await rig();try{
+  const c=await t.connect(),ro=await t.connect("alice",["blobs:r"]);
+  const b64=n=>crypto.randomBytes(n).toString("base64url");
+  const env=v=>({version:v,kdf:{alg:"argon2id",memoryKiB:19456,iterations:2,parallelism:1},salt:b64(16),iv:b64(12),wrappedKey:b64(48)});
+  let r=await t.call("/key-envelope",{key:c.apiKey});assert.equal(r.status,404);
+  r=await t.call("/key-envelope",{method:"PUT",key:c.apiKey,body:env(1)});assert.equal(r.status,428);
+  r=await t.call("/key-envelope",{method:"PUT",key:c.apiKey,body:env(1),headers:{"if-none-match":"*"}});assert.equal(r.status,201);
+  r=await t.call("/key-envelope",{method:"PUT",key:c.apiKey,body:env(1),headers:{"if-none-match":"*"}});assert.equal(r.status,409);
+  r=await t.call("/key-envelope",{method:"PUT",key:c.apiKey,body:env(3),headers:{"if-match":'"1"'}});assert.equal(r.status,412);
+  r=await t.call("/key-envelope",{method:"PUT",key:c.apiKey,body:env(2),headers:{"if-match":'"1"'}});assert.equal(r.status,200);
+  r=await t.call("/key-envelope",{key:c.apiKey});assert.equal(r.status,200);assert.equal(r.headers.get("etag"),'"2"');
+  assert.equal((await r.json()).version,2);
+  r=await t.call("/key-envelope",{method:"PUT",key:c.apiKey,body:{...env(3),passphrase:"hunter2"},headers:{"if-match":'"2"'}});
+  assert.equal(r.status,400);assert.equal((await r.json()).error,"plaintext_rejected");
+  r=await t.call("/key-envelope",{method:"PUT",key:c.apiKey,body:{...env(3),kdf:{alg:"argon2id",memoryKiB:67108864,iterations:2,parallelism:1}},headers:{"if-match":'"2"'}});
+  assert.equal(r.status,422);
+  r=await t.call("/key-envelope",{method:"PUT",key:ro.apiKey,body:env(1),headers:{"if-none-match":"*"}});assert.equal(r.status,403);
+  assert.equal((await t.call("/key-envelope",{key:ro.apiKey})).status,404,"envelopes are per binding");
+  await t.call("/bindings/"+c.bindingId+"?deleteData=true",{method:"DELETE",uid:"alice"});
+  assert.ok(![...t.db.rows.keys()].some(k=>k.startsWith(COLL.envelopes+"/"+c.bindingId)),"purge removes the envelope");
+ }finally{t.close();}
+});
