@@ -8,6 +8,7 @@ if (signing.certificatePassword && !process.env.CSC_KEY_PASSWORD) process.env.CS
 module.exports = {
   appId: "com.gendragoon.cloudssd.windows",
   productName: "GenDragoon Cloud SSD",
+  copyright: "© Red-XAI LLC",
   directories: { output: "release", buildResources: "build" },
   files: ["dist/**/*", "package.json", "build/icon.png"],
   asar: true,
@@ -25,7 +26,7 @@ module.exports = {
     executableName: "gendragoon-cloud-ssd",
     artifactName: "GenDragoon-Cloud-SSD-${version}-linux-${arch}.${ext}",
     category: "Utility",
-    maintainer: "GenDragoon <support@infected-nation.com>",
+    maintainer: "Red-XAI LLC <support@infected-nation.com>",
     target: [{ target: "AppImage" }, { target: "deb" }, { target: "tar.gz" }],
   },
   nsis: {

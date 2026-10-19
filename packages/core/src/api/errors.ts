@@ -45,12 +45,12 @@ export function isReauthRequired(error: unknown): error is ReauthRequiredError {
 
 /**
  * Support address shown with a deletion that cannot be retried.
- * Placeholder until the real address is published.
+ * Josh's shared support address.
  * Jordan's apps read this exact export: `{ value, isPlaceholder }`.
  */
 export const SUPPORT_CONTACT: { value: string; isPlaceholder: boolean } = {
-  value: "placeholder@example.com",
-  isPlaceholder: true,
+  value: "support@infected-nation.com",
+  isPlaceholder: false,
 };
 
 /**

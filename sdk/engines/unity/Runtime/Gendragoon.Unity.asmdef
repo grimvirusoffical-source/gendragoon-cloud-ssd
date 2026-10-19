@@ -1,0 +1,12 @@
+{
+  "name": "Gendragoon.Unity",
+  "rootNamespace": "Gendragoon.Unity",
+  "references": [],
+  "includePlatforms": [],
+  "excludePlatforms": [],
+  "allowUnsafeCode": false,
+  "overrideReferences": true,
+  "precompiledReferences": ["Gendragoon.Sdk.dll"],
+  "autoReferenced": true,
+  "noEngineReferences": false
+}

@@ -3,6 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "description": "Menu-bar updater for grim's Mac apps. Uses the public gendragoon-cloud-ssd GitHub releases feed.",
+  "author": "Red-XAI LLC",
   "type": "module",
   "main": "dist/main.js",
   "scripts": {

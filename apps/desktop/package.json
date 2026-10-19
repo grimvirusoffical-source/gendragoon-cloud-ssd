@@ -4,7 +4,7 @@
   "private": true,
   "description": "GenDragoon Cloud SSD for Windows. The Mac app stays the SwiftUI client.",
   "author": {
-    "name": "GenDragoon",
+    "name": "Red-XAI LLC",
     "email": "support@infected-nation.com"
   },
   "main": "dist/main.js",

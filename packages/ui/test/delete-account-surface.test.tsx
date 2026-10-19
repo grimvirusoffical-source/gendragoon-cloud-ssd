@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 import {
+  ABOUT_OWNERSHIP,
   GenDragoonClient,
   MemorySecretStore,
   SUPPORT_CONTACT,
@@ -37,9 +38,9 @@ describe("SettingsView deletion notice", () => {
     const html = view({
       deletionMessage: "Account deletion cannot be retried.",
       deletionRetryable: false,
-      supportContact: "placeholder@example.com",
+      supportContact: "support@infected-nation.com",
     });
-    expect(html).toContain("placeholder@example.com");
+    expect(html).toContain("support@infected-nation.com");
     expect(html).toContain("delete-account-dismiss");
     expect(html).not.toContain("delete-account-retry");
   });
@@ -95,5 +96,13 @@ describe("SettingsView deletion notice", () => {
     expect(html).toContain("delete-account-support");
     expect(html).toContain("delete-account-dismiss");
     expect(html).not.toContain("delete-account-retry");
+  });
+});
+
+describe("Settings About", () => {
+  it("shows the exact ownership copy", () => {
+    const html = view();
+    expect(html).toContain('data-testid="about-panel"');
+    expect(html).toContain(ABOUT_OWNERSHIP.replace("©", "©"));
   });
 });

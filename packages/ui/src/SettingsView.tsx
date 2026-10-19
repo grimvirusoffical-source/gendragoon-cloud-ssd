@@ -1,6 +1,6 @@
 import { useState } from "react";
 import type { Settings, SortCategory } from "@gendragoon/core";
-import { SORT_CATEGORIES, SUPPORT_CONTACT } from "@gendragoon/core";
+import { ABOUT_OWNERSHIP, SORT_CATEGORIES, SUPPORT_CONTACT } from "@gendragoon/core";
 import { PassphraseSetup } from "./PassphraseSetup.js";
 import { ThemeToggle } from "./ThemeToggle.js";
 
@@ -138,6 +138,10 @@ export function SettingsView(props: {
             </div>
           </div>
         ) : null}
+      </section>
+      <section className="panel stack" data-testid="about-panel" aria-labelledby="about-title" style={{ marginTop: 16 }}>
+        <h3 id="about-title">About</h3>
+        <p className="help" data-testid="about-ownership">{ABOUT_OWNERSHIP}</p>
       </section>
     </section>
   );
