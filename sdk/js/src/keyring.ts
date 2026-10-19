@@ -21,7 +21,7 @@ export class Keyring {
     this.client.check("crypto.unlock");
     this.set(await unwrapMasterKey(await this.client.getKeyEnvelope(), passphrase));
   }
-  /** Generates a master key and stores its envelope (create-only). Level L3, risk key. */
+  /** Generates a master key and stores its envelope. Create-only: it never replaces an existing envelope (412). Level L2, risk key. */
   async create(passphrase: string): Promise<void> {
     this.client.check("keyEnvelope.create");
     const mk = random(KEY_BYTES);

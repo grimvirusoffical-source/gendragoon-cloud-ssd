@@ -19,6 +19,7 @@ struct GENDRAGOON_API FGenDragoonApi
 	decltype(&gd_drive_read) DriveRead = nullptr;
 	decltype(&gd_drive_write) DriveWrite = nullptr;
 	decltype(&gd_drive_delete) DriveDelete = nullptr;
+	decltype(&gd_drive_delete_slot) DriveDeleteSlot = nullptr;
 
 	bool IsLoaded() const { return Version != nullptr; }
 

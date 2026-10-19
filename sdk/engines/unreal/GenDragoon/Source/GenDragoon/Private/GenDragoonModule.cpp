@@ -46,6 +46,7 @@ public:
 		Bind(Api.DriveRead, TEXT("gd_drive_read"));
 		Bind(Api.DriveWrite, TEXT("gd_drive_write"));
 		Bind(Api.DriveDelete, TEXT("gd_drive_delete"));
+		Bind(Api.DriveDeleteSlot, TEXT("gd_drive_delete_slot"));
 		if (!bOk)
 		{
 			UE_LOG(LogGenDragoon, Error, TEXT("%s is missing exports; rebuild it from sdk/go/cabi."), *Path);

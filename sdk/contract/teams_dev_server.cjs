@@ -7,6 +7,8 @@
 //
 // Prints one JSON line {"origin": "http://127.0.0.1:<port>"}. Accounts sign in with "Bearer dev-user:<uid>".
 // POST /__dev/pay {"url": "<checkout url>"} completes a checkout as if Stripe had charged it.
+// POST /__dev/personal-workspace {"uid", "workspaceId", "name"} adds a personal workspace owned by uid (the
+// workspace routes live elsewhere in the backend; the Teams routes only read it).
 const path = require("node:path"), crypto = require("node:crypto");
 const dir = process.env.GD_TEAMS_BACKEND;
 if (!dir) { console.error("set GD_TEAMS_BACKEND to the backend directory of a feature/teams checkout"); process.exit(2); }
@@ -57,6 +59,13 @@ const firebaseAuth = (req, res, next) => {
 installedBilling({ app, db, bucket: null, stripeOverride: stripe, admin: { firestore: { FieldValue: { serverTimestamp: () => Date.now() } } }, firebaseAuth, accountKey: hash,
   env: { STRIPE_SECRET_KEY: "sk_test_localDevServerOnly", STRIPE_WEBHOOK_SECRET: hookSecret, STRIPE_CHECKOUT_ENABLED: "true", STRIPE_ENVIRONMENT: "test",
     PUBLIC_URL: "https://billing.example", STRIPE_PRICE_CATALOG_JSON: JSON.stringify(PRICES) } });
+
+app.post("/__dev/personal-workspace", async (req, res) => {
+  const { uid, workspaceId, name } = req.body || {};
+  if (!/^[A-Za-z0-9_-]{1,64}$/.test(String(uid)) || !/^[0-9a-f-]{36}$/.test(String(workspaceId))) return res.status(400).json({ error: "uid and workspaceId" });
+  await db.collection("gd_accounts").doc(hash(uid)).collection("workspaces").doc(workspaceId).set({ accountHash: hash(uid), name: String(name || "Personal"), status: "active" });
+  res.json({ ok: true });
+});
 
 let origin = "";
 app.post("/__dev/pay", async (req, res) => {

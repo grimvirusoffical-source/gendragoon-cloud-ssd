@@ -67,7 +67,8 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "GenDragoon")
 	EGenDragoonStatus Open(const FString& ProviderUrl, const FString& ApiKey, FString& Error);
 
-	/** Opens the player's master key, creating it on first use when bCreateIfMissing. Level L2, risk key. */
+	/** Opens the player's master key, creating it on first use when bCreateIfMissing (keyEnvelope.create, L2, only
+	 * when the binding has no key yet). Level L2, risk key. */
 	UFUNCTION(BlueprintCallable, Category = "GenDragoon")
 	void Unlock(const FString& RecoveryPassphrase, bool bCreateIfMissing, FGenDragoonDone OnDone);
 
@@ -98,7 +99,7 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "GenDragoon")
 	void ListSlots(FGenDragoonSlots OnDone);
 
-	/** Level L2, risk destructive. */
+	/** Deletes one slot with the slot-scoped delete (files.deleteSlot): it can only remove SlotFolder/Slot. Level L2, risk destructive. */
 	UFUNCTION(BlueprintCallable, Category = "GenDragoon")
 	void DeleteSlot(const FString& Slot, FGenDragoonDone OnDone);
 

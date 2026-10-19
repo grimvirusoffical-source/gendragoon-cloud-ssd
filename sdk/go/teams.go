@@ -372,6 +372,10 @@ type ChatCard struct {
 	Scope       string `json:"scope"` // team or personal
 	WorkspaceID string `json:"workspaceId"`
 	Name        string `json:"name,omitempty"`
+	// Share, for a personal workspace, shares it with the team (view only) in the same call. Without it
+	// the server refuses a personal card for a workspace that is not shared yet (SHARE_REQUIRED). Only
+	// sent by PostCard; messages read from the server never set it.
+	Share bool `json:"share,omitempty"`
 }
 
 // ChatMessage is one chat message. Kind "removed" has empty Text and a Removed reason.
@@ -462,15 +466,20 @@ func (t *TeamsClient) Post(ctx context.Context, teamID, text string) (*ChatMessa
 	return t.post(ctx, teamID, map[string]any{"text": text})
 }
 
-// PostCard posts a workspace card with optional text. A personal-workspace card also shares that
-// workspace with the team, so it is checked at the sharing level as well. Level L2, risk write.
+// PostCard posts a workspace card with optional text. Level L2, risk write. A card for a personal
+// workspace is also checked at teams.share (L3): set card.Share to share the workspace in the same call,
+// or share it first with Share.
 func (t *TeamsClient) PostCard(ctx context.Context, teamID string, card ChatCard, text string) (*ChatMessage, error) {
 	if card.Scope == "personal" {
 		if err := t.acct.check("teams.share"); err != nil {
 			return nil, err
 		}
 	}
-	return t.post(ctx, teamID, map[string]any{"text": text, "card": map[string]string{"scope": card.Scope, "workspaceId": card.WorkspaceID}})
+	c := map[string]any{"scope": card.Scope, "workspaceId": card.WorkspaceID}
+	if card.Scope == "personal" && card.Share {
+		c["share"] = true
+	}
+	return t.post(ctx, teamID, map[string]any{"text": text, "card": c})
 }
 
 func (t *TeamsClient) post(ctx context.Context, teamID string, body map[string]any) (*ChatMessage, error) {

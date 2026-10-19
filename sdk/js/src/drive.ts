@@ -22,6 +22,11 @@ export function cleanPath(p: string): string {
   }
   return p;
 }
+/** folder/slot for a save slot; slot must be one path segment and folder "" or a valid drive path. */
+export function slotPath(folder: string, slot: string): string {
+  if (!slot || slot.includes("/")) throw new Error(`gendragoon: invalid slot name ${JSON.stringify(slot)}`);
+  return cleanPath(folder ? `${folder}/${slot}` : slot);
+}
 const dirname = (p: string) => (p.includes("/") ? p.slice(0, p.lastIndexOf("/")) : "");
 const basename = (p: string) => p.slice(p.lastIndexOf("/") + 1);
 
@@ -213,7 +218,7 @@ export class Drive {
     });
   }
 
-  /** Removes one file or one empty folder. Level L2, risk destructive. Blobs stay until collectGarbage. */
+  /** Removes one file or one empty folder. Level L3, risk destructive. Blobs stay until collectGarbage. Cloud saves at L2 use deleteSlot. */
   async delete(p: string): Promise<void> {
     this.c.check("files.delete");
     await this.update((doc) => {
@@ -222,6 +227,20 @@ export class Drive {
       if (!set.has(p)) throw notFound();
       for (const q of [...set, ...Object.keys(doc.files)]) if (q.startsWith(p + "/")) throw new Error(`gendragoon: folder ${JSON.stringify(p)} is not empty`);
       doc.folders = (doc.folders ?? []).filter((f) => f !== p);
+    });
+  }
+
+  /**
+   * Removes one save slot, the file folder/slot, where slot is a single path segment. It never removes a folder,
+   * a nested file or anything outside folder, and only changes this drive's manifest (blobs stay until
+   * collectGarbage). Its reach equals overwriting the slot, which L2 allows. Level L2, risk destructive.
+   */
+  async deleteSlot(folder: string, slot: string): Promise<void> {
+    this.c.check("files.deleteSlot");
+    const p = slotPath(folder, slot);
+    await this.update((doc) => {
+      if (!doc.files[p]) throw notFound();
+      delete doc.files[p];
     });
   }
 

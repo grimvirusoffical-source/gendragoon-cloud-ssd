@@ -333,6 +333,18 @@ func gd_drive_delete(drive C.uint64_t, path *C.char, err **C.char) C.int {
 	return driveOp(drive, err, func(c context.Context, d *gd.Drive) error { return d.Delete(c, p) })
 }
 
+//export gd_drive_delete_slot
+func gd_drive_delete_slot(drive C.uint64_t, folder, slot *C.char, err **C.char) C.int {
+	if slot == nil {
+		return invalid("missing slot", err)
+	}
+	f, n := "", C.GoString(slot)
+	if folder != nil {
+		f = C.GoString(folder)
+	}
+	return driveOp(drive, err, func(c context.Context, d *gd.Drive) error { return d.DeleteSlot(c, f, n) })
+}
+
 //export gd_drive_mkdir
 func gd_drive_mkdir(drive C.uint64_t, path *C.char, err **C.char) C.int {
 	if path == nil {

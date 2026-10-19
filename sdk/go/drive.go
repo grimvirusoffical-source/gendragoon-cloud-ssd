@@ -473,8 +473,8 @@ func (d *Drive) Move(ctx context.Context, from, to string) error {
 	})
 }
 
-// Delete removes one file or one empty folder. Level L2, risk destructive. The file's blobs stay until
-// CollectGarbage runs.
+// Delete removes one file or one empty folder. Level L3, risk destructive. The file's blobs stay until
+// CollectGarbage runs. Cloud saves at L2 use DeleteSlot.
 func (d *Drive) Delete(ctx context.Context, p string) error {
 	if err := d.c.check("files.delete"); err != nil {
 		return err
@@ -501,6 +501,43 @@ func (d *Drive) Delete(ctx context.Context, p string) error {
 		doc.Folders = remove(doc.Folders, p)
 		return nil
 	})
+}
+
+// DeleteSlot removes one save slot: the file folder/slot, where slot is a single path segment. It never
+// removes a folder, a nested file or anything outside folder, and it only changes this drive's manifest
+// (the slot's blobs stay until CollectGarbage runs). Its reach is the same as overwriting that slot, which
+// L2 already allows, so it is level L2, risk destructive. The engine cloud-save components use it.
+func (d *Drive) DeleteSlot(ctx context.Context, folder, slot string) error {
+	if err := d.c.check("files.deleteSlot"); err != nil {
+		return err
+	}
+	p, err := SlotPath(folder, slot)
+	if err != nil {
+		return err
+	}
+	return d.update(ctx, func(doc *DriveDocument) error {
+		if doc.Files[p] == nil {
+			return &APIError{Status: 404, Code: "not_found"}
+		}
+		delete(doc.Files, p)
+		return nil
+	})
+}
+
+// SlotPath returns folder/slot for a save slot. slot must be one path segment; folder may be "" (the
+// drive root) or a valid drive path.
+func SlotPath(folder, slot string) (string, error) {
+	if slot == "" || strings.Contains(slot, "/") {
+		return "", fmt.Errorf("gendragoon: invalid slot name %q", slot)
+	}
+	p := slot
+	if folder != "" {
+		p = folder + "/" + slot
+	}
+	if _, err := CleanPath(p); err != nil {
+		return "", err
+	}
+	return p, nil
 }
 
 // DeleteFolder removes a folder and everything in it, returning how many files were removed.

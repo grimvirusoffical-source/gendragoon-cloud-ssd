@@ -259,14 +259,15 @@ void UGenDragoonCloudSave::ListSlots(FGenDragoonSlots OnDone)
 void UGenDragoonCloudSave::DeleteSlot(const FString& Slot, FGenDragoonDone OnDone)
 {
 	const uint64 D = Drive;
-	const FString Path = SlotPath(Slot);
-	RunAsync([D, Path]()
+	const FString Folder = SlotFolder;
+	RunAsync([D, Folder, Slot]()
 	{
 		const FGenDragoonApi* Api = FGenDragoonApi::Get();
 		if (!Api) return Missing();
 		FOutcome O;
 		char* Err = nullptr;
-		O.Status = ToStatus(Api->DriveDelete(D, TCHAR_TO_UTF8(*Path), &Err));
+		// Slot-scoped delete (files.deleteSlot, L2): only this slot file, never a folder or another path.
+		O.Status = ToStatus(Api->DriveDeleteSlot(D, TCHAR_TO_UTF8(*Folder), TCHAR_TO_UTF8(*Slot), &Err));
 		O.Error = Api->TakeString(Err);
 		return O;
 	}, [OnDone](FOutcome O) { OnDone.ExecuteIfBound(O.Status, O.Error); });

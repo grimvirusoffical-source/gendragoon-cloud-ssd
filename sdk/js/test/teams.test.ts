@@ -1,4 +1,4 @@
-// Teams contract suite (sdk/spec/CONTRACT.md, T01-T10) against contract/teams_dev_server.cjs. Set GD_TEAMS_ORIGIN to a
+// Teams contract suite (sdk/spec/CONTRACT.md, T01-T11) against contract/teams_dev_server.cjs. Set GD_TEAMS_ORIGIN to a
 // running server, or GD_TEAMS_SERVER to the script path (with GD_TEAMS_BACKEND) to start one; otherwise these tests skip.
 import { after, before, test } from "node:test";
 import assert from "node:assert/strict";
@@ -27,8 +27,9 @@ const pay = async (url: string) => assert.equal((await fetch(origin + "/__dev/pa
 const status = async (p: Promise<unknown>) => { try { await p; return 0; } catch (e) { return e instanceof gd.APIError ? e.status : -1; } };
 const levelRefused = async (p: () => Promise<unknown>) => { try { await p(); } catch (e) { return e instanceof gd.LevelError; } return false; };
 
-test("Teams contract T01-T10", { skip }, async (t) => {
-  const alice = user("alice" + randomBytes(4).toString("hex")), bob = user("bob" + randomBytes(4).toString("hex"));
+test("Teams contract T01-T11", { skip }, async (t) => {
+  const aliceUid = "alice" + randomBytes(4).toString("hex");
+  const alice = user(aliceUid), bob = user("bob" + randomBytes(4).toString("hex"));
   let teamId = "", bobId = "", lastSeq = 0;
   await t.test("T01 catalog", async () => { assert.ok(((await alice.catalog()).tiers as unknown[]).length >= 3); });
   await t.test("T02 create and pay", async () => {
@@ -83,6 +84,19 @@ test("Teams contract T01-T10", { skip }, async (t) => {
     const ws = await bob.workspaces(teamId);
     assert.equal(ws.teamWorkspaces.length, 1); assert.equal(ws.teamWorkspaces[0].access, "read"); assert.ok(ws.subscriptionActive);
     await alice.setRole(teamId, bobId, "member");
+  });
+  await t.test("T11 personal workspace card", async () => {
+    const wid = randomUUID();
+    const seeded = await fetch(origin + "/__dev/personal-workspace", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ uid: aliceUid, workspaceId: wid, name: "Sketches" }) });
+    assert.equal(seeded.status, 200);
+    const card = { scope: "personal" as const, workspaceId: wid };
+    assert.ok(await levelRefused(() => user(aliceUid, "L2").postCard(teamId, card, "", { share: true })));
+    await assert.rejects(alice.postCard(teamId, card, "not shared yet"), (e) => e instanceof gd.APIError && e.status === 403 && e.code === "SHARE_REQUIRED");
+    const m = await alice.postCard(teamId, card, "have a look", { share: true });
+    assert.equal(m.kind, "workspace_card"); assert.equal(m.card?.workspaceId, wid);
+    assert.equal((await bob.workspaces(teamId)).sharedWorkspaces.length, 1);
+    await alice.postCard(teamId, card, "again");
+    await alice.unshare(teamId, wid);
   });
   await t.test("T08 mute and unmute", async () => {
     await alice.mute(teamId, bobId, "cool down");

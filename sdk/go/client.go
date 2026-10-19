@@ -322,7 +322,8 @@ func (c *Client) HeadBlob(ctx context.Context, id string) (*BlobInfo, error) {
 	return &BlobInfo{Size: size, Generation: etag(r.header), SHA256: r.header.Get("X-Content-SHA256")}, nil
 }
 
-// DeleteBlob deletes one blob. Deleting a missing blob succeeds. Level L2, risk destructive.
+// DeleteBlob deletes one blob. Deleting a missing blob succeeds. Level L3, risk destructive: a blob
+// can belong to any file of any drive in the binding.
 func (c *Client) DeleteBlob(ctx context.Context, id string) error {
 	_, err := c.do(ctx, "blobs.delete", "DELETE", "/blobs/"+id, nil, nil, true)
 	return err
@@ -471,7 +472,7 @@ func (c *Client) PutManifest(ctx context.Context, key string, data []byte, pre P
 	return PutResult{Created: r.status == 201, Generation: etag(r.header)}, nil
 }
 
-// DeleteManifest deletes one manifest. Level L2, risk destructive.
+// DeleteManifest deletes one manifest. Level L3, risk destructive: one manifest can be a whole drive.
 func (c *Client) DeleteManifest(ctx context.Context, key string, pre Precondition) error {
 	h := map[string]string{}
 	pre.headers(h)

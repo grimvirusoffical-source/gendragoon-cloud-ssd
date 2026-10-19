@@ -17,14 +17,14 @@ cap before any request is made. Levels and risks are explained in [LEVELS.md](LE
 | `blobs.head` | L2 | read | `HEAD /blobs/{id}` | Size and checksum of one blob |
 | `blobs.list` | L2 | read | `GET /blobs` | List blob ids |
 | `blobs.batchHas` | L2 | read | `POST /blobs/batch-has` | Which of these blobs exist |
-| `blobs.delete` | L2 | destructive | `DELETE /blobs/{id}` | Delete one blob |
+| `blobs.delete` | L3 | destructive | `DELETE /blobs/{id}` | Delete one blob |
 | `manifests.get` | L2 | read | `GET /manifests/{key}` | Read one manifest |
 | `manifests.put` | L2 | write | `PUT /manifests/{key}` | Write one manifest (create-only or compare-and-swap) |
 | `manifests.list` | L2 | read | `GET /manifests` | List manifest keys and generations |
-| `manifests.delete` | L2 | destructive | `DELETE /manifests/{key}` | Delete one manifest |
+| `manifests.delete` | L3 | destructive | `DELETE /manifests/{key}` | Delete one manifest |
 | `keyEnvelope.get` | L2 | read | `GET /key-envelope` | Read the wrapped master key |
-| `keyEnvelope.create` | L3 | key | `PUT /key-envelope` | Create the master key and its recovery envelope |
-| `keyEnvelope.replace` | L3 | key | `PUT /key-envelope` | Re-wrap the master key under a new recovery passphrase |
+| `keyEnvelope.create` | L2 | key | `PUT /key-envelope` | Create the master key and its recovery envelope (only when none exists) |
+| `keyEnvelope.replace` | L3 | key | `PUT /key-envelope` | Replace the recovery envelope of an existing master key (passphrase change or re-wrap) |
 | `apiKey.rotate` | L2 | credential | `POST /connect/rotate` | Replace this binding's API key |
 | `share.createReadKey` | L3 | sharing | `POST /keys` | Mint a read-only key for this binding |
 | `share.listReadKeys` | L2 | read | `GET /keys` | List this binding's read-only keys |
@@ -43,7 +43,8 @@ cap before any request is made. Levels and risks are explained in [LEVELS.md](LE
 | `files.write` | L2 | write | (composite) | Create or replace a file |
 | `files.mkdir` | L2 | write | (composite) | Create a folder |
 | `files.move` | L2 | write | (composite) | Rename or move a file or folder |
-| `files.delete` | L2 | destructive | (composite) | Delete one file or an empty folder |
+| `files.delete` | L3 | destructive | (composite) | Delete one file or an empty folder |
+| `files.deleteSlot` | L2 | destructive | (composite) | Delete one save slot: a single file directly inside the app's save folder |
 | `files.deleteFolder` | L3 | bulk-destructive | (composite) | Delete a folder and everything in it |
 | `files.collectGarbage` | L3 | bulk-destructive | (composite) | Delete blobs no file references |
 | `sync.push` | L2 | write | (composite) | Upload new and changed local files |

@@ -9,7 +9,7 @@ public enum Level: Int, Comparable, CustomStringConvertible, Sendable {
 
     /// Parses "L2" or "2".
     public init?(parsing s: String) {
-        var t = s.trimmingCharacters(in: .whitespaces).uppercased()
+        var t = s.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
         if t.hasPrefix("L") { t.removeFirst() }
         guard t.count == 1, let n = Int(t), let l = Level(rawValue: n) else { return nil }
         self = l

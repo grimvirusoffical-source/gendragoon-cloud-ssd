@@ -1,6 +1,6 @@
 package gendragoon_test
 
-// Teams contract suite (sdk/spec/CONTRACT.md, T01-T10) against contract/teams_dev_server.cjs. Set
+// Teams contract suite (sdk/spec/CONTRACT.md, T01-T11) against contract/teams_dev_server.cjs. Set
 // GD_TEAMS_ORIGIN to a running server, or GD_TEAMS_SERVER to the script path (with GD_TEAMS_BACKEND)
 // to start one; otherwise the suite skips.
 
@@ -81,7 +81,8 @@ func TestTeamsContract(t *testing.T) {
 	user := func(uid string, max gd.Level) *gd.TeamsClient {
 		return gd.NewTeamsClient(origin, func(context.Context) (string, error) { return "dev-user:" + uid, nil }, &gd.Options{Gate: gd.LevelGate(max)})
 	}
-	alice, bob := user("alice"+uuid4()[:8], gd.L3), user("bob"+uuid4()[:8], gd.L3)
+	aliceUID := "alice" + uuid4()[:8]
+	alice, bob := user(aliceUID, gd.L3), user("bob"+uuid4()[:8], gd.L3)
 	var teamID, bobID string
 	var lastSeq int64
 
@@ -204,6 +205,39 @@ func TestTeamsContract(t *testing.T) {
 			t.Fatal(err, ws)
 		}
 		if err := alice.SetRole(ctx, teamID, bobID, "member"); err != nil {
+			t.Fatal(err)
+		}
+	})
+	t.Run("T11 personal workspace card", func(t *testing.T) {
+		wid := uuid4()
+		body, _ := json.Marshal(map[string]string{"uid": aliceUID, "workspaceId": wid, "name": "Sketches"})
+		r, err := http.Post(origin+"/__dev/personal-workspace", "application/json", bytes.NewReader(body))
+		if err != nil || r.StatusCode != 200 {
+			t.Fatal("seed personal workspace", err)
+		}
+		r.Body.Close()
+		card := gd.ChatCard{Scope: "personal", WorkspaceID: wid}
+		if _, err := user(aliceUID, gd.L2).PostCard(ctx, teamID, gd.ChatCard{Scope: "personal", WorkspaceID: wid, Share: true}, ""); !errors.As(err, new(*gd.LevelError)) {
+			t.Fatalf("L2 gate allowed a personal card: %v", err)
+		}
+		var ae *gd.APIError
+		if _, err := alice.PostCard(ctx, teamID, card, "not shared yet"); !errors.As(err, &ae) || ae.Status != 403 || ae.Code != "SHARE_REQUIRED" {
+			t.Fatalf("unshared personal card without share: %v", err)
+		}
+		card.Share = true
+		m, err := alice.PostCard(ctx, teamID, card, "have a look")
+		if err != nil || m.Kind != "workspace_card" || m.Card == nil || m.Card.WorkspaceID != wid {
+			t.Fatal(err, m)
+		}
+		ws, err := bob.Workspaces(ctx, teamID)
+		if err != nil || len(ws.SharedWorkspaces) != 1 {
+			t.Fatal("shared by the card", err, ws)
+		}
+		card.Share = false
+		if _, err := alice.PostCard(ctx, teamID, card, "again"); err != nil {
+			t.Fatal("card for an already shared workspace", err)
+		}
+		if err := alice.Unshare(ctx, teamID, wid); err != nil {
 			t.Fatal(err)
 		}
 	})

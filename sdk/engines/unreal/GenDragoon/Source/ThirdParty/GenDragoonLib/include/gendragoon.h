@@ -62,7 +62,10 @@ int gd_drive_open(gd_handle client, const char *name, gd_handle keyring, gd_hand
 int gd_drive_list(gd_handle drive, const char *folder, char **entries_json, char **err);
 int gd_drive_read(gd_handle drive, const char *path, uint8_t **data, size_t *length, char **err);
 int gd_drive_write(gd_handle drive, const char *path, const uint8_t *data, size_t length, char **err);
+/* Deletes one file or empty folder. Level L3. */
 int gd_drive_delete(gd_handle drive, const char *path, char **err);
+/* Deletes the save slot folder/slot (slot is one path segment, never a folder). Level L2. */
+int gd_drive_delete_slot(gd_handle drive, const char *folder, const char *slot, char **err);
 int gd_drive_mkdir(gd_handle drive, const char *path, char **err);
 int gd_drive_move(gd_handle drive, const char *from, const char *to, char **err);
 

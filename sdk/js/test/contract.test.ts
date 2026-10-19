@@ -4,7 +4,7 @@ import { after, before, test } from "node:test";
 import assert from "node:assert/strict";
 import { spawn, type ChildProcess } from "node:child_process";
 import { createInterface } from "node:readline";
-import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { lstat, mkdtemp, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
 import { randomBytes } from "node:crypto";
@@ -127,6 +127,31 @@ test("C08 gate refuses above the client's level before any request", { skip }, a
   const d = await gd.Drive.open(r.client, "x", null, { plain: true });
   await rejectsWith(d.deleteFolder("a"), (e) => e instanceof gd.LevelError && e.op.id === "files.deleteFolder" && e.op.level === "L3", "L3 call");
   await rejectsWith(r.client.wipe(), (e) => e instanceof gd.LevelError, "wipe");
+  for (const [name, call] of [
+    ["files.delete", () => d.delete("a.txt")],
+    ["blobs.delete", () => r.client.deleteBlob("0".repeat(64))],
+    ["manifests.delete", () => r.client.deleteManifest(d.manifestKey)],
+    ["keyEnvelope.replace", () => r.keys.changePassphrase("new passphrase")],
+  ] as const) {
+    await rejectsWith(call(), (e) => e instanceof gd.LevelError && e.op.id === name && e.op.level === "L3", name);
+  }
+});
+
+test("C15 cloud save at L2 on a fresh binding", { skip }, async () => {
+  const r = await connect("ws", { gate: gd.levelGate("L2") });
+  await rejectsWith(r.keys.unlock("slot passphrase"), (e) => gd.isNotFound(e), "unlock before the first save");
+  await r.keys.create("slot passphrase");
+  await rejectsWith(new gd.Keyring(r.client).create("other passphrase"), (e) => gd.isPreconditionFailed(e), "second create");
+  await rejectsWith(r.keys.changePassphrase("new passphrase"), (e) => e instanceof gd.LevelError && e.op.id === "keyEnvelope.replace", "key replacement at L2");
+  const d = await gd.Drive.open(r.client, "saves", r.keys);
+  for (const v of ["first", "second, overwritten in place"]) await d.writeFile("slots/one.sav", new TextEncoder().encode(v));
+  assert.equal(new TextDecoder().decode(await d.readFile("slots/one.sav")), "second, overwritten in place");
+  await d.mkdir("slots/sub");
+  await rejectsWith(d.deleteSlot("slots", "sub"), (e) => gd.isNotFound(e), "deleteSlot on a folder");
+  for (const bad of ["", "sub/x.sav", "..", "."]) await rejectsWith(d.deleteSlot("slots", bad), (e) => !(e instanceof gd.LevelError), `deleteSlot(${bad})`);
+  await d.deleteSlot("slots", "one.sav");
+  await rejectsWith(d.readFile("slots/one.sav"), (e) => gd.isNotFound(e), "deleted slot");
+  await new gd.Keyring(r.client).unlock("slot passphrase");
 });
 
 test("C09 events by polling", { skip, timeout: 40_000 }, async () => {
@@ -234,4 +259,35 @@ test("C14 account bindings", { skip }, async () => {
   assert.ok(list[0]!.active && list[0]!.usedBytes > 0);
   await assert.rejects(r.acct.revokeAndDelete(list[0]!.id), gd.LevelError);
   await rejectsWith(account("nobody", { gate: gd.levelGate("L4") }).revokeAndDelete(list[0]!.id), gd.isNotFound, "another account");
+});
+
+test("C16 folder sync stays inside the local folder", { skip }, async () => {
+  const r = await connect("ws");
+  const d = await gd.Drive.open(r.client, "hostile", null, { plain: true });
+  await d.writeFile("ok.txt", new TextEncoder().encode("ok"));
+  const doc = await d.snapshot();
+  const hostile = ["../dotdot.txt", "a/../../mid.txt", "/abs.txt", "out/link.txt", "in/inner.txt"];
+  for (const p of hostile) doc.files[p] = doc.files["ok.txt"]!;
+  await r.client.putManifest(d.manifestKey, await gd.sealManifest(null, d.manifestKey, new TextEncoder().encode(JSON.stringify(doc))));
+  const tmp = await mkdtemp(path.join(tmpdir(), "gd-c16-"));
+  const local = path.join(tmp, "local"), outside = path.join(tmp, "outside");
+  try {
+    await mkdir(path.join(local, "real"), { recursive: true });
+    await mkdir(outside);
+    await symlink(outside, path.join(local, "out"));
+    await symlink(path.join(local, "real"), path.join(local, "in"));
+    for (const p of hostile) {
+      await rejectsWith(gd.pullFolder(r.client, d, local, { skip: (rel) => rel !== p && "/" + rel !== p }), () => true, `pull ${p}`);
+    }
+    for (const f of [path.join(tmp, "dotdot.txt"), path.join(tmp, "mid.txt"), path.join(outside, "link.txt"), path.join(local, "real", "inner.txt"), "/abs.txt"]) {
+      await rejectsWith(lstat(f), () => true, `pull wrote ${f}`);
+    }
+    await gd.pullFolder(r.client, d, local, { skip: (rel) => rel !== "ok.txt" });
+    await writeFile(path.join(outside, "secret.txt"), "secret");
+    await symlink(path.join(outside, "secret.txt"), path.join(local, "real", "secret.txt"));
+    const d2 = await gd.Drive.open(r.client, "pushed", null, { plain: true });
+    assert.deepEqual((await gd.pushFolder(r.client, d2, local)).uploaded, ["ok.txt"]);
+  } finally {
+    await rm(tmp, { recursive: true, force: true });
+  }
 });

@@ -200,6 +200,9 @@ func (d *Drive) pull(ctx context.Context, localDir string, opts SyncOptions, mir
 		if opts.Skip != nil && opts.Skip(rel) {
 			continue
 		}
+		if _, err := CleanPath(p); err != nil {
+			return nil, ErrUnsafePath
+		}
 		remote[rel] = true
 		e := doc.Files[p]
 		if lf, ok := local[rel]; ok && lf.size == e.Size {
@@ -216,9 +219,9 @@ func (d *Drive) pull(ctx context.Context, localDir string, opts SyncOptions, mir
 		if err != nil {
 			return nil, err
 		}
-		target := filepath.Join(localDir, filepath.FromSlash(rel))
-		if !strings.HasPrefix(target, filepath.Clean(localDir)+string(filepath.Separator)) {
-			return nil, errors.New("gendragoon: drive path escapes the local folder")
+		target, err := localTarget(localDir, rel)
+		if err != nil {
+			return nil, err
 		}
 		if err := writeAtomic(target, data, time.UnixMilli(e.MTime)); err != nil {
 			return nil, err
@@ -259,6 +262,58 @@ func (d *Drive) Mirror(ctx context.Context, localDir string, dir Direction, opts
 		return d.push(ctx, localDir, opts, true)
 	}
 	return d.pull(ctx, localDir, opts, true)
+}
+
+// ErrUnsafePath is returned when a drive path would be written outside the local folder: through "..",
+// an absolute path or a symbolic link (sync never follows links, inside the folder or out of it).
+var ErrUnsafePath = errors.New("gendragoon: drive path escapes the local folder")
+
+// localTarget maps a drive-relative path to a file under root. Every existing component is checked with
+// Lstat: symbolic links and non-folders on the way are refused, and so is an existing target that is not
+// a regular file. After the folders are created, the resolved parent must still be inside root.
+func localTarget(root, rel string) (string, error) {
+	if _, err := CleanPath(rel); err != nil {
+		return "", ErrUnsafePath
+	}
+	abs, err := filepath.Abs(root)
+	if err != nil {
+		return "", err
+	}
+	if err := os.MkdirAll(abs, 0o755); err != nil {
+		return "", err
+	}
+	real, err := filepath.EvalSymlinks(abs)
+	if err != nil {
+		return "", err
+	}
+	parts := strings.Split(rel, "/")
+	cur := real
+	for i, part := range parts {
+		cur = filepath.Join(cur, part)
+		fi, err := os.Lstat(cur)
+		if errors.Is(err, fs.ErrNotExist) {
+			break // the rest is created by writeAtomic, as plain folders
+		}
+		if err != nil {
+			return "", err
+		}
+		last := i == len(parts)-1
+		if fi.Mode()&fs.ModeSymlink != 0 || (!last && !fi.IsDir()) || (last && !fi.Mode().IsRegular()) {
+			return "", ErrUnsafePath
+		}
+	}
+	target := filepath.Join(real, filepath.FromSlash(rel))
+	if !strings.HasPrefix(target, real+string(filepath.Separator)) {
+		return "", ErrUnsafePath
+	}
+	dir := filepath.Dir(target)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return "", err
+	}
+	if resolved, err := filepath.EvalSymlinks(dir); err != nil || (resolved != real && !strings.HasPrefix(resolved, real+string(filepath.Separator))) {
+		return "", ErrUnsafePath
+	}
+	return target, nil
 }
 
 func under(p, prefix string) bool { return prefix == "" || strings.HasPrefix(p, prefix+"/") }

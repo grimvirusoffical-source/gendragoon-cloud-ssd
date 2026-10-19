@@ -166,7 +166,7 @@ export class Client extends Gated {
     const r = await this.request("blobs.head", "HEAD", `/blobs/${id}`);
     return { size: Number(r.headers.get("Content-Length") ?? 0), generation: etag(r), sha256: r.headers.get("X-Content-SHA256") ?? "" };
   }
-  /** Level L2, risk destructive. Deleting a missing blob succeeds. */
+  /** Level L3, risk destructive (a blob can belong to any file of any drive). Deleting a missing blob succeeds. */
   async deleteBlob(id: string): Promise<void> {
     needHex(id, "blob id");
     await this.request("blobs.delete", "DELETE", `/blobs/${id}`);
@@ -216,7 +216,7 @@ export class Client extends Gated {
     const r = await this.request("manifests.put", "PUT", `/manifests/${key}`, data, h);
     return { created: r.status === 201, generation: etag(r) };
   }
-  /** Level L2, risk destructive. */
+  /** Level L3, risk destructive (one manifest can be a whole drive). */
   async deleteManifest(key: string, pre?: Precondition): Promise<void> {
     needHex(key, "manifest key");
     await this.request("manifests.delete", "DELETE", `/manifests/${key}`, null, preHeaders(pre, {}));

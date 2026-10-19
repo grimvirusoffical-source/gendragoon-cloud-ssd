@@ -90,3 +90,12 @@ for round in 1 2; do
   done
 done
 echo "interop ok: ${run[*]}"
+
+# C15 for the C ABI (the Unreal plugin's first session at L2) on a fresh binding.
+if printf '%s\n' "${run[@]}" | grep -qx unreal; then
+  GD_FIRST_RUN_GRANT="$(node --input-type=module -e '
+    const r = await fetch(process.env.GD_SDK_BASE + "/connect/grants", { method: "POST", headers: { Authorization: "Bearer dev-user:firstrun-" + Date.now(), "Content-Type": "application/json" }, body: JSON.stringify({ workspaceId: "ws", scopes: ["blobs:rw"], requester: { name: "Unreal first run" } }) });
+    console.log((await r.json()).grant);')" "$sdk/engines/unreal/test/build/cabi_test" --first-run >/dev/null \
+    || { echo "unreal first run (C15) failed" >&2; exit 1; }
+  echo "unreal first run (C15) ok"
+fi

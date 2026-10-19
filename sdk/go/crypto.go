@@ -245,7 +245,8 @@ func (c *Client) Unlock(ctx context.Context, k *Keyring, passphrase string) erro
 }
 
 // CreateMasterKey generates a master key, stores its envelope (create-only) and loads it into k.
-// Level L3, risk key. Fails with ErrPreconditionFailed if the binding already has an envelope.
+// Level L2, risk key: it can only create the first envelope, never replace one. Fails with
+// ErrPreconditionFailed if the binding already has an envelope.
 func (c *Client) CreateMasterKey(ctx context.Context, k *Keyring, passphrase string) error {
 	if err := c.check("keyEnvelope.create"); err != nil {
 		return err

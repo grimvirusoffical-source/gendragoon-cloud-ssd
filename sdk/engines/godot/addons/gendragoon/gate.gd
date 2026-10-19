@@ -16,11 +16,16 @@ static func parse_level(s: String) -> int:
 	return -1
 
 
-## The effective cap: max_level lowered by GENDRAGOON_SDK_MAX_LEVEL. An unreadable value locks to L0.
+## The effective cap: max_level lowered by GENDRAGOON_SDK_MAX_LEVEL. A set but unreadable value, including an empty
+## one, locks to L0, as in the other SDKs.
 static func effective(max_level: int) -> int:
-	var env := OS.get_environment(MAX_LEVEL_ENV)
-	if env.is_empty():
+	if not OS.has_environment(MAX_LEVEL_ENV):
 		return max_level
+	return effective_for(OS.get_environment(MAX_LEVEL_ENV), max_level)
+
+
+## The cap for a GENDRAGOON_SDK_MAX_LEVEL value that is set (possibly to "").
+static func effective_for(env: String, max_level: int) -> int:
 	var l := parse_level(env)
 	return 0 if l < 0 else mini(l, max_level)
 

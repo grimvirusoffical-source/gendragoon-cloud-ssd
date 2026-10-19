@@ -1,6 +1,8 @@
 /*
  * Tests for the GenDragoon C ABI. Without arguments it runs the offline checks. With --interop [--init] it is the
- * "unreal" participant of sdk/contract/run.sh (GD_SDK_BASE, GD_SDK_KEY, GD_SDK_PASSPHRASE, GD_SDK_LANG).
+ * "unreal" participant of sdk/contract/run.sh (GD_SDK_BASE, GD_SDK_KEY, GD_SDK_PASSPHRASE, GD_SDK_LANG). With
+ * --first-run it replays the Unreal plugin's first session at its default level, L2 (contract C15), on a fresh
+ * binding redeemed from GD_FIRST_RUN_GRANT.
  *
  *   cc -I../GenDragoon/Source/ThirdParty/GenDragoonLib/include cabi_test.c -L. -lgendragoon -o cabi_test
  */
@@ -76,7 +78,49 @@ fail:
     return 1;
 }
 
+static int first_run(void) {
+    const char *base = getenv("GD_SDK_BASE"), *grant = getenv("GD_FIRST_RUN_GRANT");
+    char *err = NULL, *conn = NULL, key[128] = "";
+    gd_handle c = 0, k = 0, d = 0;
+    if (!base || !grant) { fprintf(stderr, "set GD_SDK_BASE and GD_FIRST_RUN_GRANT\n"); return 1; }
+    CHECK(gd_connect_grant(base, grant, "Unreal first run", 2, &conn, &err) == GD_OK, "C15 connect at L2");
+    const char *p = conn ? strstr(conn, "\"apiKey\":\"") : NULL;
+    if (p) { p += 10; size_t n = strcspn(p, "\""); if (n < sizeof key) memcpy(key, p, n); }
+    gd_free(conn); gd_free(err); err = NULL;
+    CHECK(gd_client_new(base, key, 2, &c, &err) == GD_OK, "C15 client at L2");
+    CHECK(gd_keyring_unlock(c, "first run passphrase", &k, &err) == GD_ERR_NOT_FOUND, "C15 no key before the first save");
+    gd_free(err); err = NULL;
+    CHECK(gd_keyring_create(c, "first run passphrase", &k, &err) == GD_OK, "C15 first master key at L2");
+    gd_free(err); err = NULL;
+    gd_handle k2 = 0;
+    CHECK(gd_keyring_create(c, "another passphrase", &k2, &err) == GD_ERR_PRECONDITION, "C15 second create cannot replace the key");
+    gd_free(err); err = NULL;
+    CHECK(gd_drive_open(c, "cloud-save", k, &d, &err) == GD_OK, "C15 open save drive");
+    const char *v1 = "slot v1", *v2 = "slot v2, overwritten";
+    CHECK(gd_drive_write(d, "saves/slot1", (const uint8_t *)v1, strlen(v1), &err) == GD_OK, "C15 save at L2");
+    CHECK(gd_drive_write(d, "saves/slot1", (const uint8_t *)v2, strlen(v2), &err) == GD_OK, "C15 overwrite at L2");
+    uint8_t *data = NULL; size_t n = 0;
+    CHECK(gd_drive_read(d, "saves/slot1", &data, &n, &err) == GD_OK && n == strlen(v2) && memcmp(data, v2, n) == 0, "C15 load");
+    gd_free(data); gd_free(err); err = NULL;
+    CHECK(gd_drive_delete(d, "saves/slot1", &err) == GD_ERR_LEVEL, "C15 general delete refused at L2 (L3)");
+    gd_free(err); err = NULL;
+    int rc = gd_drive_delete_slot(d, "saves", "../slot1", &err);
+    CHECK(rc != GD_OK && rc != GD_ERR_LEVEL, "C15 slot delete refuses a path");
+    gd_free(err); err = NULL;
+    CHECK(gd_drive_delete_slot(d, "saves", "slot1", &err) == GD_OK, "C15 slot delete at L2");
+    gd_free(err); err = NULL;
+    CHECK(gd_drive_read(d, "saves/slot1", &data, &n, &err) == GD_ERR_NOT_FOUND, "C15 deleted slot is gone");
+    gd_free(err);
+    gd_release(d); gd_release(k); gd_release(k2); gd_release(c);
+    return failures == 0 ? 0 : 1;
+}
+
 int main(int argc, char **argv) {
+    if (argc > 1 && strcmp(argv[1], "--first-run") == 0) {
+        int r = first_run();
+        printf(r == 0 ? "first-run checks passed\n" : "first-run checks failed\n");
+        return r;
+    }
     if (argc > 1 && strcmp(argv[1], "--interop") == 0) return interop(argc > 2 && strcmp(argv[2], "--init") == 0);
     int r = offline();
     printf(r == 0 ? "offline checks passed\n" : "offline checks failed\n");

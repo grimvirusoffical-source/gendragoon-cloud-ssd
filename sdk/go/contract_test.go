@@ -16,6 +16,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -290,6 +291,67 @@ func TestC08Gate(t *testing.T) {
 	if _, err := r.client.Wipe(ctx); !errors.As(err, &le) {
 		t.Fatal("wipe not gated")
 	}
+	for _, call := range []func() error{
+		func() error { return d.Delete(ctx, "a.txt") },
+		func() error { return r.client.DeleteBlob(ctx, strings.Repeat("0", 64)) },
+		func() error { return r.client.DeleteManifest(ctx, d.ManifestKey(), gd.Precondition{}) },
+		func() error { return r.client.ChangePassphrase(ctx, r.keys, "new passphrase") },
+	} {
+		if err := call(); !errors.As(err, &le) || le.Op.Level != gd.L3 {
+			t.Fatal("L2 client ran an L3 call", err)
+		}
+	}
+}
+
+// C15: what the engine cloud-save components do on a fresh binding, at their default level (L2).
+func TestC15CloudSaveAtL2(t *testing.T) {
+	r := connect(t, "ws", &gd.Options{Gate: gd.LevelGate(gd.L2)})
+	if err := r.client.Unlock(ctx, r.keys, "slot passphrase"); !errors.Is(err, gd.ErrNotFound) {
+		t.Fatal("unlock before the first save", err)
+	}
+	if err := r.client.CreateMasterKey(ctx, r.keys, "slot passphrase"); err != nil {
+		t.Fatal("first master key at L2", err)
+	}
+	if err := r.client.CreateMasterKey(ctx, r.client.NewKeyring(), "other passphrase"); !errors.Is(err, gd.ErrPreconditionFailed) {
+		t.Fatal("second create replaced the envelope", err)
+	}
+	var le *gd.LevelError
+	if err := r.client.ChangePassphrase(ctx, r.keys, "new passphrase"); !errors.As(err, &le) || le.Op.ID != "keyEnvelope.replace" {
+		t.Fatal("key replacement at L2", err)
+	}
+	d, err := r.client.OpenDrive("saves", r.keys, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, v := range []string{"first", "second, overwritten in place"} {
+		if _, err := d.WriteFile(ctx, "slots/one.sav", []byte(v), nil); err != nil {
+			t.Fatal("save at L2", err)
+		}
+	}
+	if got, err := d.ReadFile(ctx, "slots/one.sav"); err != nil || string(got) != "second, overwritten in place" {
+		t.Fatal("load", err, string(got))
+	}
+	if err := d.Mkdir(ctx, "slots/sub"); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.DeleteSlot(ctx, "slots", "sub"); !errors.Is(err, gd.ErrNotFound) {
+		t.Fatal("DeleteSlot removed a folder", err)
+	}
+	for _, bad := range []string{"", "sub/x.sav", "..", "."} {
+		if err := d.DeleteSlot(ctx, "slots", bad); err == nil || errors.As(err, &le) {
+			t.Fatalf("DeleteSlot(%q): %v", bad, err)
+		}
+	}
+	if err := d.DeleteSlot(ctx, "slots", "one.sav"); err != nil {
+		t.Fatal("delete slot at L2", err)
+	}
+	if _, err := d.ReadFile(ctx, "slots/one.sav"); !errors.Is(err, gd.ErrNotFound) {
+		t.Fatal("deleted slot still readable", err)
+	}
+	k2 := r.client.NewKeyring()
+	if err := r.client.Unlock(ctx, k2, "slot passphrase"); err != nil {
+		t.Fatal("next session unlock", err)
+	}
 }
 
 func TestC09Events(t *testing.T) {
@@ -458,5 +520,59 @@ func TestC14AccountBindings(t *testing.T) {
 	}, &gd.Options{Gate: gd.LevelGate(gd.L4)})
 	if _, err := full.RevokeAndDelete(ctx, list[0].ID); !errors.Is(err, gd.ErrNotFound) {
 		t.Fatal("another account revoked the binding", err)
+	}
+}
+
+// C16: folder sync stays inside the local folder. The drive document is written with the raw manifest
+// call, as a hostile or corrupted drive could be.
+func TestC16SyncStaysInside(t *testing.T) {
+	r := connect(t, "ws", nil)
+	d, _ := r.client.OpenDrive("hostile", nil, &gd.DriveOptions{Plain: true})
+	if _, err := d.WriteFile(ctx, "ok.txt", []byte("ok"), nil); err != nil {
+		t.Fatal(err)
+	}
+	doc, _ := d.Snapshot(ctx)
+	hostile := []string{"../dotdot.txt", "a/../../mid.txt", "/abs.txt", "out/link.txt", "in/inner.txt"}
+	for _, p := range hostile {
+		doc.Files[p] = doc.Files["ok.txt"]
+	}
+	raw, _ := json.Marshal(doc)
+	if _, err := r.client.PutManifest(ctx, d.ManifestKey(), gd.SealManifest(nil, d.ManifestKey(), raw), gd.Precondition{}); err != nil {
+		t.Fatal(err)
+	}
+	tmp := t.TempDir()
+	local, outside := filepath.Join(tmp, "local"), filepath.Join(tmp, "outside")
+	os.MkdirAll(filepath.Join(local, "real"), 0o755)
+	os.MkdirAll(outside, 0o755)
+	if err := os.Symlink(outside, filepath.Join(local, "out")); err != nil {
+		t.Skip("symlinks not available:", err)
+	}
+	os.Symlink(filepath.Join(local, "real"), filepath.Join(local, "in"))
+	for _, p := range hostile {
+		only := func(rel string) bool { return rel != p && "/"+rel != p }
+		if _, err := d.Pull(ctx, local, gd.SyncOptions{Skip: only}); err == nil {
+			t.Errorf("pull of %q succeeded", p)
+		}
+	}
+	for _, f := range []string{filepath.Join(tmp, "dotdot.txt"), filepath.Join(tmp, "mid.txt"), filepath.Join(outside, "link.txt"), filepath.Join(local, "real", "inner.txt"), "/abs.txt"} {
+		if _, err := os.Lstat(f); err == nil {
+			t.Errorf("pull wrote %s", f)
+		}
+	}
+	if _, err := d.Pull(ctx, local, gd.SyncOptions{Skip: func(rel string) bool { return rel != "ok.txt" }}); err != nil {
+		t.Fatal("pull of a normal file", err)
+	}
+	// Push never follows links: a link to a file outside the folder is not uploaded.
+	os.WriteFile(filepath.Join(outside, "secret.txt"), []byte("secret"), 0o644)
+	os.Symlink(filepath.Join(outside, "secret.txt"), filepath.Join(local, "real", "secret.txt"))
+	d2, _ := r.client.OpenDrive("pushed", nil, &gd.DriveOptions{Plain: true})
+	rep, err := d2.Push(ctx, local, gd.SyncOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range rep.Uploaded {
+		if p != "ok.txt" {
+			t.Errorf("push uploaded %q", p)
+		}
 	}
 }

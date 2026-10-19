@@ -143,10 +143,16 @@ export class TeamsClient extends Gated {
   async post(teamId: string, text: string): Promise<ChatMessage> {
     return (await this.call<{ message: ChatMessage }>("teams.chat.post", "POST", `/${seg(teamId)}/chat`, { text })).message;
   }
-  /** Posts a workspace card. A personal-workspace card also shares it with the team, so it needs the sharing level too. Level L2, risk write. */
-  async postCard(teamId: string, card: ChatCard, text = ""): Promise<ChatMessage> {
+  /**
+   * Posts a workspace card. Level L2, risk write. A card for a personal workspace is also checked at teams.share
+   * (L3): pass `{ share: true }` to share the workspace with the team in the same call, or share it first with
+   * share(); otherwise the server refuses an unshared personal workspace (SHARE_REQUIRED).
+   */
+  async postCard(teamId: string, card: ChatCard, text = "", opts: { share?: boolean } = {}): Promise<ChatMessage> {
     if (card.scope === "personal") this.check("teams.share");
-    return (await this.call<{ message: ChatMessage }>("teams.chat.post", "POST", `/${seg(teamId)}/chat`, { text, card: { scope: card.scope, workspaceId: card.workspaceId } })).message;
+    const c: Record<string, unknown> = { scope: card.scope, workspaceId: card.workspaceId };
+    if (card.scope === "personal" && opts.share === true) c.share = true;
+    return (await this.call<{ message: ChatMessage }>("teams.chat.post", "POST", `/${seg(teamId)}/chat`, { text, card: c })).message;
   }
   /** Reports a message to the platform. Level L2, risk write. */
   async report(teamId: string, seq: number, category: "spam" | "abuse" | "harassment" | "illegal" | "other", note = ""): Promise<void> {

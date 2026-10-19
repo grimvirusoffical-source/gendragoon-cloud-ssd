@@ -1,6 +1,6 @@
 // Node-only helpers: folder sync with the local disk and the PKCE loopback listener.
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
-import { mkdir, readdir, readFile, rename, rm, stat, utimes, writeFile } from "node:fs/promises";
+import { lstat, mkdir, readdir, readFile, realpath, rename, rm, stat, utimes, writeFile } from "node:fs/promises";
 import { createServer, type Server } from "node:http";
 import * as path from "node:path";
 import { fromB64u, random } from "./bytes.js";
@@ -100,6 +100,34 @@ async function writeAtomic(target: string, data: Uint8Array, mtimeMs: number) {
   await utimes(target, t, t);
 }
 
+const unsafe = () => new Error("gendragoon: drive path escapes the local folder");
+const inside = (p: string, root: string) => p === root || p.startsWith(root + path.sep);
+
+/**
+ * Maps a drive path to a file under root. Existing components are checked with lstat: symbolic links and
+ * non-folders on the way are refused, and so is an existing target that is not a regular file. After the
+ * folders are created, the resolved parent must still be inside root. Sync never follows links.
+ */
+async function localTarget(root: string, rel: string): Promise<string> {
+  try { cleanPath(rel); } catch { throw unsafe(); }
+  await mkdir(root, { recursive: true });
+  const real = await realpath(root);
+  const parts = rel.split("/");
+  let cur = real;
+  for (let i = 0; i < parts.length; i++) {
+    cur = path.join(cur, parts[i]!);
+    let st;
+    try { st = await lstat(cur); } catch (e) { if ((e as NodeJS.ErrnoException).code === "ENOENT") break; throw e; }
+    const last = i === parts.length - 1;
+    if (st.isSymbolicLink() || (!last && !st.isDirectory()) || (last && !st.isFile())) throw unsafe();
+  }
+  const target = path.join(real, ...parts);
+  if (!target.startsWith(real + path.sep)) throw unsafe();
+  await mkdir(path.dirname(target), { recursive: true });
+  if (!inside(await realpath(path.dirname(target)), real)) throw unsafe();
+  return target;
+}
+
 async function pull(d: Drive, c: Client, localDir: string, opts: SyncOptions, mirror: boolean): Promise<SyncReport> {
   const prefix = opts.prefix ?? "";
   const { doc } = await d.load();
@@ -111,15 +139,14 @@ async function pull(d: Drive, c: Client, localDir: string, opts: SyncOptions, mi
     if (!under(p, prefix)) continue;
     const rel = relOf(p, prefix);
     if (opts.skip?.(rel)) continue;
+    try { cleanPath(p); } catch { throw unsafe(); }
     remote.add(rel);
     const e = doc.files[p]!;
     const lf = local.get(rel);
     if (lf && lf.size === e.size && sha(new Uint8Array(await readFile(lf.abs))) === e.sha256) { rep.unchanged++; continue; }
     rep.downloaded.push(p);
     if (opts.dryRun) continue;
-    const target = path.resolve(root, ...rel.split("/"));
-    if (!target.startsWith(root + path.sep)) throw new Error("gendragoon: drive path escapes the local folder");
-    await writeAtomic(target, await readEntry(c, e), e.mtime);
+    await writeAtomic(await localTarget(root, rel), await readEntry(c, e), e.mtime);
   }
   if (mirror) {
     for (const rel of [...local.keys()].sort()) {

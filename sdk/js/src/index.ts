@@ -5,7 +5,7 @@ export { OPERATIONS, type OperationId } from "./operations.js";
 export * from "./client.js";
 export * from "./crypto.js";
 export { Keyring } from "./keyring.js";
-export { Drive, cleanPath, collectGarbage, DEFAULT_CHUNK_SIZE, type DriveDocument, type DriveOptions, type Entry, type FileEntry } from "./drive.js";
+export { Drive, cleanPath, slotPath, collectGarbage, DEFAULT_CHUNK_SIZE, type DriveDocument, type DriveOptions, type Entry, type FileEntry } from "./drive.js";
 export { Identity, exportShare, openShare, openShareEnvelope, createReadKey, listReadKeys, revokeReadKey, type Share, type SharedFile, type ReadKey } from "./share.js";
 export { watch, type ChangeEvent, type EventType, type WatchOptions } from "./events.js";
 export { Connector, connectLink, newPKCE, pkceChallenge, type ClientInfo, type Connection, type PKCE } from "./connect.js";

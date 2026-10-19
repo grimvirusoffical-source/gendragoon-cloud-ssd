@@ -34,7 +34,7 @@
         "summary": "Gendragoon status and connect"
       }
     },
-    "methodLevels": "Each call is at least its service's level (L2). Calls marked L3 (Trusted) or L4 (By approval) are GenDragoon's method list under SDK_LEVELS.md section 8, for ra-core to register and confirm with Josh."
+    "methodLevels": "Each call is at least its service's level (L2). Calls marked L3 (Trusted) or L4 (By approval) are GenDragoon's method list under SDK_LEVELS.md section 8, for ra-core to register. Placements decided on 2026-10-19 (QA findings B1 and B2): keyEnvelope.create (first envelope only) and files.deleteSlot are L2; keyEnvelope.replace, blobs.delete, manifests.delete and files.delete are L3."
   },
   "operations": [
     {
@@ -143,7 +143,7 @@
     },
     {
       "id": "blobs.delete",
-      "level": "L2",
+      "level": "L3",
       "service": "data.storage",
       "risk": "destructive",
       "context": "app",
@@ -195,7 +195,7 @@
     },
     {
       "id": "manifests.delete",
-      "level": "L2",
+      "level": "L3",
       "service": "data.storage",
       "risk": "destructive",
       "context": "app",
@@ -221,7 +221,7 @@
     },
     {
       "id": "keyEnvelope.create",
-      "level": "L3",
+      "level": "L2",
       "service": "data.storage",
       "risk": "key",
       "context": "app",
@@ -230,7 +230,7 @@
         "path": "/key-envelope"
       },
       "scope": "blobs:rw",
-      "summary": "Create the master key and its recovery envelope"
+      "summary": "Create the master key and its recovery envelope (only when none exists)"
     },
     {
       "id": "keyEnvelope.replace",
@@ -243,7 +243,7 @@
         "path": "/key-envelope"
       },
       "scope": "blobs:rw",
-      "summary": "Re-wrap the master key under a new recovery passphrase"
+      "summary": "Replace the recovery envelope of an existing master key (passphrase change or re-wrap)"
     },
     {
       "id": "crypto.unlock",
@@ -350,13 +350,23 @@
     },
     {
       "id": "files.delete",
-      "level": "L2",
+      "level": "L3",
       "service": "data.storage",
       "risk": "destructive",
       "context": "app",
       "http": null,
       "scope": null,
       "summary": "Delete one file or an empty folder"
+    },
+    {
+      "id": "files.deleteSlot",
+      "level": "L2",
+      "service": "data.storage",
+      "risk": "destructive",
+      "context": "app",
+      "http": null,
+      "scope": null,
+      "summary": "Delete one save slot: a single file directly inside the app's save folder"
     },
     {
       "id": "files.deleteFolder",
