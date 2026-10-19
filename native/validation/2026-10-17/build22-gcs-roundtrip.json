@@ -1,0 +1,57 @@
+{
+  "appFixture": "copied supplied smoke app",
+  "appLaunchTested": false,
+  "backendAcceptanceTested": false,
+  "bucket": "gen-dragoon-ssd",
+  "bundleSignatureAfter": true,
+  "bundleSignatureBefore": true,
+  "bytecodeWritingEnabled": false,
+  "checks": [],
+  "cloudCleanupPerformed": false,
+  "cloudOwnershipVerified": true,
+  "cloudPrefix": "GenDragoon-Validation/roundtrip-c3e370dc6d4f4a12a76d1758726681bc",
+  "elapsedSeconds": 26.697,
+  "error": "A production helper or fixture operation failed; retained evidence must be reviewed before retrying",
+  "errorType": "RuntimeError",
+  "evidenceRetained": true,
+  "helperSHA256": {
+    "gendragoon_connect.py": "c54a781a721362c3b593b97782028cfb17a6ce8119f1ab4b3761679f6af34214",
+    "gendragoon_library.py": "3102bf31b29ea6d69cbb1f5e6ec8d16c43f9dc38f87574733f6fb6f2727208e6",
+    "gendragoon_upload_workspace.py": "881445f93d77ac222e8f790584f3ded90c246cc407e5d77a9ddbc5637c7cc38e"
+  },
+  "limits": {
+    "commandSeconds": 30,
+    "finalVerificationSeconds": 20,
+    "googleAPISeconds": 35,
+    "objects": 3,
+    "originalBytes": 1048576,
+    "totalSeconds": 180
+  },
+  "nativeFirebaseSignInTested": false,
+  "objects": [],
+  "offloadRequested": false,
+  "ok": false,
+  "originalFixtureBytes": 21973,
+  "originalFixturesUnchanged": true,
+  "originalsDeleted": false,
+  "prefixInitiallyEmpty": true,
+  "productionIndexUnchanged": true,
+  "productionReserveOverridden": false,
+  "project": "gendragood-ssd",
+  "remote": "gendragoon",
+  "runID": "c3e370dc6d4f4a12a76d1758726681bc",
+  "scope": "authenticated GCS component roundtrip only",
+  "candidate": {
+    "version": "0.17.0",
+    "build": "22",
+    "productionSource": "9214bdcdc3c953c39c5015177dc6185cfc61e95d",
+    "fixtureSource": "950191aa36880b551bca8804dcf6ad545db57133"
+  },
+  "followupReadOnlySpaceDiagnostic": {
+    "freeGiB": 9.523,
+    "requiredGiB": 10.062501833,
+    "unchangedReserveGiB": 10,
+    "reproducedProductionSpaceGate": true,
+    "uploadPerformed": false
+  }
+}

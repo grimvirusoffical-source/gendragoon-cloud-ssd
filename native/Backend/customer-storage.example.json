@@ -1,0 +1,5 @@
+{
+  "projectId": "gendragood-ssd",
+  "bucket": "YOUR_PRIVATE_CUSTOMER_BUCKET",
+  "note": "The personal gen-dragoon-ssd bucket must not be used for multi-tenant customer storage. Keep real customer-storage.json local and untracked."
+}

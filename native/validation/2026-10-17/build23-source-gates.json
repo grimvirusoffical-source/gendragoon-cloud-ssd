@@ -1,0 +1,72 @@
+{
+  "phase": "pre-release source verification",
+  "backend": {
+    "tests": 162,
+    "passed": 162,
+    "failed": 0,
+    "skipped": 0,
+    "milliseconds": 7535.354929,
+    "note": "Before final legacy-client checkout compatibility patch; its focused result is recorded separately."
+  },
+  "nativeIntegrated": {
+    "tests": 187,
+    "passed": 180,
+    "skipped": 7,
+    "seconds": 8.479
+  },
+  "projectPackage": {
+    "tests": 16,
+    "passed": 16,
+    "seconds": 0.132,
+    "includesLocalHeaderMismatchRejection": true
+  },
+  "libraryMetadata": {
+    "tests": 21,
+    "passed": 21,
+    "seconds": 0.15
+  },
+  "nativePerformance": {
+    "tests": 8,
+    "passed": 8,
+    "seconds": 0.014,
+    "verifiedTLSRequired": true
+  },
+  "realMacSwiftBudget": {
+    "tests": 6,
+    "passed": 6,
+    "seconds": 1.669,
+    "platform": "arm64 macOS",
+    "fixtureIsolation": true
+  },
+  "realMacUpdateActivity": {
+    "tests": 1,
+    "passed": 1,
+    "seconds": 4.029
+  },
+  "stress": {
+    "generatedFilesVerified": 10000,
+    "parallelIndexWriters": 16,
+    "commitsVerified": 512,
+    "hostileArchivesRejected": 300,
+    "sourceMutationDetected": true,
+    "seconds": 2.956
+  },
+  "deploymentHelpers": {
+    "tests": 31,
+    "passed": 31
+  },
+  "productionDependencyAudit": {
+    "reportedVulnerabilities": 0
+  },
+  "paidCheckoutCompleted": false,
+  "fullCommercialApplicationStreamingValidated": false,
+  "allPlatformDeviceAcceptance": false,
+  "legacyClientPurchaseCompatibility": {
+    "tests": 61,
+    "passed": 61,
+    "milliseconds": 580.4,
+    "oldDraftReplayPreserved": true,
+    "unsupportedLegacyNewPurchaseRejectedBeforeWrites": true,
+    "implicitProjectFeeRedirectRemoved": true
+  }
+}

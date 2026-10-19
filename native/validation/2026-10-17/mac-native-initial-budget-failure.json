@@ -1,0 +1,30 @@
+{
+  "cases": [
+    {
+      "cacheRetained": false,
+      "case": "cleanup",
+      "openResourceVerified": true,
+      "pidPathVerified": true,
+      "sourcePreserved": true,
+      "startTimeVerified": true,
+      "state": "exited-cleaned",
+      "watcherIdentityVerified": true
+    },
+    {
+      "cacheRetained": true,
+      "case": "keep",
+      "openResourceVerified": true,
+      "pidPathVerified": true,
+      "sourcePreserved": true,
+      "startTimeVerified": true,
+      "state": "exited-retained",
+      "watcherIdentityVerified": true
+    }
+  ],
+  "error": "The disposable macOS smoke test reached its 55-second wall limit",
+  "fixtureBytes": 407326,
+  "fixtureRetained": true,
+  "ok": false,
+  "seconds": 55.002,
+  "fixturePathOmitted": true
+}

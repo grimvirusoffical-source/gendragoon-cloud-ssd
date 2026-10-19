@@ -1,0 +1,193 @@
+{
+  "timestamp": "2026-10-18T01:49:34.630852+00:00",
+  "removedOldAppBundles": [
+    {
+      "path": "~/Applications/GenDragoon Cloud SSD.previous-56f1fd2c752a4c15b6fbbbf17356d89a.app",
+      "build": "19",
+      "signatureVerified": false,
+      "removalAuthorization": "User requested removal of all old GenDragoon versions; exact owned stopped bundle",
+      "stoppedBeforeRemoval": true,
+      "removed": true
+    },
+    {
+      "path": "~/Applications/GenDragoon Cloud SSD.previous-55a7a0ae4474437fbcc523b6d1d0ff08.app",
+      "build": "22",
+      "signatureVerified": true,
+      "removalAuthorization": "User requested removal of all old GenDragoon versions; exact owned stopped bundle",
+      "stoppedBeforeRemoval": true,
+      "removed": true
+    },
+    {
+      "path": "~/Downloads/GenDragoon-Validation-0.17.0/MacBuild12-0.18.0-build28/GenDragoon Cloud SSD.app",
+      "build": "28",
+      "signatureVerified": true,
+      "removalAuthorization": "User requested removal of all old GenDragoon versions; exact owned stopped bundle",
+      "stoppedBeforeRemoval": true,
+      "removed": true
+    }
+  ],
+  "removedSupersededInstallerAssets": [
+    {
+      "path": "~/Downloads/GenDragoon-Validation-0.17.0/Downloaded-0.18.0-build28/GenDragoon-Cloud-SSD-Mac-v0.18.0.zip",
+      "build": "28",
+      "bytes": 69722436,
+      "removed": true
+    },
+    {
+      "path": "~/Downloads/GenDragoon-Validation-0.17.0/Downloaded-0.18.0-build28/install-macos.py",
+      "build": "28",
+      "bytes": 28569,
+      "removed": true
+    },
+    {
+      "path": "~/Downloads/GenDragoon-Validation-0.17.0/Downloaded-0.18.0-build28/Install.command",
+      "build": "28",
+      "bytes": 476,
+      "removed": true
+    },
+    {
+      "path": "~/Downloads/GenDragoon-Validation-0.17.0/ReleasePackage-0.17.0-build22/install-macos.py",
+      "build": "22",
+      "bytes": 28569,
+      "removed": true
+    },
+    {
+      "path": "~/Downloads/GenDragoon-Validation-0.17.0/ReleasePackage-0.17.0-build22/Install.command",
+      "build": "22",
+      "bytes": 476,
+      "removed": true
+    },
+    {
+      "path": "~/Downloads/GenDragoon-Validation-0.17.0/ReleasePackage-0.18.0-build28/GenDragoon-Cloud-SSD-Mac-v0.18.0.zip",
+      "build": "28",
+      "bytes": 69722436,
+      "removed": true
+    },
+    {
+      "path": "~/Downloads/GenDragoon-Validation-0.17.0/ReleasePackage-0.18.0-build28/install-macos.py",
+      "build": "28",
+      "bytes": 28569,
+      "removed": true
+    },
+    {
+      "path": "~/Downloads/GenDragoon-Validation-0.17.0/ReleasePackage-0.18.0-build28/Install.command",
+      "build": "28",
+      "bytes": 476,
+      "removed": true
+    },
+    {
+      "path": "~/Downloads/GenDragoon-Validation-0.17.0/Downloaded-0.17.0-build22/GenDragoon-Cloud-SSD-Mac-v0.17.0.zip",
+      "build": "22",
+      "bytes": 69509769,
+      "removed": true
+    },
+    {
+      "path": "~/Downloads/GenDragoon-Validation-0.17.0/Downloaded-0.17.0-build22/install-macos.py",
+      "build": "22",
+      "bytes": 28569,
+      "removed": true
+    },
+    {
+      "path": "~/Downloads/GenDragoon-Validation-0.17.0/Downloaded-0.17.0-build22/Install.command",
+      "build": "22",
+      "bytes": 476,
+      "removed": true
+    },
+    {
+      "path": "~/Downloads/GenDragoon-Validation-0.17.0/ReleasePackage-0.18.0-build26/GenDragoon-Cloud-SSD-Mac-v0.18.0.zip",
+      "build": "26",
+      "bytes": 69722158,
+      "removed": true
+    },
+    {
+      "path": "~/Downloads/GenDragoon-Validation-0.17.0/ReleasePackage-0.18.0-build26/install-macos.py",
+      "build": "26",
+      "bytes": 28569,
+      "removed": true
+    },
+    {
+      "path": "~/Downloads/GenDragoon-Validation-0.17.0/ReleasePackage-0.18.0-build26/Install.command",
+      "build": "26",
+      "bytes": 476,
+      "removed": true
+    },
+    {
+      "path": "~/Downloads/GenDragoon-Validation-0.17.0/ReleasePackage-0.18.0-build24/GenDragoon-Cloud-SSD-Mac-v0.18.0.zip",
+      "build": "24",
+      "bytes": 69715030,
+      "removed": true
+    },
+    {
+      "path": "~/Downloads/GenDragoon-Validation-0.17.0/ReleasePackage-0.18.0-build24/install-macos.py",
+      "build": "24",
+      "bytes": 28569,
+      "removed": true
+    },
+    {
+      "path": "~/Downloads/GenDragoon-Validation-0.17.0/ReleasePackage-0.18.0-build24/Install.command",
+      "build": "24",
+      "bytes": 476,
+      "removed": true
+    },
+    {
+      "path": "~/Downloads/GenDragoon-Validation-0.17.0/ReleasePackage-0.18.0-build23/GenDragoon-Cloud-SSD-Mac-v0.18.0.zip",
+      "build": "23",
+      "bytes": 69715035,
+      "removed": true
+    },
+    {
+      "path": "~/Downloads/GenDragoon-Validation-0.17.0/ReleasePackage-0.18.0-build23/install-macos.py",
+      "build": "23",
+      "bytes": 28569,
+      "removed": true
+    },
+    {
+      "path": "~/Downloads/GenDragoon-Validation-0.17.0/ReleasePackage-0.18.0-build23/Install.command",
+      "build": "23",
+      "bytes": 476,
+      "removed": true
+    },
+    {
+      "path": "~/Downloads/GenDragoon-Validation-0.17.0/Downloaded-0.18.0-build24/GenDragoon-Cloud-SSD-Mac-v0.18.0.zip",
+      "build": "24",
+      "bytes": 69715030,
+      "removed": true
+    },
+    {
+      "path": "~/Downloads/GenDragoon-Validation-0.17.0/Downloaded-0.18.0-build24/install-macos.py",
+      "build": "24",
+      "bytes": 28569,
+      "removed": true
+    },
+    {
+      "path": "~/Downloads/GenDragoon-Validation-0.17.0/Downloaded-0.18.0-build24/Install.command",
+      "build": "24",
+      "bytes": 476,
+      "removed": true
+    },
+    {
+      "path": "~/Downloads/GenDragoon-Validation-0.17.0/ReleasePackage-0.18.0-build25/GenDragoon-Cloud-SSD-Mac-v0.18.0.zip",
+      "build": "25",
+      "bytes": 69722165,
+      "removed": true
+    },
+    {
+      "path": "~/Downloads/GenDragoon-Validation-0.17.0/ReleasePackage-0.18.0-build25/install-macos.py",
+      "build": "25",
+      "bytes": 28569,
+      "removed": true
+    },
+    {
+      "path": "~/Downloads/GenDragoon-Validation-0.17.0/ReleasePackage-0.18.0-build25/Install.command",
+      "build": "25",
+      "bytes": 476,
+      "removed": true
+    }
+  ],
+  "freeBeforeBytes": 4685942784,
+  "freeAfterBytes": 6065213440,
+  "currentAppRetained": true,
+  "cloudFilesAndPreferencesPreserved": true,
+  "bootstrap27AndFinal29Retained": true,
+  "passed": true
+}

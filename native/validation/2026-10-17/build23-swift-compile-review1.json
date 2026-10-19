@@ -1,0 +1,11 @@
+{
+  "sourceSHA256": "04179c26a27add4213297f6a83bcc7a581761ad0496d120b24895c0088a6e9e4",
+  "sourceFiles": 40,
+  "freeBeforeBytes": 17772961792,
+  "minimumFreeBytes": 10737418240,
+  "compiled": true,
+  "exitCode": 0,
+  "seconds": 43.385,
+  "freeAfterBytes": 17688997888,
+  "note": "Initial 40-file source snapshot. Subsequent reviewed changes require the final signed build compilation."
+}

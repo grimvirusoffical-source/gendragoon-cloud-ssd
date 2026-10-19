@@ -1,0 +1,33 @@
+{
+  "timestamp": "2026-10-18T01:59:02.739769+00:00",
+  "tag": "v0.18.0-rc.3",
+  "url": "https://github.com/grimvirusoffical-source/gendragoon-cloud-ssd/releases/tag/v0.18.0-rc.3",
+  "isDraft": false,
+  "isPrerelease": true,
+  "sourceCommit": "577c2a7c98f3c70a00937594c6a206dd353b5004",
+  "validationCommit": "0bb1d5abb05e7571b230922085c22419705527b0",
+  "testFixtureOnlyDifference": true,
+  "allFiveDownloadedAssetHashesMatch": true,
+  "assetHashes": {
+    "GenDragoon-Cloud-SSD-Mac-v0.18.0.zip": "c087b8fb5bb42144b91805c5258e8674d4d321c8fe6ebff3a036c39e1f0b01d5",
+    "sha256.txt": "3982d1075334fa4373504442c05d2c7074d4feff4a9e02a9f97b05abfac362dd",
+    "package-status.json": "2d07037a8751a23e11fdaa09942605991d5dcbd1dd40e2859b499e3b5f4fdff1",
+    "install-macos.py": "e452642e8116e079e5a3fcac82f25544b533ccb0d62aca38509c9bdddc72abf9",
+    "Install.command": "ea5a15cf7c58b5e0fb6179db29055e33be4c668e3b7967bbb34b9991a763f9f3"
+  },
+  "archiveVerification": {
+    "apple_signature_and_gatekeeper": "not_assessed",
+    "architecture": "arm64",
+    "archive": "~/Downloads/GenDragoon-Validation-0.17.0/Downloaded-0.18.0-build29/GenDragoon-Cloud-SSD-Mac-v0.18.0.zip",
+    "archive_bytes": 69722465,
+    "build": "29",
+    "bundle_id": "app.gendragoon.cloudssd",
+    "expanded_bytes": 215150127,
+    "minimum_macos": "14.0",
+    "release_status": "draft",
+    "sha256": "c087b8fb5bb42144b91805c5258e8674d4d321c8fe6ebff3a036c39e1f0b01d5",
+    "status": "package_verified_only",
+    "version": "0.18.0"
+  },
+  "passed": true
+}

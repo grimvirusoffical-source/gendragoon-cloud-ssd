@@ -1,0 +1,14 @@
+<resources>
+    <style name="Theme.GenDragoon.Base" parent="Theme.Material3.Dark.NoActionBar">
+        <item name="colorPrimary">#C5A0FF</item>
+        <item name="colorOnPrimary">#231333</item>
+        <item name="colorSecondary">#C5A0FF</item>
+        <item name="colorSurface">#1D1829</item>
+        <item name="android:colorBackground">#10101A</item>
+        <item name="android:windowLightStatusBar">false</item>
+        <item name="android:statusBarColor">#10101A</item>
+        <item name="android:navigationBarColor">#10101A</item>
+        <item name="android:fontFamily">sans</item>
+    </style>
+    <style name="Theme.GenDragoon" parent="Theme.GenDragoon.Base"/>
+</resources>

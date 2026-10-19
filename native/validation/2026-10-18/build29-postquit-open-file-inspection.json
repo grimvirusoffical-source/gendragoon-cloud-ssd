@@ -1,0 +1,10 @@
+{
+  "inspection": "Identical current-user lsof snapshot with a longer read-only deadline",
+  "timeoutSeconds": 45,
+  "exitCode": 0,
+  "inspectedFileCount": 19032,
+  "protectedOpenFiles": [],
+  "stderrBytes": 0,
+  "completed": true,
+  "elapsedSeconds": 2.968
+}

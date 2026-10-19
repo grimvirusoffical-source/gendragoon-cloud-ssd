@@ -1,0 +1,45 @@
+{
+  "startedAt": "2026-10-18T00:22:29.200849+00:00",
+  "elapsedSeconds": 252.226,
+  "appVersion": "0.18.0",
+  "installedBuild": "23",
+  "initialBuild": 23,
+  "initialPids": [
+    49493
+  ],
+  "finalPids": [
+    49493
+  ],
+  "timeline": [
+    {
+      "elapsedSeconds": 2.17,
+      "installedBuild": "23",
+      "pids": [
+        49493
+      ],
+      "updateState": null,
+      "updateBuild": null,
+      "launchStatus": null
+    },
+    {
+      "elapsedSeconds": 6.29,
+      "installedBuild": "23",
+      "pids": [
+        49493
+      ],
+      "updateState": "ready",
+      "updateBuild": 24,
+      "launchStatus": null
+    }
+  ],
+  "updateReceipt": {
+    "state": "ready",
+    "updatedAt": 1792282954.88571,
+    "version": "v0.18.0",
+    "build": 24,
+    "channel": "preview"
+  },
+  "externalUpdaterInvoked": false,
+  "externalQuitInvoked": false,
+  "passed": false
+}

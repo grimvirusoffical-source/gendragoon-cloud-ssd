@@ -1,0 +1,8 @@
+{
+  "at": "2026-10-18T02:18:24.952161+00:00",
+  "stage": "before production fix; Firestore Standard constraint added to fixture",
+  "exitCode": 1,
+  "seconds": 0.37,
+  "expectedRegressionObserved": true,
+  "output": "\u2716 free upload, resume, SHA verification, range restore and quota integrity (84.538291ms)\n\u2139 tests 1\n\u2139 suites 0\n\u2139 pass 0\n\u2139 fail 1\n\u2139 cancelled 0\n\u2139 skipped 0\n\u2139 todo 0\n\u2139 duration_ms 298.709167\n\n\u2716 failing tests:\n\ntest at transfer_v3.test.js:73:1\n\u2716 free upload, resume, SHA verification, range restore and quota integrity (84.538291ms)\n  AssertionError [ERR_ASSERTION]: {\"error\":\"Transfer unavailable; retry safely\"}\n  \n  503 !== 200\n  \n      at TestContext.<anonymous> (~/Downloads/GenDragoon-Validation-0.17.0/Repository/native/Backend/transfer_v3.test.js:78:54)\n      at process.processTicksAndRejections (node:internal/process/task_queues:104:5)\n      at async Test.run (node:internal/test_runner/test:1409:7)\n      at async startSubtestAfterBootstrap (node:internal/test_runner/harness:387:3) {\n    generatedMessage: false,\n    code: 'ERR_ASSERTION',\n    actual: 503,\n    expected: 200,\n    operator: 'strictEqual',\n    diff: 'simple'\n  }\n"
+}
