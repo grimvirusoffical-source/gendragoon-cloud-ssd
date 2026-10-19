@@ -6,6 +6,11 @@ import Foundation
 /// `xcodebuild test -configuration Release`; `testReleaseBuildRejectsPlaceholderSupportContact`
 /// fails while this flag is true. Debug test runs only check that the placeholder is still
 /// the shared value.
+enum AboutCopy {
+    static let ownership = "Gendragoon is developed and maintained by Red-XAI LLC. Red-XAI LLC is wholly owned by GRIM-VIRUS, an independent recording artist who leads development under the alias MainDirectory. © Red-XAI LLC. All rights reserved."
+    static let copyright = "© Red-XAI LLC"
+}
+
 enum SupportContact {
     /// Shared-core placeholder. Not a deliverable address.
     static let address="SUPPORT_CONTACT_PLACEHOLDER@invalid"

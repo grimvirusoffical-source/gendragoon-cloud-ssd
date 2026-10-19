@@ -2,6 +2,7 @@
   "name": "gendragoon-identity-billing",
   "version": "0.18.0",
   "private": true,
+  "author": "Red-XAI LLC",
   "type": "commonjs",
   "scripts": {
     "start": "node free_server.js",
