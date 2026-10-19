@@ -56,8 +56,7 @@ function createLoginGate({verifyIdToken,fetchTerms,decorate,accountsGate}={}){
     const status=Number.isInteger(error?.status)?error.status:401;
     const message=typeof error?.expose==="string"?error.expose:(status===403?"Google provider required":"Invalid or expired Firebase login");
     const body={error:message};
-    if(typeof error?.code==="string")body.code=error.code;
-    if(Array.isArray(error?.pending))body.pending=error.pending;
+    if(Array.isArray(error?.pending)){body.code=error.code;body.pending=error.pending;}
     res.status(status).json(body);
    });
   };

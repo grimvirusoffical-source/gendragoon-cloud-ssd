@@ -123,7 +123,7 @@ test("N2b a repeat send after the post was sent must keep expireAt (retention)",
 for(const nodeEnv of [undefined,"test","development"]){
  test("N3 K_SERVICE gate, NODE_ENV="+nodeEnv+": invalid -> exit 1 with no value; valid -> server starts",async()=>{
   const run=url=>new Promise(resolve=>{
-   const env={PATH:process.env.PATH,K_SERVICE:"gendragoon-free",PORT:"0",CUSTOMER_BUCKET:"gendragoon-test-placeholder",STORAGE_PROJECT_ID:"gendragood-ssd",
+   const env={PATH:process.env.PATH,K_SERVICE:"gendragoon-free",PORT:"0",ACCOUNTS_SEAL_KEY:Buffer.alloc(32,7).toString("base64"),CUSTOMER_BUCKET:"gendragoon-test-placeholder",STORAGE_PROJECT_ID:"gendragood-ssd",
     FIRESTORE_EMULATOR_HOST:"127.0.0.1:1",GOOGLE_APPLICATION_CREDENTIALS:"/nonexistent"};
    if(nodeEnv)env.NODE_ENV=nodeEnv;if(url!==undefined)env.SUPPORT_DISCORD_WEBHOOK_URL=url;
    const child=spawn(process.execPath,["-e","require('./free_server.js').start()"],{cwd:__dirname,env});

@@ -333,8 +333,6 @@ app.delete("/v1/files/:id",auth,requireWrite,async(req,res)=>{
 });
 require("./v2_errors").installV2Errors(app);
 function start(port=Number(process.env.PORT||8080)){
- const accountsGate=require("./accounts").accountsStartup(process.env);
- if(accountsGate.exit){console.error(accountsGate.message);process.exit(1);}
  const deletion=require("./account_delete");
  const gate=deletion.supportDiscordStartup(process.env);
  if(gate.exit){
@@ -342,6 +340,8 @@ function start(port=Number(process.env.PORT||8080)){
   process.exit(gate.code||1);
  }
  if(gate.warn)console.warn(gate.message);
+ const accountsGate=require("./accounts").accountsStartup(process.env);
+ if(accountsGate.exit){console.error(accountsGate.message);process.exit(1);}
  firestore();
  const timer=setInterval(()=>{
   Promise.resolve(deletion.sweepRegisteredSupportNotifications()).catch(()=>console.error("support_notify_sweep_failed"));
