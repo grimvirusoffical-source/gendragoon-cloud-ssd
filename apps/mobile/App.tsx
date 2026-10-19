@@ -336,6 +336,7 @@ export function MobileRoot(props: {
                 return created;
               }}
               onConfirmTwoFactor={async (code) => { await accounts.withSession(accountSession.current).confirmTwoFactor(code); }}
+              onResendPhoneCode={(phone) => accounts.withSession(accountSession.current).setupTwoFactor({ method: "phone", phone })}
               onDone={() => navigationRef.navigate("SignIn")}
             />
           )}

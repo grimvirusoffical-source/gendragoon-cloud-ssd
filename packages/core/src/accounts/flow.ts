@@ -14,14 +14,30 @@ export interface TwoFactorOption {
   label: string;
   detail: string;
   available: boolean;
+  /** Offered only when the server's rules say it is available (phone needs a configured SMS provider). */
+  serverGated?: boolean;
 }
 
 export const TWO_FACTOR_OPTIONS: readonly TwoFactorOption[] = [
   { method: "app", label: "Authenticator app", detail: "Scan a QR code with an app like 1Password, Authy or Google Authenticator.", available: true },
-  { method: "phone", label: "Phone (text message)", detail: "We text a 6-digit code to your phone.", available: true },
+  { method: "phone", label: "Phone (text message)", detail: "We text a 6-digit code to your phone.", available: true, serverGated: true },
   { method: "redxai_auth", label: "Red-XAI Auth", detail: "Coming soon", available: false },
   { method: "none", label: "No two-factor sign-in", detail: "Not recommended.", available: true },
 ];
+
+/**
+ * Whether a 2FA choice can be picked. The server's `rules.twoFactor` list has the last word: anything it marks
+ * unavailable is off, and server-gated methods (phone) stay off until the server says they are available, so
+ * Phone appears only once the backend has a text-message provider configured.
+ */
+export function twoFactorOptionAvailable(
+  option: TwoFactorOption,
+  server?: ReadonlyArray<{ method: TwoFactorMethod; available: boolean }> | null,
+): boolean {
+  if (!option.available) return false;
+  const said = server?.find((m) => m.method === option.method)?.available;
+  return option.serverGated ? said === true : said !== false;
+}
 
 /**
  * Terms gate. The person scrolls to the end, presses "Read ToS" (the server

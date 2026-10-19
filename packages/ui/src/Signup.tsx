@@ -6,6 +6,7 @@ import {
   TOS_GATE_START,
   TWO_FACTOR_OPTIONS,
   accountErrorText,
+  twoFactorOptionAvailable,
   birthDateFromIso,
   birthDateToIso,
   copyAcross,
@@ -142,8 +143,7 @@ export function TwoFactorPicker(props: {
     <fieldset className="twofa" data-testid="twofa">
       <legend>Two-factor sign-in</legend>
       {TWO_FACTOR_OPTIONS.map((option) => {
-        const serverSays = props.available?.find((m) => m.method === option.method)?.available;
-        const available = option.available && serverSays !== false;
+        const available = twoFactorOptionAvailable(option, props.available);
         return (
           <label key={option.method} className={`twofa-option${props.value === option.method ? " active" : ""}${available ? "" : " disabled"}`} data-testid={`twofa-${option.method}`}>
             <input type="radio" name="twofa" value={option.method} checked={props.value === option.method} disabled={!available}
@@ -230,12 +230,15 @@ export function QrCode(props: { value: string; label: string }) {
 
 /** After sign-up: scan the QR (authenticator) or enter the texted code (phone). */
 export function TwoFactorSetup(props: {
-  result: Pick<SignupResult, "totp" | "phoneMasked">;
+  result: Pick<SignupResult, "totp" | "phoneMasked" | "smsError">;
   onConfirm: (code: string) => Promise<void>;
+  /** Phone only: sends a new setup code. */
+  onResend?: () => Promise<{ phoneMasked?: string }>;
 }) {
   const [code, setCode] = useState("");
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(props.result.smsError ?? null);
   const [busy, setBusy] = useState(false);
+  const [masked, setMasked] = useState(props.result.phoneMasked);
   return (
     <section className="twofa-setup" data-testid="twofa-setup">
       {props.result.totp ? (
@@ -245,7 +248,7 @@ export function TwoFactorSetup(props: {
           <p className="sub">Can't scan? Enter this key: <code data-testid="totp-secret">{props.result.totp.secret.replace(/(.{4})/g, "$1 ").trim()}</code></p>
         </>
       ) : (
-        <h3>Enter the code we texted to {props.result.phoneMasked}</h3>
+        <h3>{masked ? <>Enter the code we texted to {masked}</> : "Enter the code we text to your phone"}</h3>
       )}
       <label className="field">
         <span>6-digit code</span>
@@ -257,6 +260,14 @@ export function TwoFactorSetup(props: {
           setBusy(true); setError(null);
           try { await props.onConfirm(code); } catch (e) { setError((e as { code?: string }).code ?? "code_invalid"); } finally { setBusy(false); }
         }}>Turn on two-factor sign-in</button>
+      {!props.result.totp && props.onResend ? (
+        <button type="button" className="btn-ghost" data-testid="twofa-resend" disabled={busy}
+          onClick={async () => {
+            setBusy(true); setError(null);
+            try { const sent = await props.onResend!(); if (sent.phoneMasked) setMasked(sent.phoneMasked); }
+            catch (e) { setError((e as { code?: string }).code ?? "sms_send_failed"); } finally { setBusy(false); }
+          }}>Send a new code</button>
+      ) : null}
     </section>
   );
 }
@@ -278,6 +289,8 @@ export function SignupForm(props: {
   quick?: { email: string };
   onSubmit: (fields: SignupSubmit) => Promise<SignupResult>;
   onConfirmTwoFactor: (code: string) => Promise<void>;
+  /** Sends a new phone setup code to the number entered at sign-up. */
+  onResendPhoneCode?: (phone: string) => Promise<{ phoneMasked?: string }>;
   onDone: () => void;
   onSignIn?: () => void;
 }) {
@@ -320,7 +333,9 @@ export function SignupForm(props: {
   const blocking = Object.keys(errors).length > 0 || Boolean(remote.username) || Boolean(remote.email);
 
   if (step === "twofa" && result) {
-    return <TwoFactorSetup result={result} onConfirm={async (code) => { await props.onConfirmTwoFactor(code); props.onDone(); }} />;
+    const resend = props.onResendPhoneCode;
+    return <TwoFactorSetup result={result} onConfirm={async (code) => { await props.onConfirmTwoFactor(code); props.onDone(); }}
+      onResend={resend ? () => resend(twoFactor.phone) : undefined} />;
   }
 
   if (step === "terms") {

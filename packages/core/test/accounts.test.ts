@@ -24,6 +24,7 @@ import {
   qrSvgPath,
   reduceTosGate,
   scrolledToEnd,
+  twoFactorOptionAvailable,
   usernameKey,
   usernameRules,
   validateSignup,
@@ -82,6 +83,17 @@ describe("hints and inputs", () => {
   it("2FA options: Red-XAI Auth is listed but not available", () => {
     expect(TWO_FACTOR_OPTIONS.map((o) => o.method)).toEqual(["app", "phone", "redxai_auth", "none"]);
     expect(TWO_FACTOR_OPTIONS.find((o) => o.method === "redxai_auth")).toMatchObject({ available: false, detail: "Coming soon" });
+  });
+  it("2FA availability: Phone needs the server to say a text-message provider is configured", () => {
+    const opt = (m: string) => TWO_FACTOR_OPTIONS.find((o) => o.method === m)!;
+    expect(twoFactorOptionAvailable(opt("phone"), undefined)).toBe(false);
+    expect(twoFactorOptionAvailable(opt("phone"), [{ method: "app", available: true }])).toBe(false);
+    expect(twoFactorOptionAvailable(opt("phone"), [{ method: "phone", available: false }])).toBe(false);
+    expect(twoFactorOptionAvailable(opt("phone"), [{ method: "phone", available: true }])).toBe(true);
+    expect(twoFactorOptionAvailable(opt("app"), undefined)).toBe(true);
+    expect(twoFactorOptionAvailable(opt("app"), [{ method: "app", available: false }])).toBe(false);
+    expect(twoFactorOptionAvailable(opt("none"), null)).toBe(true);
+    expect(twoFactorOptionAvailable(opt("redxai_auth"), [{ method: "redxai_auth", available: true }])).toBe(false);
   });
 });
 

@@ -8,6 +8,7 @@ import {
   TOS_GATE_START,
   TWO_FACTOR_OPTIONS,
   accountErrorText,
+  twoFactorOptionAvailable,
   copyAcross,
   formatBirthDate,
   maskBirthDateInput,
@@ -156,7 +157,7 @@ export function TwoFactorChoice(props: { value: TwoFactorMethod | ""; available?
     <View style={styles.section} accessibilityRole="radiogroup" testID="twofa">
       <Text style={styles.label}>Two-factor sign-in</Text>
       {TWO_FACTOR_OPTIONS.map((option) => {
-        const available = option.available && props.available?.find((m) => m.method === option.method)?.available !== false;
+        const available = twoFactorOptionAvailable(option, props.available);
         const detail = available ? option.detail : option.method === "redxai_auth" ? "Coming soon" : "Not available yet";
         return (
           <View key={option.method}>
@@ -251,6 +252,8 @@ export function SignupScreen(props: {
   quick?: { email: string };
   onSubmit: (fields: MobileSignupSubmit) => Promise<SignupResult>;
   onConfirmTwoFactor: (code: string) => Promise<void>;
+  /** Sends a new phone setup code to the number entered at sign-up. */
+  onResendPhoneCode?: (phone: string) => Promise<{ phoneMasked?: string }>;
   onDone: () => void;
 }) {
   const styles = useStyles(makeStyles);
@@ -295,6 +298,7 @@ export function SignupScreen(props: {
       <Screen testID="twofa-setup">
         <FadeIn stepKey="twofa">
           <Title>{result.totp ? "Scan with your authenticator app" : `Enter the code we texted to ${result.phoneMasked ?? "your phone"}`}</Title>
+          {result.smsError && !serverError ? <Banner tone="danger" testID="twofa-sms-error">{accountErrorText(result.smsError)}</Banner> : null}
           {result.totp ? <QrCodeMobile value={result.totp.otpauthUri} /> : null}
           {result.totp ? <Text style={styles.helper} selectable testID="totp-secret">{result.totp.secret.replace(/(.{4})/g, "$1 ").trim()}</Text> : null}
           <Input label="6-digit code" testID="twofa-code" keyboardType="number-pad" value={code} onChange={(v) => setCode(v.replace(/\D/g, "").slice(0, 6))} error={serverError} />
@@ -302,6 +306,15 @@ export function SignupScreen(props: {
             setBusy(true); setServerError(null);
             try { await props.onConfirmTwoFactor(code); props.onDone(); } catch (e) { setServerError((e as { code?: string }).code ?? "code_invalid"); } finally { setBusy(false); }
           }} />
+          {!result.totp && props.onResendPhoneCode ? (
+            <Button testID="twofa-resend" label="Send a new code" tone="ghost" disabled={busy} onPress={async () => {
+              setBusy(true); setServerError(null);
+              try {
+                const sent = await props.onResendPhoneCode!(twoFactor.phone);
+                setResult({ ...result, smsError: undefined, phoneMasked: sent.phoneMasked ?? result.phoneMasked });
+              } catch (e) { setServerError((e as { code?: string }).code ?? "sms_send_failed"); } finally { setBusy(false); }
+            }} />
+          ) : null}
         </FadeIn>
       </Screen>
     );

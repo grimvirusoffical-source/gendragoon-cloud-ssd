@@ -73,6 +73,8 @@ export interface SignupResult {
   pending: AccountPending[];
   totp?: { secret: string; otpauthUri: string };
   phoneMasked?: string;
+  /** Set when the account was created but the first text message could not be sent (`sms_send_failed`, `phone_undeliverable`). */
+  smsError?: string;
   /** Red-XAI Accounts `/v1/signup` returns the new `rxa_s_` session. */
   session?: string;
 }

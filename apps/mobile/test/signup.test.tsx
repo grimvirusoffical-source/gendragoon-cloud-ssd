@@ -53,6 +53,14 @@ describe("mobile sign-up", () => {
     expect(screen.getByTestId("no2fa-warning")).toHaveTextContent(/Red-XAI LLC isn't responsible/);
     expect(screen.getByTestId("no2fa-ack")).toBeTruthy();
   });
+  it("Phone is off until the server's rules say a text-message provider is configured", async () => {
+    const off = await render(<TwoFactorChoice value="" phone="" ack={false} onChange={jest.fn()} />);
+    expect(off.getByTestId("twofa-phone")).toBeDisabled();
+  });
+  it("Phone can be picked once the server says it is available", async () => {
+    const on = await render(<TwoFactorChoice value="" phone="" ack={false} onChange={jest.fn()} available={[{ method: "phone", available: true }]} />);
+    expect(on.getByTestId("twofa-phone")).not.toBeDisabled();
+  });
 
   it("Read ToS waits for the end of the text; Agree waits for Read", async () => {
     const onRead = jest.fn(async () => undefined), onAgree = jest.fn(async () => undefined);

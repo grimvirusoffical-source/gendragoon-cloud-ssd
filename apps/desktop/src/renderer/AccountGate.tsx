@@ -104,6 +104,10 @@ export function AccountGate(props: { deps: AccountGateDeps; onReady: () => void 
             return created;
           }}
           onConfirmTwoFactor={async (code) => { await sessionRef.current?.confirmTwoFactor(code); }}
+          onResendPhoneCode={async (phone) => {
+            if (!sessionRef.current) throw Object.assign(new Error("unavailable"), { code: "unavailable" });
+            return sessionRef.current.setupTwoFactor({ method: "phone", phone });
+          }}
           onDone={() => setStage({ name: "finish-in-browser" })}
           onSignIn={() => setStage({ name: "start" })}
         />

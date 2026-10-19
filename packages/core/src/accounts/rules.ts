@@ -285,6 +285,8 @@ export const ACCOUNT_ERROR_TEXT: Record<string, string> = {
   no2fa_ack_required: "Confirm that you accept the risk of not using two-factor sign-in.",
   phone_invalid: "Enter the number with its country code, like +1 555 123 4567.",
   sms_unavailable: "Text-message codes aren't available yet. Choose another option.",
+  sms_send_failed: "We couldn't send the text message. Try again in a moment.",
+  phone_undeliverable: "We can't send text messages to that number. Check it or choose another option.",
   false_info_ack_required: "Confirm that your details are true.",
   tos_required: "Read and agree to the Terms of Service to continue.",
   tos_not_read: "Read the Terms of Service to the end first.",

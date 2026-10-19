@@ -5,7 +5,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { renderToStaticMarkup } from "react-dom/server";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { PairedField, RequirementHints, SignupForm, TermsGate, TwoFactorPicker, type SignupApi } from "../src/Signup.js";
+import { PairedField, RequirementHints, SignupForm, TermsGate, TwoFactorPicker, TwoFactorSetup, type SignupApi } from "../src/Signup.js";
 import { passwordRules, usernameRules, type TermsDocument } from "@gendragoon/core";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -94,6 +94,23 @@ describe("2FA choices", () => {
     const html = renderToStaticMarkup(<TwoFactorPicker value="" phone="" acceptNo2faRisk={false} onChange={() => {}}
       available={[{ method: "phone", available: false }, { method: "app", available: true }]} />);
     expect(html).toMatch(/data-testid="twofa-phone"[\s\S]*?disabled=""[\s\S]*?Not available yet/);
+  });
+  it("Phone stays off until the server's rules say it is available, then it can be picked", () => {
+    const off = renderToStaticMarkup(<TwoFactorPicker value="" phone="" acceptNo2faRisk={false} onChange={() => {}} />);
+    expect(off).toMatch(/data-testid="twofa-phone"[\s\S]*?disabled=""[\s\S]*?Not available yet/);
+    const on = renderToStaticMarkup(<TwoFactorPicker value="" phone="" acceptNo2faRisk={false} onChange={() => {}}
+      available={[{ method: "phone", available: true }]} />);
+    expect(on).toMatch(/data-testid="twofa-phone"[\s\S]*?We text a 6-digit code/);
+    expect(on).not.toMatch(/data-testid="twofa-phone"[^>]*>\s*<input[^>]*disabled/);
+  });
+  it("a text that couldn't be sent is shown after sign-up, and Send a new code retries", async () => {
+    const onResend = vi.fn(async () => ({ phoneMasked: "+1******4567" }));
+    mount(<TwoFactorSetup result={{ smsError: "sms_send_failed" }} onConfirm={async () => {}} onResend={onResend} />);
+    expect(host!.textContent).toContain("We couldn't send the text message");
+    await act(async () => { (host!.querySelector('[data-testid="twofa-resend"]') as HTMLButtonElement).click(); });
+    expect(onResend).toHaveBeenCalledTimes(1);
+    expect(host!.textContent).toContain("Enter the code we texted to +1******4567");
+    expect(host!.textContent).not.toContain("We couldn't send the text message");
   });
 });
 
