@@ -1,4 +1,5 @@
 import type { CreateWorkspaceRequest } from "../workspace-plans.js";
+import { parseChatEvents, type ChatMessage, type CreateTeamRequest, type JoinTeamRequest, type ModerationAction, type SharedWorkspace, type Team, type TeamColorChoices, type TeamInvite, type TeamMember, type TeamTierId, type TeamWorkspace, type WorkspaceCard } from "../teams.js";
 import { assertNoCredentialFields, BYO_PRESIGNED_URL_MESSAGE, BYO_UNSUPPORTED_MESSAGE, BYO_UNVERIFIABLE_MESSAGE } from "../byo.js";
 import { assertKeyEnvelope } from "../envelope.js";
 import { AccountDeletedError, ApiError, DeletionNotFoundError, DeletionNotRetryableError, InvalidTokenError, ReauthRequiredError, SUPPORT_CONTACT, WorkspaceLockedError, deletionAuthFailure, isAccountDeleted, isInvalidToken, isReauthRequired } from "./errors.js";
@@ -130,6 +131,105 @@ export class GenDragoonClient {
   /** Resumes the workspace's single plans Checkout, or replaces its plans before payment. */
   checkoutProject(id: string, body?: { plans: NonNullable<CreateWorkspaceRequest["plans"]> }): Promise<CheckoutResponse> {
     return this.request("POST", `/v2/projects/${encodeURIComponent(id)}/checkout`, body);
+  }
+
+  // Teams (cloud-ssd feature/teams, docs/API-teams.md)
+  teamsCatalog(): Promise<{ tiers: Array<{ id: TeamTierId; name: string; members: number; monthlyCents: number; yearlyCents: number }>; enterprise: { contact: true }; colors: TeamColorChoices }> {
+    return this.request("GET", "/v2/teams/catalog");
+  }
+
+  checkoutTeamWorkspace(id: string, workspaceId: string): Promise<CheckoutResponse> {
+    return this.request("POST", `/v2/teams/${encodeURIComponent(id)}/workspaces/${encodeURIComponent(workspaceId)}/checkout`, {});
+  }
+
+  listTeams(): Promise<{ teams: Team[] }> {
+    return this.request("GET", "/v2/teams");
+  }
+
+  createTeam(body: CreateTeamRequest): Promise<{ team: Team; resumed: boolean; url?: string; totalCents?: number; checkoutError?: string }> {
+    return this.request("POST", "/v2/teams", body);
+  }
+
+  previewTeamInvite(code: string): Promise<{ teamName: string; memberCount: number; memberLimit: number; colors: TeamColorChoices }> {
+    return this.request("POST", "/v2/teams/join/preview", { code });
+  }
+
+  joinTeam(body: JoinTeamRequest): Promise<{ teamId: string; alreadyMember: boolean }> {
+    return this.request("POST", "/v2/teams/join", body);
+  }
+
+  getTeam(id: string): Promise<{ team: Team; colors: TeamColorChoices }> {
+    return this.request("GET", `/v2/teams/${encodeURIComponent(id)}`);
+  }
+
+  checkoutTeam(id: string, body?: { tier?: TeamTierId; interval?: "month" | "year" }): Promise<CheckoutResponse> {
+    return this.request("POST", `/v2/teams/${encodeURIComponent(id)}/checkout`, body ?? {});
+  }
+
+  createTeamInvite(id: string, body?: { expiresInHours?: number; maxUses?: number }): Promise<TeamInvite> {
+    return this.request("POST", `/v2/teams/${encodeURIComponent(id)}/invites`, body ?? {});
+  }
+
+  updateTeamMe(id: string, body: { displayName?: string; color?: string }): Promise<TeamMember> {
+    return this.request("PATCH", `/v2/teams/${encodeURIComponent(id)}/me`, body);
+  }
+
+  leaveTeam(id: string): Promise<{ left: boolean }> {
+    return this.request("POST", `/v2/teams/${encodeURIComponent(id)}/leave`, {});
+  }
+
+  teamWorkspaces(id: string): Promise<{ teamWorkspaces: TeamWorkspace[]; sharedWorkspaces: SharedWorkspace[]; subscriptionActive: boolean }> {
+    return this.request("GET", `/v2/teams/${encodeURIComponent(id)}/workspaces`);
+  }
+
+  createTeamWorkspace(id: string, body: CreateWorkspaceRequest): Promise<{ workspace: TeamWorkspace; url?: string; totalCents?: number }> {
+    return this.request("POST", `/v2/teams/${encodeURIComponent(id)}/workspaces`, body);
+  }
+
+  shareWorkspace(id: string, workspaceId: string): Promise<{ shared: boolean }> {
+    return this.request("POST", `/v2/teams/${encodeURIComponent(id)}/shares`, { workspaceId });
+  }
+
+  unshareWorkspace(id: string, workspaceId: string): Promise<{ shared: boolean }> {
+    return this.request("DELETE", `/v2/teams/${encodeURIComponent(id)}/shares/${encodeURIComponent(workspaceId)}`);
+  }
+
+  teamChat(id: string, after = 0): Promise<{ messages: ChatMessage[]; latestSeq: number; pollAfterMs: number }> {
+    return this.request("GET", `/v2/teams/${encodeURIComponent(id)}/chat?after=${after}`);
+  }
+
+  postTeamChat(id: string, body: { text?: string; card?: WorkspaceCard & { share?: boolean } }): Promise<{ message: ChatMessage; shared: boolean }> {
+    return this.request("POST", `/v2/teams/${encodeURIComponent(id)}/chat`, body);
+  }
+
+  reportTeamMessage(id: string, seq: number, body: { category: string; note?: string }): Promise<{ reported: boolean }> {
+    return this.request("POST", `/v2/teams/${encodeURIComponent(id)}/chat/${seq}/report`, body);
+  }
+
+  deleteTeamMessage(id: string, seq: number, reason: string): Promise<{ ok: boolean }> {
+    return this.request("POST", `/v2/teams/${encodeURIComponent(id)}/chat/${seq}/delete`, { reason });
+  }
+
+  moderateTeamMember(id: string, memberId: string, action: ModerationAction, body: { reason?: string; until?: number | null }): Promise<{ ok: boolean }> {
+    return this.request("POST", `/v2/teams/${encodeURIComponent(id)}/members/${encodeURIComponent(memberId)}/${action}`, body);
+  }
+
+  /** SSE stream; resolves when the stream ends. Falls back to polling when streaming is unavailable. */
+  async streamTeamChat(id: string, after: number, onMessages: (messages: ChatMessage[]) => void, signal?: AbortSignal): Promise<"ended" | "removed" | "unsupported"> {
+    const response = await this.raw("GET", `/v2/teams/${encodeURIComponent(id)}/chat/stream?after=${after}`, undefined, { Accept: "text/event-stream" });
+    if (!response.ok || !response.body || typeof response.body.getReader !== "function") return "unsupported";
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    signal?.addEventListener("abort", () => { void reader.cancel(); });
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) return "ended";
+      const parsed = parseChatEvents(buffer + decoder.decode(value, { stream: true }));
+      buffer = parsed.rest;
+      if (parsed.messages.length) onMessages(parsed.messages);
+      if (parsed.removed) return "removed";
+    }
   }
 
   setSelection(id: string, body: Record<string, string>): Promise<Record<string, unknown>> {

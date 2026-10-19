@@ -33,6 +33,7 @@ import { ENCRYPTED_WORKSPACE_ENABLED } from "./src/flags";
 import { accountLockCoversApp, locksThisWorkspaceOnly, noteWorkspaceLock } from "./src/workspaceState";
 import { createExpoSecureStore } from "./src/platform/secureStore";
 import { ShotFrame, webShot } from "./src/shots";
+import { TeamsTab } from "./src/teams";
 
 type RootStack = {
   SignIn: undefined;
@@ -106,7 +107,7 @@ export function MobileRoot(props: {
   const [overrides, setOverrides] = useState<SortOverrides>({});
   const [activeTransfers, setActiveTransfers] = useState(0);
   const [settingsPage, setSettingsPage] = useState<"home" | "sort" | "connect" | "delete">("home");
-  const [tab, setTab] = useState<"Files" | "Backup" | "Workspaces" | "Settings">("Files");
+  const [tab, setTab] = useState<"Files" | "Backup" | "Workspaces" | "Teams" | "Settings">("Files");
   const [openWorkspaceId, setOpenWorkspaceId] = useState(workspaces[0]?.id ?? "");
   const nodes = PREVIEW_FILES.map((path) => treeNode({
     path,
@@ -199,6 +200,15 @@ export function MobileRoot(props: {
       />
     );
   }
+  function Teams() {
+    return (
+      <TeamsTab
+        client={client instanceof GenDragoonClient ? client : null}
+        personalWorkspaces={workspaces.map((w) => ({ id: w.id, name: w.name || w.id }))}
+        openUrl={(url) => void Linking.openURL(url)}
+      />
+    );
+  }
   function Settings() {
     if (settingsPage === "sort") return <SortScreen overrides={overrides} onChange={setOverrides} />;
     if (settingsPage === "connect") return <ConnectStorageScreen />;
@@ -259,6 +269,7 @@ export function MobileRoot(props: {
         <Tabs.Screen name="Files" component={Files} />
         <Tabs.Screen name="Backup" component={Backup} />
         <Tabs.Screen name="Workspaces" component={Spaces} />
+        <Tabs.Screen name="Teams" component={Teams} />
         <Tabs.Screen name="Settings" component={Settings} />
       </Tabs.Navigator>
     );

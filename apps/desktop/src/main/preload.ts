@@ -37,6 +37,9 @@ contextBridge.exposeInMainWorld("gendragoon", {
   openBilling(url: string): Promise<boolean> {
     return ipcRenderer.invoke("billing:open", url);
   },
+  getDeviceName(): Promise<string | null> {
+    return ipcRenderer.invoke("device:name");
+  },
   getIdToken(): Promise<string | undefined> {
     return ipcRenderer.invoke("auth:id-token");
   },

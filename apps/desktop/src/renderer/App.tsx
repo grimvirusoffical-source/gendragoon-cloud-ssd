@@ -40,6 +40,7 @@ import {
   workspacePlansLabel,
 } from "@gendragoon/core";
 import { AccountSurface, AppShell, CustomStorageWizard, FileBrowser, NewWorkspace, RedxConnections, SettingsView, UpdateControl, deletionFailureNotice, type CustomStorageCredentials, type ShellView, type UpdateView } from "@gendragoon/ui";
+import { TeamsView } from "./TeamsView";
 
 const secrets = new MemorySecretStore();
 
@@ -132,7 +133,7 @@ const EXTENSIONS = [".jpg", ".mp4", ".mp3", ".pdf", ".zip", ".app", ".bin"];
 
 function viewFromHash(hash: string): ShellView {
   const name = hash.replace("#/", "");
-  if (name === "backup" || name === "settings" || name === "files" || name === "connections") return name;
+  if (name === "backup" || name === "settings" || name === "files" || name === "connections" || name === "teams") return name;
   if (name === "workspaces" || name === "lock" || name === "connect") return "workspaces";
   return "files";
 }
@@ -249,7 +250,7 @@ export function App() {
 
   useEffect(() => {
     if (view === "connections") void loadBindings();
-    if (view === "workspaces") void loadWorkspaces();
+    if (view === "workspaces" || view === "teams") void loadWorkspaces();
   }, [view]);
 
   function open(next: ShellView) {
@@ -613,6 +614,15 @@ export function App() {
           })}
         </div>
       </section>
+    );
+  } else if (view === "teams") {
+    body = (
+      <TeamsView
+        client={providerClient}
+        openBilling={openBilling}
+        pricing={pricing}
+        personalWorkspaces={workspaces.map((w) => ({ id: w.id, name: w.name || w.id }))}
+      />
     );
   } else if (view === "connections") {
     body = (

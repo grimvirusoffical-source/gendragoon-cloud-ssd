@@ -237,3 +237,39 @@ input:focus, select:focus { border-color: var(--purple); box-shadow: 0 0 0 3px v
 .step.current { background: var(--soft); color: var(--text); }
 .step.current .step-index { background: var(--purple); color: var(--on-purple); animation: pulse-glow 1.6s var(--ease-in-out) infinite; }
 @media (prefers-reduced-motion: reduce) { .plan-card, .plan-total, .step, .step-index { transition: none; animation: none; } }
+
+/* Teams: lists, color swatches, chat. Tokens only, so dark/light/system all work. */
+.btn-sm { padding: 4px 10px; font-size: 12px; border-radius: 8px; }
+.tag { font-size: 10px; letter-spacing: 0.06em; background: var(--soft); color: var(--kicker); border-radius: 99px; padding: 2px 8px; }
+.team-list, .member-list, .workspace-list, .pick-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.team-row, .pick-list button { width: 100%; display: flex; gap: 10px; align-items: center; text-align: left; background: var(--input); border: 1px solid var(--line); color: var(--text); border-radius: 12px; padding: 10px 12px; cursor: pointer; transition: border-color var(--dur-fast) var(--ease-out), transform var(--dur-fast) var(--ease-out); }
+.team-row:hover, .pick-list button:hover { border-color: var(--purple); transform: translateY(-1px); }
+.team-row .kind, .pick-list .kind { margin-left: auto; }
+.member-row { display: flex; gap: 10px; align-items: center; padding: 8px 4px; border-bottom: 1px solid var(--line); }
+.member-row .actions { margin-left: auto; }
+.member-dot { width: 12px; height: 12px; border-radius: 99px; flex: none; box-shadow: 0 0 0 3px var(--soft); }
+.color-picker { border: 0; padding: 0; margin: 0; }
+.color-picker legend { color: var(--muted); font-size: 13px; margin-bottom: 8px; }
+.swatches { display: grid; grid-template-columns: repeat(auto-fill, minmax(28px, 1fr)); gap: 8px; }
+.swatch { width: 28px; height: 28px; border-radius: 99px; border: 2px solid transparent; cursor: pointer; transition: transform var(--dur-fast) var(--ease-out), box-shadow var(--dur-fast) var(--ease-out); }
+.swatch:hover:not(:disabled) { transform: scale(1.1); }
+.swatch.active { box-shadow: 0 0 0 2px var(--bg), 0 0 0 4px var(--focus); }
+.swatch:disabled { opacity: 0.2; cursor: not-allowed; }
+.chat { display: flex; flex-direction: column; gap: 10px; min-height: 360px; }
+.chat-log { list-style: none; margin: 0; padding: 4px; display: flex; flex-direction: column; gap: 8px; max-height: 56vh; overflow-y: auto; }
+.chat-msg { display: flex; gap: 10px; align-items: flex-start; padding: 8px 10px; border-radius: 12px; background: var(--card); border: 1px solid var(--line); animation: pop-in var(--dur-base) var(--ease-out); }
+.chat-msg.mine { border-color: color-mix(in srgb, var(--purple) 45%, var(--line)); }
+.chat-msg.removed { opacity: 0.65; }
+.chat-msg .member-dot { margin-top: 4px; }
+.chat-body { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.chat-body p { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.chat-name { font-size: 12px; font-weight: 600; }
+.chat-tools { margin-left: auto; display: flex; gap: 4px; opacity: 0; transition: opacity var(--dur-fast) var(--ease-out); }
+.chat-msg:hover .chat-tools, .chat-msg:focus-within .chat-tools { opacity: 1; }
+.ws-card { display: flex; flex-direction: column; gap: 2px; padding: 10px 12px; border-radius: 10px; background: var(--soft); border: 1px solid color-mix(in srgb, var(--purple) 40%, transparent); }
+.ws-card.unavailable { background: transparent; border-style: dashed; color: var(--faint); }
+.composer { display: flex; gap: 8px; align-items: center; }
+.composer input { flex: 1; }
+.composer-plus { width: 38px; height: 38px; border-radius: 99px; font-size: 20px; line-height: 1; }
+.inline-dialog { animation: pop-in var(--dur-base) var(--ease-out); padding: 12px; border-radius: 12px; border: 1px solid var(--line); background: var(--card); }
+@media (prefers-reduced-motion: reduce) { .chat-msg, .inline-dialog, .swatch, .team-row, .pick-list button { animation: none; transition: none; } }

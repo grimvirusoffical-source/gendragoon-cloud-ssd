@@ -265,3 +265,31 @@ export type {
   CustomStorageWizardState,
   CustomStorageWizardEvent,
 } from "./workspace-plans.js";
+export {
+  TEAM_TIERS,
+  TEAM_MESSAGES,
+  teamPrice,
+  availableMemberColors,
+  parseInviteCode,
+  defaultDisplayName,
+  mergeMessages,
+  latestSeq,
+  parseChatEvents,
+  moderationUntil,
+} from "./teams.js";
+export type {
+  TeamTierId,
+  TeamTier,
+  TeamColor,
+  TeamColorChoices,
+  TeamMember,
+  Team,
+  TeamWorkspace,
+  SharedWorkspace,
+  WorkspaceCard,
+  ChatMessage,
+  TeamInvite,
+  CreateTeamRequest,
+  JoinTeamRequest,
+  ModerationAction,
+} from "./teams.js";

@@ -259,3 +259,12 @@ The device that creates the workspace generates one random 256-bit workspace key
 ## What the Windows client does not send
 
 No Stripe secret, no Firebase private key, no `gdsk_` key baked into the app, no BYO secret, no GitHub token. Update tokens are read from the OS keychain by `@gendragoon/updater` and are not part of this API.
+
+## Teams (cloud-ssd `feature/teams`)
+
+Full contract: `native/Backend/docs/API-teams.md` in gendragoon-cloud-ssd. Core wraps every route on `GenDragoonClient` (`listTeams`, `teamsCatalog`, `createTeam`, `previewTeamInvite`, `joinTeam`, `getTeam`, `checkoutTeam`, `createTeamInvite`, `updateTeamMe`, `leaveTeam`, `teamWorkspaces`, `createTeamWorkspace`, `checkoutTeamWorkspace`, `shareWorkspace`, `unshareWorkspace`, `teamChat`, `streamTeamChat`, `postTeamChat`, `reportTeamMessage`, `deleteTeamMessage`, `moderateTeamMember`).
+
+- Tiers: Team 5 members $9.99/mo, Team Plus 15 $24.99/mo, Business 50 $69.99/mo, yearly 10x, Enterprise by contact. Team workspaces add their own storage + performance plans (custom storage: performance only).
+- The server enforces every rule: membership (non-members get 404), personal workspaces visible only after their owner shares them, unique member colors with purple reserved for the owner, owner-only moderation with a required reason. The client helpers in `packages/core/src/teams.ts` only mirror those rules for the UI.
+- Chat: desktop streams `GET /v2/teams/:id/chat/stream` (SSE) and falls back to polling `GET /chat?after=seq` every 3 s; mobile polls (React Native fetch has no streaming body).
+- The display name defaults to the device name: desktop sends `os.hostname()` (through the `device:name` IPC), mobile sends the Android model or "iPhone"/"iPad".

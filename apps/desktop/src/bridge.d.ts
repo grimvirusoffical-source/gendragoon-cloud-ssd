@@ -15,6 +15,7 @@ interface GendragoonBridge {
   deleteSecret?: (name: string) => Promise<void>;
   getIdToken?: () => Promise<string | undefined>;
   openBilling?: (url: string) => Promise<boolean>;
+  getDeviceName?: () => Promise<string | null>;
 }
 
 declare global {

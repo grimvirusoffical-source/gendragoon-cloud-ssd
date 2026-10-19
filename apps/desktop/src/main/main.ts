@@ -1,5 +1,6 @@
 import { app, BrowserWindow, dialog, ipcMain, safeStorage, session, shell as electronShell, type IpcMainInvokeEvent } from "electron";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import { detectDistribution, updatePolicy, type UpdateState } from "@gendragoon/updater";
 import { createDesktopUpdater } from "./updater-service.js";
@@ -152,6 +153,8 @@ function registerIpc(): void {
     await electronShell.openExternal(url);
     return true;
   });
+  /** The computer name, used as the default Teams chat name. Changeable in the app. */
+  ipcMain.handle("device:name", (event) => (senderIsShell(event) ? os.hostname().slice(0, 40) : null));
   ipcMain.handle("secret:get", async (event, name: unknown) => {
     if (!senderIsShell(event)) throw new Error("Refusing secret IPC from an unknown sender");
     requireSafeStorage();
