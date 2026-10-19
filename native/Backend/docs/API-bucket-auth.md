@@ -2,7 +2,7 @@
 
 Clients upload and download ciphertext in the managed customer bucket with short-lived V4 signed URLs. They never receive a service-account JSON key, a refresh token, or a downscoped OAuth access token.
 
-Threat model, device encryption, and what the server is allowed to see are in [SECURITY.md](SECURITY.md) (`docs/SECURITY.md`, Avery). This page is only the bucket API and the IAM setup that backs it.
+This page is only the bucket API and the IAM setup that backs it.
 
 No key material, customer object, or production bucket name belongs in this repository.
 

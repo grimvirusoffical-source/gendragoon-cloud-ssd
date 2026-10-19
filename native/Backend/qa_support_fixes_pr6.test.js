@@ -80,7 +80,7 @@ function countReads(db,prefixes){
  return stat;
 }
 
-test("N1 stale alert across 48 h of 10-minute sweeps fires exactly once (Avery: one-time staleAlertedAt)",async()=>{
+test("N1 stale alert across 48 h of 10-minute sweeps fires exactly once (one-time staleAlertedAt)",async()=>{
  const cap=capture();
  const w=world({env:{SUPPORT_DISCORD_WEBHOOK_URL:WEBHOOK},fetchImpl:async()=>({ok:false,status:503})});
  let j;

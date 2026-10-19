@@ -1,9 +1,0 @@
-{
-  "status": "passed",
-  "exitCode": 0,
-  "elapsedSeconds": 28.979,
-  "platform": "actual macOS",
-  "sourceCommit": "577c2a7c98f3c70a00937594c6a206dd353b5004",
-  "testModule": "native.Tests.test_integrated_native_helper",
-  "log": "test_caller_cancellation_does_not_abandon_helper_or_clear_busy_early (native.Tests.test_integrated_native_helper.NativeHelperTests.test_caller_cancellation_does_not_abandon_helper_or_clear_busy_early) ... ok\ntest_nonzero_exit_and_false_ok_cannot_report_success (native.Tests.test_integrated_native_helper.NativeHelperTests.test_nonzero_exit_and_false_ok_cannot_report_success) ... ok\ntest_parallel_quick_helpers_complete_with_private_stdin_and_separate_stderr (native.Tests.test_integrated_native_helper.NativeHelperTests.test_parallel_quick_helpers_complete_with_private_stdin_and_separate_stderr) ... ok\ntest_timeout_returns_and_normally_terminates_owned_helper (native.Tests.test_integrated_native_helper.NativeHelperTests.test_timeout_returns_and_normally_terminates_owned_helper) ... ok\n\n----------------------------------------------------------------------\nRan 4 tests in 28.330s\n\nOK\n"
-}

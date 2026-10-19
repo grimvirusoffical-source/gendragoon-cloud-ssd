@@ -24,7 +24,7 @@ enum SupportContact {
 /// Contact support for a deletion that cannot be retried. Off until the Discord webhook is
 /// configured in production. The only path is `POST /v2/account/deletions/:jobId/support-request`.
 /// There is no request body: no `jobId` field, no uid, and no user data. `Authorization` is
-/// `Bearer statusToken`, so this still works while signed out. Riley's `d33970c` fixtures in
+/// `Bearer statusToken`, so this still works while signed out. the `d33970c` fixtures in
 /// `fixtures/account-deletion/` describe the responses.
 enum DeletionSupport {
     static let enabled=false

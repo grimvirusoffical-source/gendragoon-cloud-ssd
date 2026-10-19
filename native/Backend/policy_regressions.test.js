@@ -45,7 +45,7 @@ test("cap: after downgrade, restoring an archived project is refused",async()=>{
   const f=fixture();downgraded(f);f.put(idFor(21),{projectStatus:"archived",statusBeforeArchive:"active"});
   await assert.rejects(f.service.restore(f.req,idFor(21)),{code:"PROJECT_LIMIT_REACHED"});
 });
-test("cap: downgrade over cap puts the account in the login lock (Casey bug: projects 11-20 stay usable)",async()=>{
+test("cap: downgrade over cap puts the account in the login lock (projects 11-20 stay usable)",async()=>{
   const f=fixture();downgraded(f);
   const p=(await f.service.inventory(f.req)).policy;
   assert.equal(p.locked,true,"policy must expose a lock when usedProjectSlots > projectLimit");
@@ -57,7 +57,7 @@ test("cap: while locked, data stays readable but uploads are blocked",async()=>{
   assert.equal((await f.service.inventory(f.req)).policy.uploadsBlocked,true);
 });
 
-test("cap: paid storage route denies access to workspaces over the cap after downgrade (Casey: paid_storage.js:20-28)",async()=>{
+test("cap: paid storage route denies access to workspaces over the cap after downgrade (paid_storage.js:20-28)",async()=>{
   const express=require("express");
   const {scopeFromWorkspace,registerPaidStorage}=require("./paid_storage");
   const f=fixture();for(let n=1;n<=15;n++)f.put(idFor(n),n===1?qualifier:{});

@@ -1,10 +1,7 @@
-# GenDragoon native integration — 0.17.0
+# GenDragoon native applications
 
-This tree consolidates the complete macOS app, iOS and Android clients, cloud
-backend, and the previously separate upload, cleanup, reset, and update UI.
-The initial full source came from the existing v0.16.2 macOS development tree.
-The old, unreferenced `GenDragoonFreeCloud.swift` is retained under `Legacy`;
-the current app uses `GenDragoonCustomerCloud.swift` and the v3 transfer client.
+This tree contains the macOS app, the iOS and Android clients, the cloud backend and the upload, cleanup, reset and update features.
+The previous `GenDragoonFreeCloud.swift` is kept under `Legacy`; the current app uses `GenDragoonCustomerCloud.swift` and the v3 transfer client.
 
 ## macOS application behavior
 
@@ -109,8 +106,6 @@ The backend retrieves Stripe secrets from its configured secret store. Scoped
 customer API keys are hashed server-side and are never committed here. An
 existing owner credential must remain in an authorized private credential
 store and be attached only to approved operations at the configured origin.
-No current validation result should be interpreted as a completed paid
-purchase unless the payment and webhook evidence is recorded explicitly.
 
 ## Platform boundaries
 
@@ -132,5 +127,4 @@ python3 -m unittest discover -s native/Tests -p test_preload.py
 python3 native/Tests/stress_native.py
 ```
 
-See [VALIDATION.md](VALIDATION.md) for actual results, environment limits, and
-the remaining gates. Fixtures never authorize deleting real user data.
+Fixtures never authorize deleting real user data.

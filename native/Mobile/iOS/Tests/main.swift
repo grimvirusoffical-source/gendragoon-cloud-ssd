@@ -961,7 +961,7 @@ final class AccountLogicTests: XCTestCase {
         XCTAssertTrue(SupportContact.mailto(jobId:flow.jobId)?.absoluteString.hasPrefix("mailto:SUPPORT_CONTACT_PLACEHOLDER@invalid") ?? false)
     }
 
-    /// Riley PR #6 at `0486412`: `support-unauthorized.json`. Required, no auth header at all.
+    /// PR #6 at `0486412`: `support-unauthorized.json`. Required, no auth header at all.
     func testSupportUnauthorizedFixtureOpensMailtoAndNeverSignIn() async {
         XCTAssertFalse(DeletionSupport.enabled)
         XCTAssertEqual(BackendFixtures.responseStatus(area:"account-deletion",name:"support-unauthorized"),401)
@@ -1147,7 +1147,7 @@ final class AccountLogicTests: XCTestCase {
         }
     }
 
-    /// Riley PR #5 at 0715b1a. Labels come from the server fields. `feeWaived` is required.
+    /// PR #5 at 0715b1a. Labels come from the server fields. `feeWaived` is required.
     func testWorkspacePriceUsesRileyFixturesAndNeverCounts() throws {
         XCTAssertEqual(BackendFixtures.workspacePriceSHA,"0715b1a")
         XCTAssertFalse(WorkspacePrice.enabled)
@@ -1211,8 +1211,8 @@ final class AccountLogicTests: XCTestCase {
         XCTAssertFalse(endedLabel.contains("Included"))
     }
 
-    /// Riley PR #5 at 0715b1a. Busy and deleting use the documented status strings. Lock and grace use the fixtures.
-    // Avery's review on e5f1982: a lapsed lock is per workspace and is never a dead end.
+    /// PR #5 at 0715b1a. Busy and deleting use the documented status strings. Lock and grace use the fixtures.
+    // Review on e5f1982: a lapsed lock is per workspace and is never a dead end.
     private let lapsedID="11111111-1111-4111-8111-000000000022"
     private let openID="11111111-1111-4111-8111-000000000024"
     private func lapsedLock()->WorkspaceLock { WorkspaceLock.decode(BackendFixtures.responseBodyString(area:"workspace-lock",name:"byo-lapsed")) }
@@ -1559,7 +1559,7 @@ final class InvalidTokenDeletionTests: XCTestCase {
 
 /// Fixtures are read only from `native/Mobile/fixtures/shared`.
 /// `singular-path.json` is JSON. A non-JSON body in a test is synthetic.
-/// Support responses are Riley's d33970c `support-*` files in `fixtures/account-deletion`.
+/// Support responses are the d33970c `support-*` files in `fixtures/account-deletion`.
 /// Each request is `POST /v2/account/deletions/:jobId/support-request` with no body.
 /// Workspace and pricing fixtures are the `workspaces/` files from PR #5 at 0715b1a,
 /// including `owner-fee-waived`, `byo-register-ends-grandfathered`, `byo-in-grace`,
