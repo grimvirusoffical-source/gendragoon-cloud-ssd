@@ -1,0 +1,89 @@
+# MANUAL ONLY. Never runs on push, pull request or schedule. Nothing here uploads to the App Store or publishes a release.
+name: Mac build (manual)
+
+on:
+  workflow_dispatch:
+    inputs:
+      distribution:
+        description: "developer-id (GitHub/notarized DMG) or mas (Mac App Store, sandboxed, no self-update)"
+        type: choice
+        options: [developer-id, mas]
+        default: developer-id
+      sign:
+        description: "Sign with secrets configured in the repo (otherwise unsigned compile + tests only)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: macos-14
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Python helper tests (updater channels, MAS config)
+        run: |
+          cd native && PYTHONPATH=Resources python3 -B -m unittest Tests.test_distribution_channels Tests.test_mas_config
+      - name: Typecheck the SwiftUI app (no signing, no base bundle needed)
+        run: |
+          xcrun swiftc -parse-as-library -typecheck -target arm64-apple-macosx14.0 \
+            -framework SwiftUI -framework AppKit native/Sources/*.swift
+      - name: MAS config plan
+        if: ${{ inputs.distribution == 'mas' }}
+        run: python3 native/MAS/build_mas.py --plan
+
+  build-signed:
+    needs: verify
+    if: ${{ inputs.sign }}
+    runs-on: macos-14
+    timeout-minutes: 60
+    environment: mac-release   # create this environment with required reviewers so signing needs a human click
+    steps:
+      - uses: actions/checkout@v4
+      - name: Import signing certificates into a temporary keychain
+        env:
+          CERTS_P12_BASE64: ${{ secrets.MAC_CERTS_P12_BASE64 }}
+          CERTS_P12_PASSWORD: ${{ secrets.MAC_CERTS_P12_PASSWORD }}
+        run: |
+          test -n "$CERTS_P12_BASE64" || { echo "MAC_CERTS_P12_BASE64 secret is not set"; exit 1; }
+          KEYCHAIN="$RUNNER_TEMP/build.keychain-db"; PW="$(uuidgen)"
+          security create-keychain -p "$PW" "$KEYCHAIN"
+          security set-keychain-settings -lut 3600 "$KEYCHAIN"
+          security unlock-keychain -p "$PW" "$KEYCHAIN"
+          echo "$CERTS_P12_BASE64" | base64 --decode > "$RUNNER_TEMP/certs.p12"
+          security import "$RUNNER_TEMP/certs.p12" -P "$CERTS_P12_PASSWORD" -A -t cert -f pkcs12 -k "$KEYCHAIN"
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$PW" "$KEYCHAIN"
+          security list-keychains -d user -s "$KEYCHAIN" login.keychain-db
+          rm -f "$RUNNER_TEMP/certs.p12"
+      - name: Build (Developer ID)
+        if: ${{ inputs.distribution == 'developer-id' }}
+        env:
+          BASE_APP_URL: ${{ secrets.MAC_BASE_APP_URL }}   # build_macos.py needs the pinned vendor bundle (rclone/node); it is not in git
+        run: |
+          test -n "$BASE_APP_URL" || { echo "MAC_BASE_APP_URL secret (base bundle with vendor binaries) is not set"; exit 1; }
+          curl -fsSL "$BASE_APP_URL" -o "$RUNNER_TEMP/base.zip" && ditto -x -k "$RUNNER_TEMP/base.zip" "$RUNNER_TEMP/base"
+          python3 native/build_macos.py --base-app "$RUNNER_TEMP/base/GenDragoon Cloud SSD.app" --output "$RUNNER_TEMP/out"
+          # Notarization is a separate manual step: native/notarize_macos.py (see native/NOTARIZATION.md)
+      - name: Build (Mac App Store, signed, NOT uploaded)
+        if: ${{ inputs.distribution == 'mas' }}
+        env:
+          BASE_APP_URL: ${{ secrets.MAC_BASE_APP_URL }}
+          GD_MAS_TEAM_ID: ${{ secrets.MAS_TEAM_ID }}
+          GD_MAS_APP_IDENTITY: ${{ secrets.MAS_APP_IDENTITY }}
+          GD_MAS_INSTALLER_IDENTITY: ${{ secrets.MAS_INSTALLER_IDENTITY }}
+          PROFILE_B64: ${{ secrets.MAS_PROVISIONING_PROFILE_BASE64 }}
+        run: |
+          curl -fsSL "$BASE_APP_URL" -o "$RUNNER_TEMP/base.zip" && ditto -x -k "$RUNNER_TEMP/base.zip" "$RUNNER_TEMP/base"
+          echo "$PROFILE_B64" | base64 --decode > "$RUNNER_TEMP/mas.provisionprofile"
+          GD_MAS_PROVISIONING_PROFILE="$RUNNER_TEMP/mas.provisionprofile" \
+            python3 native/MAS/build_mas.py --base-app "$RUNNER_TEMP/base/GenDragoon Cloud SSD.app" --output "$RUNNER_TEMP/mas-out"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gendragoon-mac-${{ inputs.distribution }}
+          path: |
+            ${{ runner.temp }}/out
+            ${{ runner.temp }}/mas-out/*.pkg
+          if-no-files-found: warn
+          retention-days: 7

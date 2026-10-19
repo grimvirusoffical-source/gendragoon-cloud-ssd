@@ -1,0 +1,33 @@
+GENDRAGOONSSD — TERMS OF SERVICE (PRE-RELEASE VERSION)
+Effective date: October 14, 2026 (development preview)
+Version: terms-2026-10-14-v1
+
+IMPORTANT: These are pre-release Terms for the development app and are not legally reviewed. They must be finalized by counsel before paid public launch. Customer billing is not enabled. Support contact: grimvirusoffical@gmail.com.
+
+1. ACCEPTANCE. By affirmatively accepting these Terms after scrolling through them, you agree to them and the linked Privacy Policy. You may decline and sign out. We retain the accepted version, UTC timestamp, and authenticated account reference so your decision persists. Changes materially affecting users require renewed acceptance where law requires.
+
+2. ELIGIBILITY & ACCOUNTS. You must have legal authority to agree and provide accurate information. Accounts use verified Google authentication. Do not share access credentials. You are responsible for securing your devices and the content you upload.
+
+3. STORAGE & SERVICE. GenDragoon provides a cloud-backed storage interface and local caching. Streaming compatibility varies by operating system, app design, license, connectivity, and security restrictions. It is not a replacement for local NVMe performance. Maintain independent backups of important content.
+
+4. PAID PLANS. Paid storage and transfer/concurrency features require an active subscription. Prices, taxes, recurring billing cycle, storage quotas, speeds, and any usage limits must be clearly disclosed before checkout. Stripe processes payments. Monthly or yearly subscriptions renew automatically unless canceled. Cancellation and refunds follow the purchase disclosure and applicable law. We do not guarantee a specific speed.
+
+5. YOUR CONTENT & RIGHTS. You retain ownership of uploaded content and warrant you have permission to store and use it. Do not upload stolen, malicious, unlawful, infringing, or otherwise prohibited material. Do not use the service to abuse others or bypass software licensing.
+
+6. CONTENT SAFETY. We may investigate reports of misuse, suspend access when reasonably necessary, and preserve or disclose information when legally required. Account administration is access-controlled and logged. We do not promise unrestricted access to private customer files. Privacy rights and applicable law govern reviews.
+
+7. DATA SECURITY. We implement reasonable industry-standard safeguards, including access isolation, transport encryption and encryption at rest. No service can promise absolute anonymity, untraceability, uninterrupted availability or zero security risk.
+
+8. OFFLOADING & DATA LOSS. Moving an original file or application from your device is optional and only follows a verified cloud backup and your affirmative choice. Trash or Recycle Bin may be recoverable until emptied. Software may require local assets, licenses or helper components. You should test restoration and maintain separate backups.
+
+9. AVAILABILITY & PERFORMANCE. Network, platform, maintenance and third-party outages may affect service. Concurrency allowances and cache size are not guaranteed internet speeds. Service changes or maintenance will be communicated where practical.
+
+10. SUSPENSION, TERMINATION & RETRIEVAL. We may suspend abusive or fraudulent accounts in accordance with law and reasonable review procedures. We will explain data retrieval and retention windows before launch; paid cancellation must not secretly delete customer files. Legal retention obligations may apply.
+
+11. WARRANTY DISCLAIMER. TO THE EXTENT PERMITTED BY LAW, THE SERVICE IS PROVIDED ON AN AS-IS AND AS-AVAILABLE BASIS WITHOUT WARRANTIES OF UNINTERRUPTED ACCESS OR FITNESS FOR A PARTICULAR PURPOSE. CONSUMER RIGHTS THAT CANNOT BE WAIVED REMAIN IN EFFECT.
+
+12. LIABILITY. TO THE EXTENT PERMITTED BY LAW, LIABILITY FOR INDIRECT, INCIDENTAL, SPECIAL OR CONSEQUENTIAL DAMAGES IS LIMITED AS STATED IN THE PUBLISHED FINAL TERMS. NOTHING EXCLUDES LIABILITY THAT CANNOT LAWFULLY BE EXCLUDED. A final liability cap must be drafted by counsel.
+
+13. CHANGES & CONTACT. Material terms updates must be notified reasonably and renewed consent requested where required. Customer support contacts, legal business identity, governing law, refund procedures and Privacy Policy URL MUST be completed before public launch.
+
+BY CHECKING BOTH REQUIRED BOXES, YOU CONFIRM: (A) YOU HAVE READ THE TERMS AND (B) YOU AGREE TO THE TERMS AND ACKNOWLEDGE THE LINKED PRIVACY POLICY. CHECKBOXES ARE NOT PRECHECKED.

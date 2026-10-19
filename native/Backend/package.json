@@ -1,0 +1,29 @@
+{
+  "name": "gendragoon-identity-billing",
+  "version": "0.18.0",
+  "private": true,
+  "type": "commonjs",
+  "scripts": {
+    "start": "node free_server.js",
+    "check": "node --check free_server.js && node --check projects.js && node --check workspace_policy.js && node --check locked_write.js && node --check billing_v2.js && node --check billing_gateway.js && node --check billing_bootstrap.js && node --check transfer_v3.js && node --check paid_storage.js && node --check account_delete.js && node --check login_gate.js && node --check v2_errors.js && node --check key_envelope.js && node --check storage_urls.js && node --check provider_v1.js && node --check provider_blobstore.js",
+    "test": "node --test --test-concurrency=2 *.test.js",
+    "fixtures": "node scripts/export_fixtures.js",
+    "predeploy:check": "node scripts/predeploy_check.js",
+    "test:billing": "node --test billing_v2.test.js billing_gateway.test.js billing_bootstrap.test.js billing_entitlements.test.js billing_selection.test.js owner_checkout.test.js owner_benefits.test.js ads_fulfillment.test.js projects.test.js project_routes.test.js",
+    "test:stress": "node --test transfer_stress.test.js"
+  },
+  "dependencies": {
+    "@google-cloud/firestore": "^9.3.1",
+    "@google-cloud/storage": "^8.4.0",
+    "express": "^4.21.2",
+    "firebase-admin": "^13.5.0",
+    "google-auth-library": "^10.9.1",
+    "stripe": "23.0.0"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "overrides": {
+    "uuid": "^11.1.1"
+  }
+}

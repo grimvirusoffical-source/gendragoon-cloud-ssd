@@ -1,0 +1,25 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    match /accepted_terms/{userId} {
+      allow get: if request.auth != null && request.auth.uid == userId;
+      allow list, update, delete: if false;
+      allow create: if request.auth != null
+        && request.auth.uid == userId
+        && request.auth.token.firebase.sign_in_provider == "google.com"
+        && request.resource.data.keys().hasOnly(["termsVersion","readConfirmed","agreed","acceptedAt"])
+        && request.resource.data.keys().hasAll(["termsVersion","readConfirmed","agreed","acceptedAt"])
+        && request.resource.data.termsVersion == "terms-2026-10-14-v1"
+        && request.resource.data.readConfirmed == true
+        && request.resource.data.agreed == true
+        && request.resource.data.acceptedAt == request.time;
+    }
+    match /ad_purchases/{userId} {
+      allow get: if request.auth != null && request.auth.uid == userId;
+      allow list, create, update, delete: if false;
+    }
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

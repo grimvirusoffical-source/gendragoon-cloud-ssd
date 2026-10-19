@@ -1,0 +1,22 @@
+{
+  "request": {
+    "body": {
+      "name": "open.txt",
+      "sizeBytes": 4
+    },
+    "headers": {
+      "authorization": "<redacted>",
+      "content-type": "application/json"
+    },
+    "method": "POST",
+    "path": "/v2/workspaces/11111111-1111-4111-8111-000000000021/cloud/uploads"
+  },
+  "response": {
+    "body": {
+      "chunkBytes": 8388608,
+      "totalChunks": 1,
+      "uploadId": "00000000-0000-4000-8000-000000000006"
+    },
+    "status": 201
+  }
+}

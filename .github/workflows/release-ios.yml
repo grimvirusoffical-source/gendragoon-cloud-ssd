@@ -1,0 +1,82 @@
+# MANUAL ONLY. Never runs on push, pull request or schedule. TestFlight upload is off unless you tick it AND the secrets exist.
+name: iOS build (manual)
+
+on:
+  workflow_dispatch:
+    inputs:
+      archive:
+        description: "Also archive a signed .ipa (needs signing secrets)"
+        type: boolean
+        default: false
+      upload_testflight:
+        description: "Upload the .ipa to TestFlight (needs App Store Connect API key secrets). NOT App Store review submission."
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  simulator-build-and-test:
+    runs-on: macos-14
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build and run unit tests on the simulator (no signing)
+        working-directory: native/Mobile/iOS
+        run: |
+          xcodebuild -project GenDragoonMobile.xcodeproj -scheme GenDragoonMobile \
+            -destination 'platform=iOS Simulator,name=iPhone 15' \
+            CODE_SIGNING_ALLOWED=NO test
+
+  archive:
+    needs: simulator-build-and-test
+    if: ${{ inputs.archive || inputs.upload_testflight }}
+    runs-on: macos-14
+    timeout-minutes: 60
+    environment: ios-release   # require reviewers on this environment
+    steps:
+      - uses: actions/checkout@v4
+      - name: Signing assets
+        env:
+          CERT_P12_BASE64: ${{ secrets.IOS_DIST_CERT_P12_BASE64 }}
+          CERT_P12_PASSWORD: ${{ secrets.IOS_DIST_CERT_P12_PASSWORD }}
+          PROFILE_BASE64: ${{ secrets.IOS_APPSTORE_PROFILE_BASE64 }}
+        run: |
+          test -n "$CERT_P12_BASE64" && test -n "$PROFILE_BASE64" || { echo "iOS signing secrets are not set"; exit 1; }
+          KEYCHAIN="$RUNNER_TEMP/ios.keychain-db"; PW="$(uuidgen)"
+          security create-keychain -p "$PW" "$KEYCHAIN"; security unlock-keychain -p "$PW" "$KEYCHAIN"
+          echo "$CERT_P12_BASE64" | base64 --decode > "$RUNNER_TEMP/c.p12"
+          security import "$RUNNER_TEMP/c.p12" -P "$CERT_P12_PASSWORD" -A -t cert -f pkcs12 -k "$KEYCHAIN"
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$PW" "$KEYCHAIN"
+          security list-keychains -d user -s "$KEYCHAIN" login.keychain-db
+          mkdir -p ~/Library/MobileDevice/Provisioning\ Profiles
+          echo "$PROFILE_BASE64" | base64 --decode > ~/Library/MobileDevice/Provisioning\ Profiles/gendragoon.mobileprovision
+          rm -f "$RUNNER_TEMP/c.p12"
+      - name: Archive and export .ipa
+        working-directory: native/Mobile/iOS
+        run: |
+          xcodebuild -project GenDragoonMobile.xcodeproj -scheme GenDragoonMobile -configuration Release \
+            -destination 'generic/platform=iOS' -archivePath "$RUNNER_TEMP/GenDragoon.xcarchive" archive
+          cat > "$RUNNER_TEMP/export.plist" <<'PLIST'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0"><dict><key>method</key><string>app-store-connect</string><key>signingStyle</key><string>manual</string></dict></plist>
+          PLIST
+          xcodebuild -exportArchive -archivePath "$RUNNER_TEMP/GenDragoon.xcarchive" \
+            -exportOptionsPlist "$RUNNER_TEMP/export.plist" -exportPath "$RUNNER_TEMP/ipa"
+      - name: Upload to TestFlight (only if ticked)
+        if: ${{ inputs.upload_testflight }}
+        env:
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+          ASC_KEY_P8_BASE64: ${{ secrets.ASC_KEY_P8_BASE64 }}
+        run: |
+          mkdir -p ~/.appstoreconnect/private_keys
+          echo "$ASC_KEY_P8_BASE64" | base64 --decode > ~/.appstoreconnect/private_keys/AuthKey_${ASC_KEY_ID}.p8
+          xcrun altool --upload-app -f "$RUNNER_TEMP"/ipa/*.ipa -t ios --apiKey "$ASC_KEY_ID" --apiIssuer "$ASC_ISSUER_ID"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gendragoon-ios-ipa
+          path: ${{ runner.temp }}/ipa/*.ipa
+          retention-days: 7

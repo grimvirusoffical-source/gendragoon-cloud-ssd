@@ -1,0 +1,19 @@
+Lock, workspace, merge, BYO, and ownership fixtures are copied from
+grimvirusoffical-source/gendragoon-cloud-ssd fixtures/ on fix/backend-workspace-policy at da39276.
+Account-deletion fixtures are copied from fixtures/account-deletion on PR #6 at fff0a84.
+support-unauthorized.json is from PR #6 at 0486412. Workspace policy fixtures (owner-fee-waived, byo-register-ends-grandfathered, byo-in-grace,
+byo-lapsed-others-open, make-hosted, workspace-lock/byo-lapsed) are from PR #5 at 0715b1a; #5 is still blocked and the grace and
+make-hosted fixtures may be regenerated.
+key-envelope fixtures are copied from PR #9 at ee4f76f. wrappedKey is base64 or base64url; mobile does not decode it.
+errors/payload-too-large.json is from that export.
+Each file is {request, response:{status, body}}. Do not edit these JSON files by hand.
+This directory is the one pinned copy. Android and iOS tests read only this directory.
+Billing fixtures (workspaces/ and workspace-lock/byo-lapsed) get re-copied after backend PR #5 clears;
+make-hosted.json has already changed upstream since 0715b1a.
+singular-path.json is JSON 404 {"error":"not_found"}. A non-JSON body in the tests is synthetic, not a fixture.
+expired-token.json and other-job-token.json stay HTTP 404. Tokens in the export are "<redacted>".
+A repeat DELETE after done is 410 {error:"account_deleted",jobId,statusToken}, never 401.
+Up to 5 status tokens for one job stay valid.
+byo/verify-proof-required is gone. Every byo/verify-* request except verify-missing-url sends {presignedUrl}.
+verify-missing-url sends {} and returns 400 {error:"presigned_url_required"}.
+Never send readBack or proofUrl.
