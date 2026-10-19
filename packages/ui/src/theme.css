@@ -313,3 +313,5 @@ div.field { display: flex; flex-direction: column; gap: 6px; color: var(--muted)
 .twofa-setup { display: flex; flex-direction: column; gap: var(--space-md); align-items: flex-start; animation: page-in var(--dur-slow) var(--ease-out); }
 .qr { border-radius: var(--radius-md); box-shadow: 0 10px 30px var(--glow); }
 @media (prefers-reduced-motion: reduce) { .req, .req-icon, .arrow-btn, .twofa-option, .warn-box, .field-error, .twofa-setup { animation: none; transition: none; } .tos-text { scroll-behavior: auto; } }
+.account-gate { display: grid; place-items: center; min-height: 100vh; }
+.account-start { display: flex; flex-direction: column; gap: var(--space-sm); max-width: 420px; animation: page-in var(--dur-slow) var(--ease-out); }

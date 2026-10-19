@@ -5,6 +5,7 @@ import path from "node:path";
 import { detectDistribution, updatePolicy, type UpdateState } from "@gendragoon/updater";
 import { createDesktopUpdater } from "./updater-service.js";
 import { isStripeUrl } from "./billing-url.js";
+import { RedXaiSession } from "./redxai-session.js";
 
 const here = __dirname;
 
@@ -36,6 +37,7 @@ export async function readGitHubToken(): Promise<string | undefined> {
 
 /** Test harness only: an unpackaged run (electron <app-dir>) with GENDRAGOON_E2E=1 skips the keychain requirement. A packaged app can never take this path. */
 declare const __GD_DISTRIBUTION__: string | undefined;
+declare const __GD_REDXAI_ISSUER__: string | undefined;
 /** Which store/channel this build came from. Baked in at build time (scripts/build-main.mjs), plus process.mas and the launcher marker. */
 function distributionPolicy() {
   return updatePolicy(detectDistribution({
@@ -146,7 +148,18 @@ function registerIpc(): void {
     if (!senderIsShell(event)) throw new Error("Refusing updater IPC from an unknown sender");
     return getUpdater().controller.getState();
   });
-  ipcMain.handle("auth:id-token", () => undefined);
+  ipcMain.handle("auth:id-token", (event) => (senderIsShell(event) ? redxai()?.accessToken() : undefined));
+  ipcMain.handle("auth:configured", (event) => senderIsShell(event) && redxai() !== null);
+  /** Red-XAI Account sign-in (or the hosted sign-up page) in the system browser. */
+  ipcMain.handle("auth:sign-in", async (event, mode: unknown) => {
+    const session = redxai();
+    if (!senderIsShell(event) || !session) return false;
+    await session.signIn(mode === "sign-up" ? "sign-up" : "sign-in");
+    return true;
+  });
+  ipcMain.handle("auth:sign-out", async (event) => {
+    if (senderIsShell(event)) await redxai()?.signOut();
+  });
   /** Opens a Stripe Checkout or billing portal page in the system browser. Any other URL is refused. */
   ipcMain.handle("billing:open", async (event, url: unknown) => {
     if (!senderIsShell(event) || !isStripeUrl(url)) return false;
@@ -186,6 +199,40 @@ function registerIpc(): void {
     if (!file) return;
     await rm(file, { force: true });
   });
+}
+
+let redxaiSession: RedXaiSession | null | undefined;
+/** Null when the build has no Red-XAI issuer; a development run may set GENDRAGOON_REDXAI_ISSUER. */
+function redxai(): RedXaiSession | null {
+  if (redxaiSession !== undefined) return redxaiSession;
+  const baked = typeof __GD_REDXAI_ISSUER__ === "string" ? __GD_REDXAI_ISSUER__ : "";
+  const issuer = baked || (!app.isPackaged ? process.env.GENDRAGOON_REDXAI_ISSUER ?? "" : "");
+  if (!/^https:\/\/|^http:\/\/(localhost|127\.0\.0\.1)(:|\/|$)/.test(issuer)) return (redxaiSession = null);
+  const file = secretFile("redxai:refresh")!;
+  redxaiSession = new RedXaiSession({
+    issuer,
+    openExternal: (url) => electronShell.openExternal(url),
+    store: {
+      async read() {
+        requireSafeStorage();
+        try {
+          return safeStorage.decryptString(await readFile(file));
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+          throw error;
+        }
+      },
+      async write(token) {
+        requireSafeStorage();
+        await mkdir(path.dirname(file), { recursive: true });
+        await writeFile(file, safeStorage.encryptString(token));
+      },
+      async clear() {
+        await rm(file, { force: true });
+      },
+    },
+  });
+  return redxaiSession;
 }
 
 function secretFile(name: unknown): string | null {

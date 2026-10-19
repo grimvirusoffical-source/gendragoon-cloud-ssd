@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   accountFromAssessment,
   actionsForMode,
@@ -42,6 +42,8 @@ import {
 } from "@gendragoon/core";
 import { AccountSurface, AppShell, CustomStorageWizard, FileBrowser, NewWorkspace, RedxConnections, SettingsView, UpdateControl, deletionFailureNotice, type CustomStorageCredentials, type ShellView, type UpdateView } from "@gendragoon/ui";
 import { TeamsView } from "./TeamsView";
+import { AccountGate, type AccountGateDeps } from "./AccountGate";
+import { AccountsClient } from "@gendragoon/core";
 
 const secrets = new MemorySecretStore();
 
@@ -139,6 +141,23 @@ function viewFromHash(hash: string): ShellView {
   return "files";
 }
 
+/** Red-XAI Account sign-in, when this build has an issuer and an API base. */
+function useAccountDeps(): AccountGateDeps | null {
+  return useMemo(() => {
+    const issuer = import.meta.env.VITE_REDXAI_ISSUER;
+    const apiBase = import.meta.env.VITE_API_BASE;
+    const bridge = window.gendragoon;
+    if (!issuer || !apiBase || !bridge?.signIn || !bridge.getIdToken) return null;
+    const central = (session?: string) => new AccountsClient({ baseUrl: issuer, pathPrefix: "/v1", app: "gendragoon", getToken: async () => session ?? null });
+    return {
+      central: central(),
+      centralWithSession: (session) => central(session),
+      gendragoon: new AccountsClient({ baseUrl: apiBase, getToken: async () => (await bridge.getIdToken!()) ?? null }),
+      signIn: (mode) => bridge.signIn!(mode),
+    };
+  }, []);
+}
+
 export function App() {
   const [view, setView] = useState<ShellView>(() => viewFromHash(window.location.hash));
   const [selectedId, setSelectedId] = useState<string | null>(NODES[0]?.id ?? null);
@@ -161,6 +180,13 @@ export function App() {
   const [intentId, setIntentId] = useState(() => crypto.randomUUID());
   const [setupId, setSetupId] = useState<string | null>(null);
   const [signedOut, setSignedOut] = useState<null | "deleted" | "invalid-token" | "signed-out">(null);
+  // Red-XAI Account sign-in: null while checking, true when the app needs a sign-in first.
+  const [needsAccount, setNeedsAccount] = useState<boolean | null>(null);
+  const accountDeps = useAccountDeps();
+  useEffect(() => {
+    if (!accountDeps) return;
+    void window.gendragoon?.getIdToken?.().then((token) => setNeedsAccount(!token)).catch(() => setNeedsAccount(true));
+  }, [accountDeps]);
   const [deleting, setDeleting] = useState(false);
   const [reauthRequired, setReauthRequired] = useState(false);
   const [deletionNotice, setDeletionNotice] = useState<{ message: string; retryable: boolean; support?: string } | null>(null);
@@ -515,6 +541,10 @@ export function App() {
     };
   });
 
+  if (accountDeps && (needsAccount || signedOut)) {
+    return <AccountGate deps={accountDeps} onReady={() => { setNeedsAccount(false); setSignedOut(null); }} />;
+  }
+
   if (signedOut) {
     const detail = signedOut === "invalid-token"
       ? "This session is no longer valid. Workspace keys were kept on this device."
@@ -674,7 +704,7 @@ export function App() {
   }
 
   return (
-    <AppShell view={view} onView={open} locked={account.phase === "delete_or_merge"} onSignOut={() => setSignedOut("signed-out")}>
+    <AppShell view={view} onView={open} locked={account.phase === "delete_or_merge"} onSignOut={() => { void window.gendragoon?.signOut?.(); setSignedOut("signed-out"); }}>
       {notice ? <div className="banner" data-testid="updater-notice">{notice}</div> : null}
       {body}
       <p className="footer-note" data-testid="status">{status}</p>
