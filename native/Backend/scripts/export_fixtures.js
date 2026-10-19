@@ -33,11 +33,14 @@ const wid=n=>"11111111-1111-4111-8111-"+String(n).padStart(12,"0");
 const outDir=path.resolve(process.argv[2]||path.join(__dirname,"../../../fixtures"));
 const env={STRIPE_CHECKOUT_ENABLED:"false",STRIPE_ENVIRONMENT:"test",PUBLIC_URL:"https://billing.example"};
 const stripe={customers:{create:async()=>({id:"cus_fixture"})},checkout:{sessions:{}},prices:{retrieve:async()=>{throw Error("stripe double");}}};
-const monthlyEnv={...env,STRIPE_CHECKOUT_ENABLED:"true",STRIPE_WORKSPACE_MONTHLY_READY:"true",STRIPE_WORKSPACE_MONTHLY_PRICE_ID:"price_fixturemonthly"};
+const monthlyEnv={...env,STRIPE_CHECKOUT_ENABLED:"true"};
+// Existing Stripe price keys reused by the plans model; no new price is needed.
+const PLAN_PRICES={"storage|standard|100GB|month":"price_fixturestorage100gb","performance|boost|month":"price_fixtureboost","performance|lite|month":"price_fixturelite"};
+const PLANS={storageTier:"100GB",performanceTier:"boost",interval:"month"};
 function monthlyStripe(){
  return {customers:{create:async()=>({id:"cus_fixture"})},
   prices:{retrieve:async id=>({id,active:true,type:"recurring",recurring:{interval:"month"},currency:"usd",unit_amount:500,billing_scheme:"per_unit",livemode:false,product:{active:true}})},
-  checkout:{sessions:{retrieve:async()=>{throw Error("missing session");},create:async()=>({id:"cs_fixture_monthly",url:"https://checkout.stripe.com/c/pay/cs_fixture_monthly",status:"open"})}}};
+  checkout:{sessions:{retrieve:async()=>{throw Error("missing session");},create:async()=>({id:"cs_fixture_plans",url:"https://checkout.stripe.com/c/pay/cs_fixture_plans",status:"open"})}}};
 }
 const byoBody={provider:"s3",endpoint:"https://bucket.s3.us-east-1.amazonaws.com",bucketFingerprint:"ab".repeat(8)};
 const SECRET_HEADERS=new Set(["authorization","cookie","set-cookie","x-api-key","stripe-signature"]);
@@ -84,7 +87,7 @@ function paid(name,extra={}){
   provisioned:true,storageActive:false,performanceActive:false,usedBytes:0,reservedBytes:0,createdAt:NOW,...extra};
 }
 function put(db,id,data,account=owner){db.rows.set("gd_accounts/"+account+"/workspaces/"+id,data);}
-async function start(db,{byoFetch=null,env:useEnv=env,stripe:useStripe=stripe}={}){
+async function start(db,{byoFetch=null,env:useEnv=env,stripe:useStripe=stripe,prices=PLAN_PRICES}={}){
  const app=express();
  app.use(express.json({limit:"16kb"}));
  const auth=(req,res,next)=>{
@@ -93,7 +96,7 @@ async function start(db,{byoFetch=null,env:useEnv=env,stripe:useStripe=stripe}={
   res.status(401).json({error:"Sign in required"});
  };
  registerBillingV2({app,db,stripe:useStripe,admin:{firestore:{FieldValue:{serverTimestamp:()=>NOW}}},
-  auth,agreed:(_req,_res,next)=>next(),hash,prices:{},env:useEnv,byoFetch});
+  auth,agreed:(_req,_res,next)=>next(),hash,prices,env:useEnv,byoFetch});
  registerPaidStorage({app,db,bucket:{file:()=>({})},accountKey:hash,
   FieldValue:{increment:n=>({increment:n}),serverTimestamp:()=>NOW},
   apiKeys:{verify:async()=>null},getAuth:()=>({}),firebaseAuth:auth});
@@ -227,38 +230,38 @@ async function freeSlotCases(){
   const first=await capture(hosted.base,"POST","/v2/projects",{body:{name:"Free Hosted",intentId:wid(1)}});
   assertPrice(first,true,0,"free-first");
   writeCase("workspaces","free-first",first);
-  const second=await capture(hosted.base,"POST","/v2/projects",{body:{name:"Second Workspace",intentId:wid(2)}});
-  assertPrice(second,false,500,"second-paid");
-  writeCase("workspaces","second-paid",second);
-  const moved=await capture(hosted.base,"POST","/v2/workspaces/"+wid(1)+"/byo/register",{body:byoBody});
-  assertPrice(moved,false,500,"free-to-byo");
-  if(moved.response.body?.freeWorkspaceId!==wid(2))throw Error("free slot did not move "+JSON.stringify(moved.response.body));
-  writeCase("workspaces","free-to-byo-billable",moved);
+  const bare=await capture(hosted.base,"POST","/v2/projects",{body:{name:"Second Workspace",intentId:wid(2)}});
+  if(bare.response.status!==400||bare.response.body?.error!=="PLANS_REQUIRED")throw Error("second without plans "+JSON.stringify(bare.response));
+  writeCase("workspaces","second-plans-required",bare);
+  const second=await capture(hosted.base,"POST","/v2/projects",{body:{name:"Second Workspace",intentId:wid(2),plans:PLANS}});
+  assertPrice(second,false,0,"second-plans");
+  if(second.response.body?.totalCents!==1240||second.response.body?.project?.billingModel!=="plans")throw Error("second plans "+JSON.stringify(second.response.body));
+  writeCase("workspaces","second-plans-checkout",second);
+  const refused=await capture(hosted.base,"POST","/v2/workspaces/"+wid(1)+"/byo/register",{body:byoBody});
+  if(refused.response.body?.error!=="CUSTOM_STORAGE_NEW_WORKSPACE")throw Error("custom on hosted "+JSON.stringify(refused.response));
+  writeCase("workspaces","custom-on-hosted-refused",refused);
   const both=await capture(hosted.base,"GET","/v2/workspaces");
   const items=both.response.body?.workspaces||[];
-  const kept=items.find(item=>item.id===wid(2)),converted=items.find(item=>item.id===wid(1));
-  if(kept?.isFree!==true||kept?.monthlyPriceCents!==0||converted?.isFree!==false||converted?.monthlyPriceCents!==500)
-   throw Error("hosted plus byo "+JSON.stringify(items));
-  if(both.response.body?.policy?.reason!=="lapsed"||!both.response.body.policy.unpaidWorkspaceIds.includes(wid(1)))
-   throw Error("hosted plus byo lock "+JSON.stringify(both.response.body?.policy));
-  writeCase("workspaces","list-hosted-plus-byo",both);
+  const kept=items.find(item=>item.id===wid(1)),pending=items.find(item=>item.id===wid(2));
+  if(kept?.isFree!==true||pending?.isFree!==false||pending?.monthlyPriceCents!==0||pending?.projectStatus!=="pending_payment")
+   throw Error("free plus plans "+JSON.stringify(items));
+  if(both.response.body?.policy?.locked!==false)throw Error("pending plans must not lock "+JSON.stringify(both.response.body?.policy));
+  writeCase("workspaces","list-free-plus-plans-pending",both);
  }finally{await hosted.close();}
  const only=await start(memoryFirestore(),{env:monthlyEnv,stripe:monthlyStripe()});
  try{
-  const created=await capture(only.base,"POST","/v2/projects",{body:{name:"Only BYO",intentId:wid(3)}});
-  if(created.response.status!==201)throw Error("only byo create "+JSON.stringify(created.response));
-  const registered=await capture(only.base,"POST","/v2/workspaces/"+wid(3)+"/byo/register",{body:byoBody});
-  assertPrice(registered,false,500,"byo-first");
-  if(registered.response.body?.freeWorkspaceId!==null)throw Error("byo held the free slot "+JSON.stringify(registered.response.body));
-  writeCase("workspaces","byo-first-paid",registered);
+  const noPlan=await capture(only.base,"POST","/v2/projects",{body:{name:"Own S3",intentId:wid(3),storage:"custom"}});
+  if(noPlan.response.body?.error!=="PERFORMANCE_PLAN_REQUIRED")throw Error("custom without performance "+JSON.stringify(noPlan.response));
+  writeCase("workspaces","custom-performance-required",noPlan);
+  const created=await capture(only.base,"POST","/v2/projects",{body:{name:"Own S3",intentId:wid(3),storage:"custom",plans:{performanceTier:"lite",interval:"month"}}});
+  assertPrice(created,false,0,"custom-create");
+  if(created.response.body?.totalCents!==300||created.response.body?.project?.customStorage!==true)throw Error("custom create "+JSON.stringify(created.response.body));
+  writeCase("workspaces","custom-storage-checkout",created);
   const listed=await capture(only.base,"GET","/v2/workspaces");
-  const item=listed.response.body?.workspaces?.[0];
-  if(listed.response.body?.workspaces?.length!==1||item?.isFree!==false||item?.monthlyPriceCents!==500)
-   throw Error("list byo only "+JSON.stringify(listed.response.body));
   const policy=listed.response.body?.policy;
-  if(policy?.locked!==true||policy.reason!=="lapsed"||!policy.unpaidWorkspaceIds.includes(wid(3)))
-   throw Error("list byo lock "+JSON.stringify(policy));
-  writeCase("workspaces","list-byo-only",listed);
+  if(listed.response.body?.workspaces?.length!==1||policy?.locked!==false||policy?.freeProjectAvailable!==true)
+   throw Error("list custom only "+JSON.stringify(listed.response.body));
+  writeCase("workspaces","list-custom-only",listed);
  }finally{await only.close();}
  const replaced=await start(memoryFirestore(),{env:monthlyEnv,stripe:monthlyStripe()});
  try{
@@ -275,14 +278,14 @@ async function freeSlotCases(){
  const concurrent=await start(memoryFirestore(),{env:monthlyEnv,stripe:monthlyStripe()});
  try{
   const created=await Promise.all([
-   capture(concurrent.base,"POST","/v2/projects",{body:{name:"Concurrent A",intentId:wid(6)}}),
-   capture(concurrent.base,"POST","/v2/projects",{body:{name:"Concurrent B",intentId:wid(7)}})
+   capture(concurrent.base,"POST","/v2/projects",{body:{name:"Concurrent A",intentId:wid(6),plans:PLANS}}),
+   capture(concurrent.base,"POST","/v2/projects",{body:{name:"Concurrent B",intentId:wid(7),plans:PLANS}})
   ]);
   if(created.some(item=>item.response.status!==201))throw Error("concurrent create "+created.map(item=>item.response.status).join(","));
   const listed=await capture(concurrent.base,"GET","/v2/workspaces");
   const items=listed.response.body?.workspaces||[];
-  if(items.length!==2||items.filter(item=>item.isFree===true).length!==1||items.filter(item=>item.monthlyPriceCents===500).length!==1)
-   throw Error("concurrent list "+JSON.stringify(items.map(item=>({id:item.id,isFree:item.isFree,monthlyPriceCents:item.monthlyPriceCents}))));
+  if(items.length!==2||items.filter(item=>item.isFree===true).length!==1||items.filter(item=>item.billingModel==="plans").length!==1)
+   throw Error("concurrent list "+JSON.stringify(items.map(item=>({id:item.id,isFree:item.isFree,billingModel:item.billingModel}))));
   writeCase("workspaces","concurrent-create-one-free",listed);
  }finally{await concurrent.close();}
 }

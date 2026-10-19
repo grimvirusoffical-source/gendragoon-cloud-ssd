@@ -5,7 +5,7 @@ private enum GDPage: String, CaseIterable {
     case home = "Home"
     case cloud = "Files"
     case applications = "Applications"
-    case plans = "Bundles"
+    case plans = "Workspace plans"
     case storage = "Storage"
     case performance = "Performance"
     case account = "Account"
@@ -87,14 +87,6 @@ private struct GDPrimary: View {
          .background(LinearGradient(colors:[gdPurple,Color(red:0.34,green:0.22,blue:0.74)],startPoint:.topLeading,endPoint:.bottomTrailing),in:RoundedRectangle(cornerRadius:11))
     }
 }
-private struct GDDraftWorkspace: Identifiable, Codable {
-    let id: String
-    let name: String
-    let planID: String
-    let planMode: String
-    let yearly: Bool
-    let totalCents: Int
-}
 
 @MainActor struct MainView:View {
     @EnvironmentObject private var loginSession: GDLoginSession
@@ -104,50 +96,7 @@ private struct GDDraftWorkspace: Identifiable, Codable {
     @ObservedObject private var activity = GDUpdateActivity.shared
     @State private var page:GDPage = .cloud
     @AppStorage("gd.commercial.preview.welcomeSeen") private var welcomeSeen = false
-    @AppStorage("gd.commercial.preview.selectedTier") private var selectedTier = "1TB"
-    @AppStorage("gd.commercial.preview.annual") private var annual = false
-    @AppStorage("gd.commercial.preview.storageMode") private var storageMode = "managed"
-    @State private var workspaceDraftsRevision = 0
-    private var workspaceDraftsKey: String { "gd.workspace.drafts.v2."+loginSession.userID }
-    private var workspaceDraftsJSON: String { UserDefaults.standard.string(forKey:workspaceDraftsKey) ?? "[]" }
-    @State private var newWorkspaceName = ""
-    @State private var newWorkspacePlan = "100GB"
-    @State private var newWorkspaceMode = "bundle"
-    @State private var workspaceStatus = ""
 
-    private var savedDrafts: [GDDraftWorkspace] {
-        _ = workspaceDraftsRevision
-        guard let data = workspaceDraftsJSON.data(using:.utf8),
-              let records = try? JSONDecoder().decode([GDDraftWorkspace].self,from:data) else { return [] }
-        return records
-    }
-    private var quotedStorage: GDTier { gdTiers.first(where:{$0.id==newWorkspacePlan}) ?? gdTiers[0] }
-    private var workspaceStorageCents: Int {
-        newWorkspaceMode == "bundle" ? Int((quotedStorage.monthly*100).rounded()) : Int((storagePrice(quotedStorage)*100).rounded())
-    }
-    private var workspaceChargeCents: Int { (workspaceStorageCents + 500) * (annual ? 10:1) }
-    private func saveWorkspaceDraft() {
-        let name = newWorkspaceName.trimmingCharacters(in:.whitespacesAndNewlines)
-        guard name.count >= 3 && name.count <= 64 && !name.contains("/") && !name.contains("\\") else {
-            workspaceStatus = "Enter a 3–64 character workspace name without slashes."
-            return
-        }
-        var records=savedDrafts
-        guard records.count < 100 else { workspaceStatus = "Limit of 100 local drafts reached."; return }
-        records.append(.init(id:UUID().uuidString.lowercased(),name:name,planID:newWorkspacePlan,planMode:newWorkspaceMode,yearly:annual,totalCents:workspaceChargeCents))
-        if let data=try? JSONEncoder().encode(records), let json=String(data:data,encoding:.utf8) {
-            UserDefaults.standard.set(json,forKey:workspaceDraftsKey)
-            workspaceDraftsRevision += 1
-            workspaceStatus="Draft saved locally for this Google account. No bucket created and no payment charged."
-            newWorkspaceName=""
-        }
-    }
-    private var chosen:GDTier? { gdTiers.first(where:{$0.id == selectedTier}) }
-    private var chosenLabel:String {
-        if storageMode == "byo" { return annual ? "$100.00/year · Bring Your Own Cloud" : "$10.00/month · Bring Your Own Cloud" }
-        guard let t=chosen else {return "Choose a plan"}
-        return "\(t.capacity) · \(gdMoney(annual ? t.yearly : t.monthly))/\(annual ? "year" : "month")"
-    }
     var body:some View {
         HStack(spacing:0) {
             sidebar
@@ -292,14 +241,18 @@ private struct GDDraftWorkspace: Identifiable, Codable {
     }
     private var plansPage:some View {
         VStack(alignment:.leading,spacing:20) {
-            GDHeading(kicker:"STORAGE + PERFORMANCE",title:"Choose your cloud plan.",subtitle:"Select a server-listed tier, retain your choice, and review the exact amount in secure checkout.")
-            GenDragoonStripePurchases(focus:"bundle")
+            GDHeading(kicker:"WORKSPACE PLANS",title:"One plan per workspace. No extra fees.",subtitle:"The workspace fee is included in every storage plan. Your first workspace is free: 2 GB storage and the free performance plan.")
             GDPanel {
-                Label("Your own cloud provider",systemImage:"server.rack").font(.headline)
-                Text("Use a separately configured SFTP, S3-compatible or other supported provider. Your provider bills its storage and network usage separately.")
+                Label("Every additional workspace",systemImage:"square.stack.3d.up.fill").font(.headline)
+                Text("Choose New Project in Files, then pick a storage plan and a performance plan (Lite, Boost, Turbo, Ultra or Max). Both are billed together in one Stripe Checkout.")
                     .font(.caption).foregroundStyle(gdSecondary)
             }
-            GenDragoonStripePurchases(focus:"byo")
+            GDPanel {
+                Label("Custom storage",systemImage:"server.rack").font(.headline)
+                Text("Use your own S3, VPS or cloud provider. Create the workspace with Custom storage and a paid performance plan, then finish setup below. Your provider bills its own storage and network usage.")
+                    .font(.caption).foregroundStyle(gdSecondary)
+            }
+            GenDragoonStripePurchases(focus:"custom")
         }
     }
     private var storagePage: some View {
@@ -308,167 +261,10 @@ private struct GDDraftWorkspace: Identifiable, Codable {
             GenDragoonStripePurchases(focus:"standard")
         }
     }
-    private func storagePrice(_ tier:GDTier)->Double {
-        ((tier.monthly * 0.8 * 100).rounded(.up))/100
-    }
     private var performancePage: some View {
         VStack(alignment:.leading,spacing:20) {
             GDHeading(kicker:"PERFORMANCE",title:"Tune your transfer workload.",subtitle:"Select an active storage workspace and choose its transfer-worker plan. Actual speed depends on the network, provider and workload.")
             GenDragoonStripePurchases(focus:"performance")
-        }
-    }
-    private func performanceRow(name:String,price:Int,workers:Int,symbol:String)->some View {
-        HStack(spacing:16) {
-            Image(systemName:symbol).font(.system(size:23)).foregroundStyle(gdPurple)
-                .frame(width:43,height:43).background(gdPurple.opacity(0.14),in:RoundedRectangle(cornerRadius:11))
-            VStack(alignment:.leading,spacing:5) {
-                Text(name).font(.system(size:15,weight:.bold))
-                Text("\(workers) simultaneous transfer workers").font(.system(size:11)).foregroundStyle(gdSecondary)
-            }
-            Spacer()
-            VStack(alignment:.trailing,spacing:4) {
-                Text("$\(annual ? price*10 : price)" + (annual ? "/year" : "/month"))
-                    .font(.system(size:17,weight:.bold))
-                Text("Coming with billing").font(.system(size:10)).foregroundStyle(.orange)
-            }
-        }.padding(14).background(gdSurface,in:RoundedRectangle(cornerRadius:13))
-    }
-    private func planCard(_ tier:GDTier)->some View {
-        let chosen=storageMode == "managed" && selectedTier == tier.id
-        return VStack {
-            VStack(alignment:.leading,spacing:9) {
-                HStack {
-                    Text(tier.category.uppercased())
-                        .font(.system(size:10,weight:.heavy,design:.rounded)).tracking(1.4)
-                        .foregroundStyle(gdPurple)
-                    Spacer()
-                    if chosen {Image(systemName:"checkmark.circle.fill").foregroundStyle(.green)}
-                }
-                Text(tier.capacity).font(.system(size:24,weight:.heavy,design:.rounded))
-                HStack(alignment:.firstTextBaseline,spacing:2) {
-                    Text(gdMoney(annual ? tier.yearly : tier.monthly))
-                        .font(.system(size:21,weight:.bold))
-                    Text(annual ? "/year" : "/month").font(.system(size:10))
-                        .foregroundStyle(gdSecondary)
-                }
-                if annual {Text("≈ \(gdMoney(tier.monthlyEffectiveAnnual))/month").font(.system(size:11)).foregroundStyle(gdSecondary)}
-                Divider().overlay(.white.opacity(0.1))
-                Label("Private \(tier.capacity) storage",systemImage:"checkmark")
-                Label("\(tier.workers) transfer workers¹",systemImage:"arrow.up.arrow.down")
-                Label("App library & restores",systemImage:"checkmark")
-                Text("Choose in checkout below")
-                    .font(.system(size:10,weight:.heavy,design:.monospaced))
-                    .foregroundStyle(chosen ? Color.green : gdPurple)
-                    .padding(.top,5)
-            }
-            .font(.system(size:11)).foregroundStyle(Color.white)
-            .frame(maxWidth:.infinity,minHeight:184,alignment:.leading)
-            .padding(16)
-            .background(chosen ? gdPurple.opacity(0.18) : gdSurface,in:RoundedRectangle(cornerRadius:16))
-            .overlay(RoundedRectangle(cornerRadius:16).stroke(chosen ? gdPurple : Color.white.opacity(0.13),lineWidth:chosen ? 2:1))
-        }.buttonStyle(.plain)
-    }
-    private var workspacesPage: some View {
-        VStack(alignment:.leading,spacing:20) {
-            GDHeading(kicker:"PROJECT WORKSPACES",title:"A separate cloud for every project.",subtitle:"Each managed workspace has its own $5/month management fee and a required storage plan. Billing and access are independent from your other workspaces.")
-            if loginSession.isOwner { GDPanel {
-                HStack {
-                    Image(systemName:"externaldrive.fill.badge.checkmark")
-                        .font(.system(size:28)).foregroundStyle(gdPurple)
-                    VStack(alignment:.leading,spacing:5) {
-                        Text("Your existing personal cloud").font(.system(size:17,weight:.bold))
-                        Text("Google Cloud · storage project: \(GDProjects.storageProjectID)")
-                            .font(.system(size:11)).foregroundStyle(gdSecondary)
-                        Text("Existing bucket connection is preserved, not migrated or billed by this preview.")
-                            .font(.system(size:11)).foregroundStyle(gdSecondary)
-                    }
-                    Spacer()
-                    Button("Manage") {page = .cloud}.buttonStyle(.borderedProminent).tint(.purple)
-                }
-            }}
-            GDPanel {
-                Label("Free workspace · 2 GB · 1 transfer worker",systemImage:"gift.fill")
-                    .font(.system(size:16,weight:.bold))
-                Text("Free includes one parallel transfer, resumable uploads and integrity checks, with no artificial bandwidth cap. One free project per account, no payment required.")
-                    .font(.system(size:12)).foregroundStyle(gdSecondary)
-            }
-            GDPanel {
-                Label("Create a workspace draft",systemImage:"plus.square.on.square")
-                    .font(.system(size:18,weight:.bold))
-                Text("Choose a name and one required storage plan. This saves a local draft; actual provisioning will occur only after verified Google sign-in, Terms acceptance, and Stripe payment.")
-                    .font(.system(size:12)).foregroundStyle(gdSecondary)
-                TextField("Project name · e.g. Music Studio",text:$newWorkspaceName)
-                    .textFieldStyle(.roundedBorder)
-                HStack(spacing:12) {
-                    Picker("Storage",selection:$newWorkspacePlan) {
-                        ForEach(gdTiers) { tier in Text(tier.capacity).tag(tier.id) }
-                    }.frame(maxWidth:.infinity)
-                    Picker("Type",selection:$newWorkspaceMode) {
-                        Text("Storage + Performance").tag("bundle")
-                        Text("Storage Only").tag("standard")
-                    }.frame(maxWidth:.infinity)
-                }
-                Picker("Billing",selection:$annual) {
-                    Text("Monthly").tag(false)
-                    Text("Yearly · 2 months free").tag(true)
-                }.pickerStyle(.segmented)
-                Divider()
-                HStack {
-                    Text("Required \(quotedStorage.capacity) storage plan")
-                        .font(.system(size:12)).foregroundStyle(gdSecondary)
-                    Spacer()
-                    Text(gdMoney(Double(workspaceStorageCents)/100 * (annual ? 10:1)))
-                        .font(.system(size:13,weight:.semibold))
-                }
-                HStack {
-                    Text("Private workspace management fee")
-                        .font(.system(size:12)).foregroundStyle(gdSecondary)
-                    Spacer()
-                    Text(annual ? "$50.00" : "$5.00").font(.system(size:13,weight:.semibold))
-                }
-                HStack {
-                    Text("Total for this workspace").font(.system(size:17,weight:.bold))
-                    Spacer()
-                    Text(gdMoney(Double(workspaceChargeCents)/100)+(annual ? "/year":"/month"))
-                        .font(.system(size:21,weight:.heavy)).foregroundStyle(gdPurple)
-                }
-                GDPrimary(title:"Save workspace draft",icon:"plus.circle.fill") {saveWorkspaceDraft()}
-                if !workspaceStatus.isEmpty {
-                    Text(workspaceStatus).font(.system(size:11))
-                        .foregroundStyle(.orange)
-                }
-            }
-            GDPanel {
-                Text("Your workspace drafts").font(.system(size:18,weight:.bold))
-                if savedDrafts.isEmpty {
-                    Text("No new workspace drafts yet. Your original personal cloud remains available above.")
-                        .font(.system(size:12)).foregroundStyle(gdSecondary)
-                } else {
-                    ForEach(savedDrafts) { draft in
-                        HStack(spacing:12) {
-                            Image(systemName:"square.stack.3d.up").foregroundStyle(gdPurple)
-                            VStack(alignment:.leading,spacing:4) {
-                                Text(draft.name).font(.system(size:14,weight:.bold))
-                                Text("\(draft.planID) · \(draft.planMode == "bundle" ? "Bundle" : "Storage only") · \(draft.id.prefix(8))")
-                                    .font(.system(size:11)).foregroundStyle(gdSecondary)
-                            }
-                            Spacer()
-                            Text(gdMoney(Double(draft.totalCents)/100)+(draft.yearly ? "/yr":"/mo"))
-                                .font(.system(size:13,weight:.semibold))
-                            Text("DRAFT").font(.system(size:10,weight:.bold)).foregroundStyle(.orange)
-                        }
-                        Divider().overlay(.white.opacity(0.06))
-                    }
-                }
-            }
-            GDPanel {
-                Label("Private credentials for each project",systemImage:"lock.shield.fill")
-                    .font(.system(size:14,weight:.bold)).foregroundStyle(gdPurple)
-                Text("When customer storage is deployed, each paid workspace will receive independently scoped permissions and short-lived, server-issued credentials. The desktop app will never contain permanent bucket administration keys. Upload and download quotas will be enforced by the service.")
-                    .font(.system(size:12)).foregroundStyle(gdSecondary)
-                Label("New paid workspaces cannot be activated until test-mode Stripe prices, Firebase sessions and private cloud provisioning are validated.",systemImage:"exclamationmark.shield")
-                    .font(.system(size:11)).foregroundStyle(.orange)
-            }
         }
     }
     private var cloudPage:some View {

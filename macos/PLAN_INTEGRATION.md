@@ -62,9 +62,9 @@ These proposal rules are not the current native billing contract; live prices
 and fee breakdowns come from the server-owned catalog.
 
 The existing documented GPU triple bundle separately sums standard storage +
-$5 workspace + performance + GPU, applies a single 10% discount rounded upward
+performance + GPU (the workspace fee is included in storage), applies a single 10% discount rounded upward
 to whole cents, and bills ten discounted months for annual payment. This
-preserves the documented 1 TB/Boost/Spark example: $68.40 monthly or $684 yearly.
+preserves the documented 1 TB/Boost/Spark example: $63.90 monthly or $639 yearly.
 There is no extra storage/performance discount or second annual discount.
 The catalog deliberately exposes the undiscounted `STORAGE[id].standard` and
 `PERFORMANCE[id].cents` fields required by that calculator. Product/billing

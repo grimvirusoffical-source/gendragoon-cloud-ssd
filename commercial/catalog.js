@@ -82,7 +82,7 @@ function storageQuote(tier, interval = "month") {
   return Object.freeze({
     ...planQuote(STORAGE, tier, interval, "storage"),
     // Preserve the storage subscription contract in the authoritative manifest.
-    // The separate, documented GPU triple bundle has its own workspace line.
+    // The workspace fee is part of every storage plan; there is no separate line.
     workspaceFeeIncluded: WORKSPACE.storageSubscriptionIncludesFee,
   });
 }

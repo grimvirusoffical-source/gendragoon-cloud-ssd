@@ -92,7 +92,8 @@ enum GDProjectContent: String { case files, applications }
     @Published private(set) var files: [GDCloudItem] = []
     @Published private(set) var projectLimit: Int?
     @Published private(set) var projectCount: Int?
-    @Published private(set) var nextProjectCents: Int?
+    /// True when the next new workspace takes the free slot (2 GB + free performance plan).
+    @Published private(set) var nextProjectFree: Bool?
     @Published var status = "Checking your projects…"
     @Published var busy = false { didSet { GDUpdateActivity.shared.set(self, key: "busy", active: busy) } }
     @Published var uploadProgress = 0.0
@@ -192,12 +193,12 @@ enum GDProjectContent: String { case files, applications }
             projectLimit = policy["projectLimit"] as? Int
             projectCount = policy["usedProjectSlots"] as? Int
             let free = policy["freeProjectAvailable"] as? Bool == true || policy["ownerFeeWaived"] as? Bool == true
-            nextProjectCents = free ? 0 : policy["newProjectOneTimeCents"] as? Int
+            nextProjectFree = free
         }
         files = []; workspaceName = nil
         if let selected = selectedProject {
             if selected.archived { status = "This project is archived. Its cloud files are retained; restore the project to access them."; return }
-            if selected.pendingPayment { status = "This project is awaiting its one-time project payment. Complete checkout before uploading."; return }
+            if selected.pendingPayment { status = "This workspace is waiting for its plan payment. Complete checkout before uploading."; return }
             if selected.pendingCapacity { status = "Payment is confirmed. Free a project slot, then activate this project; no new project fee is required."; return }
             if !selected.provisioned { status = "This project is being prepared. Refresh to check its storage activation."; return }
         } else if selectedWorkspace != "free" {
@@ -220,7 +221,10 @@ enum GDProjectContent: String { case files, applications }
         operation = Task { defer { finishOperation() }; do { try await load() } catch { status = GDNativeMessage.safe(error.localizedDescription) } }
     }
     func select(_ id: String) { guard !busy else { return }; selectedWorkspace = id; refresh() }
-    func create(name: String) {
+    /// Storage + performance plan tiers sold for new workspaces (server-validated; prices come from Stripe Checkout and /v2/pricing).
+    static let storageTiers = ["100GB", "200GB", "300GB", "500GB", "1TB", "2TB", "3TB", "4TB", "5TB", "6TB"]
+    static let performanceTiers = ["lite", "boost", "turbo", "ultra", "max"]
+    func create(name: String, customStorage: Bool = false, storageTier: String = "100GB", performanceTier: String = "boost", yearly: Bool = false) {
         let name = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !name.isEmpty, !busy, GDUpdateActivity.shared.canStart(excluding: self), let client else { return }
         let key = GDProjectPreferences.key(accountID: connectedID, setting: "createIntent")
@@ -229,16 +233,34 @@ enum GDProjectContent: String { case files, applications }
         UserDefaults.standard.set(intent, forKey: key); UserDefaults.standard.set(name, forKey: key + ".name")
         busy = true; activityTitle = "Creating project"; canPause = false
         operation = Task { defer { finishOperation() }; do {
-            let data = try await client.json("v2/projects", method: "POST", payload: ["name": name, "intentId": intent])
+            var body: [String: Any] = ["name": name, "intentId": intent]
+            if customStorage || nextProjectFree != true {
+                var plans: [String: Any] = ["performanceTier": performanceTier, "interval": yearly ? "year" : "month"]
+                if !customStorage { plans["storageTier"] = storageTier }
+                body["plans"] = plans
+                if customStorage { body["storage"] = "custom" }
+            }
+            let data = try await client.jsonData("v2/projects", method: "POST", payload: try JSONSerialization.data(withJSONObject: body))
             let result = try JSONSerialization.jsonObject(with: data) as? [String: Any]
             if let id = result?["workspaceId"] as? String { selectedWorkspace = id }
             try await load()
             if let text = result?["url"] as? String, let url = URL(string: text), url.scheme == "https", url.host == "checkout.stripe.com" {
                 NSWorkspace.shared.open(url)
-                status = "Project selected. Complete its one-time payment in Stripe, then refresh."
+                status = customStorage ? "Workspace selected. Pay for its performance plan in Stripe, then finish Custom storage setup in Workspace plans." : "Workspace selected. Pay for its storage and performance plans in Stripe, then refresh."
             } else {
                 UserDefaults.standard.removeObject(forKey: key); UserDefaults.standard.removeObject(forKey: key + ".name")
             }
+        } catch { status = GDNativeMessage.safe(error.localizedDescription) } }
+    }
+    /// Resumes (or reopens) the single plans Checkout of a workspace awaiting payment.
+    func resumeCheckout(_ project: GDWorkspaceChoice) {
+        guard !busy, GDUpdateActivity.shared.canStart(excluding: self), let client else { return }
+        busy = true; activityTitle = "Opening checkout"; canPause = false
+        operation = Task { defer { finishOperation() }; do {
+            let data = try await client.jsonData("v2/projects/" + project.id + "/checkout", method: "POST", payload: try JSONSerialization.data(withJSONObject: [String: Any]()))
+            let result = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+            if let text = result?["url"] as? String, let url = URL(string: text), url.scheme == "https", url.host == "checkout.stripe.com" { NSWorkspace.shared.open(url) }
+            try await load()
         } catch { status = GDNativeMessage.safe(error.localizedDescription) } }
     }
     func archiveSelected() {
@@ -452,6 +474,10 @@ struct GenDragoonFreeCloudPanel: View {
     @State private var dropTarget = false
     @State private var showCreate = false
     @State private var projectName = ""
+    @State private var customStorage = false
+    @State private var storageTier = "100GB"
+    @State private var performanceTier = "boost"
+    @State private var yearly = false
     private let accent = Color(red: 0.72, green: 0.55, blue: 0.96)
     private func size(_ count: Int64) -> String { ByteCountFormatter.string(fromByteCount: count, countStyle: .file) }
     private func category(_ file: GDCloudItem) -> String {
@@ -600,8 +626,8 @@ struct GenDragoonFreeCloudPanel: View {
                 Text("Payment received. A project slot is needed.").font(.system(size: 17, weight: .semibold))
                 Button("Activate Project") { customer.restoreProject(project) }.buttonStyle(.borderedProminent).tint(accent).disabled(locked)
             } else if customer.selectedProject?.pendingPayment == true {
-                Text("Complete this project's payment to activate it.").font(.system(size: 17, weight: .semibold))
-                Button("Storage & project plans", action: onStorage).buttonStyle(.borderedProminent).tint(accent)
+                Text("Complete this workspace's plan payment to activate it.").font(.system(size: 17, weight: .semibold))
+                if let project = customer.selectedProject { Button("Continue to checkout") { customer.resumeCheckout(project) }.buttonStyle(.borderedProminent).tint(accent).disabled(customer.busy) }
             } else if customer.selectedProject != nil {
                 Text("Your selected project is being prepared.").font(.system(size: 17, weight: .semibold))
                 Button("Refresh activation") { customer.refresh() }.disabled(customer.busy)
@@ -616,11 +642,19 @@ struct GenDragoonFreeCloudPanel: View {
         VStack(alignment: .leading, spacing: 18) {
             Text("New project").font(.system(size: 24, weight: .bold, design: .rounded))
             TextField("Project name", text: $projectName).textFieldStyle(.roundedBorder)
-            if let fee = customer.nextProjectCents {
-                Text(fee == 0 ? "Your first project is free." : String(format: "This new project costs $%.2f once. Storage and performance subscriptions are separate.", Double(fee) / 100)).font(.system(size: 12)).foregroundStyle(.secondary)
-            } else { Text("Your first project is free. Additional new projects require a one-time $5 payment, confirmed in Stripe before activation.").font(.system(size: 12)).foregroundStyle(.secondary) }
+            if customer.nextProjectFree == true {
+                Text("Your first workspace is free: 2 GB storage and the free performance plan.").font(.system(size: 12)).foregroundStyle(.secondary)
+            } else {
+                Picker("Storage", selection: $customStorage) { Text("GenDragoon storage").tag(false); Text("Custom storage").tag(true) }.pickerStyle(.segmented)
+                if !customStorage {
+                    Picker("Storage plan", selection: $storageTier) { ForEach(GDFreeCustomerModel.storageTiers, id: \.self) { Text($0).tag($0) } }
+                }
+                Picker("Performance plan", selection: $performanceTier) { ForEach(GDFreeCustomerModel.performanceTiers, id: \.self) { Text($0.capitalized).tag($0) } }
+                Picker("Billing", selection: $yearly) { Text("Monthly").tag(false); Text("Yearly").tag(true) }.pickerStyle(.segmented)
+                Text(customStorage ? "Your own S3, VPS or cloud provider. You pay only for the performance plan; setup continues after payment." : "Both plans are billed together in one Stripe Checkout. The workspace fee is included.").font(.system(size: 12)).foregroundStyle(.secondary)
+            }
             if let limit = customer.projectLimit { Text("\(customer.projectCount ?? customer.activeProjects.count) of \(limit) project slots used.").font(.caption).foregroundStyle(.secondary) }
-            HStack { Button("Cancel") { showCreate = false }; Spacer(); Button("Create Project") { customer.create(name: projectName); showCreate = false; projectName = "" }.buttonStyle(.borderedProminent).disabled(projectName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty) }
+            HStack { Button("Cancel") { showCreate = false }; Spacer(); Button(customer.nextProjectFree == true ? "Create Project" : "Continue to checkout") { customer.create(name: projectName, customStorage: customStorage, storageTier: storageTier, performanceTier: performanceTier, yearly: yearly); showCreate = false; projectName = "" }.buttonStyle(.borderedProminent).disabled(projectName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty) }
         }.padding(28).frame(width: 440)
     }
     var body: some View {

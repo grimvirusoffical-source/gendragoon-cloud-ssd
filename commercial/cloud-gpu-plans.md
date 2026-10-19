@@ -15,9 +15,9 @@ Prices are provisional; do not create live Stripe prices until hardware and clou
 
 ## Triple bundle
 
-Storage workspace management ($5) + standard managed storage + one performance tier + one Cloud GPU tier, discounted **10%** on the combined monthly total. Annual = 10 × discounted monthly payment. Do not stack triple-bundle discount with the existing storage/performance bundle to avoid double discounting.
+Standard managed storage (workspace fee included) + one performance tier + one Cloud GPU tier, discounted **10%** on the combined monthly total. Annual = 10 × discounted monthly payment. Do not stack triple-bundle discount with the existing storage/performance bundle to avoid double discounting.
 
-Example: 1 TB standard storage ($36) + $5 workspace + Boost performance ($6) + Spark GPU ($29) = $76 monthly before discount, **$68.40 monthly** or **$684 yearly**. Provisional only.
+Example: 1 TB standard storage ($36) + Boost performance ($6) + Spark GPU ($29) = $71 monthly before discount, **$63.90 monthly** or **$639 yearly**. Provisional only.
 
 ## Operational hard requirements (must ship before Stripe GPU checkout)
 

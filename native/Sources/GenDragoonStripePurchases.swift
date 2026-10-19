@@ -20,14 +20,19 @@ struct GDRemoteWorkspace: Decodable, Identifiable, Equatable {
     let performanceActive: Bool?
     let projectStatus: String?; let projectFeeStatus: String?; let projectBillingVersion: Int?
     let intendedSelection: GDRemotePlanSelection?
+    /// "plans" when the workspace's storage + performance plans are billed together (no separate fee).
+    let billingModel: String?; let customStorage: Bool?
+    var plansManaged: Bool { billingModel == "plans" }
     var isAvailable: Bool {
         if let projectStatus { return projectStatus == "active" }
         return (kind == "free" && provisioned) || (storageActive && provisioned) || (kind == "byo" && byoActive == true && manualProviderConfigured == true)
     }
-    var supportsStorage: Bool { ["free", "paid"].contains(kind) && isAvailable && provisioned }
+    // Plans workspaces change plans together through their own checkout, not these separate pickers.
+    var supportsStorage: Bool { !plansManaged && ["free", "paid"].contains(kind) && isAvailable && provisioned }
     var supportsPerformance: Bool {
-        isAvailable && (supportsStorage || (kind == "byo" && byoActive == true && manualProviderConfigured == true))
+        !plansManaged && isAvailable && (supportsStorage || (kind == "byo" && byoActive == true && manualProviderConfigured == true))
     }
+    var needsCustomSetup: Bool { plansManaged && customStorage == true && projectStatus == "active" && manualProviderConfigured != true }
 }
 private struct GDWorkspacesResponse: Decodable { let workspaces: [GDRemoteWorkspace]; let ownerBenefits: Bool? }
 private struct GDBillingProjectsResponse: Decodable { let projects: [GDRemoteWorkspace]; let ownerBenefits: Bool? }
@@ -43,7 +48,7 @@ struct GDServerBillingCatalog: Decodable {
     let catalogVersion: Int?
     let workspaceFeeMonthlyCents: Int
     let storage: [String: Storage]; let performance: [String: Performance]
-    let byo: BYO; let removeAds: Ads
+    let byo: BYO?; let removeAds: Ads
     let projects: Projects?
 }
 private struct GDBillingSelection: Codable, Equatable {
@@ -185,8 +190,11 @@ private struct GDBillingSelection: Codable, Equatable {
     func portal(login session: GDLoginSession) {
         begin(login: session) { try self.openCheckout(await self.send("billing/customer-portal", method: "POST")) }
     }
-    func buyManualBYO(login session: GDLoginSession, workspaceID: String, remote: String, provider: String, yearly: Bool) {
-        guard workspaces.contains(where: { $0.id == workspaceID && $0.isAvailable }) else { status = "Choose an active project first."; return }
+    /// Last step of the custom storage wizard. The provider's credentials stay in the local rclone
+    /// configuration on this Mac; the server only records the tested remote's label. No checkout:
+    /// the workspace was paid for by its performance plan when it was created.
+    func connectCustomStorage(login session: GDLoginSession, workspaceID: String, remote: String, provider: String, onSuccess: @escaping () -> Void) {
+        guard workspaces.contains(where: { $0.id == workspaceID && $0.needsCustomSetup }) else { status = "Choose a paid custom storage workspace first."; return }
         guard remote.range(of: "^[A-Za-z0-9_-]{3,40}$", options: .regularExpression) != nil else { status = "Enter an existing remote name using 3–40 letters, numbers, dashes or underscores."; return }
         guard let root = Bundle.main.resourceURL, FileManager.default.isExecutableFile(atPath: root.appendingPathComponent("rclone").path) else { status = "The local provider tool is unavailable."; return }
         begin(login: session) {
@@ -204,8 +212,9 @@ private struct GDBillingSelection: Codable, Equatable {
             }
             guard process.terminationStatus == 0 else { throw GDTransferError(message: "The provider check failed or timed out. Verify the remote in My Cloud and retry.", status: 0) }
             _ = try await self.send("v2/workspaces/" + workspaceID + "/manual-provider", method: "POST", payload: ["provider": provider, "label": remote, "connectionTested": true])
-            try self.openCheckout(await self.send("v2/workspaces/" + workspaceID + "/checkout/byo", method: "POST", payload: ["interval": yearly ? "year" : "month"]))
-            if self.ownerBenefits { try await self.loadWorkspaces() }
+            try await self.loadWorkspaces()
+            self.status = "Custom storage connected. Your provider bills its own storage and transfer charges."
+            onSuccess()
         }
     }
     func retainSelection(login session: GDLoginSession, workspaceID: String, payload: [String: String]) {
@@ -235,6 +244,7 @@ struct GenDragoonStripePurchases: View {
     let focus: String
     @State private var selected = GDBillingSelection()
     @State private var selectionAccount = ""
+    @State private var setupStep = 0
     private var accountScope: String { SHA256.hash(data: Data(login.userID.utf8)).map { String(format: "%02x", $0) }.joined() }
     private func persistenceKey(workspaceID: String) -> String {
         GDProjectPreferences.key(accountID: login.userID, workspaceID: workspaceID, setting: "billing.selection." + focus)
@@ -285,7 +295,6 @@ struct GenDragoonStripePurchases: View {
         let payload: [String: String]
         if focus == "performance" { payload = ["performanceTier": selected.performanceTier, "performanceInterval": interval] }
         else if focus == "standard" || focus == "bundle" { payload = ["storageTier": selected.storageTier, "storageMode": focus, "storageInterval": interval] }
-        else if focus == "byo" { payload = ["byoInterval": interval] }
         else { return }
         billing.retainSelection(login: login, workspaceID: selected.workspaceID, payload: payload)
     }
@@ -327,6 +336,41 @@ struct GenDragoonStripePurchases: View {
             }
         }
     }
+    private static let customSteps = ["Provider", "Connection", "Test", "Finish"]
+    @ViewBuilder private var customStorageWizard: some View {
+        let ready = billing.workspaces.filter { $0.needsCustomSetup }
+        if ready.isEmpty {
+            Text("No custom storage workspace is waiting for setup. In Files choose New Project, then Custom storage and a performance plan. Setup continues here after payment.").font(.system(size: 12)).foregroundStyle(.secondary)
+        } else {
+            HStack(spacing: 6) {
+                ForEach(Array(Self.customSteps.enumerated()), id: \.offset) { index, name in
+                    Text("\(index + 1). \(name)").font(.system(size: 11, weight: index == setupStep ? .bold : .regular))
+                        .padding(.horizontal, 9).padding(.vertical, 5)
+                        .background(index <= setupStep ? Color.purple.opacity(0.22) : Color.white.opacity(0.05), in: Capsule())
+                }
+            }.animation(.easeInOut(duration: 0.2), value: setupStep)
+            Picker("Workspace", selection: $selected.workspaceID) {
+                Text("Choose a workspace").tag("")
+                ForEach(ready) { project in Text(project.name).tag(project.id) }
+            }.disabled(billing.busy)
+            if setupStep == 0 {
+                Picker("Provider", selection: $selected.provider) { ForEach(["s3", "gcs", "r2", "b2", "sftp", "webdav", "google-drive", "onedrive", "other"], id: \.self) { Text($0.uppercased()).tag($0) } }
+                Button("Next") { setupStep = 1 }.disabled(selected.workspaceID.isEmpty)
+            } else if setupStep == 1 {
+                Text("Add the connection in My Cloud. Its credentials are saved only in this Mac's provider configuration and never sent to GenDragoon. Then enter the remote name.").font(.system(size: 12)).foregroundStyle(.secondary)
+                TextField("Remote name", text: $selected.remote).textFieldStyle(.roundedBorder)
+                HStack { Button("Back") { setupStep = 0 }; Button("Next") { setupStep = 2 }.disabled(selected.remote.isEmpty) }
+            } else {
+                Text(setupStep == 2 ? "Test the connection. GenDragoon lists the remote from this Mac with a 45-second limit." : "Connected.").font(.system(size: 12)).foregroundStyle(.secondary)
+                HStack {
+                    Button("Back") { setupStep = 1 }.disabled(setupStep == 3)
+                    Button("Test connection and finish") {
+                        billing.connectCustomStorage(login: login, workspaceID: selected.workspaceID, remote: selected.remote, provider: selected.provider) { setupStep = 3 }
+                    }.buttonStyle(.borderedProminent).tint(.purple).disabled(blocked || setupStep == 3)
+                }
+            }
+        }
+    }
     @ViewBuilder private func purchaseContent(_ catalog: GDServerBillingCatalog) -> some View {
         if focus == "standard" || focus == "bundle" {
             projectPicker
@@ -335,16 +379,14 @@ struct GenDragoonStripePurchases: View {
                 ForEach(catalog.storage.keys.sorted { (catalog.storage[$0]?.gb ?? 0) < (catalog.storage[$1]?.gb ?? 0) }, id: \.self) { tier in
                     if let item = catalog.storage[tier] {
                         let base = focus == "bundle" ? (selected.yearly ? item.bundleYearlyCents : item.bundleMonthlyCents) : (selected.yearly ? item.yearlyCents : item.monthlyCents)
-                        let fee = catalog.workspaceFeeMonthlyCents * (selected.yearly ? 10 : 1)
-                        selectedCard(tier, detail: focus == "bundle" ? "Includes \(item.bundleWorkers ?? 1) performance workers" : "Storage subscription for your chosen project", cents: base + fee, isSelected: selected.storageTier == tier) { selected.storageTier = tier }
+                        selectedCard(tier, detail: focus == "bundle" ? "Includes \(item.bundleWorkers ?? 1) performance workers" : "Storage plan · workspace fee included", cents: base, isSelected: selected.storageTier == tier) { selected.storageTier = tier }
                     }
                 }
             }
             if let plan = catalog.storage[selected.storageTier] {
                 let base = focus == "bundle" ? (selected.yearly ? plan.bundleYearlyCents : plan.bundleMonthlyCents) : (selected.yearly ? plan.yearlyCents : plan.monthlyCents)
-                let fee = catalog.workspaceFeeMonthlyCents * (selected.yearly ? 10 : 1)
-                Text("Selected: \(selected.storageTier) \(focus == "bundle" ? "Storage + Performance" : "Storage") · \(money(base + fee))/\(period) for the chosen project").font(.system(size: 12, weight: .semibold))
-                Button(billing.ownerBenefits ? "Activate selected plan — included" : "Continue with selected plan · " + money(base + fee) + "/" + period) {
+                Text("Selected: \(selected.storageTier) \(focus == "bundle" ? "Storage + Performance" : "Storage") · \(money(base))/\(period) for the chosen project").font(.system(size: 12, weight: .semibold))
+                Button(billing.ownerBenefits ? "Activate selected plan — included" : "Continue with selected plan · " + money(base) + "/" + period) {
                     billing.buyStorage(login: login, workspaceID: selected.workspaceID, tier: selected.storageTier, mode: focus, yearly: selected.yearly)
                 }.buttonStyle(.borderedProminent).tint(.cyan).disabled(blocked || (catalog.catalogVersion ?? 1) < 2 || !billing.workspaces.contains { $0.id == selected.workspaceID && $0.supportsStorage })
             } else { Text("Choose an available storage plan.").foregroundStyle(.orange) }
@@ -363,16 +405,9 @@ struct GenDragoonStripePurchases: View {
                 Button(billing.ownerBenefits ? "Activate selected performance — included" : "Continue with selected performance") { billing.buyPerformance(login: login, workspaceID: selected.workspaceID, tier: selected.performanceTier, yearly: selected.yearly) }
                     .buttonStyle(.borderedProminent).tint(.cyan).disabled(blocked || !billing.workspaces.contains { $0.id == selected.workspaceID && $0.supportsPerformance })
             }
-            Text("Performance is billed independently and can be added to your active basic, storage, or BYO project.").font(.system(size: 11)).foregroundStyle(.secondary)
-        } else if focus == "byo" {
-            projectPicker
-            Text("Configure your cloud connection in My Cloud, then enter its existing remote name. Provider credentials stay on your Mac.").font(.system(size: 12)).foregroundStyle(.secondary)
-            Picker("Provider", selection: $selected.provider) { ForEach(["s3", "gcs", "r2", "b2", "sftp", "webdav", "google-drive", "onedrive", "other"], id: \.self) { Text($0.uppercased()).tag($0) } }
-            TextField("Existing rclone remote name", text: $selected.remote).textFieldStyle(.roundedBorder)
-            periodPicker
-            Text("Selected: Bring Your Own Cloud · \(money(selected.yearly ? catalog.byo.yearlyCents : catalog.byo.monthlyCents))/\(period). Your provider's storage and transfer charges are separate.").font(.system(size: 12, weight: .semibold))
-            Button(billing.ownerBenefits ? "Verify provider and activate — included" : "Verify provider and continue to Checkout") { billing.buyManualBYO(login: login, workspaceID: selected.workspaceID, remote: selected.remote, provider: selected.provider, yearly: selected.yearly) }
-                .buttonStyle(.borderedProminent).tint(.cyan).disabled(blocked || selected.remote.isEmpty || (catalog.catalogVersion ?? 1) < 2 || !billing.workspaces.contains { $0.id == selected.workspaceID && $0.isAvailable })
+            Text("For your free workspace. Additional workspaces choose their performance plan when they are created.").font(.system(size: 11)).foregroundStyle(.secondary)
+        } else if focus == "custom" {
+            customStorageWizard
         } else if focus == "ads" {
             Text("Permanent ad removal · " + money(catalog.removeAds.oneTimeCents) + " once").font(.system(size: 16, weight: .semibold))
             Button(billing.ownerBenefits ? "Ad removal included" : "Continue to one-time purchase") { billing.buyRemoveAds(login: login) }.buttonStyle(.borderedProminent).tint(.cyan).disabled(blocked || login.isAdFree)

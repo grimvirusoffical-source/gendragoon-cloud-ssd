@@ -49,8 +49,8 @@ test("storage and performance quote the exact interval price without another dis
       assert.equal(quote(plan.id, "year").priceCents, quote(plan.id).priceCents * 10);
     }
   }
-  assert.equal(catalog.workspaceQuote().priceCents, 500);
-  assert.equal(catalog.workspaceQuote("year").priceCents, 5000);
+  assert.equal(catalog.workspaceQuote().priceCents, 0); // fee included in storage plans
+  assert.equal(catalog.workspaceQuote("year").priceCents, 0);
   assert.equal(catalog.storageQuote("1TB").workspaceFeeIncluded, true);
   assert.equal(catalog.storageQuote("1TB").priceCents, 3600);
 });
@@ -87,10 +87,10 @@ test("documented triple bundle works through the real catalog dependency", () =>
   const choice = { storageTier: "1TB", performanceTier: "boost", gpuTier: "spark" };
   const monthly = tripleBundleQuote(choice);
   const annual = tripleBundleQuote({ ...choice, interval: "year" });
-  assert.equal(monthly.monthlyCents, 6840);
-  assert.equal(monthly.totalCents, 6840);
-  assert.equal(annual.monthlyCents, 6840);
-  assert.equal(annual.totalCents, 68400);
+  assert.equal(monthly.monthlyCents, 6390);
+  assert.equal(monthly.totalCents, 6390);
+  assert.equal(annual.monthlyCents, 6390);
+  assert.equal(annual.totalCents, 63900);
   assert.equal(monthly.discountPercent, 10);
 });
 
@@ -126,7 +126,7 @@ test("future fractional-cent bundle discounts round up rather than reduce the ma
     };
     vm.runInNewContext(source, sandbox, { filename: "gpu_catalog.js" });
     const quote = sandbox.module.exports.tripleBundleQuote({ storageTier: "fixture", performanceTier: "fixture", gpuTier: "spark" });
-    const expected = Number((BigInt(cents + 1 + 500 + 2900) * 9n + 9n) / 10n);
+    const expected = Number((BigInt(cents + 1 + 2900) * 9n + 9n) / 10n);
     assert.equal(quote.monthlyCents, expected);
     assert.equal(quote.totalCents, expected);
   }

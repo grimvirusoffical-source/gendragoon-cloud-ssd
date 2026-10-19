@@ -60,7 +60,7 @@ test('unknown legacy creation intents receive an update requirement before any w
  const f=await fixture(t),before=structuredClone(f.rows);
  for(const body of [selection,{...selection,intentId:undefined},{name:selection.name,mode:'byo',interval:'year',intentId:selection.intentId}]){
    const result=await f.post('/v2/workspaces/draft',body);assert.equal(result.status,426);
-   assert.equal(result.body.error,'CLIENT_UPDATE_REQUIRED');assert.match(result.body.message,/Update GenDragoon.*\$5 once/);
+   assert.equal(result.body.error,'CLIENT_UPDATE_REQUIRED');assert.match(result.body.message,/Update GenDragoon.*storage plan and a performance plan/);assert.doesNotMatch(result.body.message,/\$5/);
    assert.equal(result.body.workspaceId,undefined);assert.equal(result.body.url,undefined);
  }
  assert.deepEqual(f.rows,before);assert.equal(f.created.length,0);assert.equal(f.expired.length,0);
@@ -80,11 +80,11 @@ test('new storage checkout ignores client-supplied amounts and prices and exclud
  assert.equal(result.status,200);assert.deepEqual(f.created[0].args.line_items,[{price:'price_storage',quantity:1}]);
  assert.equal(f.record().storageActive,false);assert.equal(result.body.quote.totalCents,640);
 });
-test('legacy storage contracts keep their existing price items and annual/monthly terms',async t=>{
+test('a new storage checkout on a legacy record never adds the retired workspace fee',async t=>{
  const f=await fixture(t,{storageActive:false,provisioned:false,storageInterval:'month',storageMode:'standard'});
  const result=await f.post('/v2/workspaces/'+f.id+'/checkout/storage',{});
- assert.equal(result.status,200);assert.deepEqual(f.created[0].args.line_items,[{price:'price_fee',quantity:1},{price:'price_storage',quantity:1}]);
- assert.equal(result.body.quote.totalCents,1140);
+ assert.equal(result.status,200);assert.deepEqual(f.created[0].args.line_items,[{price:'price_storage',quantity:1}]);
+ assert.equal(result.body.quote.totalCents,640);assert.equal(result.body.quote.workspaceFeeCents,0);
 });
 test('selected storage remains an intention until an exact server-verified subscription reconciles',async t=>{
  const f=await fixture(t);await f.post('/v2/projects',{name:selection.name,intentId:selection.intentId});

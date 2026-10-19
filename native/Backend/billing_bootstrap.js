@@ -10,6 +10,7 @@ const HOOK_ID='we_1UQgwBIpkwStQhHM7YZVubdd';
 const PUBLIC='https://gendragoon-free-10068843866.us-central1.run.app';
 function expectedCatalog(){
  const out={};for(const interval of ['month','year']){const factor=interval==='year'?10:1;
+   // Legacy (retired) $5 fee prices: validated only so in-flight records keep reconciling.
   out['workspace|'+interval]={cents:500*factor,interval};out['byo|'+interval]={cents:500*factor,interval};
   for(const [tier,plan]of Object.entries(STORAGE))for(const mode of ['standard','bundle'])out['storage|'+mode+'|'+tier+'|'+interval]={cents:plan[mode]*factor,interval};
   for(const [tier,plan]of Object.entries(PERFORMANCE))out['performance|'+tier+'|'+interval]={cents:plan.cents*factor,interval};
@@ -48,8 +49,11 @@ function projectCheckoutReady(catalog,hook){
 }
 async function validateUnpaidCheckoutTemplates(stripe,catalog){
  const expected={...expectedCatalog(),'one_time|project_creation':{cents:500}};
- const scenarios=[['one_time|remove_ads'],['workspace|month','storage|standard|100GB|month'],['workspace|year','storage|bundle|1TB|year']];
- if(catalog['one_time|project_creation'])scenarios.push(['one_time|project_creation']);
+ // Workspace plans: storage + performance on one subscription (no workspace fee),
+ // and custom storage with a performance plan only. The legacy workspace|/byo|
+ // prices stay in expectedCatalog() so in-flight legacy subscriptions still reconcile.
+ const scenarios=[['one_time|remove_ads'],['storage|standard|100GB|month','performance|boost|month'],
+  ['storage|standard|1TB|year','performance|turbo|year'],['performance|lite|month']];
  for(const keys of scenarios){
   const session=await stripe.checkout.sessions.create({mode:keys[0].startsWith('one_time')?'payment':'subscription',
    line_items:keys.map(key=>({price:catalog[key],quantity:1})),success_url:PUBLIC+'/billing/success',cancel_url:PUBLIC+'/billing/cancel',

@@ -26,22 +26,28 @@ test('project Checkout remains disabled until signed completion, asynchronous ou
 test('the pinned current Stripe SDK and runtime API target match',()=>{
  const Stripe=require('stripe');assert.equal(Stripe.PACKAGE_VERSION,'23.0.0');assert.equal(STRIPE_API_VERSION,'2026-09-30.endive');assert.equal(Stripe.API_VERSION,STRIPE_API_VERSION);
 });
-test('unpaid bootstrap optionally validates the exact500-cent project template and expires it even on verification failure',async()=>{
+test('unpaid bootstrap validates workspace-plan templates (storage+performance, custom performance-only), never the retired fee, and expires every session',async()=>{
  const d=data(),legacy=validateCatalog(d.prices,d.products);
- for(const {project,wrongAmount}of [{project:false},{project:true},{project:true,wrongAmount:true}]){
+ for(const {project,wrongAmount}of [{project:false},{project:true},{project:false,wrongAmount:true}]){
   const catalog={...legacy,...(project?{'one_time|project_creation':'price_project'}:{})},created=[],expired=[];
   const expected={...expectedCatalog(),'one_time|project_creation':{cents:500}},amounts=new Map(Object.entries(catalog).map(([key,id])=>[id,expected[key].cents]));
   const stripe={checkout:{sessions:{create:async args=>{
    const id='cs_validation'+created.length;created.push({id,args});
-   const isProject=args.line_items[0].price==='price_project';
    return {id,livemode:true,status:'open',url:'https://checkout.stripe.com/c/pay/'+id,
-    amount_total:wrongAmount&&isProject?501:args.line_items.reduce((sum,line)=>sum+amounts.get(line.price)*line.quantity,0)};
+    amount_total:args.line_items.reduce((sum,line)=>sum+amounts.get(line.price)*line.quantity,0)+(wrongAmount&&created.length===2?500:0)};
   },expire:async id=>{expired.push(id);}}}};
   if(wrongAmount)await assert.rejects(validateUnpaidCheckoutTemplates(stripe,catalog),/CHECKOUT_VALIDATION/);
-  else assert.equal(await validateUnpaidCheckoutTemplates(stripe,catalog),project?4:3);
+  else assert.equal(await validateUnpaidCheckoutTemplates(stripe,catalog),4);
   assert.deepEqual(expired,created.map(item=>item.id));
-  for(const {args}of created)assert.deepEqual(args.metadata,{service:'GenDragoonSSD',purpose:'unpaid_setup_validation'});
-  if(project){const args=created.at(-1).args;assert.equal(args.mode,'payment');assert.deepEqual(args.line_items,[{price:'price_project',quantity:1}]);assert.equal(args.customer,undefined);}
+  const fee=new Set([catalog['workspace|month'],catalog['workspace|year'],catalog['byo|month'],catalog['byo|year'],'price_project']);
+  for(const {args}of created){
+   assert.deepEqual(args.metadata,{service:'GenDragoonSSD',purpose:'unpaid_setup_validation'});
+   assert.ok(args.line_items.every(line=>!fee.has(line.price)),'a retired workspace-fee price was validated');
+  }
+  if(!wrongAmount){
+   assert.deepEqual(created[1].args.line_items.map(l=>l.price),[catalog['storage|standard|100GB|month'],catalog['performance|boost|month']]);
+   assert.deepEqual(created[3].args.line_items.map(l=>l.price),[catalog['performance|lite|month']]);
+  }
  }
 });
 test('vault payload integrity uses the expected CRC32C checksum',()=>assert.equal(crc32c(Buffer.from('123456789')),0xe3069283));
