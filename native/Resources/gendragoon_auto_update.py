@@ -173,6 +173,31 @@ def bundle_digest(app):
                         raise RuntimeError("Application changed during verification")
     return digest.hexdigest()
 
+DISTRIBUTION_FILE=Path(__file__).absolute().with_name("gendragoon_distribution.json")
+DISTRIBUTIONS=("direct","rotten-apple","mas")
+
+class UpdatesDisabled(RuntimeError):
+    """This build is updated by its store, never by itself."""
+
+def distribution():
+    """How this copy was distributed: direct (GitHub, self-updating), rotten-apple (the launcher updates it) or mas (Mac App Store, no self-update).
+    A Mac App Store receipt always wins. Then the build-time resource file, then the Rotten Apple launcher marker. Unknown values fail safe to no self-update."""
+    if (APP/"Contents/_MASReceipt/receipt").exists():return "mas"
+    value="direct"
+    try:
+        loaded=json.loads(DISTRIBUTION_FILE.read_text("utf8")).get("distribution","direct")
+        value=loaded if isinstance(loaded,str) else "invalid"
+    except FileNotFoundError:pass
+    except (OSError,ValueError,AttributeError):value="invalid"
+    if value=="direct" and os.environ.get("ROTTEN_APPLE_LAUNCHER")=="1":value="rotten-apple"
+    if value not in DISTRIBUTIONS:return "mas"
+    return value
+
+def self_update_allowed():return distribution()=="direct"
+
+def require_self_update():
+    if not self_update_allowed():raise UpdatesDisabled("Updates are handled by the "+distribution()+" distribution. This build never updates itself.")
+
 def configure(app=None,channel="stable"):
     global APP,CHANNEL
     if channel not in ("stable","preview"):raise RuntimeError("Unknown update channel")
@@ -252,6 +277,7 @@ def latest():
     return None
 
 def check():
+    require_self_update()
     release=latest()
     if not release:
         emit("up_to_date",progress=100,message="No newer eligible "+CHANNEL+" release is published.")
@@ -388,6 +414,7 @@ def staged_valid(strict=False):
         return None
 
 def prepare(quiet=False):
+    require_self_update()
     safe_root()
     old=staged_valid()
     if old:
@@ -524,6 +551,7 @@ def stop_failed_launch(app):
     if active_mount():raise RuntimeError("Cloud mount active after quit; backup retained")
 
 def install_worker(pid=0,quiet=True,relaunch=False,expected_stage=None,safety_check=None,original_digest=None,request_id=None):
+    require_self_update()
     safe_root()
     meta=staged_valid(strict=True)
     if not meta:return emit("up_to_date",100,None,"No verified newer update staged.",quiet=quiet)
@@ -650,6 +678,10 @@ def main(argv=None):
     if args.pid<0:ap.error("--pid must be zero or a positive process ID")
     try:
         configure(args.app,args.channel)
+        if args.action!="status" and not self_update_allowed():
+            # Store builds: succeed quietly so the host shows a managed/hidden update UI, never an error.
+            emit("disabled",message="Updates are handled by the "+distribution()+" distribution.")
+            return 0
         if args.action=="status":
             safe_root()
             print(STATUS.read_text() if STATUS.exists() else '{"state":"idle"}')

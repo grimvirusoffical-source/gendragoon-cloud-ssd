@@ -107,6 +107,28 @@ final class GDUpdateActivity: ObservableObject {
     }
 }
 
+/// How this copy of the app was distributed. Decides whether it may update itself.
+/// direct = GitHub download (self-updates); rotten-apple = the Rotten Apple launcher updates it;
+/// mas = Mac App Store (Apple forbids self-update, so no update code runs and the UI is hidden).
+/// Mirrors `distribution()` in Resources/gendragoon_auto_update.py. Unknown or unreadable values fail safe to "mas" (no self-update).
+enum GDDistribution:String {
+    case direct,rottenApple="rotten-apple",mas
+    static let current:GDDistribution={
+        // A Mac App Store receipt always wins.
+        if let receipt=Bundle.main.appStoreReceiptURL,FileManager.default.fileExists(atPath:receipt.path){return .mas}
+        var value="direct"
+        if let url=Bundle.main.url(forResource:"gendragoon_distribution",withExtension:"json"){
+            if let data=try? Data(contentsOf:url),
+               let object=try? JSONSerialization.jsonObject(with:data) as? [String:Any],
+               let text=object["distribution"] as? String{value=text}
+            else{value="invalid"}
+        }
+        if value=="direct",ProcessInfo.processInfo.environment["ROTTEN_APPLE_LAUNCHER"]=="1"{value="rotten-apple"}
+        return GDDistribution(rawValue:value) ?? .mas
+    }()
+    var selfUpdates:Bool{self == .direct}
+}
+
 @MainActor final class GDUpdateCoordinator:ObservableObject {
     static let shared=GDUpdateCoordinator()
     @Published private(set) var status="Automatic updates enabled · checking at launch and every 20 minutes."
@@ -169,6 +191,10 @@ final class GDUpdateActivity: ObservableObject {
         scheduleCheck()
     }
     func start(){
+        guard GDDistribution.current.selfUpdates else{
+            status=GDDistribution.current == .rottenApple ? "Updates are handled by the Rotten Apple launcher." : ""
+            return
+        }
         guard !launched else{return}
         launched=true
         scheduleCheck()
@@ -225,6 +251,7 @@ final class GDUpdateActivity: ObservableObject {
         bytesTotal=(json["totalBytes"] as? NSNumber)?.int64Value ?? bytesTotal
     }
     func scheduleCheck(){
+        guard GDDistribution.current.selfUpdates else{return}
         guard !isBusy,!restartRequested,Date()>=retryNotBefore else{return}
         guard GDUpdateActivity.shared.beginUpdateMaintenance(owner:self) else{
             if phase != "ready"{phase="postponed"}
@@ -331,7 +358,24 @@ struct GenDragoonAutomaticUpdateStatus:View {
             secs>=60 ? "\(secs/60)m \(secs%60)s" : "\(secs)s"
     }
     private var showETA:Bool {update.phase == "downloading"}
-    var body:some View {
+    @ViewBuilder var body:some View {
+        switch GDDistribution.current {
+        case .mas:
+            EmptyView()
+        case .rottenApple:
+            VStack(alignment:.leading,spacing:10){
+                Label("App updates",systemImage:"arrow.triangle.2.circlepath.circle.fill")
+                    .font(.system(size:16,weight:.bold))
+                Text("Updates are handled by the Rotten Apple launcher.")
+                    .font(.system(size:12)).foregroundStyle(.gray)
+            }
+            .padding(16)
+            .background(Color.white.opacity(0.045),in:RoundedRectangle(cornerRadius:15))
+        case .direct:
+            directBody
+        }
+    }
+    private var directBody:some View {
         VStack(alignment:.leading,spacing:10){
             Label("Automatic app updates",systemImage:"arrow.triangle.2.circlepath.circle.fill")
                 .font(.system(size:16,weight:.bold))
