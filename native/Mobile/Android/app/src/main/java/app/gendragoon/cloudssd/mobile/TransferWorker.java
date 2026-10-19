@@ -37,8 +37,12 @@ public final class TransferWorker extends Worker {
             String output= "upload".equals(action)?upload(workspace,Uri.parse(getInputData().getString("uri"))):download(workspace,new JSONObject(getInputData().getString("file")));
             return Result.success(new Data.Builder().putString("message","Transfer complete").putString("action",action).putString("path",output).putString("uid",api.uid).build());
         }catch(Exception error){
-            String message=isStopped()?"Paused. Select the same file to resume.":error.getMessage();
-            return Result.failure(new Data.Builder().putString("message",message==null?"Transfer stopped. Completed chunks are retained.":message.substring(0,Math.min(350,message.length()))).build());
+            CloudSignals.FailureNotice notice=CloudSignals.transferFailure(error,isStopped());
+            Data.Builder output=new Data.Builder();
+            if(notice.route!=null)output.putString("route",notice.route);
+            if(notice.message!=null)output.putString("message",notice.message);
+            if(notice.lockJson!=null)output.putString("lock",notice.lockJson);
+            return Result.failure(output.build());
         }finally{if(pool!=null)pool.shutdownNow();if(preparedArchive!=null)preparedArchive.delete();}
     }
     @Override public void onStopped(){if(pool!=null)pool.shutdownNow();super.onStopped();}

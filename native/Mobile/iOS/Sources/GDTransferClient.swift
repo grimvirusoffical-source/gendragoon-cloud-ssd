@@ -93,18 +93,21 @@ actor GDTransferClient {
             do {
                 var request=URLRequest(url:endpoint.appendingPathComponent(path))
                 request.httpMethod=method;request.httpBody=data
-                request.setValue("Bearer "+(try await tokens(attempt>0)),forHTTPHeaderField:"Authorization")
+                request.setValue(try Self.bearer(try await tokens(attempt>0)),forHTTPHeaderField:"Authorization")
                 request.setValue("identity",forHTTPHeaderField:"Accept-Encoding")
                 request.setValue("application/json",forHTTPHeaderField:"Accept")
                 if data != nil {request.setValue("application/json",forHTTPHeaderField:"Content-Type")}
                 for(key,value) in headers {request.setValue(value,forHTTPHeaderField:key)}
                 let(body,response)=try await session.data(for:request)
                 guard let http=response as? HTTPURLResponse else {throw GDTransferError(message:"No cloud response.",status:0)}
+                let routed=CloudSignals.route(status:http.statusCode,body:body,method:method)
+                if routed.destination == .lockScreen,let lock=routed.lock {throw WorkspaceLocked(lock:lock)}
                 if (200...299).contains(http.statusCode){return(body,http)}
-                let reason=((try? JSONSerialization.jsonObject(with:body)) as? [String:Any])?["error"] as? String
-                let failure=GDTransferError(message:reason ?? "Cloud request failed (HTTP \(http.statusCode)).",status:http.statusCode)
+                let failure=GDTransferError(message:routed.toast ?? "Cloud request failed (HTTP \(http.statusCode)).",status:http.statusCode)
                 if ![401,408,429,500,502,503,504].contains(http.statusCode){throw failure}
                 last=failure
+            } catch let locked as WorkspaceLocked {
+                throw locked
             } catch let error as GDTransferError {
                 if error.status != 0 && ![401,408,429,500,502,503,504].contains(error.status){throw error}
                 last=error
@@ -147,9 +150,12 @@ actor GDTransferClient {
         var parts=URLComponents(url:url,resolvingAgainstBaseURL:false)!
         parts.queryItems=[URLQueryItem(name:"cursor",value:cursor)]
         var request=URLRequest(url:parts.url!)
-        request.setValue("Bearer "+(try await tokens(false)),forHTTPHeaderField:"Authorization")
+        request.setValue(try Self.bearer(try await tokens(false)),forHTTPHeaderField:"Authorization")
         let(data,response)=try await session.data(for:request)
-        guard (response as? HTTPURLResponse)?.statusCode==200 else {throw GDTransferError(message:"Could not load next file page.",status:0)}
+        let http=response as? HTTPURLResponse
+        let routed=CloudSignals.route(status:http?.statusCode ?? 0,body:data,method:"GET")
+        if routed.destination == .lockScreen,let lock=routed.lock {throw WorkspaceLocked(lock:lock)}
+        guard http?.statusCode==200 else {throw GDTransferError(message:routed.toast ?? "Could not load next file page.",status:http?.statusCode ?? 0)}
         return try decoder.decode(GDTransferListing.self,from:data)
     }
     private func workers(_ c:GDTransferConfig,constrained:Bool)->Int {
@@ -304,6 +310,76 @@ actor GDTransferClient {
         }
         try? FileManager.default.removeItem(at:state)
         return target
+    }
+    /// One-shot `DELETE /v2/account` with `{"confirm":"DELETE"}`.
+    /// Returns `202` or `410` including `jobId` and `statusToken`.
+    /// Poll with the status token, not the Firebase token. A 401 does not wipe. Does not refresh or retry.
+    func deleteAccount(freshToken:String) async throws -> AccountHttp {
+        let(data,http)=try await once(path:"v2/account",method:"DELETE",token:freshToken,body:AccountDeletion.confirmBody)
+        return AccountHttp.parse(status:http.statusCode,data:data)
+    }
+    /// One-shot poll of `AccountDeletion.deletionStatusPath`.
+    /// `Authorization` is `Bearer statusToken`, which still works after the Firebase user is gone.
+    /// A 401 is returned and does not wipe. The token is not logged.
+    /// `POST /v2/account/deletions/:jobId/support-request` with no body.
+    /// `Authorization` is the status token, which still works after the Firebase user is gone.
+    func requestDeletionSupport(path:String,statusToken:String) async throws -> AccountHttp {
+        guard DeletionSupport.enabled else {throw GDTransferError(message:"Support requests are off.",status:400)}
+        let transport=path.hasPrefix("/") ? String(path.dropFirst()) : path
+        guard transport.hasPrefix("v2/account/deletions/"),transport.hasSuffix("/support-request"),!transport.contains("..") else {
+            throw GDTransferError(message:"Invalid support request.",status:400)
+        }
+        let(data,http)=try await once(path:transport,method:"POST",token:statusToken,body:nil)
+        return AccountHttp.parse(status:http.statusCode,data:data)
+    }
+    func accountDeletionStatus(path:String,statusToken:String) async throws -> AccountHttp {
+        guard let call=AccountDeletion.pollCall(path:path,statusToken:statusToken) else {throw GDTransferError(message:"Invalid deletion status route.",status:400)}
+        let transport=call.path.hasPrefix("/") ? String(call.path.dropFirst()) : call.path
+        let(data,http)=try await once(path:transport,method:"GET",token:statusToken)
+        return AccountHttp.parse(status:http.statusCode,data:data)
+    }
+    /// `DELETE /v2/workspaces/{id}`. Uses `send`, so HTTP 423 `workspace_lock` still opens the lock screen.
+    /// Hosted files are removed by the server. Bring-your-own storage is not modified.
+    func deleteWorkspace(id:String) async throws {
+        guard id=="free" || UUID(uuidString:id) != nil else {throw GDTransferError(message:"Invalid workspace.",status:400)}
+        _=try await send("v2/workspaces/"+id.lowercased(),method:"DELETE")
+    }
+    /// `POST /v2/workspaces/{sourceId}/merge` with `{"targetId","confirmName"}`.
+    /// Duplicate files are kept as `name (from <source>)`. Uses `send`, so HTTP 423 still locks.
+    func mergeWorkspaces(sourceID:String,targetID:String,sourceName:String) async throws {
+        guard let path=AccountDeletion.mergePath(sourceID:sourceID),
+              let body=AccountDeletion.mergeBody(targetID:targetID,confirmName:sourceName) else {
+            throw GDTransferError(message:"Invalid merge.",status:400)
+        }
+        _=try await send(path,method:"POST",data:body)
+    }
+    /// `POST v2/workspaces/{id}/byo/verify` with `{"presignedUrl"}`.
+    func verifyByo(workspaceID:String,presignedUrl:String) async throws {
+        guard let path=AccountDeletion.byoVerifyPath(workspaceID:workspaceID),
+              let body=AccountDeletion.byoVerifyBody(presignedUrl:presignedUrl) else {
+            throw GDTransferError(message:"Invalid bring-your-own verification.",status:400)
+        }
+        _=try await send(path,method:"POST",data:body)
+    }
+    /// Every sender builds its header here. A missing, empty or whitespace-only token sends nothing.
+    static func bearer(_ token:String?) throws -> String {
+        guard let token,AccountDeletion.validToken(token) else {throw GDTransferError(message:"No sign-in token. Nothing was sent.",status:0)}
+        return "Bearer "+token
+    }
+    private func once(path:String,method:String,token:String,body:Data?=nil) async throws -> (Data,HTTPURLResponse) {
+        let authorization=try Self.bearer(token)
+        guard !path.isEmpty,!path.hasPrefix("/"),!path.contains(".."),!path.contains("\\"),!path.contains("//") else {
+            throw GDTransferError(message:"Invalid cloud route.",status:400)
+        }
+        var request=URLRequest(url:endpoint.appendingPathComponent(path))
+        request.httpMethod=method;request.httpBody=body;request.timeoutInterval=120
+        request.setValue(authorization,forHTTPHeaderField:"Authorization")
+        request.setValue("application/json",forHTTPHeaderField:"Accept")
+        request.setValue("identity",forHTTPHeaderField:"Accept-Encoding")
+        if body != nil {request.setValue("application/json",forHTTPHeaderField:"Content-Type")}
+        let(data,response)=try await session.data(for:request)
+        guard let http=response as? HTTPURLResponse else {throw GDTransferError(message:"No cloud response.",status:0)}
+        return(data,http)
     }
     func delete(fileID:String,workspace:String) async throws {
         guard UUID(uuidString:fileID) != nil else{throw GDTransferError(message:"Invalid file.",status:0)}

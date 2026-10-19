@@ -1,0 +1,25 @@
+{
+  "request": {
+    "body": {
+      "confirmName": "Alpha",
+      "targetId": "11111111-1111-4111-8111-000000000002"
+    },
+    "headers": {
+      "authorization": "<redacted>",
+      "content-type": "application/json"
+    },
+    "method": "POST",
+    "path": "/v2/workspaces/11111111-1111-4111-8111-000000000001/merge"
+  },
+  "response": {
+    "body": {
+      "copied": 1,
+      "idempotent": false,
+      "merged": true,
+      "sourceDeleted": true,
+      "sourceId": "11111111-1111-4111-8111-000000000001",
+      "workspaceId": "11111111-1111-4111-8111-000000000002"
+    },
+    "status": 200
+  }
+}
