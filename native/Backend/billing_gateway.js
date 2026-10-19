@@ -111,7 +111,7 @@ function installedBilling({app,db,bucket,admin,firebaseAuth,firebaseAuthWithoutT
    next();
  });
  const auth=firebaseAuth,agreed=(_req,_res,next)=>next();
- const billing=registerBillingV2({app,db,stripe,admin,auth,agreed,hash:accountKey,prices:state.priceCatalog,env});
+ const billing=registerBillingV2({app,db,stripe,admin,auth,agreed,hash:accountKey,prices:state.priceCatalog,env,bucket});
  app.get("/v2/billing/status",(_req,res)=>{
   res.json({checkoutEnabled:state.enabled&&readiness.ok,
     stripeMode:env.STRIPE_ENVIRONMENT==="test"?"test":env.STRIPE_ENVIRONMENT==="live"?"live":"unconfigured",

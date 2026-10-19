@@ -8,6 +8,7 @@ const {listAccountProjects}=require("./projects");
 const {summarizeProjects,lockBody,LIST_UNAVAILABLE_LOCK}=require("./workspace_policy");
 const {sendObject}=require("./range_download");
 const {nativeProfile}=require("./performance");
+const {resolveTeamWorkspace}=require("./team_storage");
 const CHUNK=8*1024*1024,FREE_QUOTA=2_000_000_000,MAX_FILE=5*1024**4;
 const UUID=/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
 const SHA=/^[a-f0-9]{64}$/;
@@ -94,7 +95,16 @@ function registerTransferV3({app,db,bucket,firebaseAuth,accountKey,FieldValue,ap
   if(id!=="free"&&!UUID.test(id))throw problem(400,"Invalid workspace");
   const ref=id==="free"?db.collection("tenants").doc(hash).collection("workspaces").doc("free"):
    db.collection("gd_accounts").doc(hash).collection("workspaces").doc(id);
-  const snap=await ref.get();if(!snap.exists)throw problem(404,"Workspace not found");
+  const snap=await ref.get();
+  if(!snap.exists){
+   // Not a personal workspace: maybe a team workspace this account is a member of.
+   // API keys are per personal workspace and never open a team workspace.
+   const t=id!=="free"&&req.authKind!=="api_key"?await resolveTeamWorkspace(db,hash,id,{method:req.method}):null;
+   if(!t)throw problem(404,"Workspace not found");
+   if(!["GET","HEAD","DELETE"].includes(req.method)&&t.scope.uploadsBlocked){const error=problem(423,"workspace_lock");error.lock=t.scope.lock;throw error;}
+   return {id,hash,ref:t.ref,workspace:t.view,quota:t.scope.limit,prefix:t.scope.prefix,governor:paidGovernor,key:t.governorKey,
+    projects:null,team:t,scopeOf:data=>t.rescope(data)};
+  }
   const w=snap.data();let quota,prefix,governor,key;
   if(!req._accountProjects)req._accountProjects=listAccountProjects(db,hash).catch(()=>null);
   const listed=await req._accountProjects;
@@ -118,7 +128,8 @@ function registerTransferV3({app,db,bucket,firebaseAuth,accountKey,FieldValue,ap
    if(write&&scope.uploadsBlocked){const error=problem(423,"workspace_lock");error.lock=scope.lock||LIST_UNAVAILABLE_LOCK;throw error;}
    quota=scope.limit;prefix=scope.prefix;governor=paidGovernor;key=hash+"-"+id;
   }
-  return {id,hash,ref,workspace:w,quota,prefix,governor,key,projects};
+  return {id,hash,ref,workspace:w,quota,prefix,governor,key,projects,team:null,
+   scopeOf:data=>id==="free"?null:scopeFromWorkspace(data,hash,id,projects)};
  }
  async function work(req,fn){
   const c=await context(req);
@@ -134,7 +145,8 @@ function registerTransferV3({app,db,bucket,firebaseAuth,accountKey,FieldValue,ap
    if(error.status===423&&error.lock)return res.status(423).json(error.lock);
    const status=error.status||(/Too many/.test(error.message)?429:503);
    if(status===429||status===503)res.set("Retry-After","2");
-   res.status(status).json({error:error.status?error.message:"Transfer unavailable; retry safely"});
+   res.status(status).json({error:error.status?error.message:"Transfer unavailable; retry safely",
+    ...(error.status&&typeof error.code==="string"?{code:error.code}:{})});
   }
  });}
  const stamp=()=>FieldValue.serverTimestamp();
@@ -189,8 +201,8 @@ function registerTransferV3({app,db,bucket,firebaseAuth,accountKey,FieldValue,ap
    const [ws,existing]=await Promise.all([tx.get(c.ref),tx.get(ref)]);
    if(!ws.exists)throw problem(404,"Workspace removed");
    const w=ws.data();
-   const quota=effectiveStorageQuota(w);
-   const scope=c.id==="free"?null:scopeFromWorkspace(w,c.hash,c.id,c.projects);
+   const scope=c.id==="free"?null:c.scopeOf(w);
+   const quota=c.team?(scope?.limit||0):effectiveStorageQuota(w);
    if(quota<=0||(c.id==="free"?w.accountKey!==c.hash:!scope))throw problem(403,"Project storage inactive");
    if(scope&&scope.uploadsBlocked){const error=problem(423,"workspace_lock");error.lock=scope.lock||LIST_UNAVAILABLE_LOCK;throw error;}
    if(existing.exists){
@@ -269,8 +281,8 @@ function registerTransferV3({app,db,bucket,firebaseAuth,accountKey,FieldValue,ap
      const [ws,current]=await Promise.all([tx.get(c.ref),tx.get(ref)]);
      if(current.data()?.status==="completed")return;
      if(!ws.exists||current.data()?.status!=="assembling")throw problem(409,"Upload changed");
-     const freshScope=c.id==="free"?null:scopeFromWorkspace(ws.data(),c.hash,c.id,c.projects);
-     if(effectiveStorageQuota(ws.data())<=0||(c.id!=="free"&&!freshScope))throw problem(403,"Project storage inactive");
+     const freshScope=c.id==="free"?null:c.scopeOf(ws.data());
+     if((c.team?!freshScope:effectiveStorageQuota(ws.data())<=0)||(c.id!=="free"&&!freshScope))throw problem(403,"Project storage inactive");
      if(freshScope&&freshScope.uploadsBlocked){const error=problem(423,"workspace_lock");error.lock=freshScope.lock||LIST_UNAVAILABLE_LOCK;throw error;}
      tx.create(c.ref.collection("files").doc(req.params.id),{name:job.name,sizeBytes:job.sizeBytes,...metadata,
       generation:meta.generation||null,crc32c:meta.crc32c||null,createdAt:stamp()});

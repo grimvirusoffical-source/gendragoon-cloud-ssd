@@ -22,7 +22,7 @@ test("GPU annual price and duration explicit",()=>{
 test("triple plan discounts storage plus performance plus GPU by 10 percent",()=>{
  const p=g.tripleBundleQuote({storageTier:"1TB",performanceTier:"boost",gpuTier:"spark"});
  assert.equal(p.available,false);
- assert.equal(p.monthlyCents,Math.ceil((3600+500+600+2900)*0.9));
+ assert.equal(p.monthlyCents,Math.ceil((3600+600+2900)*0.9));
  assert.equal(g.tripleBundleQuote({storageTier:"1TB",performanceTier:"boost",gpuTier:"spark",interval:"year"}).totalCents,p.monthlyCents*10);
  assert.throws(()=>g.tripleBundleQuote({storageTier:"1TB",storageMode:"bundle",performanceTier:"boost",gpuTier:"spark"}));
 });

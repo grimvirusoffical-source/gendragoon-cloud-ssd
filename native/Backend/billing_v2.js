@@ -3,7 +3,7 @@ const crypto=require("node:crypto");
 const {STORAGE,PERFORMANCE,validateWorkspaceName}=require("./catalog");
 const {GPU,GPU_READY,gpuQuote,tripleBundleQuote}=require("./gpu_catalog");
 const {createProjectService,ProjectError,projectStatus,activatedBasicProject,effectiveStorageQuota,safeProjectId,hasContinuingBilling,isGrandfathered,evaluateLapse,workspacePrice,byoLapsed}=require("./projects");
-const {rejectProviderSecrets}=require("./workspace_policy");
+const {rejectProviderSecrets,isPlansWorkspace,plansEntitled}=require("./workspace_policy");
 const FREE_GB=2,FREE_WORKERS=1,REMOVE_ADS_CENTS=499;
 const VALID_INTERVALS=new Set(["month","year"]);
 const ACTIVE_STATUSES=new Set(["active","trialing"]);
@@ -44,6 +44,8 @@ function bundleWorkers(tier){
 function effectiveWorkers(workspace){
  if(!workspace||["archived","pending_payment","payment_revoked","payment_confirmed_pending_capacity"].includes(projectStatus(workspace)))return 0;
  if(workspace.kind==="byo"){
+   // Custom storage on the plans model runs only while its performance plan is paid.
+   if(isPlansWorkspace(workspace)&&!(plansEntitled(workspace)&&workspace.performanceActive===true))return 0;
    if(!workspace.byoActive||!workspace.manualProviderConfigured||workspace.byoChallengeVerified!==true)return 0;
    return workspace.performanceActive===true && PERFORMANCE[workspace.performanceTier] ?
      PERFORMANCE[workspace.performanceTier].workers:FREE_WORKERS;
@@ -53,13 +55,15 @@ function effectiveWorkers(workspace){
  return workspace.performanceActive===true && PERFORMANCE[workspace.performanceTier] ?
   Math.max(base,PERFORMANCE[workspace.performanceTier].workers):base;
 }
- function registerBillingV2({app,db,stripe,admin,auth,agreed,hash,prices,env=process.env,byoFetch=null}){
+ function registerBillingV2({app,db,stripe,admin,auth,agreed,hash,prices,env=process.env,byoFetch=null,bucket=null}){
  const stamp=()=>admin.firestore.FieldValue.serverTimestamp();
  const accounts=db.collection("gd_accounts");
  const accRef=req=>accounts.doc(hash(req.user.uid));
  const coll=req=>accRef(req).collection("workspaces");
  const safeWorkspaceId=safeProjectId;
  const projects=createProjectService({db,stamp,hash,stripe,env,prices,ensureCustomer,byoFetch});
+ const teams=require("./teams").createTeamService({db,stamp,hash,stripe,env,prices,ensureCustomer,bucket});
+ if(app)require("./teams").registerTeams({app,auth,agreed,service:teams});
  function projectError(res,error){
    if(!(error instanceof ProjectError))return res.status(503).json({error:"PROJECT_UNAVAILABLE"});
    const body={error:error.code};
@@ -88,7 +92,10 @@ function effectiveWorkers(workspace){
    workspaceFeeModel:w.data.workspaceFeeModel||(isGrandfathered(w.data)?"one_time":null),
    byoChallengeVerified:w.data.byoChallengeVerified===true,
    intendedSelection:w.data.intendedSelection||{},dataRetained:w.data.dataRetained===true,
-   hasContinuingBilling:hasContinuingBilling(w.data),transferEligible:effectiveStorageQuota(w.data)>0};
+   hasContinuingBilling:hasContinuingBilling(w.data),transferEligible:effectiveStorageQuota(w.data)>0,
+   billingModel:isPlansWorkspace(w.data)?"plans":w.data.kind==="free"||price.isFree?"free":"legacy",
+   customStorage:w.data.customStorage===true,requiredPlans:w.data.requiredPlans||null,plansStatus:w.data.plansStatus||null,
+   workspaceFeeIncluded:isPlansWorkspace(w.data)||price.isFree};
  }
  async function ensureCustomer(req){
    const ref=accRef(req), snap=await ref.get();
@@ -123,12 +130,17 @@ function effectiveWorkers(workspace){
  app.get("/v2/pricing",(_req,res)=>res.json({
    currency:"usd",catalogVersion:2,
    free:{storageGB:FREE_GB,workers:FREE_WORKERS,monthlyCents:0},
-   workspaceFeeMonthlyCents:0,legacyWorkspaceFeeMonthlyCents:500,
-   projects:{firstFree:true,additionalOneTimeCents:500,workspaceMonthlyCents:500,feeIsOneTime:false,freeWorkspaces:1,defaultLimit:10,qualifiedLimit:20,
+   // The workspace fee is included in storage plans; nothing is charged on top.
+   workspaceFeeMonthlyCents:0,workspaceFeeIncluded:true,
+   projects:{firstFree:true,firstFreeIncludes:{storageGB:FREE_GB,performanceTier:"free",workers:FREE_WORKERS},
+     additionalRequires:["storage","performance"],customStorageRequires:["performance"],
+     additionalOneTimeCents:0,workspaceMonthlyCents:0,feeIsOneTime:false,freeWorkspaces:1,defaultLimit:10,qualifiedLimit:20,
      qualifyingStorageTier:"2TB",qualifyingPerformanceTier:"turbo",qualifyingWorkers:8,
      qualificationLabel:"2 TB storage AND Turbo (8 workers) or higher on the same active project; equivalent bundles qualify",
      paymentAvailable:projects.paymentAvailable(),archiveRetainsData:true},
-   byo:{monthlyCents:500,yearlyCents:5000,providerFeesExtra:true,manualSetupRequired:true},
+   customStorage:{storagePlanRequired:false,performancePlanRequired:true,extraFeeCents:0,providerFeesExtra:true,setupWizard:true},
+   // Compatibility for released clients that still decode `byo`: there is no BYO fee any more.
+   byo:{monthlyCents:0,yearlyCents:0,retired:true,replacedBy:"customStorage"},
    purchasesEnabled:env.STRIPE_CHECKOUT_ENABLED==="true",
    storage:Object.fromEntries(Object.keys(STORAGE).map(t=>[t,{
      gb:STORAGE[t].gb,monthlyCents:STORAGE[t].standard,
@@ -142,7 +154,10 @@ function effectiveWorkers(workspace){
    }])),
    gpu:{available:GPU_READY,tiers:Object.fromEntries(Object.entries(GPU).map(([tier,plan])=>[tier,{name:plan.name,monthlyCents:plan.monthlyCents,yearlyCents:plan.monthlyCents*10,gpuMinutesPerMonth:plan.gpuMinutes,maxSessionMinutes:plan.maxSessionMinutes}]))},
    gpuBundles:{available:GPU_READY,discountPercent:10,requires:["storage","performance","gpu"],note:"GPU compute is not yet provisioned. Not purchasable."},
-   removeAds:{oneTimeCents:REMOVE_ADS_CENTS}
+   removeAds:{oneTimeCents:REMOVE_ADS_CENTS},
+   // Team subscription; each team workspace still needs its own plans on top.
+   teams:(({tiers,enterprise,perWorkspace})=>({tiers,enterprise,perWorkspace,yearlyMonthsCharged:10,
+     purchasable:Object.keys(require("./teams").TEAM_TIERS).every(t=>["month","year"].every(iv=>typeof prices[require("./teams").teamPriceKey(t,iv)]==="string"))}))(require("./teams").catalog())
  }));
  app.post("/v2/gpu/quote",auth,agreed,(req,res)=>{
    try{const quote=req.body?.bundle===true ? tripleBundleQuote({storageTier:req.body.storageTier,performanceTier:req.body.performanceTier,gpuTier:req.body.gpuTier,interval:req.body.interval||"month"}) : gpuQuote(req.body?.gpuTier,req.body?.interval||"month");res.json(quote)}
@@ -162,13 +177,13 @@ function effectiveWorkers(workspace){
  });
  app.post("/v2/projects",auth,agreed,async(req,res)=>{
    try{
-     const result=await projects.create(req,{name:req.body?.name,intentId:req.body?.intentId});
+     const result=await projects.create(req,{name:req.body?.name,intentId:req.body?.intentId,
+       storage:req.body?.storage||"managed",plans:req.body?.plans||null});
      let payment={};
-     if(result.project.data.projectFeeStatus==="pending")payment=await projects.checkout(req,result.project.id);
+     if(isPlansWorkspace(result.project.data)&&result.project.data.projectStatus==="pending_payment")payment=await projects.checkout(req,result.project.id);
      const project=publicWorkspace(result.project,result.policy.freeWorkspaceId);
-     const monthly=result.project.data.workspaceFeeModel==="monthly";
-     res.status(result.resumed?200:201).json({project,workspaceId:result.project.id,isFree:project.isFree,monthlyPriceCents:project.monthlyPriceCents,
-       policy:result.policy,resumed:result.resumed,oneTimeCents:result.project.data.projectFeeStatus==="pending"&&!monthly?500:0,...payment});
+     res.status(result.resumed?200:201).json({project,workspaceId:result.project.id,isFree:project.isFree,monthlyPriceCents:0,
+       policy:result.policy,resumed:result.resumed,oneTimeCents:0,...payment});
    }catch(error){projectError(res,error);}
  });
  app.get("/v2/projects/:id",auth,agreed,async(req,res)=>{
@@ -179,7 +194,7 @@ function effectiveWorkers(workspace){
    }catch(error){projectError(res,error);}
  });
  app.post("/v2/projects/:id/checkout",auth,agreed,async(req,res)=>{
-   try{res.json(await projects.checkout(req,req.params.id));}catch(error){projectError(res,error);}
+   try{res.json(await projects.checkout(req,req.params.id,req.body||{}));}catch(error){projectError(res,error);}
  });
  app.put("/v2/projects/:id/selection",auth,agreed,async(req,res)=>{
    try{res.json({workspaceId:req.params.id,intendedSelection:await projects.setSelection(req,req.params.id,req.body)});}catch(error){projectError(res,error);}
@@ -228,7 +243,7 @@ function effectiveWorkers(workspace){
      if(intent!==undefined&&(typeof intent!=="string"||!(/^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i).test(intent)))
        return res.status(400).json({error:"Invalid checkout intent"});
      const updateRequired=()=>res.status(426).json({error:"CLIENT_UPDATE_REQUIRED",projectFlow:"/v2/projects",
-       message:"Update GenDragoon to create a project in Cloud, then choose it for storage or performance. Each new project after your first costs $5 once."});
+       message:"Update GenDragoon to create a workspace. Each new workspace after your first needs a storage plan and a performance plan."});
      // Older clients cannot complete the separate project-activation flow. This
      // compatibility endpoint may resume an existing legacy intent, but never
      // creates a new project or switches a storage purchase into a project fee.
@@ -278,6 +293,7 @@ function effectiveWorkers(workspace){
    try{
      const w=await getWorkspace(req,res);if(!w)return;
      if(!["paid","free"].includes(w.data.kind))return res.status(409).json({error:"Managed storage project required"});
+     if(isPlansWorkspace(w.data))return res.status(409).json({error:"PLANS_MANAGED_TOGETHER",message:"This workspace's storage and performance plans are billed together. Use Manage Billing to change them.",workspaceId:w.id});
      if(w.data.projectBillingVersion===2&&!activatedBasicProject(w.data))return res.status(409).json({error:"PROJECT_ACTIVATION_REQUIRED",
        message:"Activate or restore this project in Cloud before choosing a storage plan.",workspaceId:w.id});
      await projects.withLease(req,w.id,async fresh=>{
@@ -285,7 +301,7 @@ function effectiveWorkers(workspace){
        const plan=storageQuote(req.body?.tier||intent.storageTier||fresh.data.storageTier,
          req.body?.interval||intent.storageInterval||fresh.data.storageInterval||"month",
          req.body?.mode||intent.storageMode||fresh.data.storageMode||"standard",
-         req.body?.tier||fresh.id==="free"?2:fresh.data.storageBillingVersion||1);
+         2); // New storage checkouts never add the retired workspace fee.
        const retained={...(fresh.data.intendedSelection||{}),storageTier:plan.tier,storageMode:plan.mode,storageInterval:plan.interval};
        if(req.ownerBenefits===true){
          await fresh.ref.update({storageTier:plan.tier,storageMode:plan.mode,storageInterval:plan.interval,storageBillingVersion:2,
@@ -305,6 +321,11 @@ function effectiveWorkers(workspace){
      const w=await getWorkspace(req,res);if(!w)return;
      if(!["byo","paid","free"].includes(w.data.kind)||projectStatus(w.data)==="archived")return res.status(409).json({error:"An available project is required"});
      try{rejectProviderSecrets(req.body||{});}catch(error){return res.status(400).json({error:error.code||"BYO_SECRET_REJECTED",message:error.message});}
+     // Custom storage is chosen when a workspace is created and is paid by its performance plan.
+     if(isPlansWorkspace(w.data)&&w.data.customStorage!==true)
+       return res.status(409).json({error:"CUSTOM_STORAGE_NEW_WORKSPACE",message:"Create a new workspace and choose Custom storage to connect your own provider."});
+     if(isPlansWorkspace(w.data)&&!(plansEntitled(w.data)&&w.data.performanceActive===true))
+       return res.status(402).json({error:"PERFORMANCE_PLAN_REQUIRED",message:"Finish paying for this workspace's performance plan before connecting custom storage."});
      const provider=String(req.body?.provider||"").trim().toLowerCase();
      const label=String(req.body?.label||"").trim();
      if(!["s3","gcs","r2","b2","sftp","webdav","google-drive","onedrive","other"].includes(provider)||
@@ -316,31 +337,30 @@ function effectiveWorkers(workspace){
      res.json({verifiedLocally:true,warning:"Customer is responsible for own provider access, charges and availability"});
    }catch(_){res.status(503).json({error:"Could not register BYO manual configuration"})}
  });
+ // The separate $5 custom-storage fee is retired: custom storage is paid by its
+ // performance plan (New workspace, Custom storage). Existing BYO subscriptions are
+ // still reconciled below; no new BYO-fee Checkout is created.
  app.post("/v2/workspaces/:id/checkout/byo",auth,agreed,async(req,res)=>{
    try{
      const w=await getWorkspace(req,res);if(!w)return;
-     if(!w.data.manualProviderConfigured)
-       return res.status(409).json({error:"Complete and test a manual cloud configuration first"});
-     if(w.data.projectBillingVersion===2&&!activatedBasicProject(w.data))return res.status(409).json({error:"PROJECT_ACTIVATION_REQUIRED",
-       message:"Activate or restore this project in Cloud before choosing a cloud connection plan.",workspaceId:w.id});
-     await projects.withLease(req,w.id,async fresh=>{
-       const plan=byoQuote(req.body?.interval||fresh.data.intendedSelection?.byoInterval||fresh.data.byoInterval||fresh.data.storageInterval||"month");
-       if(req.ownerBenefits===true){
+     if(req.ownerBenefits===true&&!isPlansWorkspace(w.data)){
+       // Owner accounts were never charged; keep their legacy activation path, which
+       // still requires a tested provider and a verified challenge.
+       if(!w.data.manualProviderConfigured)return res.status(409).json({error:"Complete and test a manual cloud configuration first"});
+       return await projects.withLease(req,w.id,async fresh=>{
          if(fresh.data.byoChallengeVerified!==true)
            return res.status(409).json({error:"BYO_CHALLENGE_REQUIRED",message:"Verify the bring-your-own challenge before activating storage"});
-         await fresh.ref.update({byoActive:true,byoInterval:plan.interval,entitlementSource:"owner",updatedAt:stamp()});
+         await fresh.ref.update({byoActive:true,entitlementSource:"owner",updatedAt:stamp()});
          return res.json({complimentary:true,workspaceId:fresh.id,message:"Owner BYO access activated. Your provider's own charges still apply."});
-       }
-       if(await existingCheckout(fresh,"byo",res))return;
-       const session=await checkoutSession(req,"byo",fresh,priceKeysBYO(plan));
-       await fresh.ref.update({byoCheckoutSessionId:session.id,pendingByoInterval:plan.interval,updatedAt:stamp()});
-       res.json({url:session.url,quote:plan});
-     });
+       });
+     }
+     res.status(410).json({error:"CUSTOM_STORAGE_FEE_RETIRED",message:"Custom storage no longer has a separate fee. Create a new workspace, choose Custom storage and a performance plan.",workspaceId:w.id});
    }catch(error){if(error instanceof ProjectError)return projectError(res,error);res.status(503).json({error:"BYO checkout unavailable"})}
  });
  app.post("/v2/workspaces/:id/checkout/performance",auth,agreed,async(req,res)=>{
    try{
      const w=await getWorkspace(req,res);if(!w)return;
+     if(isPlansWorkspace(w.data))return res.status(409).json({error:"PLANS_MANAGED_TOGETHER",message:"This workspace's storage and performance plans are billed together. Use Manage Billing to change them.",workspaceId:w.id});
      if(!((effectiveStorageQuota(w.data)>0)||
             (w.data.kind==="byo"&&w.data.byoActive&&w.data.manualProviderConfigured)))
        return res.status(409).json({error:"Active provisioned storage required before performance upgrade"});
@@ -393,6 +413,8 @@ function effectiveWorkers(workspace){
    }catch(_){res.status(503).json({error:"Remove Ads checkout unavailable"})}
  });
  async function reconcileSubscription(sub){
+   if(sub?.metadata?.kind==="workspace_plans")return projects.reconcilePlans(sub);
+   if(String(sub?.metadata?.kind||"").startsWith("team_"))return teams.reconcileSubscription(sub);
    const m=sub.metadata||{},kind=m.kind,owner=m.accountHash,id=m.workspaceId;
    if(!["storage","performance","byo"].includes(kind)||typeof owner!=="string"||
       !/^[a-f0-9]{64}$/.test(owner)||!safeWorkspaceId(id))return false;
@@ -463,7 +485,7 @@ function effectiveWorkers(workspace){
      return true;
    });
  }
- return {reconcileSubscription,reconcileAds,effectiveWorkers,projects};
+ return {reconcileSubscription,reconcileAds,effectiveWorkers,projects,teams};
 }
 module.exports={registerBillingV2,storageQuote,performanceQuote,effectiveWorkers,
  FREE_GB,FREE_WORKERS,REMOVE_ADS_CENTS,matchesStripePrices,priceKeysStorage,priceKeysPerformance,

@@ -1,5 +1,5 @@
 "use strict";
-// Extra deletion cases beyond Morgan's contract file: JSON confirm, Stripe
+// Extra deletion cases beyond the main contract file: JSON confirm, Stripe
 // cancel failure leaves the job retryable, and a repeat run does not touch
 // another account. No network, credentials, or live Stripe.
 const test=require("node:test"),assert=require("node:assert/strict"),crypto=require("node:crypto");

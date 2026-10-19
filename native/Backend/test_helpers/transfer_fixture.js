@@ -47,7 +47,7 @@ function fixture(tier="free",delay=0){
  const call=async(path,options={})=>{await ready;return fetch("http://127.0.0.1:"+server.address().port+"/v3/cloud/"+id+path,{...options,headers:{Authorization:"Bearer good",...options.headers}});};
  const create=async(name,size,requestId=crypto.randomUUID())=>{const r=await call("/uploads",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({name,sizeBytes:size,requestId})});assert.equal(r.status,201,await r.clone().text());return r.json();};
  const chunk=(id,index,data,sha)=>call("/uploads/"+id+"/chunks/"+index,{method:"PUT",headers:{"Content-Type":"application/octet-stream","X-Chunk-SHA256":sha||hashBytes(data)},body:data});
- return {app,server,call,create,chunk,docs,db,objects,wsPath,peak:()=>peak,close:()=>new Promise(r=>server.close(r))};
+ return {app,server,ready,call,create,chunk,docs,db,bucket,objects,wsPath,peak:()=>peak,close:()=>new Promise(r=>server.close(r))};
 }
 function hashBytes(x){return crypto.createHash("sha256").update(x).digest("hex");}
 module.exports={fixture};

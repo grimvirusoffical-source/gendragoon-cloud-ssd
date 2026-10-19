@@ -1,5 +1,5 @@
 "use strict";
-// Contract tests for DELETE /v2/account (Avery's spec; Riley implements).
+// Contract tests for DELETE /v2/account.
 // Contract: 202 + job id, job polled until done; recent sign-in window 5 min;
 // stale auth refused immediately (no job); second call 410 once the user is gone.
 //   const {createAccountDeletion}=require("./account_delete");
@@ -136,7 +136,7 @@ test("account deletion removes every workspace and does not move the free slot o
 });
 test("route: DELETE /v2/account answers 202 with a job id",async()=>{
   let register;try{({registerAccountDeletion:register}=require("./account_delete"));}catch(e){if(e.code==="MODULE_NOT_FOUND")assert.fail("account_delete.js not implemented");throw e;}
-  assert.equal(typeof register,"function","registerAccountDeletion export (name TBD by Riley)");
+  assert.equal(typeof register,"function","registerAccountDeletion export");
   const express=require("express"),app=express();
   register({app,firebaseAuth:(req,_res,next)=>{req.user={uid,auth_time:Math.floor(Date.now()/1000)-30};next();},db:memoryFirestore(),
     stripe:{subscriptions:{list:async()=>({has_more:false,data:[]}),cancel:async()=>({})}},bucket:{deleteFiles:async()=>{},getFiles:async()=>[[]]},

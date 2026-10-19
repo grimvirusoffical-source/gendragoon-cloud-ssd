@@ -1,5 +1,5 @@
 "use strict";
-// Regression tests for Avery's PR #5 review, blockers 2-8 (plus BYO SFTP refusal).
+// Regression tests for PR #5 review, blockers 2-8 (plus BYO SFTP refusal).
 // Written against e9ef0e3 (fix/backend-workspace-policy): every test in this file is
 // EXPECTED TO FAIL on e9ef0e3 for the reason in its name, and pass once that blocker is fixed.
 // No credentials, network, Stripe or Firebase: in-memory Firestore, stub Stripe, stub object store.

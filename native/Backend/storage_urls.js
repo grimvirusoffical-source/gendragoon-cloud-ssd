@@ -73,7 +73,7 @@ async function writeLocked(deps,ctx){
  if(!(summary&&(summary.locked||summary.uploadsBlocked)))return null;
  return policy.lockBody(summary);
 }
-async function loadWorkspace(db,accountHash,id){
+async function loadWorkspace(db,accountHash,id,op){
  if(id==="free"){
   const snap=await db.collection("tenants").doc(accountHash).collection("workspaces").doc("free").get();
   if(!snap.exists||snap.data()?.accountKey!==accountHash||snap.data()?.kind!=="free")return null;
@@ -81,7 +81,15 @@ async function loadWorkspace(db,accountHash,id){
  }
  if(typeof id!=="string"||!UUID.test(id))return {invalid:true};
  const snap=await db.collection("gd_accounts").doc(accountHash).collection("workspaces").doc(id).get();
- if(!snap.exists||snap.data()?.accountHash!==accountHash)return null;
+ if(!snap.exists){
+  // Same route for team workspaces. resolveTeamWorkspace enforces membership and role.
+  let t;
+  try{t=await require("./team_storage").resolveTeamWorkspace(db,accountHash,id,{method:OPS[op]?.method||"GET"});}
+  catch(error){throw refusal(error.status||503,error.code||"team_storage_unavailable");}
+  if(!t)return null;
+  return {id,data:t.view,prefix:t.scope.prefix+"/objects/",team:t};
+ }
+ if(snap.data()?.accountHash!==accountHash)return null;
  return {id,data:snap.data(),prefix:"customer/"+accountHash+"/managed/"+id+"/objects/"};
 }
 async function issueStorageUrls(deps,req){
@@ -100,11 +108,12 @@ async function issueStorageUrls(deps,req){
  }
  const accountHash=deps.hash(req.user.uid);
  if(typeof accountHash!=="string"||!/^[a-f0-9]{64}$/.test(accountHash))throw refusal(400,"invalid_account");
- const workspace=await loadWorkspace(deps.db,accountHash,req.params.id);
+ const workspace=await loadWorkspace(deps.db,accountHash,req.params.id,body.op);
  if(workspace?.invalid)throw refusal(400,"invalid_workspace");
  if(!workspace)throw refusal(404,"not_found");
  if(workspace.data.kind==="byo")throw refusal(409,"byo_external");
- const locked=await writeLocked(deps,{db:deps.db,accountHash,workspace:workspace.data,workspaceId:workspace.id});
+ const locked=workspace.team?(workspace.team.scope.uploadsBlocked?workspace.team.scope.lock:null):
+  await writeLocked(deps,{db:deps.db,accountHash,workspace:workspace.data,workspaceId:workspace.id});
  if((body.op==="put"||body.op==="delete")&&locked){
   const error=refusal(423,"workspace_lock");
   error.body=locked;

@@ -1,6 +1,6 @@
 "use strict";
-// PR #5 review regressions (Avery's blockers), item 1 only: fail-closed lock checks.
-// Items 2-8 are covered separately by Casey in pr5_review_regressions_2to8.test.js.
+// PR #5 review regressions (review blockers), item 1 only: fail-closed lock checks.
+// Items 2-8 are covered separately in pr5_review_regressions_2to8.test.js.
 //
 // Item 1 — a null/missing account project list must LOCK writes (423 workspace_lock)
 //   1a scopeFromWorkspace(w, owner, id, null) must report uploadsBlocked        (paid_storage.js)

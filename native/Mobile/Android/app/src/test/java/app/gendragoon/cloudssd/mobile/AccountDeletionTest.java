@@ -968,7 +968,7 @@ public final class AccountDeletionTest {
         assertTrue(SupportContact.mailto(flow.jobId).startsWith("mailto:SUPPORT_CONTACT_PLACEHOLDER@invalid"));
     }
 
-    /** Riley PR #6 at {@code 0486412}: {@code support-unauthorized.json}. Required, no auth header at all. */
+    /** PR #6 at {@code 0486412}: {@code support-unauthorized.json}. Required, no auth header at all. */
     @Test public void supportUnauthorizedFixtureOpensMailtoAndNeverSignIn(){
         assertFalse(DeletionSupport.ENABLED);
         assertEquals(401,BackendFixtures.responseStatus("account-deletion","support-unauthorized"));
@@ -1145,7 +1145,7 @@ public final class AccountDeletionTest {
         }
     }
 
-    /** Riley PR #5 at 0715b1a. Labels come from the server fields. {@code feeWaived} is required. */
+    /** PR #5 at 0715b1a. Labels come from the server fields. {@code feeWaived} is required. */
     @Test public void workspacePriceUsesRileyFixturesAndNeverCounts(){
         assertEquals("0715b1a",BackendFixtures.WORKSPACE_PRICE_SHA);
         assertFalse(WorkspacePrice.ENABLED);
@@ -1202,7 +1202,7 @@ public final class AccountDeletionTest {
         assertEquals("Missing · $5/mo",WorkspacePrice.pickerText("{\"name\":\"Missing\",\"isFree\":false,\"grandfathered\":false,\"monthlyPriceCents\":500}",true));
     }
 
-    /** Riley PR #5 at 0715b1a. Busy and deleting use the documented status strings. Lock and grace use the fixtures. */
+    /** PR #5 at 0715b1a. Busy and deleting use the documented status strings. Lock and grace use the fixtures. */
     @Test public void workspaceBusyDeletingLockAndGrace(){
         assertFalse(WorkspacePrice.ENABLED);
         assertFalse(EncryptedWorkspace.ENCRYPTED_WORKSPACE_ENABLED);

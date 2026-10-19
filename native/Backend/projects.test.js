@@ -5,6 +5,7 @@ const {createProjectService,effectiveStorageQuota,qualifiesForHigherLimit,policy
 const {effectiveWorkers,storageQuote,priceKeysStorage}=require("./billing_v2");
 const owner=crypto.createHash("sha256").update("project-test-owner").digest("hex"),other="b".repeat(64);
 const idFor=n=>"12345678-1234-4000-8000-"+String(n).padStart(12,"0");
+const PLANS={storageTier:"100GB",performanceTier:"boost",interval:"month"};
 const base={kind:"paid",accountHash:owner,name:"Existing project",projectBillingVersion:2,projectStatus:"active",projectFeeStatus:"paid",
  provisioned:true,storageActive:false,performanceActive:false,usedBytes:0,reservedBytes:0};
 function fixture({configured=true,ownerBenefits=false}={}){
@@ -18,18 +19,29 @@ function fixture({configured=true,ownerBenefits=false}={}){
    expire:async id=>{expired.push(id);sessions.get(id).status="expired";return sessions.get(id);},
    listLineItems:async id=>({has_more:false,data:sessions.get(id).line_items.map(line=>({price:{id:line.price},quantity:line.quantity}))})
  }},paymentIntents:{retrieve:async id=>structuredClone(intents.get(id))},charges:{retrieve:async()=>{throw Error("unexpected charge lookup");}}};
- const env={STRIPE_CHECKOUT_ENABLED:"true",STRIPE_PROJECT_CHECKOUT_READY:"true",STRIPE_ENVIRONMENT:"test",PUBLIC_URL:"https://billing.example",...(configured?{STRIPE_PROJECT_CREATION_PRICE_ID:"price_project"}:{})};
- const service=createProjectService({db,stamp:()=>123,hash:uid=>uid==="other"?other:owner,stripe,env,ensureCustomer:async()=>"cus_own"});
+ const env={STRIPE_CHECKOUT_ENABLED:configured?"true":"false",STRIPE_ENVIRONMENT:"test",PUBLIC_URL:"https://billing.example"};
+ const prices={"storage|standard|100GB|month":"price_s100","performance|boost|month":"price_boost",...(configured?{}:{})};
+ const service=createProjectService({db,stamp:()=>123,hash:uid=>uid==="other"?other:owner,stripe,env,prices,ensureCustomer:async()=>"cus_own"});
  const req={user:{uid:"owner"},ownerBenefits};
  const path=id=>id==="free"?"tenants/"+owner+"/workspaces/free":"gd_accounts/"+owner+"/workspaces/"+id;
- const create=(n,name="Project "+n)=>service.create(req,{name,intentId:idFor(n)});
+ const create=(n,name="Project "+n)=>service.create(req,{name,intentId:idFor(n),plans:PLANS});
+ // A workspace created before the fee was retired, still waiting on its one-time
+ // $5 Checkout. Its payment must still reconcile (or be refunded) correctly.
+ function legacyPending(n,name="Project "+n){
+   const id=idFor(n),sid="cs_legacy"+n;
+   db.rows.set(path(id),{...base,name,projectStatus:"pending_payment",projectFeeStatus:"pending",projectFeeCents:500,provisioned:false,
+     projectCheckoutSessionId:sid,projectPriceId:"price_project"});
+   sessions.set(sid,{id:sid,mode:"payment",customer:"cus_own",status:"open",payment_status:"unpaid",currency:"usd",amount_total:500,
+     metadata:{kind:"project_creation",accountHash:owner,workspaceId:id},line_items:[{price:"price_project",quantity:1}]});
+   return id;
+ }
  const put=(id,value={})=>db.rows.set(path(id),{...base,...value});
  function paidSession(id,intentId="pi_project1"){
    const record=db.rows.get(path(id)),s=sessions.get(record.projectCheckoutSessionId);s.status="complete";s.payment_status="paid";s.payment_intent=intentId;
    intents.set(intentId,{id:intentId,status:"succeeded",customer:"cus_own",currency:"usd",amount_received:500,
      latest_charge:{id:"ch_project1",refunded:false,disputed:false,amount_refunded:0,amount_captured:500}});return structuredClone(s);
  }
- return {db,service,req,create,put,path,price,stripe,sessions,calls,expired,intents,paidSession,record:id=>db.rows.get(path(id))};
+ return {db,service,req,create,legacyPending,put,path,price,stripe,sessions,calls,expired,intents,paidSession,record:id=>db.rows.get(path(id))};
 }
 test("parallel creation reserves at most10 slots and grants exactly one lifetime free project",async()=>{
  const f=fixture(),results=await Promise.allSettled(Array.from({length:32},(_,i)=>f.create(i+1)));
@@ -37,7 +49,7 @@ test("parallel creation reserves at most10 slots and grants exactly one lifetime
  assert.equal(results.filter(x=>x.status==="rejected"&&x.reason.code==="PROJECT_LIMIT_REACHED").length,22);
  const list=await f.service.inventory(f.req);assert.equal(list.policy.usedProjectSlots,10);
  assert.equal(list.records.filter(w=>w.data.projectFeeStatus==="free").length,1);
- assert.equal(list.records.filter(w=>w.data.projectFeeStatus==="pending").length,9);
+ assert.equal(list.records.filter(w=>w.data.projectFeeStatus==="included").length,9);
  assert.equal(f.calls.length,0);assert.equal(list.policy.freeProjectAvailable,false);
 });
 test("the upper cap requires both active qualifying entitlements on the same project",()=>{
@@ -62,7 +74,7 @@ test("archiving cannot reset the free allowance, including the legacy/v1 creatio
  const f=fixture();await f.create(1);f.db.rows.set(f.path(idFor(1))+"/files/file1",{name:"kept.bin",sizeBytes:7});
  await f.service.archive(f.req,idFor(1),{confirmName:"Project 1"});
  assert.equal(f.record(idFor(1)).dataRetained,true);assert.equal(f.db.rows.get(f.path(idFor(1))+"/files/file1").sizeBytes,7);
- const next=await f.create(2);assert.equal(next.project.data.projectFeeStatus,"pending");
+ const next=await f.create(2);assert.equal(next.project.data.projectFeeStatus,"included");
  await assert.rejects(f.service.create(f.req,{name:"A second free project",legacyFree:true}),{code:"FREE_PROJECT_ALREADY_CLAIMED"});
  const restored=await f.service.restore(f.req,idFor(1));assert.equal(restored.newProjectFeeCharged,false);
  assert.equal(f.record(idFor(1)).projectFeeStatus,"free");assert.equal(effectiveStorageQuota(f.record(idFor(1))),2e9);
@@ -72,7 +84,7 @@ test("a migrated legacy free project consumes the lifetime allowance and can qua
    storageActive:true,storageTier:"2TB",performanceActive:true,performanceTier:"turbo"});
  const list=await f.service.inventory(f.req);assert.equal(list.policy.freeProjectAvailable,false);assert.equal(list.policy.projectLimit,20);
  assert.equal(effectiveStorageQuota(f.record("free")),2e12);assert.equal(effectiveWorkers(f.record("free")),8);
- assert.equal((await f.create(2)).project.data.projectFeeStatus,"pending");
+ assert.equal((await f.create(2)).project.data.projectFeeStatus,"included");
 });
 test("new storage subscriptions omit recurring workspace fees while legacy quotes remain exact",()=>{
  for(const interval of ["month","year"]){
@@ -94,26 +106,26 @@ test("basic activated projects keep2GB after optional storage cancellation; pend
 });
 test("the first free project works without payment configuration; additional projects fail closed before reservation",async()=>{
  const f=fixture({configured:false});await f.create(1);
- await assert.rejects(f.create(2),{code:"PROJECT_PAYMENT_UNAVAILABLE"});
+ await assert.rejects(f.create(2),{code:"PLANS_CHECKOUT_UNAVAILABLE"});
  assert.equal((await f.service.inventory(f.req)).policy.usedProjectSlots,1);assert.equal(f.calls.length,0);
 });
-test("project Checkout uses exactly one configured one-time500-cent price and repeated requests reuse the session",async()=>{
+test("plans Checkout is one subscription with the storage and performance prices and repeated requests reuse the session",async()=>{
  const f=fixture();await f.create(1);await f.create(2);
  const first=await f.service.checkout(f.req,idFor(2)),retry=await f.service.checkout(f.req,idFor(2));
- assert.equal(first.oneTimeCents,500);assert.equal(retry.resumed,true);assert.equal(f.calls.length,1);
- const args=f.calls[0].args;assert.equal(args.mode,"payment");assert.deepEqual(args.line_items,[{price:"price_project",quantity:1}]);
- assert.equal(args.payment_method_types,undefined);assert.equal(args.subscription_data,undefined);
+ assert.equal(first.totalCents,640+600);assert.equal(retry.resumed,true);assert.equal(f.calls.length,1);
+ const args=f.calls[0].args;assert.equal(args.mode,"subscription");
+ assert.deepEqual(args.line_items,[{price:"price_s100",quantity:1},{price:"price_boost",quantity:1}]);
+ assert.equal(args.metadata.kind,"workspace_plans");assert.equal(args.subscription_data.metadata.kind,"workspace_plans");
  assert.equal(f.record(idFor(2)).provisioned,false);assert.equal(f.record(idFor(2)).checkoutLease,null);
 });
-test("a recurring, wrong-amount, inactive or wrong-mode Price cannot activate or charge a project",async()=>{
- for(const patch of [{type:"recurring",recurring:{interval:"month"}},{unit_amount:499},{active:false},{livemode:true},{currency:"eur"},{product:{active:false}}]){
-   const f=fixture();await f.create(1);await f.create(2);Object.assign(f.price,patch);
-   await assert.rejects(f.service.checkout(f.req,idFor(2)),{code:"PROJECT_PRICE_MISMATCH"});
-   assert.equal(f.calls.length,0);assert.equal(f.record(idFor(2)).provisioned,false);
- }
+test("missing plan prices fail closed without a Checkout or access",async()=>{
+ const f=fixture();await f.create(1);
+ await f.service.create(f.req,{name:"Big",intentId:idFor(2),plans:{storageTier:"6TB",performanceTier:"max",interval:"year"}});
+ await assert.rejects(f.service.checkout(f.req,idFor(2)),{code:"PLANS_PRICE_UNCONFIGURED"});
+ assert.equal(f.calls.length,0);assert.equal(f.record(idFor(2)).provisioned,false);assert.equal(effectiveStorageQuota(f.record(idFor(2))),0);
 });
-test("unpaid or failed Checkout cannot fulfill; verified asynchronous success activates once and replays are idempotent",async()=>{
- const f=fixture();await f.create(1);await f.create(2);await f.service.checkout(f.req,idFor(2));
+test("legacy in-flight $5 payment: unpaid or failed Checkout cannot fulfill; verified success activates once and replays are idempotent",async()=>{
+ const f=fixture();await f.create(1);f.legacyPending(2);
  const open=f.sessions.get(f.record(idFor(2)).projectCheckoutSessionId);
  assert.equal(await f.service.reconcilePayment({...open,status:"complete"}),false);
  assert.equal(await f.service.reconcilePayment({...open,status:"complete"},{failed:true}),true);
@@ -122,11 +134,11 @@ test("unpaid or failed Checkout cannot fulfill; verified asynchronous success ac
  const revision=f.db.rows.get("gd_accounts/"+owner).projectRevision;
  assert.equal(await f.service.reconcilePayment(paid),true);
  assert.equal(f.db.rows.get("gd_accounts/"+owner).projectRevision,revision);
- assert.equal(f.record(idFor(2)).projectStatus,"active");assert.equal(f.record(idFor(2)).projectFeeStatus,"paid");assert.equal(f.calls.length,1);
+ assert.equal(f.record(idFor(2)).projectStatus,"active");assert.equal(f.record(idFor(2)).projectFeeStatus,"paid");assert.equal(f.calls.length,0);
 });
-test("payment fulfillment checks customer, exact line, quantity, amount and current charge state",async()=>{
+test("legacy in-flight payment fulfillment checks customer, exact line, quantity, amount and current charge state",async()=>{
  for(const variation of ["foreignCustomer","wrongPrice","extraQuantity","wrongAmount","refunded","disputed","wrongIntentCustomer"]){
-   const f=fixture();await f.create(1);await f.create(2);await f.service.checkout(f.req,idFor(2));const paid=f.paidSession(idFor(2));
+   const f=fixture();await f.create(1);f.legacyPending(2);const paid=f.paidSession(idFor(2));
    if(variation==="foreignCustomer")paid.customer="cus_foreign";
    if(variation==="wrongPrice")f.sessions.get(paid.id).line_items[0].price="price_injected";
    if(variation==="extraQuantity")f.sessions.get(paid.id).line_items[0].quantity=2;
@@ -137,16 +149,16 @@ test("payment fulfillment checks customer, exact line, quantity, amount and curr
    assert.equal(await f.service.reconcilePayment(paid),false,variation);assert.equal(f.record(idFor(2)).provisioned,false,variation);
  }
 });
-test("refund/dispute revocation is durable even when a paid-completion event is replayed later",async()=>{
- const f=fixture();await f.create(1);await f.create(2);await f.service.checkout(f.req,idFor(2));const paid=f.paidSession(idFor(2));
+test("legacy in-flight refund/dispute revocation is durable even when a paid-completion event is replayed later",async()=>{
+ const f=fixture();await f.create(1);f.legacyPending(2);const paid=f.paidSession(idFor(2));
  await f.service.reconcilePayment(paid);await f.service.revokePayment(paid.payment_intent,"charge.dispute.created");
  assert.equal(f.record(idFor(2)).projectStatus,"payment_revoked");assert.equal(effectiveStorageQuota(f.record(idFor(2))),0);
  assert.equal(await f.service.reconcilePayment(paid),false);assert.equal(f.record(idFor(2)).projectFeeStatus,"revoked");
 });
 test("capacity is rechecked transactionally on payment; confirmed money is retained without fabricated access",async()=>{
  const f=fixture();f.put(idFor(1),{storageActive:true,storageTier:"2TB",storageMode:"bundle"});
- for(let n=2;n<=11;n++)await f.create(n);
- await f.service.checkout(f.req,idFor(11));const paid=f.paidSession(idFor(11));
+ for(let n=2;n<=10;n++)await f.create(n);
+ f.legacyPending(11);const paid=f.paidSession(idFor(11));
  f.put(idFor(1),{storageActive:false});
  assert.equal(await f.service.reconcilePayment(paid),true);
  assert.equal(f.record(idFor(11)).projectStatus,"payment_confirmed_pending_capacity");assert.equal(f.record(idFor(11)).projectFeeStatus,"paid");
@@ -187,13 +199,13 @@ test("archiving detects a newly persisted Checkout even after its creation lease
  await assert.rejects(f.service.archive(f.req,idFor(1),{confirmName:"Existing project"}),{code:"CHECKOUT_BUSY"});
  assert.equal(f.record(idFor(1)).projectStatus,"active");
 });
-test("archive expires only the owned unpaid session and refuses an unsettled completed payment",async()=>{
+test("archive expires only the owned unpaid plans session and refuses an unsettled completed payment",async()=>{
  const f=fixture();await f.create(1);await f.create(2);await f.service.checkout(f.req,idFor(2));
- const sessionId=f.record(idFor(2)).projectCheckoutSessionId;f.sessions.get(sessionId).status="complete";
+ const sessionId=f.record(idFor(2)).plansCheckoutSessionId;f.sessions.get(sessionId).status="complete";
  await assert.rejects(f.service.archive(f.req,idFor(2),{confirmName:"Project 2"}),{code:"PAYMENT_PENDING"});
  f.sessions.get(sessionId).status="open";
  await f.service.archive(f.req,idFor(2),{confirmName:"Project 2"});assert.deepEqual(f.expired,[sessionId]);
- assert.equal(f.record(idFor(2)).projectStatus,"archived");assert.equal(f.record(idFor(2)).projectFeeStatus,"pending");
+ assert.equal(f.record(idFor(2)).projectStatus,"archived");assert.equal(f.record(idFor(2)).projectFeeStatus,"included");
 });
 test("restore cannot exceed the cap or manufacture a paid activation for an unpaid archived project",async()=>{
  const f=fixture();await f.create(1);await f.create(2);await f.service.archive(f.req,idFor(2),{confirmName:"Project 2"});

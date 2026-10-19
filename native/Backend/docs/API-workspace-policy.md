@@ -1,88 +1,57 @@
 # Workspace policy API
 
-Server-side rules for GenDragoon workspaces. This note is the source Avery can fold into `gendragoon-apps/docs/API.md`. It describes the behavior implemented in `workspace_policy.js` and the routes that call it. No live Stripe price ids, secrets, or customer data belong in this document or in source.
+Server-side rules for GenDragoon workspaces. It describes the behavior implemented in `workspace_policy.js` and the routes that call it. No live Stripe price ids, secrets, or customer data belong in this document or in source.
 
 ## Constants
 
 | Constant | Value | Meaning |
 | --- | --- | --- |
-| `FREE_WORKSPACES` | `1` | One hosted free workspace per account. `freeWorkspaceId(account)` is that workspace. A BYO workspace never fills the slot. |
-| `WORKSPACE_FEE_USD_MONTHLY` | `5` | Recurring fee for every workspace that is not the free hosted slot. BYO is always this price. |
-| `workspaceMonthlyCents` | `500` | Same fee in USD cents. |
+| `FREE_WORKSPACES` | `1` | One hosted free workspace per account: 2 GB storage plus the free performance plan (1 worker). Custom storage never fills the slot. |
+| Workspace fee | `0` | There is no separate workspace fee. It is included in the storage plan. `workspaceMonthlyCents` and `newProjectOneTimeCents` are `0`; `workspaceFeeIncluded` is `true`. |
+| `PLANS_BILLING_VERSION` | `3` | `projectBillingVersion` of a workspace whose access comes from its storage + performance plans. |
 | `BASE_CAP` | `10` | Owned active + pending workspaces (archived and merged do not count). |
 | `RAISED_CAP` | `20` | Cap when one owned active workspace has at least 2 TB storage and Turbo (8 workers), or an equivalent 2 TB-or-larger bundle. |
-| Lapse grace | 3 days | Added to `paidThroughMs`, the last **paid** invoice period end. A failed renewal does not move this clock. |
+| Lapse grace | 3 days | Legacy monthly-fee workspaces only. Added to `paidThroughMs`, the last **paid** invoice period end. |
 | BYO challenge TTL | 10 minutes | Nonce expiry. Single use. |
 
 Raised-cap qualification lives in one function, `qualifiesForRaisedCap` (exported from `projects.js` as `qualifiesForHigherLimit`). Client-saved intentions do not qualify. Owner complimentary access does not bypass the cap.
 
-## Workspace fee
+## Workspace plans
 
-New workspaces after the free allowance use a **recurring** $5/month Stripe Price. The server looks it up. It never creates a Price and never embeds a live id.
+| Workspace | Must buy | Gets |
+| --- | --- | --- |
+| First hosted workspace | nothing | 2 GB storage, free performance plan, no checkout |
+| Every additional workspace | a storage plan **and** a performance plan | the chosen storage tier and workers |
+| Custom storage (own S3 / VPS / cloud) | a paid performance plan only | the chosen workers; storage is the user's provider |
 
-Lookup order:
+`POST /v2/projects` body: `{name, intentId, storage?, plans?}`.
 
-1. `STRIPE_WORKSPACE_MONTHLY_PRICE_ID` (must match `price_` + alphanumeric).
-2. Catalog entry whose key is the lookup key `gdssd_workspace_monthly_v3`.
+- `storage` is `"managed"` (default) or `"custom"`.
+- `plans` is `{storageTier, performanceTier, interval}` for managed storage, or `{performanceTier, interval}` for custom storage. `interval` is `month` (default) or `year` and is shared by both plans. Bundles are not sold for new workspaces.
+- The free slot ignores `plans`. Any other create without both plans is **400** `PLANS_REQUIRED`; custom storage without a paid performance tier is **400** `PERFORMANCE_PLAN_REQUIRED`; a storage tier on custom storage, an unknown tier, `free` as a paid tier, or mixed intervals is **400** `INVALID_SELECTION`.
+- A paid create stores `requiredPlans`, sets `projectStatus: "pending_payment"`, and opens **one** subscription Checkout (`mode: subscription`) with exactly the storage price (`storage|standard|<tier>|<interval>`) and the performance price (`performance|<tier>|<interval>`). No workspace-fee item is ever added. The response has `oneTimeCents: 0`, `monthlyPriceCents: 0`, `totalCents` (sum of the plan prices) and `url`.
+- When Checkout is disabled the create is **503** `PLANS_CHECKOUT_UNAVAILABLE` and nothing is written. When a plan price id is not configured, opening Checkout is **503** `PLANS_PRICE_UNCONFIGURED`; the workspace stays `pending_payment` with no storage or workers.
+- `POST /v2/projects/:id/checkout` resumes the open session, or with `{plans}` replaces the selection (the old session is expired first), so a change never stacks two charges.
+- While a workspace is on the plans model, `checkout/storage` and `checkout/performance` are **409** `PLANS_MANAGED_TOGETHER`. `checkout/byo` is **410** `CUSTOM_STORAGE_FEE_RETIRED` for everyone except the legacy owner path.
 
-The monthly path is enabled only when `STRIPE_CHECKOUT_ENABLED=true` and `STRIPE_WORKSPACE_MONTHLY_READY=true` and a price id is present. Checkout then verifies the retrieved Price is active, USD, `unit_amount` 500, `billing_scheme` `per_unit`, `type` `recurring`, interval `month`, and in the configured Stripe environment.
+Subscription metadata is `kind: workspace_plans`, plus `accountHash` and `workspaceId`. The signature-verified webhook re-fetches the subscription and activates the workspace only when its items are exactly the required prices, once each (otherwise `plansStatus: "mismatch"`). `active`, `trialing` and `past_due` keep access (Stripe dunning). `unpaid`, `canceled`, `incomplete_expired` and `paused` remove storage and workers and lock the account (**423**, `reason: "lapsed"`, the id in `unpaidWorkspaceIds`). Replays of an `evt_` id are no-ops.
 
-If that price is not configured, **new paid workspace creation stays disabled** (`503 PROJECT_PAYMENT_UNAVAILABLE`) when the monthly id is set but not ready. Existing workspaces keep working.
-
-Compatibility: when the monthly price id is **not** set, the existing one-time $5 project Checkout (`STRIPE_PROJECT_CREATION_PRICE_ID` / `one_time|project_creation`, mode `payment`) remains so current v0.18 clients and suites keep working. `GET /v2/pricing` still reports `additionalOneTimeCents: 500` for that legacy path and now also reports `workspaceMonthlyCents: 500` and `feeIsOneTime: false`.
-
-Account policy from `GET /v2/projects` and `GET /v2/workspaces` includes:
-
-- `feeIsOneTime: false`
-- `workspaceMonthlyCents: 500`
-- `freeWorkspaces: 1`
-- `freeWorkspaceId`: the hosted workspace that currently holds the free slot, or `null`
-- `projectLimit`, `usedProjectSlots`, `locked`, `uploadsBlocked`, `reason`, `overBy`, `unpaidWorkspaceIds`
-- `grandfatheredProjects`
+Account policy from `GET /v2/projects` and `GET /v2/workspaces` includes `workspaceFeeIncluded: true`, `newProjectOneTimeCents: 0`, `workspaceMonthlyCents: 0`, `firstWorkspaceIncludes {storageGB, performanceTier, workers}`, `additionalWorkspaceRequires: ["storage","performance"]`, `customStorageRequires: ["performance"]`, `freeWorkspaces`, `freeWorkspaceId`, `projectLimit`, `usedProjectSlots`, `locked`, `uploadsBlocked`, `reason`, `overBy`, `unpaidWorkspaceIds` and `grandfatheredProjects`. Workspace items add `billingModel` (`"plans"`), `customStorage`, `requiredPlans`, `plansStatus` and `workspaceFeeIncluded`.
 
 `reason` is `over_cap`, `lapsed`, `over_cap_and_lapsed`, `scope_unavailable`, `merge_in_progress`, or `null`.
 
 ## Free workspace
 
-`freeWorkspaceId(account)` is the one hosted workspace that does not pay the monthly fee. The choice is made inside the Firestore transaction on create, delete, BYO registration, and merge, so two simultaneous creates cannot both be free.
+`freeWorkspaceId(account)` is the one hosted workspace that needs no plan purchase. The choice is made inside the Firestore transaction on create, delete and merge, so two simultaneous creates cannot both be free; the loser needs plans.
 
-- The slot is hosted storage only. A BYO workspace (S3 or any bring-your-own provider) is never free: `isFree` is false and `monthlyPriceCents` is 500 even when it is the account's only workspace.
-- The slot is the oldest active hosted workspace. Create assigns it when the account has none. Delete of that workspace assigns the oldest remaining hosted workspace inside the same transaction. If none remain, the next hosted workspace created becomes free.
-- Archive does not release the slot. The stored id stays on the archived workspace.
-- Merge keeps the survivor's fee status. If the deleted source held the slot, the slot moves to another hosted workspace and does not rewrite the survivor. When the survivor is the only one left, the next create takes the slot.
-- Registering BYO on the free hosted workspace makes that workspace the $5 monthly fee and moves the slot to another hosted workspace when one exists.
-- A BYO workspace with no active subscription is locked immediately: **423** `{error:"workspace_lock", reason:"lapsed", unpaidWorkspaceIds:[id]}`. It does not get the hosted grace period.
-- Grandfathered one-time workspaces stay exempt (`monthlyPriceCents` 0) and are not rewritten into the monthly fee.
-- Each workspace list item, and the create response, includes `isFree` and `monthlyPriceCents` (`0` or `500`). Clients use those fields instead of a hardcoded price.
+- The slot is hosted storage only. A custom-storage workspace is never free, even when it is the account's only workspace, and it does not use up the slot.
+- The slot is the oldest active hosted workspace. Delete of that workspace assigns the oldest remaining hosted workspace inside the same transaction. If none remain, the next hosted workspace created becomes free.
+- Archive does not release the slot.
+- Custom storage is chosen when the workspace is created. Registering a provider on an existing hosted workspace is **409** `CUSTOM_STORAGE_NEW_WORKSPACE`.
 
-## Grandfathering
+## Legacy workspace fee (in-flight records only)
 
-These workspaces keep one-time semantics. They never lapse and are never rewritten or charged the new monthly fee:
-
-- `kind: "free"` (legacy free project, matched by `accountKey`)
-- `feeIsOneTime: true`
-- `projectBillingVersion: 2` with `projectFeeStatus` of `paid`, `free`, or `owner`, and no `workspaceFeeModel: "monthly"`
-
-A new monthly workspace is stored with `workspaceFeeModel: "monthly"` so it is not treated as grandfathered. Existing rows are not migrated.
-
-Grandfathering also requires a creation time before `GRANDFATHER_CUTOFF_MS` (environment override, default `2026-10-17T00:00:00Z`). A missing `createdAt` is a legacy row and stays grandfathered. A numeric `createdAt` below `1e12` is Unix seconds. An unresolved server-timestamp object with no `toMillis` is treated as now, so a brand-new row is not grandfathered. `workspaceFeeModel: "monthly"` is never grandfathered.
-
-## Lapse
-
-For a monthly workspace that is unpaid (`past_due`, `unpaid`, `canceled`, and the other non-active fee statuses), uploads lapse at `paidThroughMs + 3 days`. `paidThroughMs` is the period end of the last **paid** invoice (`invoice.lines[].period.end`, else `invoice.period_end`). It is not Stripe's `current_period_end`: a failed renewal advances that field, and using it would grant about a month of extra grace. One millisecond before `paidThroughMs + 3 days` the workspace is still inside grace. An active or paid monthly workspace does not lapse when the period ends. Grandfathered workspaces skip this clock.
-
-The signature-verified `POST /billing/stripe-webhook` handles, idempotently through `stripe_webhook_events`:
-
-| Event | Effect on a monthly workspace |
-| --- | --- |
-| `invoice.payment_failed` | Fee status comes only from the retrieved Subscription (`past_due` when that status is past due). Does not move `paidThroughMs`. |
-| `invoice.paid` | Fee status comes from the retrieved Subscription. `paidThroughMs` becomes `max(stored, paid invoice period end)` and is mirrored to `workspaceFeePeriodEndMs`. A late paid event cannot move the clock backward or mark a now past-due subscription paid. |
-| `customer.subscription.updated` | Fee status comes from the retrieved Subscription only. |
-| `customer.subscription.deleted` | Retrieved status `canceled` sets `workspaceFeeStatus: canceled` and unpaid. Lapse still waits for `paidThroughMs` + grace. |
-
-The handler re-fetches the Subscription and ignores the event type when choosing status. It ignores the event for a grandfathered workspace and does not write that record. A repeated `evt_` id returns `{received: true, replayed: true}` and does not retrieve Stripe again.
-
-Subscription metadata for the fee is `kind: workspace_fee`, plus `accountHash` and `workspaceId`.
+Workspaces created before this change may carry the retired $5 fee: `workspaceFeeModel: "monthly"` (`kind: workspace_fee` subscriptions), the one-time `project_creation` Checkout, or the monthly BYO fee. Those records are still reconciled, revoked on refund, and lapse at `paidThroughMs + 3 days` exactly as before, so nobody loses access or is charged twice. No new fee Checkout is ever opened. A legacy `pending_payment` workspace moves to the plans model on its next `POST /v2/projects/:id/checkout` with `{plans}`. Grandfathered rows (`kind: "free"`, `feeIsOneTime: true`, or billing version 2 with `projectFeeStatus` `paid`/`free`/`owner`) are never rewritten.
 
 ## Cap lock
 
@@ -107,13 +76,13 @@ Ownership is `accountHash` on UUID workspaces and `accountKey` on the legacy fre
 
 ## Bring-your-own storage
 
-BYO uses the same $5/month workspace fee, the same cap, and the same lapse and lock rules. Performance tiers stay separate paid add-ons.
+Custom storage (BYO) is created with `storage: "custom"` and a paid performance plan. There is no storage plan and no extra fee. `POST /v2/workspaces/:id/byo/register` is **402** `PERFORMANCE_PLAN_REQUIRED` until that plan is paid. Apps then run the setup wizard: provider type → endpoint + credentials (kept on the device) → challenge write and verify (the connection test) → finish.
 
 Launch providers are S3-compatible only, stored as `providerType: "s3"`: AWS, Cloudflare R2, Backblaze B2, Wasabi, MinIO, and GCS via S3 keys. Aliases `aws`, `r2`, `cloudflare`, `backblaze`, `b2`, `wasabi`, `minio`, `gcs`, and `google` normalize to `s3`. SFTP, Azure, and WebDAV are not launch providers. `POST /v2/workspaces/:id/byo/register` with one of those returns **422** `{error: "byo_provider_unsupported", provider}`. Error codes are the `error` string. Responses do not include a `code` field. Secret fields are rejected first, so a body that also contains a password still returns **400** `BYO_SECRET_REJECTED`.
 
 The server stores `providerType`, `endpoint`, and `bucketFingerprint`. Credentials never reach the server. A body that contains `accessKey`, `secretAccessKey`, `password`, `privateKey`, `private_key`, `serviceAccount`, `keyFile`, `pem`, a `BEGIN PRIVATE KEY` block, or pasted service-account JSON returns **400** `BYO_SECRET_REJECTED`. The value is not written to Firestore and is not logged.
 
-`GET /v2/pricing` reports BYO `monthlyCents: 500` and `yearlyCents: 5000` (the year factor stays 10). Workers and storage are not granted unless `byoChallengeVerified` is true, including owner complimentary checkout (**409** `BYO_CHALLENGE_REQUIRED`) and subscription reconciliation. `byoActive` plus `manualProviderConfigured` alone leaves `projectStatus` at `pending_activation` and `effectiveWorkers` at 0. Re-registering or changing the endpoint clears `byoChallengeVerified`, `byoActive`, and `manualProviderConfigured`.
+`GET /v2/pricing` reports `customStorage {storagePlanRequired: false, performancePlanRequired: true, extraFeeCents: 0}`. Workers and storage are not granted unless `byoChallengeVerified` is true, including owner complimentary checkout (**409** `BYO_CHALLENGE_REQUIRED`) and subscription reconciliation. `byoActive` plus `manualProviderConfigured` alone leaves `projectStatus` at `pending_activation` and `effectiveWorkers` at 0. Re-registering or changing the endpoint clears `byoChallengeVerified`, `byoActive`, and `manualProviderConfigured`.
 
 | Route | Body | Result |
 | --- | --- | --- |
@@ -127,11 +96,11 @@ Challenge errors: `presigned_url_required`, `BYO_CHALLENGE_MISMATCH`, `BYO_CHALL
 
 ## Request fields
 
-A fixture request body may contain only the fields listed for its route. `byo/verify-missing-url` is the empty-body verify case. Every other verify request is exactly `{presignedUrl}`.
+A fixture request body may contain only the fields listed for its route. Fields marked `?` are optional; the rest are required. `byo/verify-missing-url` is the empty-body verify case. Every other verify request is exactly `{presignedUrl}`.
 
 | Route | Body |
 | --- | --- |
-| `POST /v2/projects` | `{name, intentId}` |
+| `POST /v2/projects` | `{name, intentId, storage?, plans?}` |
 | `GET /v2/workspaces` | none |
 | `GET /v2/projects/:id` | none |
 | `DELETE /v2/projects/:id` | none |

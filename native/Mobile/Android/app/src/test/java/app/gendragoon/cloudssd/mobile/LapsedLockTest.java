@@ -7,7 +7,7 @@ import java.util.List;
 import java.util.Map;
 import org.junit.Test;
 
-/** Avery's review on e5f1982: a lapsed lock is per workspace and is never a dead end. */
+/** Review on e5f1982: a lapsed lock is per workspace and is never a dead end. */
 public class LapsedLockTest {
     private static final String LAPSED_ID="11111111-1111-4111-8111-000000000022";
     private static final String OPEN_ID="11111111-1111-4111-8111-000000000024";

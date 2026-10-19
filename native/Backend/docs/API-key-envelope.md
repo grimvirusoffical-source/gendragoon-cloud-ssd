@@ -2,7 +2,7 @@
 
 Each workspace has one wrapped key envelope. The device wraps the workspace key before upload. The server stores that opaque value and a version. It does not store a passphrase, a raw key, or a filename.
 
-What the server is allowed to see is described in [SECURITY.md](SECURITY.md) (`docs/SECURITY.md`). This page is only the envelope API.
+This page is only the envelope API.
 
 No wrapped key, passphrase, or customer payload belongs in logs or in this repository.
 

@@ -107,8 +107,20 @@ function subscriptionActive(w){
  if(w?.workspaceFeePaid===true&&["active","paid","trialing"].includes(status))return true;
  return ["active","paid","trialing"].includes(status)&&w?.workspaceFeePaid!==false;
 }
-function byoLapsed(w){return isByoWorkspace(w)&&!isGrandfathered(w)&&!subscriptionActive(w);}
-function feeLapsed(w){return !!w&&(evaluateLapse(w).lapsed||byoLapsed(w));}
+// Workspaces created under the plans model (projectBillingVersion 3) have no
+// separate workspace fee: the storage plan includes it. They are paid through one
+// subscription holding the storage plan and the performance plan (custom storage:
+// the performance plan only).
+const PLANS_BILLING_VERSION=3;
+const PLANS_ENDED=new Set(["unpaid","canceled","cancelled","incomplete_expired","paused"]);
+function isPlansWorkspace(w){return !!w&&w.projectBillingVersion===PLANS_BILLING_VERSION;}
+function plansEntitled(w){return isPlansWorkspace(w)&&(w.entitlementSource==="owner"||["active","trialing","past_due"].includes(w.plansStatus||""));}
+function plansLapsed(w){
+ return isPlansWorkspace(w)&&!!w.plansSubscriptionId&&w.entitlementSource!=="owner"&&
+  !["archived","merged"].includes(projectStatus(w))&&PLANS_ENDED.has(w.plansStatus||"");
+}
+function byoLapsed(w){return !isPlansWorkspace(w)&&isByoWorkspace(w)&&!isGrandfathered(w)&&!subscriptionActive(w);}
+function feeLapsed(w){return !!w&&(evaluateLapse(w).lapsed||byoLapsed(w)||plansLapsed(w));}
 function hostedEligible(w){
  if(!w||!w.id||isByoWorkspace(w))return false;
  const status=projectStatus(w);
@@ -138,6 +150,7 @@ function freeWorkspaceId(account,projects){
  return chooseFreeWorkspaceId(projects);
 }
 function workspacePrice(workspace,freeId){
+ if(isPlansWorkspace(workspace))return {isFree:false,monthlyPriceCents:0,feeIncluded:true};
  const isFree=!!workspace&&workspace.id===freeId&&!isByoWorkspace(workspace);
  const monthlyPriceCents=isByoWorkspace(workspace)?WORKSPACE_FEE_CENTS
   :(isFree||isGrandfathered(workspace)||workspace?.projectFeeStatus==="owner"?0:WORKSPACE_FEE_CENTS);
@@ -297,7 +310,7 @@ async function listAccountProjects(db,ownerHash){
 }
 function writeNeedsLock(method){return method!=="GET"&&method!=="HEAD"&&method!=="DELETE";}
 
-module.exports={FREE_WORKSPACES,WORKSPACE_FEE_USD_MONTHLY,WORKSPACE_FEE_CENTS,BASE_CAP,RAISED_CAP,
+module.exports={PLANS_BILLING_VERSION,isPlansWorkspace,plansEntitled,plansLapsed,FREE_WORKSPACES,WORKSPACE_FEE_USD_MONTHLY,WORKSPACE_FEE_CENTS,BASE_CAP,RAISED_CAP,
  LAPSE_GRACE_MS,BYO_CHALLENGE_TTL_MS,MONTHLY_LOOKUP_KEY,QUALIFYING_STORAGE_GB,QUALIFYING_WORKERS,
  GRANDFATHER_CUTOFF_MS,LIST_UNAVAILABLE,LIST_UNAVAILABLE_LOCK,
  monthlyPriceId,isGrandfathered,evaluateLapse,projectStatus,activatedBasicProject,

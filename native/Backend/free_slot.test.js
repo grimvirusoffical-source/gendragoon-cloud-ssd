@@ -9,16 +9,19 @@ const owner=crypto.createHash("sha256").update("free-slot-owner").digest("hex");
 const idFor=n=>"12345678-1234-4000-8000-"+String(n).padStart(12,"0");
 const base={kind:"paid",accountHash:owner,name:"Existing",projectBillingVersion:2,projectStatus:"active",projectFeeStatus:"paid",
  provisioned:true,storageActive:false,performanceActive:false,usedBytes:0,reservedBytes:0,createdAt:1_700_000_000_000};
+const PLANS={storageTier:"100GB",performanceTier:"boost",interval:"month"};
 const byoBody={provider:"s3",endpoint:"https://bucket.s3.us-east-1.amazonaws.com",bucketFingerprint:"ab".repeat(8)};
 function fixture(){
  const db=memoryFirestore([["gd_accounts/"+owner,{stripeCustomerId:"cus_own"}]]);
  const price={id:"price_month",active:true,type:"recurring",recurring:{interval:"month"},currency:"usd",unit_amount:500,billing_scheme:"per_unit",livemode:false,product:{active:true}};
  const stripe={prices:{retrieve:async()=>({...price})},checkout:{sessions:{create:async()=>({id:"cs_month",url:"https://checkout.stripe.com/c/pay/cs_month",status:"open"}),retrieve:async()=>{throw Error("missing");}}}};
  const env={STRIPE_CHECKOUT_ENABLED:"true",STRIPE_WORKSPACE_MONTHLY_READY:"true",STRIPE_WORKSPACE_MONTHLY_PRICE_ID:"price_month",STRIPE_ENVIRONMENT:"test",PUBLIC_URL:"https://billing.example"};
- const service=createProjectService({db,stamp:()=>1_700_000_000_000,hash:()=>owner,stripe,env,ensureCustomer:async()=>"cus_own"});
+ const prices={"storage|standard|100GB|month":"price_s100","performance|boost|month":"price_boost"};
+ const service=createProjectService({db,stamp:()=>1_700_000_000_000,hash:()=>owner,stripe,env,prices,ensureCustomer:async()=>"cus_own"});
  const req={user:{uid:"owner"}};
  const path=id=>"gd_accounts/"+owner+"/workspaces/"+id;
- return {db,service,req,path,create:(n,name)=>service.create(req,{name:name||"Project "+n,intentId:idFor(n)}),
+ return {db,service,req,path,create:(n,name)=>service.create(req,{name:name||"Project "+n,intentId:idFor(n),plans:PLANS}),
+  createBare:(n,name)=>service.create(req,{name:name||"Project "+n,intentId:idFor(n)}),
   record:id=>db.rows.get(path(id)),account:()=>db.rows.get("gd_accounts/"+owner)};
 }
 function views(f){return [1,2,3,4,5,6,7].filter(n=>f.record(idFor(n))).map(n=>({...f.record(idFor(n)),id:idFor(n)}));}
@@ -35,30 +38,32 @@ test("freeWorkspaceId is the oldest hosted workspace and never a BYO workspace",
  assert.deepEqual(workspacePrice(newer,idFor(2)),{isFree:false,monthlyPriceCents:WORKSPACE_FEE_CENTS});
 });
 
-test("the first hosted workspace is free and a lone BYO workspace is $5 and lapsed",async()=>{
+test("the first hosted workspace is free and custom storage cannot be bolted onto it",async()=>{
  const f=fixture();
- const first=await f.create(1,"Free Hosted");
+ const first=await f.createBare(1,"Free Hosted");
  assert.equal(first.isFree,true);assert.equal(first.monthlyPriceCents,0);
  assert.equal(first.project.data.projectFeeStatus,"free");
+ assert.equal(effectiveStorageQuota(f.record(idFor(1))),2_000_000_000);
  assert.equal(f.account().freeWorkspaceId,idFor(1));
- const registered=await f.service.registerByo(f.req,idFor(1),byoBody);
- assert.equal(registered.isFree,false);assert.equal(registered.monthlyPriceCents,500);
- assert.equal(registered.freeWorkspaceId,null);assert.equal(registered.lapsed,true);
+ await assert.rejects(f.service.registerByo(f.req,idFor(1),byoBody),{code:"CUSTOM_STORAGE_NEW_WORKSPACE"});
+ assert.equal(f.record(idFor(1)).projectFeeStatus,"free");assert.ok(!f.record(idFor(1)).workspaceFeeModel);
  const state=await f.service.inventory(f.req);
- assert.equal(state.policy.freeWorkspaceId,null);
- assert.equal(state.policy.locked,true);assert.equal(state.policy.reason,"lapsed");
- assert.deepEqual(state.policy.unpaidWorkspaceIds,[idFor(1)]);
- assert.equal(byoLapsed(f.record(idFor(1))),true);
+ assert.equal(state.policy.freeWorkspaceId,idFor(1));assert.equal(state.policy.locked,false);
 });
 
-test("the second hosted workspace is $5 per month",async()=>{
+test("the second hosted workspace needs a storage and a performance plan and pays no workspace fee",async()=>{
  const f=fixture();
- await f.create(1);const second=await f.create(2,"Second");
- assert.equal(second.isFree,false);assert.equal(second.monthlyPriceCents,500);
- assert.equal(second.project.data.workspaceFeeModel,"monthly");
- assert.equal(second.project.data.projectFeeStatus,"pending");
+ await f.createBare(1);
+ await assert.rejects(f.createBare(2,"Second"),{code:"PLANS_REQUIRED"});
+ const second=await f.create(2,"Second");
+ assert.equal(second.isFree,false);assert.equal(second.monthlyPriceCents,0);
+ assert.equal(second.project.data.workspaceFeeModel,undefined);
+ assert.equal(second.project.data.projectFeeStatus,"included");
+ assert.equal(second.project.data.projectStatus,"pending_payment");
+ assert.equal(effectiveStorageQuota(f.record(idFor(2))),0);
  const state=await f.service.inventory(f.req);
  assert.equal(state.records.filter(w=>w.id===state.policy.freeWorkspaceId).length,1);
+ assert.equal(state.policy.locked,false);
 });
 
 test("deleting the free workspace makes the oldest remaining hosted one free, or the next create",async()=>{
@@ -69,37 +74,40 @@ test("deleting the free workspace makes the oldest remaining hosted one free, or
  assert.equal(f.record(idFor(2)).projectFeeStatus,"free");
  assert.equal(f.record(idFor(1)),undefined);
  const third=await f.create(3,"Paid after promotion");
- assert.equal(third.isFree,false);assert.equal(third.monthlyPriceCents,500);
+ assert.equal(third.isFree,false);assert.equal(third.project.data.projectFeeStatus,"included");
  const alone=fixture();
  await alone.create(1);
  await alone.service.remove(alone.req,idFor(1));
  assert.equal(alone.account().freeWorkspaceId,null);
- const replacement=await alone.create(2,"Replacement");
+ const replacement=await alone.createBare(2,"Replacement");
  assert.equal(replacement.isFree,true);assert.equal(replacement.monthlyPriceCents,0);
  const extra=await alone.create(3,"One at a time");
  assert.equal(extra.isFree,false);
  assert.equal(views(alone).filter(w=>w.id===alone.account().freeWorkspaceId).length,1);
 });
 
-test("registering BYO on the free workspace makes it billable and moves the slot",async()=>{
+test("custom storage is its own workspace: it never takes or moves the free slot",async()=>{
  const f=fixture();
- await f.create(1);await f.create(2);
- const moved=await f.service.registerByo(f.req,idFor(1),byoBody);
- assert.equal(moved.isFree,false);assert.equal(moved.monthlyPriceCents,500);
- assert.equal(moved.freeWorkspaceId,idFor(2));
- assert.equal(f.record(idFor(2)).projectFeeStatus,"free");
- assert.equal(f.record(idFor(1)).projectFeeStatus,"pending");
- assert.equal(byoLapsed(f.record(idFor(1))),true);
- const state=await f.service.inventory(f.req);
- assert.equal(state.policy.reason,"lapsed");
- assert.deepEqual(state.policy.unpaidWorkspaceIds,[idFor(1)]);
+ await f.createBare(1);
+ await assert.rejects(f.service.create(f.req,{name:"Own S3",intentId:idFor(2),storage:"custom"}),{code:"PERFORMANCE_PLAN_REQUIRED"});
+ await assert.rejects(f.service.create(f.req,{name:"Own S3",intentId:idFor(2),storage:"custom",plans:{storageTier:"100GB",performanceTier:"boost"}}),{code:"INVALID_SELECTION"});
+ const custom=await f.service.create(f.req,{name:"Own S3",intentId:idFor(2),storage:"custom",plans:{performanceTier:"boost",interval:"month"}});
+ assert.equal(custom.project.data.kind,"byo");assert.equal(custom.project.data.customStorage,true);
+ assert.deepEqual(custom.project.data.requiredPlans,{storage:"custom",performanceTier:"boost",interval:"month"});
+ assert.equal(f.account().freeWorkspaceId,idFor(1));
+ // Setup is refused until the performance plan is paid.
+ await assert.rejects(f.service.registerByo(f.req,idFor(2),byoBody),{code:"PERFORMANCE_PLAN_REQUIRED"});
+ // A custom-storage-only account still gets its free managed workspace next.
+ const alone=fixture();
+ await alone.service.create(alone.req,{name:"Own S3",intentId:idFor(1),storage:"custom",plans:{performanceTier:"lite"}});
+ assert.equal((await alone.createBare(2,"Free later")).isFree,true);
 });
 
 test("two simultaneous creates produce exactly one free workspace",async()=>{
  const f=fixture();
  const created=await Promise.all([f.create(1,"Concurrent A"),f.create(2,"Concurrent B")]);
  assert.equal(created.filter(item=>item.isFree===true&&item.monthlyPriceCents===0).length,1);
- assert.equal(created.filter(item=>item.isFree===false&&item.monthlyPriceCents===500).length,1);
+ assert.equal(created.filter(item=>item.isFree===false&&item.project.data.projectFeeStatus==="included").length,1);
  const state=await f.service.inventory(f.req);
  assert.equal(state.records.filter(w=>w.id===state.policy.freeWorkspaceId).length,1);
  assert.equal(state.records.filter(w=>w.data.projectFeeStatus==="free").length,1);
@@ -110,7 +118,7 @@ test("merge keeps the survivor's fee status",async()=>{
  await f.create(1,"Source");await f.create(2,"Survivor");await f.create(3,"Other");
  await f.service.merge(f.req,idFor(1),{targetId:idFor(2),confirmName:"Source"});
  assert.equal(f.record(idFor(1)),undefined);
- assert.equal(f.record(idFor(2)).projectFeeStatus,"pending");
+ assert.equal(f.record(idFor(2)).projectFeeStatus,"included");
  assert.equal(f.account().freeWorkspaceId,idFor(3));
  assert.equal(f.record(idFor(3)).projectFeeStatus,"free");
  const kept=fixture();
@@ -134,10 +142,11 @@ test("a grandfathered one-time workspace stays exempt from the monthly lapse",()
  assert.equal(byoLapsed(byoGrand),true);
 });
 
-test("an unpaid BYO workspace upload is 423 workspace_lock lapsed",async()=>{
+test("an ended plans subscription locks uploads with 423 workspace_lock lapsed",async()=>{
  const f=fixture();
- await f.create(1,"Only BYO");
- await f.service.registerByo(f.req,idFor(1),byoBody);
+ await f.createBare(1,"Free");await f.create(2,"Paid plans");
+ f.db.rows.set(f.path(idFor(2)),{...f.record(idFor(2)),plansSubscriptionId:"sub_plans",plansStatus:"canceled",projectStatus:"active"});
+ assert.equal(effectiveStorageQuota(f.record(idFor(2))),0);
  assert.ok(effectiveStorageQuota(f.record(idFor(1)))>0);
  const app=express();
  registerPaidStorage({app,db:f.db,bucket:{file:()=>({})},accountKey:()=>owner,
@@ -152,6 +161,6 @@ test("an unpaid BYO workspace upload is 423 workspace_lock lapsed",async()=>{
   assert.equal(response.status,423);
   assert.equal(body.error,"workspace_lock");
   assert.equal(body.reason,"lapsed");
-  assert.deepEqual(body.unpaidWorkspaceIds,[idFor(1)]);
+  assert.deepEqual(body.unpaidWorkspaceIds,[idFor(2)]);
  }finally{await new Promise(resolve=>server.close(resolve));}
 });

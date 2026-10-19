@@ -14,7 +14,7 @@ function documentedRoutes(markdown){
   const cell=match[3].trim();
   const fields=cell==="none"?[]:cell.replace(/[{}`]/g,"").split(",").map(part=>part.trim()).filter(Boolean).sort();
   const pattern=new RegExp("^"+match[2].replace(/[.+?^${}()|[\]\\]/g,"\\$&").replace(/:[A-Za-z]+/g,"[^/]+")+"$");
-  routes.push({method:match[1],fields,pattern});
+  routes.push({method:match[1],fields:fields.filter(f=>!f.endsWith("?")),optional:fields.filter(f=>f.endsWith("?")).map(f=>f.slice(0,-1)),pattern});
  }
  assert.ok(routes.length>=10,"Request fields table is missing routes");
  return routes.sort((a,b)=>b.pattern.source.length-a.pattern.source.length);
@@ -35,7 +35,7 @@ function assertDocumentedBody(rel,fixture,routes){
   assert.deepEqual(fixture.response.body,{error:"presigned_url_required"});
   return;
  }
- assert.deepEqual(keys,route.fields,rel+" request body does not match the documented fields");
+ assert.deepEqual(keys.filter(key=>!route.optional.includes(key)),route.fields,rel+" request body does not match the documented fields");
  if(rel.startsWith("byo/verify-"))assert.deepEqual(fixture.request.body&&Object.keys(fixture.request.body),["presignedUrl"]);
 }
 

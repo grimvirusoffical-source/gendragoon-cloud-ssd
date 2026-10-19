@@ -1,7 +1,6 @@
 // GenDragoon commercial catalog. Monetary values are integer US cents.
-// Each workspace has ONE independent Stripe subscription containing BOTH
-// a $5 workspace fee and exactly one storage plan; never charge storage-only
-// subscriptions without a workspace.
+// The workspace fee is included in every storage plan: a storage subscription
+// never carries a separate workspace line item.
 "use strict";
 const STORAGE = Object.freeze({
   "100GB": {gb:100, bundle:799, standard:640},
@@ -20,6 +19,7 @@ const PERFORMANCE=Object.freeze({
   turbo:{cents:900,workers:8}, ultra:{cents:1400,workers:12},
   max:{cents:1900,workers:20}
 });
+// Retired $5 workspace fee; kept as a named constant for legacy records only.
 const BUCKET_MONTHLY_CENTS=500;
 function yearly(monthly){return monthly*10;}
 function buildQuote({storage,mode="bundle",interval="month",performance=null}){
@@ -31,7 +31,7 @@ function buildQuote({storage,mode="bundle",interval="month",performance=null}){
  const base=STORAGE[storage][mode],extra=performance?PERFORMANCE[performance].cents:0;
  // All recurring parts share the same interval and annual discount.
  const multiplier=interval==="year"?10:1;
- const fee=BUCKET_MONTHLY_CENTS*multiplier;
+ const fee=0;
  const storageCharge=base*multiplier, performanceCharge=extra*multiplier;
  return Object.freeze({storage,mode,interval,performance,
   storageGb:STORAGE[storage].gb,storageCents:storageCharge,
@@ -48,7 +48,7 @@ function validateWorkspaceName(name){
 }
 function stripeKeys(plan){
  const {storage,mode,interval,performance}=plan;
- const items=[`workspace|${interval}`,`storage|${mode}|${storage}|${interval}`];
+ const items=[`storage|${mode}|${storage}|${interval}`];
  if(performance)items.push(`performance|${performance}|${interval}`);
  return items;
 }

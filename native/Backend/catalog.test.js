@@ -1,19 +1,19 @@
 "use strict";
 const test=require("node:test"),assert=require("node:assert/strict");
 const {STORAGE,PERFORMANCE,buildQuote,validateWorkspaceName,stripeKeys}=require("./catalog");
-test("one workspace incurs a separate $5 fee and required storage",()=>{
+test("a storage plan includes the workspace fee: no separate $5 line item",()=>{
  const x=buildQuote({storage:"100GB",interval:"month"});
- assert.equal(x.workspaceFeeCents,500);assert.equal(x.storageCents,799);assert.equal(x.totalCents,1299);
- assert.deepEqual(stripeKeys(x),["workspace|month","storage|bundle|100GB|month"]);
+ assert.equal(x.workspaceFeeCents,0);assert.equal(x.storageCents,799);assert.equal(x.totalCents,799);
+ assert.deepEqual(stripeKeys(x),["storage|bundle|100GB|month"]);
 });
-test("two workspaces double the full charge instead of sharing storage",()=>{
+test("two workspaces each pay their own storage plan, with no fee on top",()=>{
  const a=buildQuote({storage:"1TB",mode:"standard"});
- assert.equal(a.totalCents*2, (500+3600)*2);
+ assert.equal(a.totalCents*2, 3600*2);
 });
 test("annual term applies to every recurring component",()=>{
  const x=buildQuote({storage:"1TB",interval:"year",mode:"standard",performance:"boost"});
- assert.equal(x.totalCents,47000);
- assert.deepEqual(stripeKeys(x),["workspace|year","storage|standard|1TB|year","performance|boost|year"]);
+ assert.equal(x.totalCents,42000);
+ assert.deepEqual(stripeKeys(x),["storage|standard|1TB|year","performance|boost|year"]);
 });
 test("bundle forbids double charging performance",()=>{
  assert.throws(()=>buildQuote({storage:"1TB",performance:"turbo"}));

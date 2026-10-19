@@ -22,7 +22,7 @@ function tripleBundleQuote(options){
     typeof performanceTier!=="string"||!Object.hasOwn(PERFORMANCE,performanceTier)||
     typeof gpuTier!=="string"||!Object.hasOwn(GPU,gpuTier)||
     !["month","year"].includes(interval)||storageMode!=="standard")throw Error("Invalid triple bundle");
- const sum=STORAGE[storageTier].standard+500+PERFORMANCE[performanceTier].cents+GPU[gpuTier].monthlyCents;
+ const sum=STORAGE[storageTier].standard+PERFORMANCE[performanceTier].cents+GPU[gpuTier].monthlyCents;
  // Apply the bundle discount once, round up to whole cents, then bill 10 months annually.
  const month=Math.ceil(sum*9/10);
  return {storageTier,performanceTier,gpuTier,interval,discountPercent:10,
