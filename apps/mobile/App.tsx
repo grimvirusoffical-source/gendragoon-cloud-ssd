@@ -11,7 +11,10 @@ import { ThemeProvider, useTheme } from "./src/themeContext";
 import { NavigationContainer, createNavigationContainerRef } from "@react-navigation/native";
 import { createBottomTabNavigator } from "@react-navigation/bottom-tabs";
 import { createNativeStackNavigator } from "@react-navigation/native-stack";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { AccountsClient, type AccountRules } from "@gendragoon/core";
+import { SignupScreen } from "./src/account/SignupScreen";
+import { adoptSignupSession } from "./src/account/redxaiSignIn";
 import { Linking } from "react-native";
 import { StatusBar } from "expo-status-bar";
 import { SafeAreaProvider } from "react-native-safe-area-context";
@@ -37,6 +40,7 @@ import { TeamsTab } from "./src/teams";
 
 type RootStack = {
   SignIn: undefined;
+  Signup: undefined;
   Passphrase: undefined;
   Lock: undefined;
   Main: undefined;
@@ -92,6 +96,18 @@ function freshPreviewToken(): string {
   return `${part({ alg: "none", typ: "JWT" })}.${part({ auth_time: authTime, sub: "preview-user" })}.sig`;
 }
 
+/**
+ * Sign-up goes to Red-XAI Accounts (`/v1`, app `gendragoon`) when this build has
+ * an issuer, otherwise to the Gendragoon backend's transitional `/v1/accounts`.
+ */
+function accountsFor(issuer: string, apiBase: string) {
+  const base = issuer || apiBase;
+  if (!base) return null;
+  const make = (session: string | null) =>
+    new AccountsClient(issuer ? { baseUrl: issuer, pathPrefix: "/v1", app: "gendragoon", getToken: async () => session } : { baseUrl: apiBase, getToken: async () => session });
+  return { client: make(null), withSession: make };
+}
+
 export function MobileRoot(props: {
   secrets?: SecretStore;
   apiBase?: string;
@@ -101,6 +117,12 @@ export function MobileRoot(props: {
   const secrets = useMemo(() => props.secrets ?? createExpoSecureStore(), [props.secrets]);
   const apiBase = props.apiBase ?? process.env.EXPO_PUBLIC_API_BASE ?? "";
   const [idToken, setIdToken] = useState(freshPreviewToken);
+  const accounts = useMemo(() => accountsFor(process.env.EXPO_PUBLIC_REDXAI_ISSUER ?? "", apiBase), [apiBase]);
+  const accountSession = useRef<string | null>(null);
+  const [accountRules, setAccountRules] = useState<AccountRules | null>(null);
+  useEffect(() => {
+    void accounts?.client.rules().then(setAccountRules).catch(() => undefined);
+  }, [accounts]);
   const [access, setAccess] = useState<LockAssessment>(lockedAccess);
   const [workspaces, setWorkspaces] = useState(previewWorkspaces);
   const [selected, setSelected] = useState<TreeNode | null>(null);
@@ -291,6 +313,7 @@ export function MobileRoot(props: {
             sessionToken={idToken}
             nextToken={freshPreviewToken()}
             googleEnabled={Boolean(process.env.EXPO_PUBLIC_GOOGLE_WEB_CLIENT_ID)}
+            onCreateAccount={accounts ? () => navigationRef.navigate("Signup") : undefined}
             onSwapped={(token) => {
               setIdToken(token);
               if (accountLockCoversApp(access)) {
@@ -302,6 +325,34 @@ export function MobileRoot(props: {
           />
         )}
       </Stack.Screen>
+      {accounts ? (
+        <Stack.Screen name="Signup" options={{ title: "Create account" }}>
+          {() => (
+            <SignupScreen
+              api={accounts.client}
+              rules={accountRules}
+              onSubmit={async (fields) => {
+                const created = await accounts.client.signup(fields);
+                accountSession.current = created.session ?? null;
+                return created;
+              }}
+              onConfirmTwoFactor={async (code) => { await accounts.withSession(accountSession.current).confirmTwoFactor(code); }}
+              onResendPhoneCode={(phone) => accounts.withSession(accountSession.current).resendSignupCode(phone)}
+              onDone={() => {
+                const session = accountSession.current;
+                accountSession.current = null;
+                const issuer = process.env.EXPO_PUBLIC_REDXAI_ISSUER ?? "";
+                if (!issuer || !session) { navigationRef.navigate("SignIn"); return; }
+                // In-app sign-up signs in directly with the session grant; a used-up or expired session falls back to Sign in.
+                void adoptSignupSession(issuer, session, secrets).then(
+                  (tokens) => { setIdToken(tokens.accessToken); navigationRef.navigate(accountLockCoversApp(access) ? "Lock" : "Main"); },
+                  () => navigationRef.navigate("SignIn"),
+                );
+              }}
+            />
+          )}
+        </Stack.Screen>
+      ) : null}
       {ENCRYPTED_WORKSPACE_ENABLED ? (
         <Stack.Screen name="Passphrase" options={{ title: "Passphrase" }}>
           {() => <PassphraseScreen onSubmit={() => navigationRef.navigate("Main")} />}

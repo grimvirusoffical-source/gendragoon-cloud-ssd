@@ -43,4 +43,17 @@ contextBridge.exposeInMainWorld("gendragoon", {
   getIdToken(): Promise<string | undefined> {
     return ipcRenderer.invoke("auth:id-token");
   },
+  isAccountSignInConfigured(): Promise<boolean> {
+    return ipcRenderer.invoke("auth:configured");
+  },
+  signIn(mode: "sign-in" | "sign-up"): Promise<boolean> {
+    return ipcRenderer.invoke("auth:sign-in", mode);
+  },
+  /** Signs in with the one-time session an in-app sign-up returned (no browser round trip). */
+  adoptSignupSession(session: string): Promise<boolean> {
+    return ipcRenderer.invoke("auth:adopt-session", session);
+  },
+  signOut(): Promise<void> {
+    return ipcRenderer.invoke("auth:sign-out");
+  },
 });

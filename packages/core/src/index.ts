@@ -295,4 +295,5 @@ export type {
   ModerationAction,
 } from "./teams.js";
 export { uploadPlainFile } from "./plain-upload.js";
+export * from "./accounts/index.js";
 export { ABOUT_OWNERSHIP, COPYRIGHT, PUBLISHER } from "./about.js";

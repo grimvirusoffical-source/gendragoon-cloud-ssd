@@ -5,3 +5,6 @@ const DEFAULT_API_BASE = "https://gendragoon-free-10068843866.us-central1.run.ap
 export const API_BASE = typeof __API_BASE__ === "string" && __API_BASE__ ? __API_BASE__ : DEFAULT_API_BASE;
 export const SUPPORT_URL = "https://example.com/gendragoon/support"; // TODO(owner): real support URL before store submission
 export const PRIVACY_URL = "https://example.com/gendragoon/privacy"; // TODO(owner): real privacy-policy URL before store submission
+declare const __REDXAI_ISSUER__: string | undefined;
+/** Red-XAI Accounts issuer, set at build time with GENDRAGOON_REDXAI_ISSUER. Empty: no sign-in in this build. */
+export const REDXAI_ISSUER = typeof __REDXAI_ISSUER__ === "string" ? __REDXAI_ISSUER__ : "";

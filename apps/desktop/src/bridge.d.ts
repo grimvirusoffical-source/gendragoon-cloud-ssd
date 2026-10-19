@@ -1,5 +1,6 @@
 interface ImportMetaEnv {
   readonly VITE_API_BASE?: string;
+  readonly VITE_REDXAI_ISSUER?: string;
 }
 
 interface GendragoonBridge {
@@ -14,6 +15,10 @@ interface GendragoonBridge {
   setSecret?: (name: string, bytes: Uint8Array) => Promise<void>;
   deleteSecret?: (name: string) => Promise<void>;
   getIdToken?: () => Promise<string | undefined>;
+  isAccountSignInConfigured?: () => Promise<boolean>;
+  signIn?: (mode: "sign-in" | "sign-up") => Promise<boolean>;
+  adoptSignupSession?: (session: string) => Promise<boolean>;
+  signOut?: () => Promise<void>;
   openBilling?: (url: string) => Promise<boolean>;
   getDeviceName?: () => Promise<string | null>;
 }

@@ -9,6 +9,8 @@ import { BROWSERS, DEFAULT_API_BASE, manifestFor } from "./manifests.mjs";
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const pkg = JSON.parse(await readFile(path.join(root, "package.json"), "utf8"));
 const apiBase = process.env.GENDRAGOON_API_BASE || DEFAULT_API_BASE;
+// Red-XAI Accounts issuer. Unset builds have no sign-in and no extra permissions.
+const issuer = process.env.GENDRAGOON_REDXAI_ISSUER || "";
 const zip = process.argv.includes("--zip");
 const outRoot = process.env.EXT_OUT || path.join(root, "dist");
 const zipDir = process.env.EXT_ZIP_DIR || path.join(root, "dist-zips");
@@ -21,7 +23,7 @@ for (const browser of BROWSERS) {
   await build({
     entryPoints: { popup: path.join(root, "src/popup.ts"), options: path.join(root, "src/options.ts"), background: path.join(root, "src/background.ts"), "popup-style": path.join(root, "src/popup.css") },
     outdir: dir, bundle: true, format: "iife", target: ["chrome114", "firefox128"], minify: true, sourcemap: false, legalComments: "none",
-    define: { __API_BASE__: JSON.stringify(apiBase) }, loader: { ".png": "dataurl" }, logLevel: "warning",
+    define: { __API_BASE__: JSON.stringify(apiBase), __REDXAI_ISSUER__: JSON.stringify(issuer) }, loader: { ".png": "dataurl" }, logLevel: "warning",
   });
   // esbuild names the css after its entry; popup.html links popup.css.
   await cp(path.join(dir, "popup-style.css"), path.join(dir, "popup.css"));
@@ -30,7 +32,7 @@ for (const browser of BROWSERS) {
   await cp(path.join(root, "src/options.html"), path.join(dir, "options.html"));
   await cp(path.join(root, "src/_locales"), path.join(dir, "_locales"), { recursive: true });
   await cp(path.join(root, "icons"), path.join(dir, "icons"), { recursive: true });
-  await writeFile(path.join(dir, "manifest.json"), `${JSON.stringify(manifestFor(browser, pkg.version, apiBase), null, 2)}\n`);
+  await writeFile(path.join(dir, "manifest.json"), `${JSON.stringify(manifestFor(browser, pkg.version, apiBase, issuer), null, 2)}\n`);
   if (zip) {
     const file = path.join(zipDir, `GenDragoon-Extension-${browser}-${pkg.version}.zip`);
     await rm(file, { force: true });

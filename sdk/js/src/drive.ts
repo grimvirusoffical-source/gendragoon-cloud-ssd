@@ -18,6 +18,8 @@ export function cleanPath(p: string): string {
   const bad = () => new Error(`gendragoon: invalid path ${JSON.stringify(p)}`);
   if (!p || text.encode(p).length > 1024 || p.startsWith("/") || p.endsWith("/") || p.includes("\\")) throw bad();
   for (const seg of p.split("/")) {
+    // Control characters are refused on purpose (contract path rules).
+    // eslint-disable-next-line no-control-regex
     if (!seg || seg === "." || seg === ".." || /[\x00-\x1f\x7f]/.test(seg)) throw bad();
   }
   return p;
