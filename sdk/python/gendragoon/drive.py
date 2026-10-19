@@ -18,6 +18,13 @@ from .keyring import Keyring
 DEFAULT_CHUNK_SIZE = 4 << 20
 
 
+def slot_path(folder: str, slot: str) -> str:
+    """folder/slot for a save slot; slot must be one path segment and folder "" or a valid drive path."""
+    if not slot or "/" in slot:
+        raise ValueError(f"gendragoon: invalid slot name {slot!r}")
+    return clean_path(f"{folder}/{slot}" if folder else slot)
+
+
 def clean_path(p: str) -> str:
     """Slash-separated, no leading or trailing slash, no empty, "." or ".." segments, no backslash or control
     characters, at most 1024 bytes."""
@@ -246,7 +253,8 @@ class Drive:
         self.update(apply)
 
     def delete(self, p: str) -> None:
-        """Removes one file or one empty folder. Level L2, risk destructive. Blobs stay until collect_garbage."""
+        """Removes one file or one empty folder. Level L3, risk destructive. Blobs stay until collect_garbage.
+        Cloud saves at L2 use delete_slot."""
         self._c.check("files.delete")
 
         def apply(doc: dict) -> None:
@@ -259,6 +267,19 @@ class Drive:
             if any(q.startswith(p + "/") for q in list(s) + list(doc["files"])):
                 raise ValueError(f"gendragoon: folder {p!r} is not empty")
             doc["folders"] = [f for f in doc.get("folders") or [] if f != p]
+        self.update(apply)
+
+    def delete_slot(self, folder: str, slot: str) -> None:
+        """Removes one save slot, the file folder/slot, where slot is a single path segment. It never removes a
+        folder, a nested file or anything outside folder, and only changes this drive's manifest (blobs stay until
+        collect_garbage). Its reach equals overwriting the slot, which L2 allows. Level L2, risk destructive."""
+        self._c.check("files.deleteSlot")
+        p = slot_path(folder, slot)
+
+        def apply(doc: dict) -> None:
+            if p not in doc["files"]:
+                raise _not_found()
+            del doc["files"][p]
         self.update(apply)
 
     def delete_folder(self, p: str) -> int:

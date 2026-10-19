@@ -5,7 +5,7 @@ from .client import VERSION, Client, ListItem, ListPage, Manifest, PutResult
 from .connect import PKCE, Connector, Loopback, connect_link, new_pkce, pkce_challenge
 from .crypto import (drive_manifest_key, open_chunk, open_manifest, seal_chunk, seal_manifest, sub_key, unwrap_master_key,
                      wrap_master_key)
-from .drive import DEFAULT_CHUNK_SIZE, Drive, Entry, clean_path, collect_garbage
+from .drive import DEFAULT_CHUNK_SIZE, Drive, Entry, clean_path, collect_garbage, slot_path
 from .errors import APIError, ChecksumError, CorruptError, GendragoonError, LockedError, WrongPassphraseError
 from .events import Event, watch
 from .gate import DEFAULT_MAX_LEVEL, LEVELS, MAX_LEVEL_ENV, LevelError, Operation, level_gate, parse_level

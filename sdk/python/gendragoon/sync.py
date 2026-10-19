@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import stat
 import tempfile
 from dataclasses import dataclass, field
 from typing import Callable, Optional
@@ -108,6 +109,37 @@ def _write_atomic(target: str, data: bytes, mtime_ms: int) -> None:
     os.utime(target, ns=(mtime_ms * 1_000_000, mtime_ms * 1_000_000))
 
 
+def _unsafe() -> ValueError:
+    return ValueError("gendragoon: drive path escapes the local folder")
+
+
+def _local_target(root: str, rel: str) -> str:
+    """Maps a drive path to a file under root (already resolved). Existing components are checked with lstat:
+    symbolic links and non-folders on the way are refused, and so is an existing target that is not a regular
+    file. After the folders are created, the resolved parent must still be inside root."""
+    try:
+        clean_path(rel)
+    except ValueError:
+        raise _unsafe() from None
+    parts = rel.split("/")
+    cur = root
+    for i, part in enumerate(parts):
+        cur = os.path.join(cur, part)
+        try:
+            st = os.lstat(cur)
+        except FileNotFoundError:
+            break
+        last = i == len(parts) - 1
+        if stat.S_ISLNK(st.st_mode) or (not last and not stat.S_ISDIR(st.st_mode)) or (last and not stat.S_ISREG(st.st_mode)):
+            raise _unsafe()
+    target = os.path.join(root, *parts)
+    os.makedirs(os.path.dirname(target), exist_ok=True)
+    parent = os.path.realpath(os.path.dirname(target))
+    if parent != root and not parent.startswith(root + os.sep):
+        raise _unsafe()
+    return target
+
+
 def _pull(c: Client, d: Drive, local_dir: str, prefix: str, dry_run: bool, skip, mirror: bool) -> SyncReport:
     doc, _ = d.load()
     local = _scan(local_dir, skip)
@@ -119,6 +151,10 @@ def _pull(c: Client, d: Drive, local_dir: str, prefix: str, dry_run: bool, skip,
         rel = _rel(p, prefix)
         if skip and skip(rel):
             continue
+        try:
+            clean_path(p)
+        except ValueError:
+            raise _unsafe() from None
         remote.add(rel)
         e = doc["files"][p]
         lf = local.get(rel)
@@ -128,10 +164,7 @@ def _pull(c: Client, d: Drive, local_dir: str, prefix: str, dry_run: bool, skip,
         rep.downloaded.append(p)
         if dry_run:
             continue
-        target = os.path.realpath(os.path.join(root, *rel.split("/")))
-        if not target.startswith(root + os.sep):
-            raise ValueError("gendragoon: drive path escapes the local folder")
-        _write_atomic(target, read_entry(c, e), e["mtime"])
+        _write_atomic(_local_target(root, rel), read_entry(c, e), e["mtime"])
     if mirror:
         for rel in sorted(local):
             if rel not in remote:

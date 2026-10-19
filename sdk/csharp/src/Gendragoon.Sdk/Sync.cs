@@ -97,6 +97,30 @@ namespace Gendragoon.Sdk
             File.SetLastWriteTimeUtc(target, DateTimeOffset.FromUnixTimeMilliseconds(mtimeMs).UtcDateTime);
         }
 
+        static InvalidOperationException Unsafe() => new InvalidOperationException("gendragoon: drive path escapes the local folder");
+
+        // Maps a drive path to a file under root (a full path ending in the separator). Every existing component is
+        // checked without following it: symbolic links (reparse points) and non-folders on the way are refused, and so
+        // is an existing target that is not a regular file. Sync never follows links, inside the folder or out of it.
+        static string LocalTarget(string root, string rel)
+        {
+            try { Drive.CleanPath(rel); } catch (ArgumentException) { throw Unsafe(); }
+            var parts = rel.Split('/');
+            var cur = root.TrimEnd(Path.DirectorySeparatorChar);
+            for (int i = 0; i < parts.Length; i++)
+            {
+                cur = Path.Combine(cur, parts[i]);
+                FileSystemInfo info = new FileInfo(cur);
+                if (!info.Exists) { info = new DirectoryInfo(cur); if (!info.Exists) break; }
+                bool last = i == parts.Length - 1;
+                if ((info.Attributes & FileAttributes.ReparsePoint) != 0 || (!last && !(info is DirectoryInfo)) || (last && !(info is FileInfo)))
+                    throw Unsafe();
+            }
+            var target = Path.GetFullPath(Path.Combine(root, rel.Replace('/', Path.DirectorySeparatorChar)));
+            if (!target.StartsWith(root, StringComparison.Ordinal)) throw Unsafe();
+            return target;
+        }
+
         static async Task<SyncReport> Pull(Client c, Drive d, string localDir, SyncOptions o, bool mirror, CancellationToken ct)
         {
             var (doc, _) = await d.Load(ct).ConfigureAwait(false);
@@ -109,13 +133,12 @@ namespace Gendragoon.Sdk
                 if (!Under(kv.Key, o.Prefix)) continue;
                 var rel = Rel(kv.Key, o.Prefix);
                 if (o.Skip != null && o.Skip(rel)) continue;
+                try { Drive.CleanPath(kv.Key); } catch (ArgumentException) { throw Unsafe(); }
                 remote.Add(rel);
                 if (local.TryGetValue(rel, out var f) && f.Length == kv.Value.Size && Bytes.Hex(Bytes.Sha256(File.ReadAllBytes(f.FullName))) == kv.Value.Sha256) { rep.Unchanged++; continue; }
                 rep.Downloaded.Add(kv.Key);
                 if (o.DryRun) continue;
-                var target = Path.GetFullPath(Path.Combine(root, rel.Replace('/', Path.DirectorySeparatorChar)));
-                if (!target.StartsWith(root)) throw new InvalidOperationException("gendragoon: drive path escapes the local folder");
-                WriteAtomic(target, await Drive.ReadEntry(c, kv.Value, ct).ConfigureAwait(false), kv.Value.MTime);
+                WriteAtomic(LocalTarget(root, rel), await Drive.ReadEntry(c, kv.Value, ct).ConfigureAwait(false), kv.Value.MTime);
             }
             if (mirror)
                 foreach (var rel in local.Keys.OrderBy(k => k, StringComparer.Ordinal).Where(r => !remote.Contains(r)).ToList())

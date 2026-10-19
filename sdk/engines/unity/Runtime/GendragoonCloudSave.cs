@@ -138,8 +138,12 @@ namespace Gendragoon.Unity
             catch (ApiException e) when (e.NotFound) { return Array.Empty<Entry>(); }
         }
 
-        /// <summary>Deletes one slot. Level L2, risk destructive.</summary>
-        public Task DeleteSlotAsync(string slot, CancellationToken ct = default) => NeedDrive().DeleteAsync(SlotPath(slot), ct);
+        /// <summary>
+        /// Deletes one slot: a single file directly inside the slot folder (operation files.deleteSlot,
+        /// level L2, risk destructive). Folders, nested paths and other files of the drive are refused;
+        /// general file deletion is files.delete at L3.
+        /// </summary>
+        public Task DeleteSlotAsync(string slot, CancellationToken ct = default) => NeedDrive().DeleteSlotAsync(slotFolder, slot, ct);
 
         /// <summary>Bytes used and the workspace quota.</summary>
         public Task<Usage> UsageAsync(CancellationToken ct = default) => NeedClient().UsageAsync(ct);

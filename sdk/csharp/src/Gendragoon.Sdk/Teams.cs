@@ -313,13 +313,16 @@ namespace Gendragoon.Sdk
         public async Task<ChatMessage> PostAsync(string teamId, string text, CancellationToken ct = default) =>
             ChatMessage.From((await Call("teams.chat.post", "POST", "/" + Seg(teamId) + "/chat", new JObj { ["text"] = text }, ct).ConfigureAwait(false)).O("message"));
 
-        /// <summary>Posts a workspace card (<paramref name="scope"/> team or personal). A personal-workspace card also shares
-        /// it with the team, so it needs the sharing level too. Level L2, risk write.</summary>
-        public async Task<ChatMessage> PostCardAsync(string teamId, string scope, string workspaceId, string text = "", CancellationToken ct = default)
+        /// <summary>Posts a workspace card (<paramref name="scope"/> team or personal). Level L2, risk write. A card for a
+        /// personal workspace is also checked at teams.share (L3): set <paramref name="share"/> to share the workspace with
+        /// the team in the same call, or share it first with ShareAsync; otherwise the server refuses an unshared personal
+        /// workspace (SHARE_REQUIRED).</summary>
+        public async Task<ChatMessage> PostCardAsync(string teamId, string scope, string workspaceId, string text = "", bool share = false, CancellationToken ct = default)
         {
             if (scope == "personal") Check("teams.share");
-            var d = await Call("teams.chat.post", "POST", "/" + Seg(teamId) + "/chat",
-                new JObj { ["text"] = text, ["card"] = new JObj { ["scope"] = scope, ["workspaceId"] = workspaceId } }, ct).ConfigureAwait(false);
+            var card = new JObj { ["scope"] = scope, ["workspaceId"] = workspaceId };
+            if (scope == "personal" && share) card["share"] = true;
+            var d = await Call("teams.chat.post", "POST", "/" + Seg(teamId) + "/chat", new JObj { ["text"] = text, ["card"] = card }, ct).ConfigureAwait(false);
             return ChatMessage.From(d.O("message"));
         }
 

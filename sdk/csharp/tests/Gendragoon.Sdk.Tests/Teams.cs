@@ -8,7 +8,7 @@ using System.Threading.Tasks;
 
 namespace Gendragoon.Sdk.Tests
 {
-    /// <summary>The Teams contract suite (sdk/spec/CONTRACT.md, T01-T10) against contract/teams_dev_server.cjs.</summary>
+    /// <summary>The Teams contract suite (sdk/spec/CONTRACT.md, T01-T11) against contract/teams_dev_server.cjs.</summary>
     static class Teams
     {
         public static string? Origin;
@@ -23,9 +23,10 @@ namespace Gendragoon.Sdk.Tests
         }
 
         [Test(NeedsTeams = true)]
-        static async Task T01_T10_TeamsContract()
+        static async Task T01_T11_TeamsContract()
         {
-            var alice = User("alice" + Bytes.Hex(Bytes.Random(4)));
+            var aliceUid = "alice" + Bytes.Hex(Bytes.Random(4));
+            var alice = User(aliceUid);
             var bob = User("bob" + Bytes.Hex(Bytes.Random(4)));
 
             // T01 catalog
@@ -86,6 +87,23 @@ namespace Gendragoon.Sdk.Tests
             var spaces = await bob.WorkspacesAsync(id);
             Assert.True(spaces.Team.Count == 1 && spaces.Team[0].Access == "read" && spaces.SubscriptionActive, "viewer access");
             await alice.SetRoleAsync(id, bobId, "member");
+
+            // T11 personal workspace card
+            var wid = Guid.NewGuid().ToString();
+            using (var http = new HttpClient())
+            {
+                var seeded = await http.PostAsync(Origin + "/__dev/personal-workspace", new StringContent(
+                    "{\"uid\":" + Json.Write(aliceUid) + ",\"workspaceId\":" + Json.Write(wid) + ",\"name\":\"Sketches\"}", Encoding.UTF8, "application/json"));
+                Assert.Equal(200, (int)seeded.StatusCode, "seed personal workspace");
+            }
+            await Assert.ThrowsAsync<LevelException>(() => User(aliceUid, Level.L2).PostCardAsync(id, "personal", wid, "", share: true));
+            var refused = await Assert.ThrowsAsync<ApiException>(() => alice.PostCardAsync(id, "personal", wid, "not shared yet"));
+            Assert.True(refused.Status == 403 && refused.Code == "SHARE_REQUIRED", "unshared personal card");
+            var card = await alice.PostCardAsync(id, "personal", wid, "have a look", share: true);
+            Assert.True(card.Kind == "workspace_card", "card posted");
+            Assert.Equal(1, (await bob.WorkspacesAsync(id)).Shared.Count, "shared by the card");
+            await alice.PostCardAsync(id, "personal", wid, "again");
+            await alice.UnshareAsync(id, wid);
 
             // T08 mute and unmute
             await alice.MuteAsync(id, bobId, "cool down");

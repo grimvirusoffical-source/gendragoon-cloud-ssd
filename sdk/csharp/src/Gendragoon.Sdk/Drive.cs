@@ -259,7 +259,8 @@ namespace Gendragoon.Sdk
             }, ct);
         }
 
-        /// <summary>Removes one file or one empty folder. Level L2, risk destructive. Blobs stay until CollectGarbageAsync.</summary>
+        /// <summary>Removes one file or one empty folder. Level L3, risk destructive. Blobs stay until CollectGarbageAsync.
+        /// Cloud saves at L2 use <see cref="DeleteSlotAsync"/>.</summary>
         public Task DeleteAsync(string p, CancellationToken ct = default)
         {
             c.Check("files.delete");
@@ -271,6 +272,27 @@ namespace Gendragoon.Sdk
                 if (s.Concat(doc.Files.Keys).Any(q => q.StartsWith(p + "/"))) throw new InvalidOperationException($"gendragoon: folder \"{p}\" is not empty");
                 doc.Folders.Remove(p);
             }, ct);
+        }
+
+        /// <summary>Removes one save slot, the file <paramref name="folder"/>/<paramref name="slot"/>, where slot is a single
+        /// path segment. It never removes a folder, a nested file or anything outside folder, and only changes this drive's
+        /// manifest (blobs stay until CollectGarbageAsync). Its reach equals overwriting the slot, which L2 allows.
+        /// Level L2, risk destructive.</summary>
+        /// <param name="folder">The save folder ("" for the drive root).</param>
+        /// <param name="slot">The slot file name.</param>
+        /// <param name="ct">Cancels the call.</param>
+        public Task DeleteSlotAsync(string folder, string slot, CancellationToken ct = default)
+        {
+            c.Check("files.deleteSlot");
+            var p = SlotPath(folder, slot);
+            return Update(doc => { if (!doc.Files.Remove(p)) throw NotFound(); }, ct);
+        }
+
+        /// <summary>folder/slot for a save slot; slot must be one path segment and folder "" or a valid drive path.</summary>
+        public static string SlotPath(string folder, string slot)
+        {
+            if (string.IsNullOrEmpty(slot) || slot.Contains("/")) throw new ArgumentException($"gendragoon: invalid slot name \"{slot}\"");
+            return CleanPath(string.IsNullOrEmpty(folder) ? slot : folder + "/" + slot);
         }
 
         /// <summary>Removes a folder and everything in it; returns how many files were removed. Level L3, risk bulk-destructive.</summary>

@@ -183,7 +183,7 @@ class Client(Transport):
         return {"size": int(r.headers.get("content-length") or 0), "generation": r.etag(), "sha256": r.headers.get("x-content-sha256", "")}
 
     def delete_blob(self, blob_id: str) -> None:
-        """Level L2, risk destructive. Deleting a missing blob succeeds."""
+        """Level L3, risk destructive (a blob can belong to any file of any drive). Deleting a missing blob succeeds."""
         _need_hex(blob_id, "blob id")
         self.request("blobs.delete", "DELETE", f"/blobs/{blob_id}")
 
@@ -239,7 +239,7 @@ class Client(Transport):
         return PutResult(r.status == 201, r.etag())
 
     def delete_manifest(self, key: str, *, if_generation: str = "") -> None:
-        """Level L2, risk destructive."""
+        """Level L3, risk destructive (one manifest can be a whole drive)."""
         _need_hex(key, "manifest key")
         self.request("manifests.delete", "DELETE", f"/manifests/{key}", headers=_pre({}, False, if_generation))
 

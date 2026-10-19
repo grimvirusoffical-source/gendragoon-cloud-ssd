@@ -41,7 +41,8 @@ class Keyring:
             self._mk = mk
 
     def create(self, passphrase: str) -> None:
-        """Generates a master key and stores its envelope (create-only). Level L3, risk key."""
+        """Generates a master key and stores its envelope. Create-only: it never replaces an existing envelope
+        (412). Level L2, risk key."""
         self._c.check("keyEnvelope.create")
         mk = os.urandom(KEY_BYTES)
         env = wrap_master_key(mk, passphrase, DEFAULT_SCRYPT, 1)

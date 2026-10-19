@@ -130,6 +130,44 @@ def test_c08_gate(base):
     assert e.value.op.id == "files.deleteFolder" and e.value.op.level == "L3"
     with pytest.raises(gd.LevelError):
         r.client.wipe()
+    d = gd.Drive(r.client, "x", plain=True)
+    for name, call in [("files.delete", lambda: d.delete("a.txt")),
+                       ("blobs.delete", lambda: r.client.delete_blob("0" * 64)),
+                       ("manifests.delete", lambda: r.client.delete_manifest(d.manifest_key)),
+                       ("keyEnvelope.replace", lambda: r.keys.change_passphrase("new passphrase"))]:
+        with pytest.raises(gd.LevelError) as e:
+            call()
+        assert e.value.op.id == name and e.value.op.level == "L3"
+
+
+def test_c15_cloud_save_at_l2(base):
+    r = Rig(base, "ws", gate=gd.level_gate("L2"))
+    with pytest.raises(gd.APIError) as e:
+        r.keys.unlock("slot passphrase")
+    assert e.value.not_found
+    r.keys.create("slot passphrase")
+    with pytest.raises(gd.APIError) as e:
+        gd.Keyring(r.client).create("other passphrase")
+    assert e.value.precondition_failed
+    with pytest.raises(gd.LevelError) as le:
+        r.keys.change_passphrase("new passphrase")
+    assert le.value.op.id == "keyEnvelope.replace"
+    d = gd.Drive(r.client, "saves", r.keys)
+    for v in (b"first", b"second, overwritten in place"):
+        d.write_file("slots/one.sav", v)
+    assert d.read_file("slots/one.sav") == b"second, overwritten in place"
+    d.mkdir("slots/sub")
+    with pytest.raises(gd.APIError) as e:
+        d.delete_slot("slots", "sub")
+    assert e.value.not_found
+    for bad in ("", "sub/x.sav", "..", "."):
+        with pytest.raises(ValueError):
+            d.delete_slot("slots", bad)
+    d.delete_slot("slots", "one.sav")
+    with pytest.raises(gd.APIError) as e:
+        d.read_file("slots/one.sav")
+    assert e.value.not_found
+    gd.Keyring(r.client).unlock("slot passphrase")
 
 
 def test_c09_events(base):
@@ -243,3 +281,29 @@ def test_c14_account_bindings(base):
     with pytest.raises(gd.APIError) as e:
         account(base, "nobody", gate=gd.level_gate("L4")).revoke_and_delete(lst[0]["id"])
     assert e.value.not_found
+
+
+def test_c16_sync_stays_inside(base, tmp_path):
+    import json as _json
+    r = Rig(base, "ws")
+    d = gd.Drive(r.client, "hostile", plain=True)
+    d.write_file("ok.txt", b"ok")
+    doc = d.snapshot()
+    hostile = ["../dotdot.txt", "a/../../mid.txt", "/abs.txt", "out/link.txt", "in/inner.txt"]
+    for p in hostile:
+        doc["files"][p] = doc["files"]["ok.txt"]
+    r.client.put_manifest(d.manifest_key, gd.seal_manifest(None, d.manifest_key, _json.dumps(doc).encode()))
+    local, outside = tmp_path / "local", tmp_path / "outside"
+    (local / "real").mkdir(parents=True)
+    outside.mkdir()
+    os.symlink(outside, local / "out")
+    os.symlink(local / "real", local / "in")
+    for p in hostile:
+        with pytest.raises(ValueError):
+            gd.pull(r.client, d, str(local), skip=lambda rel, p=p: rel != p and "/" + rel != p)
+    for f in [tmp_path / "dotdot.txt", tmp_path / "mid.txt", outside / "link.txt", local / "real" / "inner.txt"]:
+        assert not os.path.lexists(f), f
+    gd.pull(r.client, d, str(local), skip=lambda rel: rel != "ok.txt")
+    (outside / "secret.txt").write_text("secret")
+    os.symlink(outside / "secret.txt", local / "real" / "secret.txt")
+    assert gd.push(r.client, gd.Drive(r.client, "pushed", plain=True), str(local)).uploaded == ["ok.txt"]

@@ -135,6 +135,75 @@ namespace Gendragoon.Sdk.Tests
             var e = await Assert.ThrowsAsync<LevelException>(() => new Drive(r.Client, "x", null, plain: true).DeleteFolderAsync("a"));
             Assert.Equal("files.deleteFolder", e.Operation.Id); Assert.Equal(Level.L3, e.Operation.Level);
             await Assert.ThrowsAsync<LevelException>(() => r.Client.WipeAsync());
+            var d = new Drive(r.Client, "x", null, plain: true);
+            foreach (var (name, call) in new (string, Func<Task>)[] {
+                ("files.delete", () => d.DeleteAsync("a.txt")),
+                ("blobs.delete", () => r.Client.DeleteBlobAsync(new string('0', 64))),
+                ("manifests.delete", () => r.Client.DeleteManifestAsync(d.ManifestKey)),
+                ("keyEnvelope.replace", () => r.Keys.ChangePassphraseAsync("new passphrase")) })
+            {
+                var le = await Assert.ThrowsAsync<LevelException>(call);
+                Assert.True(le.Operation.Id == name && le.Operation.Level == Level.L3, name + " refused at L2");
+            }
+        }
+
+        // What the Unity component does on a fresh binding at its default level (L2).
+        [Test(NeedsServer = true)]
+        static async Task C15_CloudSaveAtL2()
+        {
+            var r = await Rig.Create("ws", Max(Level.L2));
+            Assert.True((await Assert.ThrowsAsync<ApiException>(() => r.Keys.UnlockAsync("slot passphrase"))).NotFound, "no key before the first save");
+            await r.Keys.CreateAsync("slot passphrase");
+            Assert.True((await Assert.ThrowsAsync<ApiException>(() => new Keyring(r.Client).CreateAsync("other passphrase"))).PreconditionFailed, "second create");
+            Assert.Equal("keyEnvelope.replace", (await Assert.ThrowsAsync<LevelException>(() => r.Keys.ChangePassphraseAsync("new passphrase"))).Operation.Id);
+            var d = new Drive(r.Client, "saves", r.Keys);
+            foreach (var v in new[] { "first", "second, overwritten in place" }) await d.WriteFileAsync("slots/one.sav", Encoding.UTF8.GetBytes(v));
+            Assert.Equal("second, overwritten in place", Encoding.UTF8.GetString(await d.ReadFileAsync("slots/one.sav")));
+            await d.MkdirAsync("slots/sub");
+            Assert.True((await Assert.ThrowsAsync<ApiException>(() => d.DeleteSlotAsync("slots", "sub"))).NotFound, "slot delete never removes a folder");
+            foreach (var bad in new[] { "", "sub/x.sav", "..", "." }) await Assert.ThrowsAsync<ArgumentException>(() => d.DeleteSlotAsync("slots", bad));
+            await d.DeleteSlotAsync("slots", "one.sav");
+            Assert.True((await Assert.ThrowsAsync<ApiException>(() => d.ReadFileAsync("slots/one.sav"))).NotFound, "deleted slot");
+            await new Keyring(r.Client).UnlockAsync("slot passphrase");
+        }
+
+        [Test(NeedsServer = true)]
+        static async Task C16_SyncStaysInside()
+        {
+            var r = await Rig.Create("ws");
+            var d = new Drive(r.Client, "hostile", null, plain: true);
+            await d.WriteFileAsync("ok.txt", Encoding.UTF8.GetBytes("ok"));
+            var doc = await d.SnapshotAsync();
+            var hostile = new[] { "../dotdot.txt", "a/../../mid.txt", "/abs.txt", "out/link.txt", "in/inner.txt" };
+            foreach (var p in hostile) doc.Files[p] = doc.Files["ok.txt"];
+            await r.Client.PutManifestAsync(d.ManifestKey, Crypto.SealManifest(null, d.ManifestKey, doc.Encode()));
+            var tmp = Path.Combine(Path.GetTempPath(), "gd-c16-" + Bytes.Hex(Bytes.Random(4)));
+            var local = Path.Combine(tmp, "local"); var outside = Path.Combine(tmp, "outside");
+            try
+            {
+                Directory.CreateDirectory(Path.Combine(local, "real"));
+                Directory.CreateDirectory(outside);
+                Symlink(outside, Path.Combine(local, "out"));
+                Symlink(Path.Combine(local, "real"), Path.Combine(local, "in"));
+                foreach (var p in hostile)
+                    await Assert.ThrowsAsync<InvalidOperationException>(() => Sync.PullAsync(r.Client, d, local, new SyncOptions { Skip = rel => rel != p && "/" + rel != p }));
+                foreach (var f in new[] { Path.Combine(tmp, "dotdot.txt"), Path.Combine(tmp, "mid.txt"), Path.Combine(outside, "link.txt"), Path.Combine(local, "real", "inner.txt") })
+                    Assert.True(!File.Exists(f), "pull wrote " + f);
+                await Sync.PullAsync(r.Client, d, local, new SyncOptions { Skip = rel => rel != "ok.txt" });
+                File.WriteAllText(Path.Combine(outside, "secret.txt"), "secret");
+                Symlink(Path.Combine(outside, "secret.txt"), Path.Combine(local, "real", "secret.txt"));
+                var pushed = await Sync.PushAsync(r.Client, new Drive(r.Client, "pushed", null, plain: true), local);
+                Assert.Equal("ok.txt", string.Join(",", pushed.Uploaded));
+            }
+            finally { try { Directory.Delete(tmp, true); } catch (IOException) { } }
+        }
+
+        // netstandard2.1 has no symlink API; the tests create links with ln.
+        static void Symlink(string target, string link)
+        {
+            using var p = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo("ln", $"-s \"{target}\" \"{link}\"") { UseShellExecute = false })!;
+            p.WaitForExit();
+            Assert.Equal(0, p.ExitCode, "ln -s");
         }
 
         [Test(NeedsServer = true)]

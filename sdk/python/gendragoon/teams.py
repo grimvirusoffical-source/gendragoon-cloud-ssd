@@ -170,13 +170,16 @@ class TeamsClient(Transport):
         """Posts a text message. Level L2, risk write."""
         return self._call("teams.chat.post", "POST", f"/{_seg(team_id)}/chat", {"text": text})["message"]
 
-    def post_card(self, team_id: str, scope: str, workspace_id: str, text: str = "") -> dict:
-        """Posts a workspace card. A personal-workspace card also shares it with the team, so it needs the sharing
-        level too. Level L2, risk write."""
+    def post_card(self, team_id: str, scope: str, workspace_id: str, text: str = "", *, share: bool = False) -> dict:
+        """Posts a workspace card. Level L2, risk write. A card for a personal workspace is also checked at
+        teams.share (L3): pass share=True to share the workspace with the team in the same call, or share it first
+        with share(); otherwise the server refuses an unshared personal workspace (SHARE_REQUIRED)."""
         if scope == "personal":
             self.check("teams.share")
-        return self._call("teams.chat.post", "POST", f"/{_seg(team_id)}/chat",
-                          {"text": text, "card": {"scope": scope, "workspaceId": workspace_id}})["message"]
+        card = {"scope": scope, "workspaceId": workspace_id}
+        if scope == "personal" and share:
+            card["share"] = True
+        return self._call("teams.chat.post", "POST", f"/{_seg(team_id)}/chat", {"text": text, "card": card})["message"]
 
     def report(self, team_id: str, seq: int, category: str, note: str = "") -> None:
         """Reports a message (spam, abuse, harassment, illegal or other). Level L2, risk write."""

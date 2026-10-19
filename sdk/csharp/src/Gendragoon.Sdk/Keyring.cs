@@ -29,7 +29,8 @@ namespace Gendragoon.Sdk
             Set(await Task.Run(() => Crypto.UnwrapMasterKey(env, passphrase), ct).ConfigureAwait(false));
         }
 
-        /// <summary>Generates a master key and stores its envelope (create-only). Level L3, risk key.</summary>
+        /// <summary>Generates a master key and stores its envelope. Create-only: it never replaces an existing envelope
+        /// (412). Level L2, risk key.</summary>
         public async Task CreateAsync(string passphrase, CancellationToken ct = default)
         {
             c.Check("keyEnvelope.create");

@@ -1,4 +1,4 @@
-"""Teams contract suite (sdk/spec/CONTRACT.md, T01-T10) against contract/teams_dev_server.cjs."""
+"""Teams contract suite (sdk/spec/CONTRACT.md, T01-T11) against contract/teams_dev_server.cjs."""
 import json
 import os
 import threading
@@ -31,7 +31,8 @@ def status(fn):
 
 def test_teams_contract(teams_origin):
     o = teams_origin
-    alice, bob = user(o, "alice" + os.urandom(4).hex()), user(o, "bob" + os.urandom(4).hex())
+    alice_uid = "alice" + os.urandom(4).hex()
+    alice, bob = user(o, alice_uid), user(o, "bob" + os.urandom(4).hex())
 
     # T01 catalog
     assert len(alice.catalog()["tiers"]) >= 3
@@ -87,6 +88,23 @@ def test_teams_contract(teams_origin):
     ws = bob.workspaces(team)
     assert len(ws["teamWorkspaces"]) == 1 and ws["teamWorkspaces"][0]["access"] == "read" and ws["subscriptionActive"]
     alice.set_role(team, bob_id, "member")
+
+    # T11 personal workspace card
+    wid = str(uuid.uuid4())
+    req = urllib.request.Request(o + "/__dev/personal-workspace", method="POST", headers={"Content-Type": "application/json"},
+                                 data=json.dumps({"uid": alice_uid, "workspaceId": wid, "name": "Sketches"}).encode())
+    with urllib.request.urlopen(req) as r:
+        assert r.status == 200
+    with pytest.raises(gd.LevelError):
+        user(o, alice_uid, "L2").post_card(team, "personal", wid, share=True)
+    with pytest.raises(gd.APIError) as e:
+        alice.post_card(team, "personal", wid, "not shared yet")
+    assert e.value.status == 403 and e.value.code == "SHARE_REQUIRED"
+    m = alice.post_card(team, "personal", wid, "have a look", share=True)
+    assert m["kind"] == "workspace_card" and m["card"]["workspaceId"] == wid
+    assert len(bob.workspaces(team)["sharedWorkspaces"]) == 1
+    alice.post_card(team, "personal", wid, "again")
+    alice.unshare(team, wid)
 
     # T08 mute and unmute
     alice.mute(team, bob_id, "cool down")

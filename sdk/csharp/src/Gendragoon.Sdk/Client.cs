@@ -176,7 +176,7 @@ namespace Gendragoon.Sdk
             return r.Body;
         }
 
-        /// <summary>Level L2, risk destructive. Deleting a missing blob succeeds.</summary>
+        /// <summary>Level L3, risk destructive (a blob can belong to any file of any drive). Deleting a missing blob succeeds.</summary>
         public Task DeleteBlobAsync(string id, CancellationToken ct = default) { NeedHex(id, "blob id"); return Request("blobs.delete", "DELETE", "/blobs/" + id, ct: ct); }
 
         async Task<ListPage> List(string op, string path, string? cursor, int limit, CancellationToken ct)
@@ -237,7 +237,7 @@ namespace Gendragoon.Sdk
             return new PutResult { Created = r.Status == 201, Generation = r.ETag };
         }
 
-        /// <summary>Level L2, risk destructive.</summary>
+        /// <summary>Level L3, risk destructive (one manifest can be a whole drive).</summary>
         public Task DeleteManifestAsync(string key, string? ifGeneration = null, CancellationToken ct = default)
         {
             NeedHex(key, "manifest key");
