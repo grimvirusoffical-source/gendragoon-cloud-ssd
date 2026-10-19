@@ -40,7 +40,7 @@ function environmentGuard(env){
   throw Error("Live checkout requires PAID_STORAGE_READY=approved after provisioning acceptance");
  return {enabled,hasSecret,hasHook,priceCatalog};
 }
-function installedBilling({app,db,bucket,admin,firebaseAuth,accountKey,env=process.env,stripeOverride}){
+function installedBilling({app,db,bucket,admin,firebaseAuth,firebaseAuthWithoutTerms,accountKey,env=process.env,stripeOverride,adminAuth,byoProviders,now}){
  const state=environmentGuard(env);
  const Stripe=state.hasSecret&&!stripeOverride?require("stripe"):null;
  const stripe=stripeOverride||(Stripe?new Stripe(env.STRIPE_SECRET_KEY,{apiVersion:STRIPE_API_VERSION,maxNetworkRetries:2,timeout:25000}):{
@@ -149,15 +149,19 @@ function installedBilling({app,db,bucket,admin,firebaseAuth,accountKey,env=proce
    const previous=await evt.get();
    if(previous.exists&&previous.data().processed===true)return res.json({received:true,replayed:true});
    const object=event.data?.object||{};
+   async function applySubscription(latest,eventType,source){
+    if(latest?.metadata?.kind==="workspace_fee")return billing.projects.reconcileWorkspaceFee(latest,{eventType,invoice:String(eventType).startsWith("invoice.")?source:null});
+    if(await billing.reconcileSubscription(latest))await provisionIfPaid(latest);
+   }
    if(event.type.startsWith("customer.subscription.")){
     const latest=await stripe.subscriptions.retrieve(object.id);
-    if(await billing.reconcileSubscription(latest))await provisionIfPaid(latest);
+    await applySubscription(latest,event.type,object);
    } else if(event.type.startsWith("invoice.")){
     const id=typeof object.subscription==="string"?object.subscription:
       object.subscription?.id||object.parent?.subscription_details?.subscription;
     if(id){
       const latest=await stripe.subscriptions.retrieve(id);
-      if(await billing.reconcileSubscription(latest))await provisionIfPaid(latest);
+      await applySubscription(latest,event.type,object);
     }
    } else if(event.type.startsWith("checkout.session.")){
     if(object.metadata?.kind==="project_creation"){
@@ -170,7 +174,7 @@ function installedBilling({app,db,bucket,admin,firebaseAuth,accountKey,env=proce
       const id=typeof object.subscription==="string"?object.subscription:object.subscription.id;
       if(id){
       const latest=await stripe.subscriptions.retrieve(id);
-      if(await billing.reconcileSubscription(latest))await provisionIfPaid(latest);
+      await applySubscription(latest,event.type,object);
     }
     }
    } else if(event.type==="charge.refunded"||event.type==="charge.dispute.created"){
@@ -194,6 +198,11 @@ function installedBilling({app,db,bucket,admin,firebaseAuth,accountKey,env=proce
    res.status(503).json({error:"Webhook temporary failure; Stripe will retry"});
   }
  });
+ if(app&&typeof (firebaseAuthWithoutTerms||firebaseAuth)==="function"){
+  require("./account_delete").registerAccountDeletion({app,firebaseAuth:firebaseAuthWithoutTerms||firebaseAuth,db,bucket,stripe,
+   auth:adminAuth||{async deleteUser(){throw Object.assign(Error("auth_unavailable"),{status:503,code:"auth_unavailable"});}},
+   byoProviders:byoProviders||{},hash:accountKey,now:now||(()=>Date.now())});
+ }
  return {...state,stripe,billing};
 }
 module.exports={installedBilling,environmentGuard,parsePrices,RELEVANT,STRIPE_API_VERSION};

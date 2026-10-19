@@ -4,6 +4,8 @@
 const express=require("express"),crypto=require("node:crypto");
 const {effectiveWorkers,effectiveStorageQuota}=require("./billing_v2");
 const {scopeFromWorkspace,safeName}=require("./paid_storage");
+const {listAccountProjects}=require("./projects");
+const {summarizeProjects,lockBody,LIST_UNAVAILABLE_LOCK}=require("./workspace_policy");
 const {sendObject}=require("./range_download");
 const {nativeProfile}=require("./performance");
 const CHUNK=8*1024*1024,FREE_QUOTA=2_000_000_000,MAX_FILE=5*1024**4;
@@ -94,16 +96,29 @@ function registerTransferV3({app,db,bucket,firebaseAuth,accountKey,FieldValue,ap
    db.collection("gd_accounts").doc(hash).collection("workspaces").doc(id);
   const snap=await ref.get();if(!snap.exists)throw problem(404,"Workspace not found");
   const w=snap.data();let quota,prefix,governor,key;
+  if(!req._accountProjects)req._accountProjects=listAccountProjects(db,hash).catch(()=>null);
+  const listed=await req._accountProjects;
+  const write=!["GET","HEAD","DELETE"].includes(req.method);
+  const projects=Array.isArray(listed)?listed:null;
   if(id==="free"){
-   if(w.kind!=="free"||w.accountKey!==hash||w.provisioned!==true)throw problem(403,"Free workspace unavailable");
+   if(w.accountKey!==hash)throw problem(404,"Workspace not found");
+   if(w.kind!=="free"||w.provisioned!==true)throw problem(403,"Free workspace unavailable");
+   if(write){
+    if(!projects){const error=problem(423,"workspace_lock");error.lock=LIST_UNAVAILABLE_LOCK;throw error;}
+    const summary=summarizeProjects(projects);
+    if(summary.locked){const error=problem(423,"workspace_lock");error.lock=lockBody(summary);throw error;}
+    if(w.mergeLock&&w.mergeLock.expiresAtMs>Date.now()){const error=problem(423,"workspace_lock");error.lock={error:"workspace_lock",reason:"merge_in_progress",overBy:0,unpaidWorkspaceIds:[]};throw error;}
+   }
    quota=effectiveStorageQuota(w);
    if(quota<=0)throw problem(403,"Project is archived or unavailable");
    prefix="customer/"+hash+"/free";governor=freeGovernor;key=hash;
   }else{
-   const scope=scopeFromWorkspace(w,hash,id);if(!scope)throw problem(403,"Active provisioned storage required");
+   if(w.accountHash!==hash)throw problem(404,"Workspace not found");
+   const scope=scopeFromWorkspace(w,hash,id,projects);if(!scope)throw problem(403,"Active provisioned storage required");
+   if(write&&scope.uploadsBlocked){const error=problem(423,"workspace_lock");error.lock=scope.lock||LIST_UNAVAILABLE_LOCK;throw error;}
    quota=scope.limit;prefix=scope.prefix;governor=paidGovernor;key=hash+"-"+id;
   }
-  return {id,hash,ref,workspace:w,quota,prefix,governor,key};
+  return {id,hash,ref,workspace:w,quota,prefix,governor,key,projects};
  }
  async function work(req,fn){
   const c=await context(req);
@@ -116,6 +131,7 @@ function registerTransferV3({app,db,bucket,firebaseAuth,accountKey,FieldValue,ap
  function route(method,path,fn){router[method](path,async(req,res)=>{
   try{await fn(req,res);}catch(error){
    if(res.headersSent)return res.destroy();
+   if(error.status===423&&error.lock)return res.status(423).json(error.lock);
    const status=error.status||(/Too many/.test(error.message)?429:503);
    if(status===429||status===503)res.set("Retry-After","2");
    res.status(status).json({error:error.status?error.message:"Transfer unavailable; retry safely"});
@@ -174,7 +190,9 @@ function registerTransferV3({app,db,bucket,firebaseAuth,accountKey,FieldValue,ap
    if(!ws.exists)throw problem(404,"Workspace removed");
    const w=ws.data();
    const quota=effectiveStorageQuota(w);
-   if(quota<=0||(c.id==="free"?w.accountKey!==c.hash:!scopeFromWorkspace(w,c.hash,c.id)))throw problem(403,"Project storage inactive");
+   const scope=c.id==="free"?null:scopeFromWorkspace(w,c.hash,c.id,c.projects);
+   if(quota<=0||(c.id==="free"?w.accountKey!==c.hash:!scope))throw problem(403,"Project storage inactive");
+   if(scope&&scope.uploadsBlocked){const error=problem(423,"workspace_lock");error.lock=scope.lock||LIST_UNAVAILABLE_LOCK;throw error;}
    if(existing.exists){
     const old=existing.data();
     const previous=itemMetadata({name:old.name,kind:old.kind,originalName:old.originalName,
@@ -251,7 +269,9 @@ function registerTransferV3({app,db,bucket,firebaseAuth,accountKey,FieldValue,ap
      const [ws,current]=await Promise.all([tx.get(c.ref),tx.get(ref)]);
      if(current.data()?.status==="completed")return;
      if(!ws.exists||current.data()?.status!=="assembling")throw problem(409,"Upload changed");
-     if(effectiveStorageQuota(ws.data())<=0||(c.id!=="free"&&!scopeFromWorkspace(ws.data(),c.hash,c.id)))throw problem(403,"Project storage inactive");
+     const freshScope=c.id==="free"?null:scopeFromWorkspace(ws.data(),c.hash,c.id,c.projects);
+     if(effectiveStorageQuota(ws.data())<=0||(c.id!=="free"&&!freshScope))throw problem(403,"Project storage inactive");
+     if(freshScope&&freshScope.uploadsBlocked){const error=problem(423,"workspace_lock");error.lock=freshScope.lock||LIST_UNAVAILABLE_LOCK;throw error;}
      tx.create(c.ref.collection("files").doc(req.params.id),{name:job.name,sizeBytes:job.sizeBytes,...metadata,
       generation:meta.generation||null,crc32c:meta.crc32c||null,createdAt:stamp()});
      tx.update(c.ref,{usedBytes:FieldValue.increment(job.sizeBytes),reservedBytes:FieldValue.increment(-job.sizeBytes)});

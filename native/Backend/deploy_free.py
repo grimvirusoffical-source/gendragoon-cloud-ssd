@@ -12,9 +12,9 @@ import tempfile
 BASE = Path(__file__).resolve().parent
 RUNTIME_FILES = (
     "free_server.js", "free_performance.js", "billing_bootstrap.js",
-    "billing_gateway.js", "billing_v2.js", "projects.js", "catalog.js", "performance.js", "performance_profiles.json",
+    "billing_gateway.js", "billing_v2.js", "projects.js", "workspace_policy.js", "locked_write.js", "catalog.js", "performance.js", "performance_profiles.json",
     "gpu_catalog.js", "owner_benefits.js", "api_keys.js", "paid_storage.js",
-    "transfer_v3.js", "range_download.js", "package.json", "package-lock.json",
+    "transfer_v3.js", "range_download.js", "account_delete.js", "key_envelope.js", "package.json", "package-lock.json",
 )
 
 def stage_runtime(destination):
@@ -73,8 +73,13 @@ def deployment_command(gcloud, credential, stage, options):
     # Update only explicitly supplied values; never clear vault configuration.
     if options.service_account:
         command.extend(["--service-account", options.service_account])
+    # Cloud Run sets K_SERVICE and does not set NODE_ENV. The support gate is
+    # always on when K_SERVICE is set. NODE_ENV=production covers every other host.
+    env_vars = ["NODE_ENV=production"]
     if options.customer_bucket:
-        command.extend(["--update-env-vars", "CUSTOMER_BUCKET=" + options.customer_bucket + ",STORAGE_PROJECT_ID=" + options.project])
+        env_vars.append("CUSTOMER_BUCKET=" + options.customer_bucket)
+        env_vars.append("STORAGE_PROJECT_ID=" + options.project)
+    command.extend(["--update-env-vars", ",".join(env_vars)])
     return command
 
 

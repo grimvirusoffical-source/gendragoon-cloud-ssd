@@ -5,6 +5,37 @@
 function memoryFirestore(initial=[]){
  const rows=new Map(initial.map(([key,value])=>[key,structuredClone(value)]));
  let tail=Promise.resolve();
+ function fieldAt(row,key){
+  if(row==null)return undefined;
+  if(!key.includes("."))return row[key];
+  let cur=row;
+  for(const part of key.split(".")){
+   if(cur==null||typeof cur!=="object")return undefined;
+   cur=cur[part];
+  }
+  return cur;
+ }
+ function isIso(value){return typeof value==="string"&&/^\d{4}-\d{2}-\d{2}T/.test(value);}
+ function compareValues(left,right){
+  if(left instanceof Date||right instanceof Date||isIso(left)||isIso(right)){
+   const stamp=value=>value instanceof Date?value.getTime():typeof value==="number"?value:Date.parse(value);
+   const a=stamp(left),b=stamp(right);
+   return (Number.isFinite(a)?a:0)-(Number.isFinite(b)?b:0);
+  }
+  return ((left||0)-(right||0));
+ }
+ function matches(row,filter){
+  const value=fieldAt(row,filter.key);
+  if(filter.op==="==")return value===filter.value;
+  if(filter.op==="in")return Array.isArray(filter.value)&&filter.value.includes(value);
+  if(value===undefined||value===null)return false;
+  const cmp=compareValues(value,filter.value);
+  if(filter.op==="<=")return cmp<=0;
+  if(filter.op==="<")return cmp<0;
+  if(filter.op===">=")return cmp>=0;
+  if(filter.op===">")return cmp>0;
+  return false;
+ }
  function snap(path){return {exists:rows.has(path),id:path.split("/").at(-1),ref:doc(path),data:()=>structuredClone(rows.get(path))};}
  function doc(path){return {path,id:path.split("/").at(-1),get:async()=>snap(path),collection:name=>collection(path+"/"+name),
    create:async value=>{if(rows.has(path))throw Object.assign(Error("exists"),{code:6});rows.set(path,structuredClone(value));},
@@ -16,10 +47,10 @@ function memoryFirestore(initial=[]){
      where:(key,op,value)=>collection(path,[...filters,{key,op,value}],maximum,sort),
      orderBy:(key,direction="asc")=>collection(path,filters,maximum,{key,direction}),
      get:async()=>{
-       let matches=[...rows.keys()].filter(key=>key.startsWith(path+"/")&&!key.slice(path.length+1).includes("/"))
-         .filter(key=>filters.every(f=>f.op==="=="?rows.get(key)[f.key]===f.value:f.op==="in"?f.value.includes(rows.get(key)[f.key]):false));
-       if(sort)matches.sort((a,b)=>((rows.get(a)[sort.key]||0)-(rows.get(b)[sort.key]||0))*(sort.direction==="desc"?-1:1));
-       const docs=matches.slice(0,maximum).map(snap);return {docs,empty:docs.length===0,size:docs.length};
+       let matchesRows=[...rows.keys()].filter(key=>key.startsWith(path+"/")&&!key.slice(path.length+1).includes("/"))
+         .filter(key=>filters.every(filter=>matches(rows.get(key),filter)));
+       if(sort)matchesRows.sort((a,b)=>compareValues(fieldAt(rows.get(a),sort.key),fieldAt(rows.get(b),sort.key))*(sort.direction==="desc"?-1:1));
+       const docs=matchesRows.slice(0,maximum).map(snap);return {docs,empty:docs.length===0,size:docs.length};
      }};return query;
  }
  const db={collection,doc,rows,transactionCount:0,runTransaction(fn){

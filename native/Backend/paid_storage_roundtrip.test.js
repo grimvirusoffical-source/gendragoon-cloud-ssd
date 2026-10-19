@@ -56,11 +56,17 @@ function fixture(){
  const workspaces=collection(new Map([[wid,workspace]]));
  const ref=workspaces.doc(wid);
  ref.collection=name=>collection(name==="uploads"?uploads:fs);
+ const emptyDoc=()=>({get:async()=>({exists:false,data:()=>undefined})});
  const db={collection:name=>{
+  if(name==="tenants")return {doc:()=>({collection:()=>({doc:emptyDoc})})};
   assert.equal(name,"gd_accounts");
   return {doc:userHash=>({collection:collectionName=>{
    assert.equal(collectionName,"workspaces");
-   return {doc:id=>id===wid&&userHash===owner?ref:collection(new Map()).doc(id)};
+   return {
+    doc:id=>id===wid&&userHash===owner?ref:collection(new Map()).doc(id),
+    limit(){return this;},
+    get:async()=>userHash===owner?{docs:[{id:wid,data:()=>({...workspace})}]}:{docs:[]}
+   };
   }})};
  },runTransaction:async handler=>{
   const tx={get:r=>r.get(),create:(r,d)=>r.create(d),update:(r,d)=>r.update(d),delete:r=>r.delete()};
