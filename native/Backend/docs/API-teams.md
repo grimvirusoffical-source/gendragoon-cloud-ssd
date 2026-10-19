@@ -40,6 +40,9 @@ Per-workspace plans come **on top**: every team workspace needs a storage plan +
 | POST | `/v2/teams/:id/chat/:seq/delete` | owner | `{reason}` |
 | POST | `/v2/teams/:id/members/:memberId/{mute,unmute,kick,ban}` | owner | `{reason, until?: epoch ms | null (forever)}` |
 | GET | `/v2/teams/:id/audit` | owner | hash-chained log |
+| POST | `/v2/teams/:id/members/:memberId/role` | owner | `{role: "member"|"viewer"}`; audited as `member.role` |
+| POST | `/v2/teams/:id/transfer` | owner | `{memberId, color, ownerShade?}`: `color` is the old owner's new member color, `ownerShade` the new owner's purple (default `purple-500`) |
+| POST | `/v2/teams/:id/delete` | owner | `{confirmName}` (the exact team name). Cancels the team subscription and team workspace plans, deletes chat, invites, team workspaces and their files. `503 TEAM_DELETE_UNAVAILABLE` if storage isn't wired |
 
 ## Visibility (ACL)
 
@@ -63,9 +66,46 @@ Per-workspace plans come **on top**: every team workspace needs a storage plan +
 
 ## Billing webhooks
 
-Subscriptions carry `metadata.kind` `team_subscription` (`teamId`, `tier`, `interval`) or `team_workspace_plans` (`teamId`, `workspaceId`). They are applied only when the customer matches the team owner's Stripe customer and the items match exactly; anything else is `mismatch` or ignored.
+Subscriptions carry `metadata.kind` `team_subscription` (`teamId`, `tier`, `interval`) or `team_workspace_plans` (`teamId`, `workspaceId`). They are applied only when the account is the team's payer (or the current owner taking over lapsed billing), its Stripe customer matches, and the items match exactly; anything else is `mismatch` or ignored.
 
-## Not built yet
+## Team workspace files
 
-- Team workspace file storage and transfers: team workspaces have records, plans, billing and ACL; the upload, download and quota routes still serve personal workspaces only.
-- Account deletion doesn't yet remove team memberships or chat messages.
+Team workspaces use **the same routes as personal workspaces**, with the team workspace id:
+
+- `/v3/cloud/:id/...` (config, files, uploads, chunks, finalize, download with `Range`, delete): desktop, mobile and browser transfers, backup and preload.
+- `/v2/workspaces/:id/cloud/...` (the core client's `uploadFile`, `listFiles`, `downloadFile`).
+- `POST /v2/workspaces/:id/storage-urls` (signed URLs for the encrypted object store).
+
+`GET /v2/teams/:id/workspaces` returns `storageRoutes`, `usedBytes` and `access` (`write` or `read`) for each team workspace.
+
+How an id is resolved: the caller's personal workspace first; if there is none, `gd_team_workspace_index/{id}` names the team. Ids are unique across both (team workspace creation and `/v2/projects` refuse an id the other uses, `409 INTENT_CONFLICT`). Objects live under `customer/teams/<teamId>/<workspaceId>/`, never under any member's prefix.
+
+| Who | Read (list, download, signed GET) | Write (upload, signed PUT) | Delete |
+| --- | --- | --- | --- |
+| owner | yes | yes | yes |
+| member | yes | yes | yes |
+| viewer | yes | `403 TEAM_ROLE_READ_ONLY` | `403 TEAM_ROLE_READ_ONLY` |
+| not an active member (never joined, left, kicked, banned) | `404` | `404` | `404` |
+| API key (`gdsk_`) | refused: keys belong to one personal workspace | | |
+
+- Quota is the storage plan of the team workspace (`requiredPlans.storageTier`), counted in `usedBytes`/`reservedBytes` on the team workspace record. Uploads past it are `413`.
+- Transfer workers and the preload budget (`/config` → `transfer.workers`, `defaultPrefetchBytes`, `nativeApplication`) come from the paid performance plan.
+- Plans never paid: `403`. Plans or team subscription lapsed after being paid: files stay readable and deletable, writes are `423 {error:"workspace_lock", reason:"lapsed"}`. Custom storage team workspaces: `409 byo_external` (files live in the team's own bucket).
+- Platform `account_state` suspensions block team storage like other team routes.
+- Shared **personal** workspaces stay view-only cards: a share does not open the owner's files to the team.
+
+## Ownership transfer and billing
+
+The payer (`payerHash`) is whoever's Stripe customer pays. A transfer changes the owner, not the payer: the old owner's subscription keeps reconciling. Once the team subscription (or a team workspace's plans) is no longer active, the current owner can check out on their own customer and the webhook moves `payerHash` to them; stray events for the old subscription are then ignored.
+
+## Account deletion
+
+Rule: **an owner must transfer the team or delete it first** when other active members remain. `DELETE /v2/account` answers `409 {error:"team_owner_must_transfer", teams:[{teamId,name,otherMembers}], message}` before anything is deleted. The deletion job also runs a `teams` step first, before Stripe and object deletion, and re-checks (a member who joined in between fails the job retryably with `failureReason: "team_owner_must_transfer"`; nothing else has been deleted).
+
+The `teams` step (`teams_account.js`):
+
+- A team whose only active member is the owner is deleted with the account, including team workspace files.
+- Every other membership: the member record is deleted, the color lock freed, `memberCount` lowered, the user's personal-workspace shares removed, and **each chat message they wrote is emptied** (`text`, `card`, author hash and member id removed; shown as "Deleted member", `kind: "removed"`, `removed.by: "account"`). Message `seq` numbers stay so polling doesn't skip.
+- The audit log is kept (it holds per-team pseudonymous member ids only) and gets `member.account_deleted`; the hash chain still verifies.
+- A team or team workspace the user still pays for after a transfer is marked `canceled` with `payerHash: null` (the Stripe step of the same job cancels the subscription). Its files stay readable for the team (`plansEverPaid`) until the new owner checks out.
+- Abuse reports the user filed or that name them stay in the platform queue (owner page retention rules apply).

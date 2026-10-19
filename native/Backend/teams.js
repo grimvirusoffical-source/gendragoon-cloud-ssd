@@ -208,7 +208,9 @@ function createTeamService({db,stamp,hash,stripe,env={},prices={},ensureCustomer
    if(prior&&tier===m.team.tier&&iv===m.team.interval){
      const s=await stripe.checkout.sessions.retrieve(prior);
      if(s.status==="open"&&s.url)return {url:s.url,teamId:id,totalCents:teamCents(tier,iv),resumed:true};
-     if(s.status!=="expired")throw new ProjectError(409,"Your team payment is being verified. Refresh before retrying.","PAYMENT_PENDING");
+     // A completed session whose subscription has since ended (or a transfer) starts over.
+     const ended=s.status==="complete"&&m.team.subscriptionId&&!ENTITLED.has(m.team.subscriptionStatus);
+     if(s.status!=="expired"&&!ended)throw new ProjectError(409,"Your team payment is being verified. Refresh before retrying.","PAYMENT_PENDING");
    }else if(prior){
      const s=await stripe.checkout.sessions.retrieve(prior);
      if(s.status==="open")await stripe.checkout.sessions.expire(prior);
@@ -411,7 +413,8 @@ function createTeamService({db,stamp,hash,stripe,env={},prices={},ensureCustomer
    if(w.plansCheckoutSessionId){
      const s=await stripe.checkout.sessions.retrieve(w.plansCheckoutSessionId);
      if(s.status==="open"&&s.url)return {url:s.url,workspaceId:wid,totalCents,resumed:true};
-     if(s.status!=="expired")throw new ProjectError(409,"Your workspace payment is being verified. Refresh before retrying.","PAYMENT_PENDING");
+     const ended=s.status==="complete"&&w.plansSubscriptionId&&!ENTITLED.has(w.plansStatus);
+     if(s.status!=="expired"&&!ended)throw new ProjectError(409,"Your workspace payment is being verified. Refresh before retrying.","PAYMENT_PENDING");
    }
    const customer=await ensureCustomer(req),origin=new URL(env.PUBLIC_URL);
    const metadata={kind:"team_workspace_plans",accountHash:m.owner,teamId:id,workspaceId:wid};
