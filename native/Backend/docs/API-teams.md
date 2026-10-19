@@ -24,6 +24,7 @@ Per-workspace plans come **on top**: every team workspace needs a storage plan +
 | POST | `/v2/teams/:id/checkout` | owner | `{tier?, interval?}`; resumes or replaces the open session |
 | POST | `/v2/teams/:id/invites` | owner | `{expiresInHours?=72, maxUses?}`; needs an active subscription; returns `code` (`XXXX-XXXX-XXXX`), `link` (`/teams/join#CODE`), `inviteId`. Only a hash of the code is stored |
 | POST | `/v2/teams/:id/invites/:inviteId/revoke` | owner | |
+| POST | `/v2/teams/join/preview` | any | `{code}`; team name, member count and limit, colors with `taken`, so the join screen can grey them out. Shares the join rate limit |
 | POST | `/v2/teams/join` | any | `{code (or the link), color, displayName?, deviceName?}`; 10 attempts/min; `INVITE_INVALID`, `TEAM_FULL`, `TEAM_BANNED`, `COLOR_TAKEN`, `COLOR_RESERVED` |
 | PATCH | `/v2/teams/:id/me` | member | `{displayName?, color?}` at any time |
 | POST | `/v2/teams/:id/leave` | member | the owner can't leave; the member's shares are removed |

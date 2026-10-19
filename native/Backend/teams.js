@@ -274,6 +274,21 @@ function createTeamService({db,stamp,hash,stripe,env={},prices={},ensureCustomer
      return {teamId:id,alreadyMember:false};
    });
  }
+ // Lets an invited person see the team name and which colors are taken before
+ // joining. Same rate limit as join; an invalid code says nothing about any team.
+ async function previewInvite(req,body={}){
+   const owner=hash(req.user.uid);await platformGate(owner);
+   const attempts=(rate.get("join:"+owner)||[]).filter(t=>t>now()-60_000);
+   if(attempts.length>=10)throw new ProjectError(429,"Too many join attempts. Wait a minute.","RATE_LIMITED");
+   rate.set("join:"+owner,[...attempts,now()]);
+   const code=String(body.code||"").trim(),inv=await db.collection("gd_team_invites").doc(codeHash(code.includes("#")?code.split("#").pop():code)).get();
+   const i=inv.exists?inv.data():null;
+   if(!i||i.revoked||i.expiresAtMs<=now()||i.uses>=i.maxUses)throw new ProjectError(404,"This invite is not valid. Ask the team owner for a new one.","INVITE_INVALID");
+   const t=await teamRef(i.teamId).get();
+   if(!t.exists)throw new ProjectError(404,"This invite is not valid. Ask the team owner for a new one.","INVITE_INVALID");
+   const all=await activeMembers(i.teamId);
+   return {teamName:t.data().name,memberCount:t.data().memberCount||0,memberLimit:TEAM_TIERS[t.data().tier].members,colors:colorChoices(all)};
+ }
  async function updateMe(req,id,body={}){
    return db.runTransaction(async tx=>{
      const m=await membership(req,id,{tx});
@@ -591,7 +606,7 @@ function createTeamService({db,stamp,hash,stripe,env={},prices={},ensureCustomer
    }
    return true;
  }
- return {list,create,view,checkout,invite,revokeInvite,join,updateMe,leave,workspaces,createWorkspace,checkoutWorkspace,
+ return {list,create,view,checkout,invite,revokeInvite,join,previewInvite,updateMe,leave,workspaces,createWorkspace,checkoutWorkspace,
    reconcileSubscription,share,unshare,post,messages,readMessages,membership,moderate,report,auditLog,verifyAudit};
 }
 
@@ -613,6 +628,7 @@ function registerTeams({app,auth,agreed,service}){
  app.get("/v2/teams",...mw,route(async req=>({teams:await service.list(req)})));
  app.post("/v2/teams",...mw,async(req,res)=>{try{const r=await service.create(req,req.body||{});res.status(r.resumed?200:201).json(r);}catch(e){send(res,e);}});
  app.post("/v2/teams/join",...mw,route(req=>service.join(req,req.body||{})));
+ app.post("/v2/teams/join/preview",...mw,route(req=>service.previewInvite(req,req.body||{})));
  app.get("/v2/teams/:id",...mw,route(req=>service.view(req,req.params.id)));
  app.post("/v2/teams/:id/checkout",...mw,route(req=>service.checkout(req,req.params.id,req.body||{})));
  app.post("/v2/teams/:id/invites",...mw,route(req=>service.invite(req,req.params.id,req.body||{}),201));

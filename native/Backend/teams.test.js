@@ -127,6 +127,11 @@ test("colors: at least 9 choices, unique per team, purple reserved for the owner
  assert.equal((await f.join(id,"test-b","#ff0000")).body.error,"INVALID_COLOR");
  assert.equal((await f.join(id,"test-b","sky-500")).status,200);
  const taken=await f.join(id,"test-c","sky-500");assert.equal(taken.status,409);assert.equal(taken.body.error,"COLOR_TAKEN");
+ const pv=await f.invite(id),preview=await f.request("/v2/teams/join/preview",{code:pv.link},"test-c");
+ assert.equal(preview.status,200);assert.equal(preview.body.teamName,"Studio 1");
+ assert.equal(preview.body.colors.memberColors.find(c=>c.id==="sky-500").taken,true,"the join screen can grey out taken colors");
+ assert.ok(!JSON.stringify(preview.body).includes(hash("test-b")));
+ assert.equal((await f.request("/v2/teams/join/preview",{code:"ZZZZ-ZZZZ-ZZZZ"},"test-c")).body.error,"INVITE_INVALID");
  const view=await f.request("/v2/teams/"+id,undefined,"test-c-not-member");assert.equal(view.status,401);
  assert.equal((await f.join(id,"test-c","rose-500")).status,200);
  assert.equal((await f.request("/v2/teams/"+id+"/me",{color:"sky-500"},"test-c","PATCH")).body.error,"COLOR_TAKEN");
