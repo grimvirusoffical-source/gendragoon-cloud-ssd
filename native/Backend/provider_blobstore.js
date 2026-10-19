@@ -4,7 +4,7 @@
 //   get(name)                          -> {data, size, generation, sha256} | null
 //   put(name, data, {ifGenerationMatch, sha256}) -> {generation}; throws code "precondition_failed"
 //   delete(name, {ifGenerationMatch})  -> true if an object was deleted, false if absent or precondition lost
-//   list(prefix, {cursor, limit})      -> {items:[{name,size}], next}
+//   list(prefix, {cursor, limit})      -> {items:[{name,size,generation}], next}
 // ifGenerationMatch follows GCS: 0 means "must not exist"; a generation string means "must be that generation".
 // The memory store is the test fake. The GCS store has NOT been run against a real bucket or the Storage emulator yet.
 const crypto=require("node:crypto");
@@ -43,7 +43,7 @@ function memoryBlobStore(){
    this._fail("list");
    const names=[...objects.keys()].filter(n=>n.startsWith(prefix)&&n>cursor).sort();
    const page=names.slice(0,limit);
-   return {items:page.map(n=>({name:n,size:objects.get(n).data.length})),next:names.length>limit?page.at(-1):null};
+   return {items:page.map(n=>({name:n,size:objects.get(n).data.length,generation:objects.get(n).generation})),next:names.length>limit?page.at(-1):null};
   },
  };
 }
@@ -76,7 +76,7 @@ function gcsBlobStore(bucket){
   },
   async list(prefix,{cursor="",limit=1000}={}){
    const [files,,resp]=await bucket.getFiles({prefix,startOffset:cursor?cursor+"\u0000":undefined,maxResults:limit,autoPaginate:false});
-   return {items:files.map(f=>({name:f.name,size:Number(f.metadata?.size||0)})),next:resp?.nextPageToken&&files.length?files.at(-1).name:null};
+   return {items:files.map(f=>({name:f.name,size:Number(f.metadata?.size||0),generation:f.metadata?.generation!=null?String(f.metadata.generation):null})),next:resp?.nextPageToken&&files.length?files.at(-1).name:null};
   },
  };
 }

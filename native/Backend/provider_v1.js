@@ -63,9 +63,12 @@ function rateLimiter({rate,burst,now}){
 }
 
 function registerProviderV1({app,db,blobs,firebaseAuth,accountKey,resolveWorkspace,isUserActive=null,now=Date.now,
-  limits={},prefix="/provider/v1"}={}){
+  limits={},prefix="/provider/v1",notify=null}={}){
  for(const [k,v] of Object.entries({app,db,blobs,firebaseAuth,accountKey,resolveWorkspace}))
   if(!v)throw Error("registerProviderV1 needs "+k);
+ // notify(uid, kind, details): optional account notice (support_email.js). Never awaited by the request, never
+ // given a key, grant or code; a failure is swallowed so a mail outage cannot break connect or revoke.
+ const notice=(uid,kind,details)=>{if(notify&&uid)Promise.resolve().then(()=>notify(uid,kind,details)).catch(()=>{});};
  const L={rps:50,burst:200,grantsPer10Min:10,redeemPerMinPerIp:30,...limits};
  const bindingLimit=rateLimiter({rate:L.rps,burst:L.burst,now});
  const grantLimit=rateLimiter({rate:L.grantsPer10Min/600,burst:L.grantsPer10Min,now});
@@ -98,7 +101,8 @@ function registerProviderV1({app,db,blobs,firebaseAuth,accountKey,resolveWorkspa
  }
  function capabilities(){
   return {version:1,maxBlobBytes:MAX_BLOB_BYTES,maxManifestBytes:MAX_MANIFEST_BYTES,idModes:["content","sealed"],
-   manifestCas:true,batchHasMax:BATCH_HAS_MAX,listMax:LIST_MAX,rateLimit:{rps:L.rps,burst:L.burst}};
+   manifestCas:true,batchHasMax:BATCH_HAS_MAX,listMax:LIST_MAX,rateLimit:{rps:L.rps,burst:L.burst},
+   events:{poll:true,changeSeq:true,webhook:false,stream:false}};
  }
 
  // ---- connect ------------------------------------------------------------------------------------------
@@ -158,6 +162,7 @@ function registerProviderV1({app,db,blobs,firebaseAuth,accountKey,resolveWorkspa
    });
    if(!out.issued){audit("connect.fail",{reason:out.reason});return fail(res,400,"invalid_grant");}
    audit("connect.exchange",{bindingId:out.issued.binding.id,ownerHash:out.issued.binding.ownerHash});
+   notice(out.issued.binding.uid,"provider.connected",{client:out.issued.binding.client,workspaceId:out.issued.binding.workspaceId});
    res.status(201).json(bindingResponse(out.issued));
   }catch(_){fail(res,503,"provider_unavailable");}
  }
@@ -190,7 +195,7 @@ function registerProviderV1({app,db,blobs,firebaseAuth,accountKey,resolveWorkspa
    }
    const wait=bindingLimit("b:"+binding.id);
    if(wait){res.set("Retry-After",String(wait));return fail(res,429,"rate_limited");}
-   req.binding=binding;req.keyId=m[1];req.keyScopes=k.scopes;
+   req.binding=binding;req.keyId=m[1];req.keyScopes=k.scopes;req.keyKind=k.kind||"binding";
    if((lastTouch.get(binding.id)||0)+60000<t){
     lastTouch.set(binding.id,t);
     db.collection(COLL.bindings).doc(binding.id).update({lastUsedAtMs:t}).catch(()=>{});
@@ -200,8 +205,9 @@ function registerProviderV1({app,db,blobs,firebaseAuth,accountKey,resolveWorkspa
  }
  const canWrite=(req,res,next)=>req.keyScopes?.includes("blobs:rw")?next():fail(res,403,"insufficient_scope");
  const canRead=(req,res,next)=>(req.keyScopes?.includes("blobs:rw")||req.keyScopes?.includes("blobs:r"))?next():fail(res,403,"insufficient_scope");
+ const notShareKey=(req,res,next)=>req.keyKind==="share"?fail(res,403,"insufficient_scope"):next();
 
- router.post("/connect/rotate",keyAuth,async(req,res)=>{
+ router.post("/connect/rotate",keyAuth,notShareKey,async(req,res)=>{
   try{
    const keyId=crypto.randomBytes(8).toString("hex"),secret=b64url(32),t=now();
    await db.runTransaction(async tx=>{
@@ -217,6 +223,45 @@ function registerProviderV1({app,db,blobs,firebaseAuth,accountKey,resolveWorkspa
   }catch(e){if(e?.code==="rotated")return fail(res,409,"already_rotated");fail(res,503,"provider_unavailable");}
  });
 
+ // ---- read-only share keys -----------------------------------------------------------------------------------
+ // A writer can mint read-only keys for the same binding so another device or person can read what it shares
+ // (the SDKs encrypt each shared file's key to the recipient, so a share key alone decrypts nothing). Share keys
+ // cannot write, cannot mint keys, cannot read the key envelope, and are revoked with the binding.
+ const MAX_SHARE_KEYS=20;
+ router.post("/keys",keyAuth,canWrite,notShareKey,express.json({limit:"2kb"}),async(req,res)=>{
+  const label=cleanText(req.body?.label,80);
+  const ttlDays=req.body?.ttlDays===undefined?30:Number(req.body.ttlDays);
+  if(!Number.isInteger(ttlDays)||ttlDays<1||ttlDays>90)return fail(res,400,"bad_ttl");
+  try{
+   const live=await db.collection(COLL.keys).where("bindingId","==",req.binding.id).limit(200).get();
+   const t=now();
+   if(live.docs.filter(d=>d.data().kind==="share"&&!d.data().revokedAtMs&&d.data().expiresAtMs>t).length>=MAX_SHARE_KEYS)
+    return fail(res,409,"too_many_keys");
+   const keyId=crypto.randomBytes(8).toString("hex"),secret=b64url(32),expiresAtMs=t+ttlDays*86400000;
+   await db.collection(COLL.keys).doc(keyId).create({bindingId:req.binding.id,digest:sha256hex(secret),scopes:["blobs:r"],kind:"share",
+    label,createdAtMs:t,expiresAtMs,revokedAtMs:null,graceUntilMs:null});
+   audit("key.share_create",{bindingId:req.binding.id,ownerHash:req.binding.ownerHash});
+   res.status(201).json({keyId,apiKey:"gdpk_"+keyId+"_"+secret,scopes:["blobs:r"],label,expiresAt:new Date(expiresAtMs).toISOString()});
+  }catch(_){fail(res,503,"provider_unavailable");}
+ });
+ router.get("/keys",keyAuth,canWrite,notShareKey,async(req,res)=>{
+  try{
+   const docs=await db.collection(COLL.keys).where("bindingId","==",req.binding.id).limit(200).get();
+   res.json({keys:docs.docs.filter(d=>d.data().kind==="share").map(d=>{const k=d.data();return {keyId:d.id,scopes:k.scopes,label:k.label||"",
+    createdAt:new Date(k.createdAtMs).toISOString(),expiresAt:new Date(k.expiresAtMs).toISOString(),revoked:Boolean(k.revokedAtMs)};})});
+  }catch(_){fail(res,503,"provider_unavailable");}
+ });
+ router.delete("/keys/:keyId",keyAuth,canWrite,notShareKey,async(req,res)=>{
+  if(!/^[0-9a-f]{16}$/.test(req.params.keyId))return fail(res,404,"not_found");
+  try{
+   const ref=db.collection(COLL.keys).doc(req.params.keyId),s=await ref.get();
+   if(!s.exists||s.data().bindingId!==req.binding.id||s.data().kind!=="share")return fail(res,404,"not_found");
+   if(!s.data().revokedAtMs)await ref.update({revokedAtMs:now()});
+   audit("key.share_revoke",{bindingId:req.binding.id,ownerHash:req.binding.ownerHash});
+   res.status(204).end();
+  }catch(_){fail(res,503,"provider_unavailable");}
+ });
+
  // ---- quota accounting --------------------------------------------------------------------------------------
  // usedBytes moves inside a Firestore transaction BEFORE the object write (reservation) and is refunded if the write
  // fails. A crash between the two over-counts, never under-counts; reconcileBinding() repairs it from the bucket.
@@ -229,6 +274,14 @@ function registerProviderV1({app,db,blobs,firebaseAuth,accountKey,resolveWorkspa
    if(enforce&&deltaBytes>0&&used>b.quotaBytes)throw Object.assign(Error(),{code:"quota_exceeded",usedBytes:b.usedBytes,quotaBytes:b.quotaBytes});
    tx.update(ref,{usedBytes:Math.max(0,used),objectCount:Math.max(0,(b.objectCount||0)+deltaCount)});
   });
+ }
+ // Change sequence: bumped after every manifest write or delete, so a client can poll /usage cheaply and list
+ // manifests only when something was committed. Blob writes do not bump it (blobs are not visible until a
+ // manifest references them). A failed bump is not fatal: clients also resync on a timer.
+ async function bumpChange(binding){
+  const ref=db.collection(COLL.bindings).doc(binding.id);
+  await db.runTransaction(async tx=>{const s=await tx.get(ref);if(!s.exists)return;
+   tx.update(ref,{changeSeq:(s.data().changeSeq||0)+1,lastChangeAtMs:now()});}).catch(()=>{});
  }
  function noteError(binding,code){db.collection(COLL.bindings).doc(binding.id).update({lastError:{code,atMs:now()}}).catch(()=>{});}
 
@@ -326,8 +379,8 @@ function registerProviderV1({app,db,blobs,firebaseAuth,accountKey,resolveWorkspa
   const cursor=typeof req.query.cursor==="string"&&HEX64.test(req.query.cursor)?req.query.cursor:"";
   const base=objectPrefix(req.binding)+kind+"/";
   try{const page=await blobs.list(base,{cursor:cursor?base+cursor:"",limit});
-   const ids=page.items.map(i=>i.name.slice(base.length)).filter(id=>HEX64.test(id));
-   res.json({ids,next:page.next?page.next.slice(base.length):null});
+   const items=page.items.map(i=>({id:i.name.slice(base.length),size:i.size,generation:i.generation??null})).filter(i=>HEX64.test(i.id));
+   res.json({ids:items.map(i=>i.id),items,next:page.next?page.next.slice(base.length):null});
   }catch(e){storageError(req,res,e);}
  }
  router.get("/blobs",keyAuth,canRead,(req,res)=>listIds(req,res,"b"));
@@ -363,19 +416,20 @@ function registerProviderV1({app,db,blobs,firebaseAuth,accountKey,resolveWorkspa
   if(claimed!==undefined&&claimed!==digest)return fail(res,422,"checksum_mismatch");
   try{
    const out=await writeObject(req.binding,manifestName(req.binding,req.params.key),req.body,digest,{callerPrecondition:p.value,sameContentIsNoop:false});
+   await bumpChange(req.binding);
    res.set("ETag",'"'+out.generation+'"').status(out.created?201:200).json({key:req.params.key,created:out.created,size:req.body.length});
   }catch(e){storageError(req,res,e);}
  });
  router.delete("/manifests/:key",keyAuth,canWrite,validKey,async(req,res)=>{
   const p=precondition(req);if(p.error)return fail(res,400,p.error);
-  try{await removeObject(req.binding,manifestName(req.binding,req.params.key),p.value);res.status(204).end();}catch(e){storageError(req,res,e);}
+  try{if(await removeObject(req.binding,manifestName(req.binding,req.params.key),p.value))await bumpChange(req.binding);res.status(204).end();}catch(e){storageError(req,res,e);}
  });
  router.get("/manifests",keyAuth,canRead,(req,res)=>listIds(req,res,"m"));
 
  // ---- per-binding key envelope (G9) ------------------------------------------------------------------------
  // RedX's master key wrapped with a recovery passphrase on the RedX host. Same record, bounds and version rules as
  // /v2/workspaces/:id/key-envelope (key_envelope.js): the server only ever sees the opaque wrapped key.
- router.get("/key-envelope",keyAuth,canRead,async(req,res)=>{
+ router.get("/key-envelope",keyAuth,canRead,notShareKey,async(req,res)=>{
   try{const s=await db.collection(COLL.envelopes).doc(req.binding.id).get();
    if(!s.exists)return fail(res,404,"not_found");
    const env=keyEnvelope.parseEnvelope(s.data().envelope);
@@ -406,7 +460,8 @@ function registerProviderV1({app,db,blobs,firebaseAuth,accountKey,resolveWorkspa
  // ---- usage, health, capabilities -----------------------------------------------------------------------------
  router.get("/usage",keyAuth,canRead,async(req,res)=>{
   try{const s=await db.collection(COLL.bindings).doc(req.binding.id).get();const b=s.data();
-   res.json({usedBytes:b.usedBytes||0,quotaBytes:b.quotaBytes,objectCount:b.objectCount||0,workspaceId:b.workspaceId});
+   res.json({usedBytes:b.usedBytes||0,quotaBytes:b.quotaBytes,objectCount:b.objectCount||0,workspaceId:b.workspaceId,
+    changeSeq:b.changeSeq||0,lastChangeAt:b.lastChangeAtMs?new Date(b.lastChangeAtMs).toISOString():null});
   }catch(_){fail(res,503,"provider_unavailable");}
  });
  router.get("/health",keyAuth,(req,res)=>res.json({ok:true,time:new Date(now()).toISOString()}));
@@ -429,6 +484,7 @@ function registerProviderV1({app,db,blobs,firebaseAuth,accountKey,resolveWorkspa
    let purged=null;
    if(req.query.deleteData==="true")purged=await purgeBinding(req.params.id);
    audit(purged?"binding.revoke_and_purge":"binding.revoke",{bindingId:req.params.id,ownerHash:s.data().ownerHash});
+   notice(req.user.uid,"provider.revoked",{client:s.data().client,workspaceId:s.data().workspaceId,dataDeleted:Boolean(purged)});
    res.json({revoked:true,purgedObjects:purged});
   }catch(_){fail(res,503,"provider_unavailable");}
  });
@@ -436,7 +492,7 @@ function registerProviderV1({app,db,blobs,firebaseAuth,accountKey,resolveWorkspa
  async function revokeBinding(id){
   const t=now();
   await db.collection(COLL.bindings).doc(id).update({revokedAtMs:t});
-  const keys=await db.collection(COLL.keys).where("bindingId","==",id).limit(50).get();
+  const keys=await db.collection(COLL.keys).where("bindingId","==",id).limit(500).get();
   for(const k of keys.docs)if(!k.data().revokedAtMs)await k.ref.update({revokedAtMs:t});
  }
  async function bindingDoc(id){const s=await db.collection(COLL.bindings).doc(id).get();if(!s.exists)throw Error("no binding");return s.data();}

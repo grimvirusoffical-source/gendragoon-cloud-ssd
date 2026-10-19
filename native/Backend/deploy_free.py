@@ -18,6 +18,7 @@ RUNTIME_FILES = (
     # Loaded by free_server.js / billing_v2.js / transfer_v3.js / account_delete.js at start or during deletion jobs.
     # provider_v1.js is shipped because account deletion calls it; its routes stay off unless PROVIDER_V1_ENABLED=true.
     "login_gate.js", "v2_errors.js", "teams.js", "teams_account.js", "team_storage.js", "provider_v1.js", "provider_blobstore.js",
+    "support_email.js",
 )
 
 def stage_runtime(destination):

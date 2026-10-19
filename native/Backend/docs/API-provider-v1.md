@@ -26,20 +26,42 @@ Any grant/code failure is `400 invalid_grant` (unknown, used, expired, wrong kin
 | `HEAD /blobs/:id` | `200` with `Content-Length`, `ETag`, `X-Content-SHA256`; `404` |
 | `GET /blobs/:id` | bytes + `X-Content-SHA256`; `404 not_found` |
 | `DELETE /blobs/:id` | `204`, also when absent |
-| `GET /blobs?cursor=&limit=` | `{ids, next}` sorted, ≤ 1000 per page |
+| `GET /blobs?cursor=&limit=` | `{ids, items:[{id,size,generation}], next}` sorted, ≤ 1000 per page |
 | `POST /blobs/batch-has` | `{ids:[≤1000]}` → `{present:[…]}` |
 
 ## Manifests (ManifestStore)
 
-`GET/PUT/DELETE /manifests/:key`, `GET /manifests`. `PUT` is atomic. Preconditions: `If-None-Match: *` (create only) or `If-Match: "<etag>"` (compare-and-swap on the storage generation); neither = atomic overwrite. Losing a race is `412 precondition_failed`. Max 4 MiB.
+`GET/PUT/DELETE /manifests/:key`, `GET /manifests` (`{ids, items:[{id,size,generation}], next}`). `PUT` is atomic. Preconditions: `If-None-Match: *` (create only) or `If-Match: "<etag>"` (compare-and-swap on the storage generation); neither = atomic overwrite. Losing a race is `412 precondition_failed`. Max 4 MiB.
 
 ## Key envelope (per binding)
 
 `GET /key-envelope` (`blobs:r`) and `PUT /key-envelope` (`blobs:rw`): RedX's master key wrapped with a recovery passphrase on the RedX host. Same record, KDF bounds, forbidden-field check and version rules as `/v2/workspaces/:id/key-envelope` (shared `parseEnvelope`/`precondition` from `key_envelope.js`): `If-None-Match: *` creates (`409 envelope_exists` if present), `If-Match: "<n>"` replaces with version `n+1` (`412 version_mismatch` otherwise), neither is `428 precondition_required`. Removed when the binding is purged.
 
+### Read-only share keys
+
+A writer key (`blobs:rw`) can mint read-only keys for its own binding so a recipient can fetch the chunks of a file shared with them (the SDKs encrypt the file key to the recipient; the server never sees it).
+
+| Route | Result |
+|---|---|
+| `POST /keys` `{"label": "…", "ttlDays": 1–90}` (default 30) | `201 {keyId, apiKey, scopes: ["blobs:r"], label, expiresAt}`; at most 20 live share keys per binding (`409 too_many_keys`), `400 bad_ttl` |
+| `GET /keys` | `{keys: [{keyId, scopes, label, createdAt, expiresAt, revoked}]}`; never returns a secret |
+| `DELETE /keys/:keyId` | `204`; revoked immediately; `404 not_found` for another binding's key |
+
+A share key can read blobs and manifests and call `/usage`, `/health` and `/capabilities`. It cannot write, mint or list keys, rotate itself, or read the key envelope (`403 insufficient_scope`). Revoking the binding revokes its share keys.
+
 ## Usage, health, capabilities
 
-`GET /usage` → `{usedBytes, quotaBytes, objectCount, workspaceId}`; `GET /health`; `GET /capabilities` (no auth).
+`GET /usage` → `{usedBytes, quotaBytes, objectCount, workspaceId, changeSeq, lastChangeAt}`; `GET /health`; `GET /capabilities` (no auth; includes `events`).
+
+## Change events (polling)
+
+There is no webhook or stream. A client watches a binding by polling:
+
+1. `GET /usage` and compare `changeSeq`. It increases by one after every manifest write or delete that took effect (a failed precondition or deleting an absent manifest does not count). Blob writes do not change it, because a blob is not visible to a reader until a manifest references it.
+2. When `changeSeq` moved, `GET /manifests` and compare each item's `generation` with the last seen one: new id = created, different generation = updated, missing id = deleted.
+3. `401` on a key that worked before means the binding was revoked or the key expired.
+
+Increments are best effort: if the counter update fails after a commit, the commit still stands, so clients also do a full list on a slow timer (the SDKs use 10 minutes). `capabilities.events` is `{poll:true, changeSeq:true, webhook:false, stream:false}`.
 
 ## Errors
 
@@ -70,7 +92,13 @@ Each binding has `quotaBytes` (snapshot of the workspace quota at connect time) 
 - `provider_v1.test.js` (12 tests, `node --test`, including G9): both connect legs, replay and expiry, checksums, quota and refunds, 16 MiB cap, manifest CAS with 8 racing writers, pagination, scopes, tenant isolation, rotation grace, revoke and purge, rate limit, reconcile, no secrets in audit rows.
 - `provider_blobstore.test.js`: BlobStore contract on the memory fake and, with `GD_FAKE_GCS_BIN=/path/fake-gcs-server` (or `STORAGE_EMULATOR_HOST`), on `gcsBlobStore` via the real client, plus an end-to-end run of the routes on it. Skipped otherwise.
 - `provider_v1_deletion.test.js`: G7.
+- `provider_v1_events.test.js`: `changeSeq`, list generations, notices on connect and revoke.
+- `scripts/provider_dev_server.js`: the routes on memory stores for SDK tests (`PROVIDER_V1_ENABLED=true` required; development tokens `Bearer dev-user:<uid>` for signed-in calls; loopback only).
 - `contract/redxpack` (Go): a client with RedX's exact `ChunkStore`/`ManifestStore` method set, contract tests against the Node server (`scripts/provider_contract_server.js`, memory fakes), and with `-tags redx` (`REDX_DIR=… contract/redxpack/run_redx.sh`) RedX's real `pack.New(...)` doing put/get/verify/list/delete over this API.
+
+## Account notices
+
+With `SUPPORT_EMAIL_ENABLED=true`, connecting and revoking an app send a notice to the account's address (resolved through Firebase Auth at send time; no address is stored). Notices never contain keys, grants or codes, and a mail failure never fails the request. See `docs/SUPPORT_EMAIL.md`.
 
 ## Account deletion
 
