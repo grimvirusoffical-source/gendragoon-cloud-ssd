@@ -1,0 +1,527 @@
+{
+ "version": 1,
+ "levels": [
+  "L0",
+  "L1",
+  "L2",
+  "L3",
+  "L4"
+ ],
+ "risks": {
+  "read": "Reads data",
+  "write": "Creates or changes data",
+  "credential": "Obtains or replaces an API key",
+  "destructive": "Deletes one item",
+  "bulk-destructive": "Deletes many items or everything",
+  "key": "Creates, unlocks or re-wraps encryption keys",
+  "key-export": "Releases raw key material to the caller",
+  "sharing": "Grants or revokes access for someone else"
+ },
+ "defaultMaxLevel": "L3",
+ "operations": [
+  {
+   "id": "capabilities",
+   "level": "L2",
+   "risk": "read",
+   "context": "app",
+   "http": {
+    "method": "GET",
+    "path": "/capabilities"
+   },
+   "scope": null,
+   "summary": "Server limits and features"
+  },
+  {
+   "id": "health",
+   "level": "L2",
+   "risk": "read",
+   "context": "app",
+   "http": {
+    "method": "GET",
+    "path": "/health"
+   },
+   "scope": null,
+   "summary": "Checks that the key works"
+  },
+  {
+   "id": "usage",
+   "level": "L2",
+   "risk": "read",
+   "context": "app",
+   "http": {
+    "method": "GET",
+    "path": "/usage"
+   },
+   "scope": "blobs:r",
+   "summary": "Bytes used, quota, object count and change sequence"
+  },
+  {
+   "id": "blobs.put",
+   "level": "L2",
+   "risk": "write",
+   "context": "app",
+   "http": {
+    "method": "PUT",
+    "path": "/blobs/{id}"
+   },
+   "scope": "blobs:rw",
+   "summary": "Store one blob"
+  },
+  {
+   "id": "blobs.get",
+   "level": "L2",
+   "risk": "read",
+   "context": "app",
+   "http": {
+    "method": "GET",
+    "path": "/blobs/{id}"
+   },
+   "scope": "blobs:r",
+   "summary": "Read one blob"
+  },
+  {
+   "id": "blobs.head",
+   "level": "L2",
+   "risk": "read",
+   "context": "app",
+   "http": {
+    "method": "HEAD",
+    "path": "/blobs/{id}"
+   },
+   "scope": "blobs:r",
+   "summary": "Size and checksum of one blob"
+  },
+  {
+   "id": "blobs.list",
+   "level": "L2",
+   "risk": "read",
+   "context": "app",
+   "http": {
+    "method": "GET",
+    "path": "/blobs"
+   },
+   "scope": "blobs:r",
+   "summary": "List blob ids"
+  },
+  {
+   "id": "blobs.batchHas",
+   "level": "L2",
+   "risk": "read",
+   "context": "app",
+   "http": {
+    "method": "POST",
+    "path": "/blobs/batch-has"
+   },
+   "scope": "blobs:r",
+   "summary": "Which of these blobs exist"
+  },
+  {
+   "id": "blobs.delete",
+   "level": "L2",
+   "risk": "destructive",
+   "context": "app",
+   "http": {
+    "method": "DELETE",
+    "path": "/blobs/{id}"
+   },
+   "scope": "blobs:rw",
+   "summary": "Delete one blob"
+  },
+  {
+   "id": "manifests.get",
+   "level": "L2",
+   "risk": "read",
+   "context": "app",
+   "http": {
+    "method": "GET",
+    "path": "/manifests/{key}"
+   },
+   "scope": "blobs:r",
+   "summary": "Read one manifest"
+  },
+  {
+   "id": "manifests.put",
+   "level": "L2",
+   "risk": "write",
+   "context": "app",
+   "http": {
+    "method": "PUT",
+    "path": "/manifests/{key}"
+   },
+   "scope": "blobs:rw",
+   "summary": "Write one manifest (create-only or compare-and-swap)"
+  },
+  {
+   "id": "manifests.list",
+   "level": "L2",
+   "risk": "read",
+   "context": "app",
+   "http": {
+    "method": "GET",
+    "path": "/manifests"
+   },
+   "scope": "blobs:r",
+   "summary": "List manifest keys and generations"
+  },
+  {
+   "id": "manifests.delete",
+   "level": "L2",
+   "risk": "destructive",
+   "context": "app",
+   "http": {
+    "method": "DELETE",
+    "path": "/manifests/{key}"
+   },
+   "scope": "blobs:rw",
+   "summary": "Delete one manifest"
+  },
+  {
+   "id": "keyEnvelope.get",
+   "level": "L2",
+   "risk": "read",
+   "context": "app",
+   "http": {
+    "method": "GET",
+    "path": "/key-envelope"
+   },
+   "scope": "blobs:r",
+   "summary": "Read the wrapped master key"
+  },
+  {
+   "id": "keyEnvelope.create",
+   "level": "L3",
+   "risk": "key",
+   "context": "app",
+   "http": {
+    "method": "PUT",
+    "path": "/key-envelope"
+   },
+   "scope": "blobs:rw",
+   "summary": "Create the master key and its recovery envelope"
+  },
+  {
+   "id": "keyEnvelope.replace",
+   "level": "L3",
+   "risk": "key",
+   "context": "app",
+   "http": {
+    "method": "PUT",
+    "path": "/key-envelope"
+   },
+   "scope": "blobs:rw",
+   "summary": "Re-wrap the master key under a new recovery passphrase"
+  },
+  {
+   "id": "crypto.unlock",
+   "level": "L2",
+   "risk": "key",
+   "context": "local",
+   "http": null,
+   "scope": null,
+   "summary": "Unwrap the master key with the recovery passphrase, in memory"
+  },
+  {
+   "id": "crypto.importMasterKey",
+   "level": "L2",
+   "risk": "key",
+   "context": "local",
+   "http": null,
+   "scope": null,
+   "summary": "Use a master key handed over by the host (for example the Rotten Apple launcher)"
+  },
+  {
+   "id": "crypto.exportMasterKey",
+   "level": "L4",
+   "risk": "key-export",
+   "context": "local",
+   "http": null,
+   "scope": null,
+   "summary": "Return the raw master key to the caller"
+  },
+  {
+   "id": "apiKey.rotate",
+   "level": "L2",
+   "risk": "credential",
+   "context": "app",
+   "http": {
+    "method": "POST",
+    "path": "/connect/rotate"
+   },
+   "scope": null,
+   "summary": "Replace this binding's API key"
+  },
+  {
+   "id": "files.list",
+   "level": "L2",
+   "risk": "read",
+   "context": "app",
+   "http": null,
+   "scope": null,
+   "summary": "List a folder"
+  },
+  {
+   "id": "files.stat",
+   "level": "L2",
+   "risk": "read",
+   "context": "app",
+   "http": null,
+   "scope": null,
+   "summary": "Metadata of one file"
+  },
+  {
+   "id": "files.read",
+   "level": "L2",
+   "risk": "read",
+   "context": "app",
+   "http": null,
+   "scope": null,
+   "summary": "Read a file"
+  },
+  {
+   "id": "files.write",
+   "level": "L2",
+   "risk": "write",
+   "context": "app",
+   "http": null,
+   "scope": null,
+   "summary": "Create or replace a file"
+  },
+  {
+   "id": "files.mkdir",
+   "level": "L2",
+   "risk": "write",
+   "context": "app",
+   "http": null,
+   "scope": null,
+   "summary": "Create a folder"
+  },
+  {
+   "id": "files.move",
+   "level": "L2",
+   "risk": "write",
+   "context": "app",
+   "http": null,
+   "scope": null,
+   "summary": "Rename or move a file or folder"
+  },
+  {
+   "id": "files.delete",
+   "level": "L2",
+   "risk": "destructive",
+   "context": "app",
+   "http": null,
+   "scope": null,
+   "summary": "Delete one file or an empty folder"
+  },
+  {
+   "id": "files.deleteFolder",
+   "level": "L3",
+   "risk": "bulk-destructive",
+   "context": "app",
+   "http": null,
+   "scope": null,
+   "summary": "Delete a folder and everything in it"
+  },
+  {
+   "id": "files.collectGarbage",
+   "level": "L3",
+   "risk": "bulk-destructive",
+   "context": "app",
+   "http": null,
+   "scope": null,
+   "summary": "Delete blobs no file references"
+  },
+  {
+   "id": "sync.push",
+   "level": "L2",
+   "risk": "write",
+   "context": "app",
+   "http": null,
+   "scope": null,
+   "summary": "Upload new and changed local files"
+  },
+  {
+   "id": "sync.pull",
+   "level": "L2",
+   "risk": "write",
+   "context": "app",
+   "http": null,
+   "scope": null,
+   "summary": "Download new and changed remote files to the local folder"
+  },
+  {
+   "id": "sync.mirror",
+   "level": "L3",
+   "risk": "bulk-destructive",
+   "context": "app",
+   "http": null,
+   "scope": null,
+   "summary": "Make one side identical to the other, deleting extras"
+  },
+  {
+   "id": "share.createIdentity",
+   "level": "L2",
+   "risk": "key",
+   "context": "local",
+   "http": null,
+   "scope": null,
+   "summary": "Create a recipient key pair for receiving shares"
+  },
+  {
+   "id": "share.export",
+   "level": "L3",
+   "risk": "sharing",
+   "context": "app",
+   "http": null,
+   "scope": null,
+   "summary": "Encrypt one file's key to a recipient"
+  },
+  {
+   "id": "share.open",
+   "level": "L2",
+   "risk": "read",
+   "context": "app",
+   "http": null,
+   "scope": null,
+   "summary": "Open a share addressed to this recipient"
+  },
+  {
+   "id": "share.createReadKey",
+   "level": "L3",
+   "risk": "sharing",
+   "context": "app",
+   "http": {
+    "method": "POST",
+    "path": "/keys"
+   },
+   "scope": "blobs:rw",
+   "summary": "Mint a read-only key for this binding"
+  },
+  {
+   "id": "share.listReadKeys",
+   "level": "L2",
+   "risk": "read",
+   "context": "app",
+   "http": {
+    "method": "GET",
+    "path": "/keys"
+   },
+   "scope": "blobs:rw",
+   "summary": "List this binding's read-only keys"
+  },
+  {
+   "id": "share.revokeReadKey",
+   "level": "L3",
+   "risk": "sharing",
+   "context": "app",
+   "http": {
+    "method": "DELETE",
+    "path": "/keys/{keyId}"
+   },
+   "scope": "blobs:rw",
+   "summary": "Revoke a read-only key"
+  },
+  {
+   "id": "events.watch",
+   "level": "L2",
+   "risk": "read",
+   "context": "app",
+   "http": null,
+   "scope": null,
+   "summary": "Poll for manifest changes, usage changes and revocation"
+  },
+  {
+   "id": "storage.wipe",
+   "level": "L4",
+   "risk": "bulk-destructive",
+   "context": "app",
+   "http": null,
+   "scope": null,
+   "summary": "Delete every object stored through this binding"
+  },
+  {
+   "id": "connect.redeemGrant",
+   "level": "L2",
+   "risk": "credential",
+   "context": "app",
+   "http": {
+    "method": "POST",
+    "path": "/connect/redeem"
+   },
+   "scope": null,
+   "summary": "Exchange a one-time connect code for an API key"
+  },
+  {
+   "id": "connect.exchangeCode",
+   "level": "L2",
+   "risk": "credential",
+   "context": "app",
+   "http": {
+    "method": "POST",
+    "path": "/connect/token"
+   },
+   "scope": null,
+   "summary": "Exchange a PKCE authorization code for an API key"
+  },
+  {
+   "id": "account.createGrant",
+   "level": "L3",
+   "risk": "sharing",
+   "context": "user",
+   "http": {
+    "method": "POST",
+    "path": "/connect/grants"
+   },
+   "scope": null,
+   "summary": "Issue a one-time connect code for a workspace"
+  },
+  {
+   "id": "account.authorize",
+   "level": "L3",
+   "risk": "sharing",
+   "context": "user",
+   "http": {
+    "method": "POST",
+    "path": "/connect/authorize"
+   },
+   "scope": null,
+   "summary": "Approve a PKCE connect request"
+  },
+  {
+   "id": "account.listBindings",
+   "level": "L2",
+   "risk": "read",
+   "context": "user",
+   "http": {
+    "method": "GET",
+    "path": "/bindings"
+   },
+   "scope": null,
+   "summary": "List connected apps"
+  },
+  {
+   "id": "account.revokeBinding",
+   "level": "L3",
+   "risk": "sharing",
+   "context": "user",
+   "http": {
+    "method": "DELETE",
+    "path": "/bindings/{id}"
+   },
+   "scope": null,
+   "summary": "Disconnect an app, keeping its data"
+  },
+  {
+   "id": "account.revokeAndDelete",
+   "level": "L4",
+   "risk": "bulk-destructive",
+   "context": "user",
+   "http": {
+    "method": "DELETE",
+    "path": "/bindings/{id}?deleteData=true"
+   },
+   "scope": null,
+   "summary": "Disconnect an app and delete its data"
+  }
+ ]
+}
