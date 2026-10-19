@@ -45,6 +45,10 @@ cd native/Mobile/Android && ./gradlew :app:assembleDebug
 
 More detail: [native/README.md](native/README.md), [native/Backend/README.md](native/Backend/README.md), [native/Desktop/README.md](native/Desktop/README.md), [native/Mobile/PLATFORM_BEHAVIOR.md](native/Mobile/PLATFORM_BEHAVIOR.md), [sdk/README.md](sdk/README.md).
 
+## Configuration
+
+The backend reads its settings from the environment. Variable names, and which ones are secrets, are listed in [native/Backend/README.md](native/Backend/README.md#configuration-and-deployment), including accounts (`ACCOUNTS_SEAL_KEY`) and phone two-factor codes through Twilio (`TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN` or `TWILIO_API_KEY_SID` with `TWILIO_API_KEY_SECRET`, and `TWILIO_MESSAGING_SERVICE_SID` or `TWILIO_FROM_NUMBER`). Secret values live in Secret Manager, never in this repository.
+
 ## Security
 
 Please report vulnerabilities privately; see [SECURITY.md](SECURITY.md). No user data, private API keys or cloud credentials belong in this repository.

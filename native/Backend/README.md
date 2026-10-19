@@ -91,6 +91,25 @@ The deployment command uses the active Google application-default account throug
 
 `SUPPORT_DISCORD_WEBHOOK_URL` is loaded from Secret Manager in production and is never written in this repo. `free_server.js` exits before it listens if that variable is missing or is not an `https://discord.com/api/webhooks/` URL when `NODE_ENV=production`. Whenever Cloud Run sets `K_SERVICE`, that gate stays on even if `NODE_ENV` is `development`, `dev`, or `test`. `deploy_free.py` sets `NODE_ENV=production` on every Cloud Run deploy. The error names the variable and does not print the value, so Cloud Run keeps serving the previous revision. `npm run predeploy:check` is an optional extra that confirms the secret exists (`gcloud secrets versions describe`) without printing it. It is not the promotion gate.
 
+### Accounts and two-factor sign-in
+
+Set these as Cloud Run environment variables; bind the secret ones from Secret Manager and never write their values in this repo.
+
+| Variable | Secret | Purpose |
+| --- | --- | --- |
+| `ACCOUNTS_SEAL_KEY` | yes | Required in production. 32 random bytes, base64. Seals 2FA secrets and phone numbers and signs Terms grants. |
+| `ACCOUNTS_MIN_AGE` | no | Optional. Values below 13 are raised to 13. |
+| `REDXAI_ISSUER`, `REDXAI_CLIENT_ID` | no | Optional. Accept Red-XAI Accounts sign-in tokens. |
+| `TWILIO_ACCOUNT_SID` | no | Turns on phone 2FA codes through Twilio. |
+| `TWILIO_AUTH_TOKEN` | yes | Twilio credential. Alternatively set the API key pair below. |
+| `TWILIO_API_KEY_SID`, `TWILIO_API_KEY_SECRET` | secret only | Twilio API key credential (preferred over the auth token). |
+| `TWILIO_MESSAGING_SERVICE_SID` | no | Sender. Preferred; otherwise set `TWILIO_FROM_NUMBER`. |
+| `TWILIO_FROM_NUMBER` | no | Sender number in E.164 form, used when no Messaging Service is set. |
+| `SMS_PROVIDER` | no | Optional. `twilio` forces Twilio; `mock` is for local and staging runs only. |
+| `ACCOUNTS_ALLOW_MOCK_SMS` | no | Staging only. Allows `SMS_PROVIDER=mock` with `NODE_ENV=production`. Never set it on the live service. |
+
+Phone 2FA is offered only when a complete Twilio setup is present: an account SID, one credential (auth token or API key pair) and one sender (Messaging Service SID or From number). Otherwise `GET /v1/accounts/rules` reports Phone as unavailable and phone sign-ups are refused with `sms_unavailable`. A half-finished Twilio setup does not stop the server; startup logs which variable is missing without printing any value. Codes are sent with the Twilio Messages API over HTTPS. They are generated, hashed, single-use, expire after 10 minutes, allow 5 tries, and are limited to 5 texts per account per hour. The automated tests use HTTP stubs and never send a text message.
+
 ## Validation
 
 ### Release blocker
