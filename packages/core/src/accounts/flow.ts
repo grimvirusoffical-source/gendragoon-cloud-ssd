@@ -1,8 +1,5 @@
 import type { TwoFactorMethod } from "./rules.js";
 
-/** The Terms of Service version this build shows. Must match the server's current version. */
-export const TOS_VERSION = "gendragoon-tos-2026-10-19";
-
 export const FALSE_INFO_WARNING =
   "Use your real details. If any of them are false, we won't be able to recover your account.";
 
@@ -20,15 +17,16 @@ export interface TwoFactorOption {
 }
 
 export const TWO_FACTOR_OPTIONS: readonly TwoFactorOption[] = [
-  { method: "totp", label: "Authenticator app", detail: "Scan a QR code with an app like 1Password, Authy or Google Authenticator.", available: true },
-  { method: "sms", label: "Phone (text message)", detail: "We text a 6-digit code to your phone.", available: true },
+  { method: "app", label: "Authenticator app", detail: "Scan a QR code with an app like 1Password, Authy or Google Authenticator.", available: true },
+  { method: "phone", label: "Phone (text message)", detail: "We text a 6-digit code to your phone.", available: true },
   { method: "redxai_auth", label: "Red-XAI Auth", detail: "Coming soon", available: false },
   { method: "none", label: "No two-factor sign-in", detail: "Not recommended.", available: true },
 ];
 
 /**
- * Terms gate. The person scrolls to the end, presses "Read ToS", then
- * "Agree to ToS". Each step only opens after the one before it.
+ * Terms gate. The person scrolls to the end, presses "Read ToS" (the server
+ * issues a read grant), then "Agree to ToS" (the server advances the grant).
+ * Each step only opens after the one before it, here and on the server.
  */
 export interface TosGateState {
   scrolledToEnd: boolean;
