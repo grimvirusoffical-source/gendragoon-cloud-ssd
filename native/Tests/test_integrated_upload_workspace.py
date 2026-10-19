@@ -173,6 +173,9 @@ class UploadWorkspaceTests(unittest.TestCase):
         child.write_bytes(b"before")
         self.prepare([folder])
         child.write_bytes(b"after!")
+        # Same-size rewrite: advance mtime so a coarse filesystem clock tick cannot hide it (flaky ~1 in 5 otherwise).
+        stamp = child.stat().st_mtime_ns + 2_000_000_000
+        os.utime(child, ns=(stamp, stamp))
         with self.fake_library() as helper, self.assertRaises(workspace.WorkspaceError):
             workspace.run_next(self.home)
         helper.assert_not_called()
