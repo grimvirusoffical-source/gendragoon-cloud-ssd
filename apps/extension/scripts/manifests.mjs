@@ -14,7 +14,7 @@ export function baseManifest(version, apiBase = DEFAULT_API_BASE) {
     version,
     description: "__MSG_extDescription__",
     default_locale: "en",
-    author: "GenDragoon",
+    author: "Red-XAI LLC",
     icons: ICONS,
     action: {
       default_title: "__MSG_actionTitle__",

@@ -4,6 +4,7 @@
   "type": "module",
   "version": "0.1.0",
   "description": "GenDragoon Cloud SSD clients: shared core, Windows desktop, and Red-XAI Updater.",
+  "author": "Red-XAI LLC",
   "packageManager": "pnpm@10.33.4",
   "engines": {
     "node": ">=22"

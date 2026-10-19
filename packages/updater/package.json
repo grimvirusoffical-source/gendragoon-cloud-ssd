@@ -4,6 +4,7 @@
   "private": true,
   "type": "module",
   "description": "App-agnostic GitHub release updater: channel selection, sha256, install, relaunch, health, rollback.",
+  "author": "Red-XAI LLC",
   "exports": {
     ".": "./src/index.ts"
   },

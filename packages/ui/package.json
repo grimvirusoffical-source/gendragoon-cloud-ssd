@@ -4,6 +4,7 @@
   "private": true,
   "type": "module",
   "description": "Shared GenDragoon React UI: uploader, backup, lock, settings, and BYO setup.",
+  "author": "Red-XAI LLC",
   "exports": {
     ".": "./src/index.ts",
     "./theme": "./src/theme.ts",
