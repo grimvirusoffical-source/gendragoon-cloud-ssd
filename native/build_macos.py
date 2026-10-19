@@ -42,7 +42,25 @@ def remove_python_caches(app):
             if name in folders:
                 folders.remove(name)
 
-def build(base,output):
+ADHOC="-"
+DISTRIBUTIONS=("direct","rotten-apple","mas")
+
+def sign_commands(identity):
+    """Developer ID: hardened runtime + secure timestamp (required for notarization).
+    Ad-hoc ("-"): no hardened runtime and no timestamp. Ad-hoc code has no Team ID, so library validation under the
+    hardened runtime would refuse to load the other ad-hoc signed binaries and libraries in the bundle; ad-hoc builds
+    cannot be notarized anyway, so the runtime flag would buy nothing."""
+    if identity==ADHOC:return ["/usr/bin/codesign","--force","--sign",ADHOC]
+    return ["/usr/bin/codesign","--force","--options","runtime","--timestamp","--sign",identity]
+
+def write_distribution(resources,distribution):
+    """Bake the channel into the bundle before signing (read by gendragoon_auto_update.py and GDDistribution)."""
+    if distribution is None:return
+    if distribution not in DISTRIBUTIONS:raise RuntimeError("Unknown distribution "+distribution)
+    import json
+    (resources/"gendragoon_distribution.json").write_text(json.dumps({"distribution":distribution})+"\n","utf8")
+
+def build(base,output,identity=IDENTITY,distribution=None):
     if sys.platform!="darwin":raise RuntimeError("Build this target on macOS with Xcode")
     with (base/"Contents/Info.plist").open("rb") as source:info=plistlib.load(source)
     if info.get("CFBundleIdentifier")!="app.gendragoon.cloudssd":raise RuntimeError("Base bundle identity mismatch")
@@ -74,24 +92,28 @@ def build(base,output):
          "-framework","SwiftUI","-framework","AppKit","-o",binary,*swift],timeout=900)
     info.update(CFBundleShortVersionString=VERSION,CFBundleVersion=BUILD,LSMinimumSystemVersion="14.0")
     (app/"Contents/Info.plist").write_bytes(plistlib.dumps(info))
+    write_distribution(resources,distribution)
     entitlements=output/"node-entitlements.plist"
     entitlements.write_bytes(plistlib.dumps({"com.apple.security.cs.allow-jit":True,
         "com.apple.security.cs.allow-unsigned-executable-memory":True}))
     for name in ("rclone","gendragoon_node"):
         helper=resources/name
         if not helper.is_file():raise RuntimeError("Missing vendor runtime "+name)
-        command=["/usr/bin/codesign","--force","--options","runtime","--timestamp","--sign",IDENTITY]
-        if name=="gendragoon_node":command += ["--entitlements",entitlements]
+        command=sign_commands(identity)
+        if name=="gendragoon_node" and identity!=ADHOC:command += ["--entitlements",entitlements]
         run([*command,helper])
-    run(["/usr/bin/codesign","--force","--options","runtime","--timestamp","--sign",IDENTITY,app])
+    run([*sign_commands(identity),app])
     run(["/usr/bin/codesign","--verify","--deep","--strict",app])
-    print("Signed staged build:",app,flush=True)
+    print(("Ad-hoc signed" if identity==ADHOC else "Signed")+" staged build:",app,flush=True)
     print("Version "+VERSION+" ("+BUILD+"). Installation and notarization are separate verification gates.",flush=True)
 
 if __name__=="__main__":
     parser=argparse.ArgumentParser()
     parser.add_argument("--base-app",type=Path,default=Path.home()/"Applications"/NAME)
     parser.add_argument("--output",type=Path,required=True)
+    parser.add_argument("--identity",default=IDENTITY,help='codesign identity; "-" = ad-hoc (no Apple Developer ID; cannot be notarized)')
+    parser.add_argument("--distribution",choices=DISTRIBUTIONS,help="write gendragoon_distribution.json into the bundle before signing")
     args=parser.parse_args()
-    try:build(args.base_app.absolute(),args.output.absolute())
+    if args.identity not in (IDENTITY,ADHOC):parser.error("--identity must be the pinned Developer ID or - (ad-hoc)")
+    try:build(args.base_app.absolute(),args.output.absolute(),args.identity,args.distribution)
     except Exception as error:print(str(error),file=sys.stderr);sys.exit(1)
