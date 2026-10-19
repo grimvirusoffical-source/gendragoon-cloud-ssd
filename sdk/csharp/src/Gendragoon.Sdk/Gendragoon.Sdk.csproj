@@ -1,0 +1,18 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <!-- netstandard2.1 is what Unity loads; net8.0 uses the platform AES-GCM and ECDH. -->
+    <TargetFrameworks>netstandard2.1;net8.0</TargetFrameworks>
+    <LangVersion>9.0</LangVersion>
+    <Nullable>enable</Nullable>
+    <RootNamespace>Gendragoon.Sdk</RootNamespace>
+    <AssemblyName>Gendragoon.Sdk</AssemblyName>
+    <Version>0.1.0</Version>
+    <Description>GenDragoon Cloud SSD SDK for .NET and Unity: storage provider API, encrypted files and folders, sync, sharing and change events.</Description>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <NoWarn>$(NoWarn);CS1591</NoWarn>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+  </PropertyGroup>
+  <ItemGroup>
+    <InternalsVisibleTo Include="Gendragoon.Sdk.Tests" />
+  </ItemGroup>
+</Project>

@@ -1,0 +1,8 @@
+; Test project for the GenDragoon addon. Games copy addons/gendragoon into their own project.
+config_version=5
+
+[application]
+config/name="GenDragoon SDK tests"
+
+[editor_plugins]
+enabled=PackedStringArray()

@@ -1,0 +1,19 @@
+{
+	"FileVersion": 3,
+	"Version": 1,
+	"VersionName": "0.1.0",
+	"FriendlyName": "GenDragoon Cloud Save",
+	"Description": "Encrypted cloud saves on GenDragoon Cloud SSD, through the GenDragoon C library.",
+	"Category": "Online",
+	"CreatedBy": "GenDragoon",
+	"CanContainContent": false,
+	"Installed": false,
+	"Modules": [
+		{
+			"Name": "GenDragoon",
+			"Type": "Runtime",
+			"LoadingPhase": "Default",
+			"PlatformAllowList": [ "Win64", "Mac", "Linux" ]
+		}
+	]
+}

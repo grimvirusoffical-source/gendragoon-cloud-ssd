@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gendragoon"
+version = "0.1.0"
+description = "GenDragoon Cloud SSD SDK: storage provider API, encrypted files and folders, sync, sharing and change events."
+requires-python = ">=3.10"
+dependencies = ["cryptography>=42"]
+
+[project.optional-dependencies]
+argon2 = ["cryptography>=44"]
+test = ["pytest>=8"]
+
+[tool.setuptools]
+packages = ["gendragoon"]
