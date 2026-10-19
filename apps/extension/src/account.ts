@@ -71,3 +71,16 @@ export async function status(deps: ExtensionAuthDeps): Promise<AccountStatus> {
     return { state: "error", code: error instanceof AccountsApiError ? error.code : "unavailable" };
   }
 }
+
+/**
+ * The redirect registered with Red-XAI for this build: Chrome and Edge give
+ * `https://<extension id>.chromiumapp.org/oauth2`, Firefox gives
+ * `https://<sha1 of the add-on id>.extensions.allizom.org/oauth2`. Opera has
+ * `launchWebAuthFlow` but no `getRedirectURL`, and catches the same chromiumapp.org
+ * pattern, so the URL is built from the runtime id there.
+ */
+export function extensionRedirectUri(identity: { getRedirectURL?(path?: string): string }, runtimeId: string | undefined): string {
+  if (identity.getRedirectURL) return identity.getRedirectURL("oauth2");
+  if (!runtimeId) throw new Error("no_extension_id");
+  return `https://${runtimeId}.chromiumapp.org/oauth2`;
+}

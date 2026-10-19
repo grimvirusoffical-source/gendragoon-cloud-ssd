@@ -1,7 +1,7 @@
 import { applyThemePreference, loadThemePreference } from "../../../packages/ui/src/theme-runtime";
 import { mountThemeControl } from "./themeControl";
 import { API_BASE, PRIVACY_URL, REDXAI_ISSUER, SUPPORT_URL } from "./config";
-import { signIn, signOut, status, type AccountStatus, type ExtensionAuthDeps } from "./account";
+import { extensionRedirectUri, signIn, signOut, status, type AccountStatus, type ExtensionAuthDeps } from "./account";
 import { sortCategoryFor } from "./sorter";
 import { probeService } from "./status";
 import { renderChecking, renderStatus } from "./statusView";
@@ -27,7 +27,8 @@ function openSettings(): void {
 }
 
 type IdentityApi = {
-  identity?: { getRedirectURL(path?: string): string; launchWebAuthFlow(details: { url: string; interactive: boolean }): Promise<string | undefined> };
+  runtime?: { id?: string };
+  identity?: { getRedirectURL?(path?: string): string; launchWebAuthFlow(details: { url: string; interactive: boolean }): Promise<string | undefined> };
   storage?: { session?: { get(key: string): Promise<Record<string, unknown>>; set(items: Record<string, unknown>): Promise<void>; remove(key: string): Promise<void> } };
 };
 
@@ -40,7 +41,7 @@ function authDeps(): ExtensionAuthDeps | null {
   return {
     issuer: REDXAI_ISSUER,
     apiBase: API_BASE,
-    redirectUri: identity.getRedirectURL("oauth2"),
+    redirectUri: extensionRedirectUri(identity, api?.runtime?.id),
     launchWebAuthFlow: async (url) => {
       const redirect = await identity.launchWebAuthFlow({ url, interactive: true });
       if (!redirect) throw new Error("cancelled");

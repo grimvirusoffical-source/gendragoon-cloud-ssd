@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { signIn, signOut, status, type ExtensionAuthDeps } from "../src/account";
+import { extensionRedirectUri, signIn, signOut, status, type ExtensionAuthDeps } from "../src/account";
 import { manifestFor } from "../scripts/manifests.mjs";
 import { startRedXaiMock, type RedXaiMock } from "../../../packages/core/test/redxai-mock";
 
@@ -75,5 +75,11 @@ describe("extension Red-XAI Account sign-in", () => {
     expect(withSignIn.permissions).toEqual(["identity", "storage"]);
     expect(withSignIn.host_permissions).toEqual([`${API}/*`, "https://accounts.red-xai.example/*"]);
     expect(manifestFor("firefox", "1.0.0", API, "https://accounts.red-xai.example").browser_specific_settings.gecko.data_collection_permissions).toEqual({ required: ["authenticationInfo"] });
+  });
+
+  it("redirect URIs: the browser's own for Chrome/Edge/Firefox, built from the runtime id on Opera", () => {
+    expect(extensionRedirectUri({ getRedirectURL: (p) => `https://abcdefghijklmnop.chromiumapp.org/${p}` }, "abcdefghijklmnop")).toBe("https://abcdefghijklmnop.chromiumapp.org/oauth2");
+    expect(extensionRedirectUri({}, "operaextensionid")).toBe("https://operaextensionid.chromiumapp.org/oauth2");
+    expect(() => extensionRedirectUri({}, undefined)).toThrow("no_extension_id");
   });
 });
