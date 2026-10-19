@@ -6,6 +6,9 @@ interface GendragoonBridge {
   platform: string;
   setTransferActive?: (active: boolean) => void;
   onUpdaterNotice?: (callback: (text: string) => void) => void;
+  checkForUpdates?: () => Promise<unknown>;
+  getUpdateState?: () => Promise<unknown>;
+  onUpdateState?: (callback: (state: unknown) => void) => void;
   getSecret?: (name: string) => Promise<Uint8Array | null>;
   setSecret?: (name: string, bytes: Uint8Array) => Promise<void>;
   deleteSecret?: (name: string) => Promise<void>;

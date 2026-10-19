@@ -34,7 +34,7 @@ import {
   type TreeNode,
   type WorkspaceRecord,
 } from "@gendragoon/core";
-import { AccountSurface, AppShell, ByoSetup, FileBrowser, SettingsView, deletionFailureNotice, type ShellView } from "@gendragoon/ui";
+import { AccountSurface, AppShell, ByoSetup, FileBrowser, SettingsView, UpdateControl, deletionFailureNotice, type ShellView, type UpdateView } from "@gendragoon/ui";
 
 const secrets = new MemorySecretStore();
 
@@ -125,6 +125,7 @@ export function App() {
   });
   const [status, setStatus] = useState("Ready");
   const [notice, setNotice] = useState<string | null>(null);
+  const [updateState, setUpdateState] = useState<UpdateView>({ status: "idle" });
   const [writeError, setWriteError] = useState<unknown>(null);
   const [byoMessage, setByoMessage] = useState<string | null>(null);
   const [signedOut, setSignedOut] = useState<null | "deleted" | "invalid-token" | "signed-out">(null);
@@ -147,7 +148,20 @@ export function App() {
 
   useEffect(() => {
     window.gendragoon?.onUpdaterNotice?.((text) => setNotice(text));
+    window.gendragoon?.onUpdateState?.((next) => setUpdateState(next as UpdateView));
+    void window.gendragoon?.getUpdateState?.().then((current) => setUpdateState(current as UpdateView));
   }, []);
+
+  /** Manual "Check for updates": a real check in the main process. Progress arrives through onUpdateState. */
+  function checkForUpdates() {
+    const check = window.gendragoon?.checkForUpdates;
+    if (!check) {
+      setUpdateState({ status: "error", message: "Updates are only available in the installed desktop app." });
+      return;
+    }
+    setUpdateState({ status: "checking", manual: true });
+    void check().then((final) => setUpdateState(final as UpdateView)).catch(() => setUpdateState({ status: "error", message: "Could not check for updates. Try again." }));
+  }
 
   function open(next: ShellView) {
     window.location.hash = `#/${next}`;
@@ -447,6 +461,8 @@ export function App() {
     );
   } else if (view === "settings") {
     body = (
+      <>
+      <UpdateControl state={updateState} onCheck={checkForUpdates} />
       <SettingsView
         settings={settings}
         rows={rows}
@@ -462,6 +478,7 @@ export function App() {
         onRetryDeletion={() => void onRetryDeletion()}
         onDismissDeletion={() => void onDismissDeletion()}
       />
+      </>
     );
   }
 

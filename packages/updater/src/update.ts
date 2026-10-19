@@ -7,6 +7,14 @@ export const HEALTH_WINDOW_MS = 60_000;
 /** NSIS silent install. The same flag reinstalls the previous installer on rollback. */
 export const NSIS_SILENT_ARGS = ["/S"] as const;
 
+/**
+ * Update-time NSIS args. electron-builder's assisted (oneClick:false) installer only
+ * starts the app again after a silent install when it gets `--force-run`, and
+ * `--updated` makes it wait for the running app to exit instead of killing it.
+ * Without them a silent install replaces the files and leaves the user with no app running.
+ */
+export const NSIS_UPDATE_ARGS = ["/S", "--updated", "--force-run"] as const;
+
 /** Public stable feed. No token. */
 export function publicReleaseFeed(): { repo: string; assetPattern: string } {
   return {
@@ -15,8 +23,8 @@ export function publicReleaseFeed(): { repo: string; assetPattern: string } {
   };
 }
 
-export function silentInstallPlan(file: string): { file: string; args: readonly ["/S"]; healthWindowMs: number } {
-  return { file, args: NSIS_SILENT_ARGS, healthWindowMs: HEALTH_WINDOW_MS };
+export function silentInstallPlan(file: string): { file: string; args: readonly ["/S", "--updated", "--force-run"]; healthWindowMs: number } {
+  return { file, args: NSIS_UPDATE_ARGS, healthWindowMs: HEALTH_WINDOW_MS };
 }
 
 /** A version that was just rolled back is not offered again. */

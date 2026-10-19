@@ -222,3 +222,14 @@ input:focus, select:focus { border-color: var(--purple); box-shadow: 0 0 0 3px r
   .shell { grid-template-columns: 1fr; }
   .grid, .lock-grid { grid-template-columns: 1fr; }
 }
+
+/* Updates */
+.update-control { margin-bottom: 16px; }
+.update-head { display: flex; justify-content: space-between; align-items: center; gap: 16px; }
+.update-head h3 { margin: 0 0 4px; font-size: 16px; }
+.update-status { margin: 0; color: var(--muted); font-size: 14px; }
+.update-status.is-error { color: var(--danger); }
+.progress { margin-top: 12px; height: 6px; border-radius: 99px; background: var(--line); overflow: hidden; }
+.progress > span { display: block; height: 100%; width: 100%; background: var(--purple); transform-origin: left center; transition: transform 0.2s ease-out; }
+.progress.indeterminate > span { width: 40%; animation: indeterminate 1.2s ease-in-out infinite; }
+@keyframes indeterminate { from { transform: translateX(-100%); } to { transform: translateX(260%); } }

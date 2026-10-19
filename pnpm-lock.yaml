@@ -69,6 +69,9 @@ importers:
       vite:
         specifier: 6.3.5
         version: 6.3.5(@types/node@22.15.21)(lightningcss@1.33.0)(terser@5.51.2)
+      vitest:
+        specifier: 3.1.4
+        version: 3.1.4(@types/debug@4.1.13)(@types/node@22.15.21)(jsdom@26.1.0)(lightningcss@1.33.0)(terser@5.51.2)
 
   apps/mobile:
     dependencies:

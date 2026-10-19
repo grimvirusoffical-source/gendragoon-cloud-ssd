@@ -9,7 +9,8 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "build": "vite build && esbuild src/main/main.ts --bundle --platform=node --format=cjs --outfile=dist/main.js --external:electron && esbuild src/main/preload.ts --bundle --platform=node --format=cjs --outfile=dist/preload.js --external:electron",
     "dist:win": "pnpm build && electron-builder --win nsis --publish never",
-    "screenshots": "vite build && node scripts/capture.mjs"
+    "screenshots": "vite build && node scripts/capture.mjs",
+    "test": "vitest run"
   },
   "dependencies": {
     "@gendragoon/core": "workspace:*",
@@ -27,6 +28,7 @@
     "react": "18.3.1",
     "react-dom": "18.3.1",
     "typescript": "5.8.3",
-    "vite": "6.3.5"
+    "vite": "6.3.5",
+    "vitest": "3.1.4"
   }
 }

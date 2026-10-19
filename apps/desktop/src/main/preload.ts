@@ -10,6 +10,16 @@ contextBridge.exposeInMainWorld("gendragoon", {
       if (typeof text === "string") callback(text);
     });
   },
+  /** Manual "Check for updates". Resolves with the state the cycle ended in. */
+  checkForUpdates(): Promise<unknown> {
+    return ipcRenderer.invoke("updater:check");
+  },
+  getUpdateState(): Promise<unknown> {
+    return ipcRenderer.invoke("updater:state");
+  },
+  onUpdateState(callback: (state: unknown) => void) {
+    ipcRenderer.on("updater-state", (_event, state: unknown) => callback(state));
+  },
   getSecret(name: string): Promise<Uint8Array | null> {
     return ipcRenderer.invoke("secret:get", name);
   },
