@@ -102,7 +102,7 @@ Set these as Cloud Run environment variables; bind the secret ones from Secret M
 | `REDXAI_ISSUER`, `REDXAI_CLIENT_ID` | no | Optional. Accept Red-XAI Accounts sign-in tokens. |
 | `TWILIO_ACCOUNT_SID` | no | Turns on phone 2FA codes through Twilio. |
 | `TWILIO_AUTH_TOKEN` | yes | Twilio credential. Alternatively set the API key pair below. |
-| `TWILIO_API_KEY_SID`, `TWILIO_API_KEY_SECRET` | secret only | Twilio API key credential (preferred over the auth token). |
+| `TWILIO_API_KEY_SID`, `TWILIO_API_KEY_SECRET` | the secret is | Twilio API key credential (preferred over the auth token). |
 | `TWILIO_MESSAGING_SERVICE_SID` | no | Sender. Preferred; otherwise set `TWILIO_FROM_NUMBER`. |
 | `TWILIO_FROM_NUMBER` | no | Sender number in E.164 form, used when no Messaging Service is set. |
 | `SMS_PROVIDER` | no | Optional. `twilio` forces Twilio; `mock` is for local and staging runs only. |
