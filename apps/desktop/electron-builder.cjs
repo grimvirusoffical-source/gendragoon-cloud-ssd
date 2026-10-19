@@ -26,7 +26,7 @@ module.exports = {
     executableName: "gendragoon-cloud-ssd",
     artifactName: "GenDragoon-Cloud-SSD-${version}-linux-${arch}.${ext}",
     category: "Utility",
-    maintainer: "Red-XAI LLC <support@example.com>",
+    maintainer: "Red-XAI LLC <support@infected-nation.com>",
     target: [{ target: "AppImage" }, { target: "deb" }, { target: "tar.gz" }],
   },
   nsis: {

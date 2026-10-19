@@ -38,9 +38,9 @@ describe("SettingsView deletion notice", () => {
     const html = view({
       deletionMessage: "Account deletion cannot be retried.",
       deletionRetryable: false,
-      supportContact: "placeholder@example.com",
+      supportContact: "support@infected-nation.com",
     });
-    expect(html).toContain("placeholder@example.com");
+    expect(html).toContain("support@infected-nation.com");
     expect(html).toContain("delete-account-dismiss");
     expect(html).not.toContain("delete-account-retry");
   });
