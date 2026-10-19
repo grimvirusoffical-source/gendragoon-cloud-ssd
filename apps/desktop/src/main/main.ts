@@ -2,6 +2,7 @@ import { app, BrowserWindow, dialog, ipcMain, safeStorage, session, shell as ele
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { ABOUT_OWNERSHIP } from "@gendragoon/core/about";
 import { detectDistribution, updatePolicy, type UpdateState } from "@gendragoon/updater";
 import { createDesktopUpdater } from "./updater-service.js";
 import { isStripeUrl } from "./billing-url.js";
@@ -197,6 +198,9 @@ function toBuffer(bytes: unknown): Buffer | null {
   if (bytes instanceof Uint8Array) return Buffer.from(bytes);
   return null;
 }
+
+// Native About panel (app menu / Linux): same ownership copy as Settings > About.
+app.setAboutPanelOptions({ applicationName: "GenDragoon Cloud SSD", applicationVersion: app.getVersion(), copyright: ABOUT_OWNERSHIP });
 
 void app.whenReady().then(async () => {
   requireSafeStorage();

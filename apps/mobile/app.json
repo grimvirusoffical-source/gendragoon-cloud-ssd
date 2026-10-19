@@ -11,7 +11,10 @@
     "backgroundColor": "#0d0b14",
     "ios": {
       "bundleIdentifier": "com.gendragoon.cloudssd",
-      "supportsTablet": true
+      "supportsTablet": true,
+      "infoPlist": {
+        "NSHumanReadableCopyright": "© Red-XAI LLC"
+      }
     },
     "android": {
       "package": "com.gendragoon.cloudssd",

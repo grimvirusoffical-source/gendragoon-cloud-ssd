@@ -1,4 +1,5 @@
 import {
+  ABOUT_OWNERSHIP,
   ApiError,
   COMING_SOON_BYO_PROVIDERS,
   LAUNCH_BYO_PROVIDERS,
@@ -1021,6 +1022,11 @@ export function ThemePicker() {
   );
 }
 
+function AboutText() {
+  const styles = useStyles(makeStyles);
+  return <Text style={styles.help} testID="about-ownership" accessibilityRole="text">{ABOUT_OWNERSHIP}</Text>;
+}
+
 export function SettingsHome(props: {
   onSort: () => void;
   onConnect?: () => void;
@@ -1040,6 +1046,8 @@ export function SettingsHome(props: {
       ) : null}
       <Button label="Delete account" tone="danger" compact testID="delete-account" disabled={props.deleteDisabled} onPress={props.onDelete} />
       <Button label="Sign out" tone="ghost" testID="sign-out" onPress={props.onSignOut} />
+      <SectionLabel>About</SectionLabel>
+      <AboutText />
     </Screen>
   );
 }
