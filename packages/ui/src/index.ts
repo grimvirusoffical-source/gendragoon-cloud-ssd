@@ -6,6 +6,8 @@ export { LockScreen } from "./LockScreen.js";
 export { PassphraseSetup } from "./PassphraseSetup.js";
 export { SettingsView, deletionFailureNotice } from "./SettingsView.js";
 export { ByoSetup } from "./ByoSetup.js";
+export { RedxConnections } from "./RedxConnections.js";
+export type { ConnectionWorkspace } from "./RedxConnections.js";
 export { UpdateControl, isUpdateBusy, updateLabel } from "./UpdateControl.js";
 export type { UpdateView } from "./UpdateControl.js";
 export { ThemeToggle, initTheme } from "./ThemeToggle.js";

@@ -18,6 +18,7 @@ import {
   MemorySecretStore,
   performOwnershipChallenge,
   presignChallengeGet,
+  providerErrorMessage,
   reduceAccount,
   retryDeletion,
   registrationRequiresChallenge,
@@ -29,12 +30,14 @@ import {
   type AccountState,
   type BrowserMode,
   type ByoProviderId,
+  type ProviderBinding,
+  type ProviderGrant,
   type Settings,
   type SortCategory,
   type TreeNode,
   type WorkspaceRecord,
 } from "@gendragoon/core";
-import { AccountSurface, AppShell, ByoSetup, FileBrowser, SettingsView, UpdateControl, deletionFailureNotice, type ShellView, type UpdateView } from "@gendragoon/ui";
+import { AccountSurface, AppShell, ByoSetup, FileBrowser, RedxConnections, SettingsView, UpdateControl, deletionFailureNotice, type ShellView, type UpdateView } from "@gendragoon/ui";
 
 const secrets = new MemorySecretStore();
 
@@ -106,11 +109,28 @@ function sampleWorkspaces(): WorkspaceRecord[] {
   ];
 }
 
+/** Shown when no API base or token is configured (preview builds, screenshots). */
+const SAMPLE_BINDINGS: ProviderBinding[] = [
+  {
+    id: "5b0e8f7a-2c41-4d6e-9a13-7f2c4b8d1e90",
+    workspaceId: "paid-1",
+    client: { name: "RedX", host: "studio-mac" },
+    scopes: ["blobs:rw"],
+    usedBytes: 3_400_000_000,
+    quotaBytes: 10_000_000_000,
+    objectCount: 1820,
+    createdAt: "2026-10-12T09:30:00Z",
+    lastUsedAt: "2026-10-19T06:10:00Z",
+    lastError: null,
+    active: true,
+  },
+];
+
 const EXTENSIONS = [".jpg", ".mp4", ".mp3", ".pdf", ".zip", ".app", ".bin"];
 
 function viewFromHash(hash: string): ShellView {
   const name = hash.replace("#/", "");
-  if (name === "backup" || name === "settings" || name === "files") return name;
+  if (name === "backup" || name === "settings" || name === "files" || name === "connections") return name;
   if (name === "workspaces" || name === "lock" || name === "connect") return "workspaces";
   return "files";
 }
@@ -134,6 +154,11 @@ export function App() {
   const [deleting, setDeleting] = useState(false);
   const [reauthRequired, setReauthRequired] = useState(false);
   const [deletionNotice, setDeletionNotice] = useState<{ message: string; retryable: boolean; support?: string } | null>(null);
+  const [bindings, setBindings] = useState<ProviderBinding[] | null>(null);
+  const [bindingsError, setBindingsError] = useState<string | null>(null);
+  const [grant, setGrant] = useState<ProviderGrant | null>(null);
+  const [connecting, setConnecting] = useState(false);
+  const [revokingId, setRevokingId] = useState<string | null>(null);
   const [access, setAccess] = useState<AccessResponse>(LOCKED_ACCESS);
   const [account, setAccount] = useState<AccountState>(() => accountFromAssessment(LOCKED_ACCESS));
   const mode: BrowserMode = view === "backup" ? "backup" : "upload";
@@ -168,6 +193,55 @@ export function App() {
     setUpdateState({ status: "checking", manual: true });
     void check().then((final) => setUpdateState(final as UpdateView)).catch(() => setUpdateState({ status: "error", message: "Could not check for updates. Try again." }));
   }
+
+  async function providerClient(): Promise<GenDragoonClient | null> {
+    const token = await window.gendragoon?.getIdToken?.();
+    const apiBase = import.meta.env.VITE_API_BASE;
+    return apiBase && token ? new GenDragoonClient({ baseUrl: apiBase, getToken: async () => token }) : null;
+  }
+
+  async function loadBindings() {
+    setBindingsError(null);
+    setBindings(null);
+    try {
+      const client = await providerClient();
+      setBindings(client ? await client.providerBindings() : SAMPLE_BINDINGS);
+    } catch (error) {
+      setBindingsError(providerErrorMessage(error));
+    }
+  }
+
+  async function onCreateGrant(workspaceId: string) {
+    setConnecting(true);
+    try {
+      const client = await providerClient();
+      setGrant(client
+        ? await client.createProviderGrant(workspaceId, { name: "RedX", host: "" })
+        : { grant: `gdpg_${"x".repeat(43)}`, expiresAt: new Date(Date.now() + 300_000).toISOString(), ttlSeconds: 300 });
+    } catch (error) {
+      setBindingsError(providerErrorMessage(error));
+    } finally {
+      setConnecting(false);
+    }
+  }
+
+  async function onRevokeBinding(id: string, deleteData: boolean) {
+    setRevokingId(id);
+    try {
+      const client = await providerClient();
+      if (client) await client.revokeProviderBinding(id, deleteData);
+      else setBindings((current) => current?.map((b) => (b.id === id ? { ...b, active: false, usedBytes: deleteData ? 0 : b.usedBytes } : b)) ?? null);
+      if (client) await loadBindings();
+    } catch (error) {
+      setBindingsError(providerErrorMessage(error));
+    } finally {
+      setRevokingId(null);
+    }
+  }
+
+  useEffect(() => {
+    if (view === "connections") void loadBindings();
+  }, [view]);
 
   function open(next: ShellView) {
     window.location.hash = `#/${next}`;
@@ -464,6 +538,26 @@ export function App() {
         </header>
         <ByoSetup onChallenge={(input) => void onChallenge(input)} onStoreSecret={(secret) => void onStoreSecret(secret)} message={byoMessage} />
       </section>
+    );
+  } else if (view === "connections") {
+    body = (
+      <RedxConnections
+        bindings={bindings}
+        error={bindingsError}
+        workspaces={workspaces.filter((w) => w.kind !== "byo").map((w) => ({ id: w.id, name: w.name || w.id }))}
+        grant={grant}
+        // TODO(connect links): gendragoon://connect?… from RedX (PKCE) needs a protocol handler in main.ts and a
+        // preload bridge; parseConnectRequest/authorizeProvider/connectRedirect in core are ready for it.
+        pendingRequest={null}
+        busyId={revokingId}
+        connecting={connecting}
+        onCreateGrant={(id) => void onCreateGrant(id)}
+        onApproveRequest={() => {}}
+        onDenyRequest={() => {}}
+        onRevoke={(id, deleteData) => void onRevokeBinding(id, deleteData)}
+        onRetry={() => void loadBindings()}
+        onCopy={(value) => void navigator.clipboard?.writeText(value)}
+      />
     );
   } else if (view === "settings") {
     body = (

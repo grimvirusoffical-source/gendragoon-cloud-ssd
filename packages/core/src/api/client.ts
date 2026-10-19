@@ -2,6 +2,7 @@ import { assertNoCredentialFields, BYO_PRESIGNED_URL_MESSAGE, BYO_UNSUPPORTED_ME
 import { assertKeyEnvelope } from "../envelope.js";
 import { AccountDeletedError, ApiError, DeletionNotFoundError, DeletionNotRetryableError, InvalidTokenError, ReauthRequiredError, SUPPORT_CONTACT, WorkspaceLockedError, deletionAuthFailure, isAccountDeleted, isInvalidToken, isReauthRequired } from "./errors.js";
 import { parseWorkspacePrice } from "../policy.js";
+import { PROVIDER_BASE_PATH, parseProviderAuthorization, parseProviderBindings, parseProviderGrant, type ProviderAuthorization, type ProviderBinding, type ProviderConnectRequest, type ProviderGrant, type ProviderRevokeResult, type ProviderScope } from "../provider.js";
 import { assertStorageUrlResponse, reauthIsRecent, reauthenticatedAtForDelete } from "../storage.js";
 import type {
   BillingStatusResponse,
@@ -239,6 +240,34 @@ export class GenDragoonClient {
   }
 
   /** Server stores this envelope and nothing else about the workspace key. */
+  /** Connections from other apps (RedX) to this account's workspaces. Never includes keys. */
+  async providerBindings(): Promise<ProviderBinding[]> {
+    return parseProviderBindings(await this.request<unknown>("GET", `${PROVIDER_BASE_PATH}/bindings`));
+  }
+
+  /** One-time connect code (5 minutes) the user pastes into the other app. */
+  async createProviderGrant(workspaceId: string, requester: { name: string; host: string }, scopes: ProviderScope[] = ["blobs:rw"]): Promise<ProviderGrant> {
+    return parseProviderGrant(await this.request<unknown>("POST", `${PROVIDER_BASE_PATH}/connect/grants`, { workspaceId, scopes, requester }));
+  }
+
+  /** Approves a PKCE connect request; the returned code goes back to the requesting app's loopback listener. */
+  async authorizeProvider(workspaceId: string, request: ProviderConnectRequest): Promise<ProviderAuthorization> {
+    return parseProviderAuthorization(await this.request<unknown>("POST", `${PROVIDER_BASE_PATH}/connect/authorize`, {
+      workspaceId,
+      scopes: request.scopes,
+      requester: request.requester,
+      codeChallenge: request.codeChallenge,
+      codeChallengeMethod: request.codeChallengeMethod,
+    }));
+  }
+
+  /** Revokes the connection and its keys at once. deleteData also removes what the app stored. */
+  async revokeProviderBinding(id: string, deleteData = false): Promise<ProviderRevokeResult> {
+    const query = deleteData ? "?deleteData=true" : "";
+    const body = await this.request<{ revoked?: unknown; purgedObjects?: unknown }>("DELETE", `${PROVIDER_BASE_PATH}/bindings/${encodeURIComponent(id)}${query}`);
+    return { revoked: body?.revoked === true, purgedObjects: typeof body?.purgedObjects === "number" ? body.purgedObjects : null };
+  }
+
   async getKeyEnvelope(id: string): Promise<KeyEnvelope> {
     const envelope = await this.request<KeyEnvelope>("GET", `/v2/workspaces/${encodeURIComponent(id)}/key-envelope`);
     assertKeyEnvelope(envelope);

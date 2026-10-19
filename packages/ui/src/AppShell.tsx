@@ -1,11 +1,12 @@
 import type { ReactNode } from "react";
 
-export type ShellView = "files" | "backup" | "workspaces" | "settings";
+export type ShellView = "files" | "backup" | "workspaces" | "connections" | "settings";
 
 const NAV: { id: ShellView; label: string }[] = [
   { id: "files", label: "Files" },
   { id: "backup", label: "Backup" },
   { id: "workspaces", label: "Workspaces" },
+  { id: "connections", label: "Connected apps" },
   { id: "settings", label: "Settings" },
 ];
 

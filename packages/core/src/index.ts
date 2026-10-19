@@ -212,3 +212,28 @@ export type {
   DeletionSupportResult,
   KeyEnvelope,
 } from "./api/types.js";
+
+export {
+  PROVIDER_BASE_PATH,
+  PROVIDER_SCOPES,
+  isProviderScope,
+  parseProviderBindings,
+  parseProviderGrant,
+  parseProviderAuthorization,
+  providerQuota,
+  formatBytes,
+  parseConnectRequest,
+  connectRedirect,
+  scopeLabel,
+  providerErrorMessage,
+} from "./provider.js";
+export type {
+  ProviderScope,
+  ProviderClientInfo,
+  ProviderBinding,
+  ProviderGrant,
+  ProviderAuthorization,
+  ProviderRevokeResult,
+  ProviderConnectRequest,
+  QuotaView,
+} from "./provider.js";
