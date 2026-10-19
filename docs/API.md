@@ -16,11 +16,21 @@ Customers have logical workspaces inside one shared `CUSTOMER_BUCKET`. They do n
 
 Caps, the monthly fee, grandfathering, and lapse are decided on the server. `packages/core` does not recompute them and does not include `feeIsOneTime` on client types. The client renders lock fields on the workspace list and HTTP 423. There is no `/v2/access` route.
 
-Workspace list items and create `project` objects carry `isFree`, `monthlyPriceCents`, `grandfathered`, and `feeWaived` from the server. All four are required. `monthlyPriceCents` is 0 exactly when `isFree`, `grandfathered`, or `feeWaived` is true. `workspacePriceLabel` renders `Free` only when `isFree` is true, `Included` when `grandfathered` or `feeWaived` is true, and otherwise formats `monthlyPriceCents` as USD. A BYO register response may include `grandfatheringEnded`; the client copies that boolean through. The client does not count workspaces and does not hard-code a dollar amount. `GET /v2/pricing` remains the server catalog (`additionalOneTimeCents` and the rest). That catalog is not a per-workspace price.
+Workspace list items and create `project` objects carry `isFree`, `monthlyPriceCents`, `grandfathered`, and `feeWaived` from the server. All four are required. `monthlyPriceCents` is 0 exactly when `isFree`, `grandfathered`, or `feeWaived` is true. `workspacePriceLabel` renders `Free` only when `isFree` is true, `Included` when `grandfathered` or `feeWaived` is true, and otherwise formats `monthlyPriceCents` as USD. A BYO register response may include `grandfatheringEnded`; the client copies that boolean through. The client does not count workspaces and does not hard-code a dollar amount. `GET /v2/pricing` remains the server catalog (`storage`, `performance`, `customStorage` and the rest). That catalog is not a per-workspace price.
 
 `planSummary(access)` copies `activeCount` to `used`, `cap` to `limit`, and `locked`. It copies `paidThroughMs`, `renewsAtMs`, and `lifetime` only when the server sent them. It does not invent a grace period or a lifetime rule.
 
-Recurring workspace-fee checkout is an addition for Riley. Until it exists, the client keeps calling `POST /v2/projects` and `POST /v2/projects/:id/checkout`. The quoted cents on that response are the server's.
+### Workspace plans (cloud-ssd `feature/workspace-plans`)
+
+The workspace fee is included in the storage plans; there is no separate fee and no fee checkout.
+
+| Workspace | `POST /v2/projects` body | Checkout |
+| --- | --- | --- |
+| First hosted workspace (policy `freeProjectAvailable`) | `{name, intentId}` | none: 2 GB + free performance plan |
+| Every additional workspace | `{name, intentId, plans: {storageTier, performanceTier, interval}}` | one subscription with the storage price + the performance price |
+| Custom storage | `{name, intentId, storage: "custom", plans: {performanceTier, interval}}` | one subscription with the performance price only; then the setup wizard (provider → credentials on device → challenge test → finish) |
+
+Build the body with `buildCreateWorkspaceRequest` (core) so the client throws the same `PLANS_REQUIRED` / `PERFORMANCE_PLAN_REQUIRED` / `INVALID_SELECTION` codes the server returns. `POST /v2/projects/:id/checkout` resumes the open session, or takes `{plans}` to change the plans before payment. Plan rows carry `billingModel: "plans"` and `requiredPlans`; label them with `workspacePlansLabel` ("100GB + Boost", "Custom storage + Lite"), not `monthlyPriceCents` (which is 0). Separate `checkout/storage` and `checkout/performance` are only for upgrading the legacy free workspace; on a plans workspace they return 409 `PLANS_MANAGED_TOGETHER`. `checkout/byo` returns 410 `CUSTOM_STORAGE_FEE_RETIRED`.
 
 ## Lock
 
@@ -133,12 +143,6 @@ This client calls workspace routes on `/v2` only. Chunk size is 8,388,608 bytes.
 Keys do not grant billing, merge, or BYO setup.
 
 ## Additions for Riley
-
-### Recurring workspace fee
-
-`POST /v2/workspaces/:id/checkout/workspace-fee`
-
-Subscription mode, metadata `{kind:"workspace_fee", accountHash, workspaceId}`. The price, the free slot, and whether a workspace is already paid are server decisions. `monthlyCents` on the response is that quote. The client does not send `feeIsOneTime` and does not decide the quote.
 
 ### BYO challenge
 

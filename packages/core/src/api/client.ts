@@ -1,3 +1,4 @@
+import type { CreateWorkspaceRequest } from "../workspace-plans.js";
 import { assertNoCredentialFields, BYO_PRESIGNED_URL_MESSAGE, BYO_UNSUPPORTED_MESSAGE, BYO_UNVERIFIABLE_MESSAGE } from "../byo.js";
 import { assertKeyEnvelope } from "../envelope.js";
 import { AccountDeletedError, ApiError, DeletionNotFoundError, DeletionNotRetryableError, InvalidTokenError, ReauthRequiredError, SUPPORT_CONTACT, WorkspaceLockedError, deletionAuthFailure, isAccountDeleted, isInvalidToken, isReauthRequired } from "./errors.js";
@@ -25,7 +26,6 @@ import type {
   ProjectListResponse,
   UploadStatus,
   Workspace,
-  WorkspaceFeeCheckout,
   WorkspaceListResponse,
   StorageUrlRequest,
   StorageUrlResponse,
@@ -116,14 +116,20 @@ export class GenDragoonClient {
     return this.request("POST", `/v2/projects/${encodeURIComponent(id)}/make-hosted`);
   }
 
-  async createProject(body: { name: string; intentId: string }): Promise<Record<string, unknown>> {
+  /**
+   * POST /v2/projects. The free first workspace sends `{ name, intentId }`; every other
+   * workspace sends `plans` (and `storage: "custom"` for custom storage). Build the body with
+   * `buildCreateWorkspaceRequest` so the rules match the server.
+   */
+  async createProject(body: CreateWorkspaceRequest): Promise<Record<string, unknown>> {
     const created = await this.request<Record<string, unknown>>("POST", "/v2/projects", body);
     assertServerPrices(created);
     return created;
   }
 
-  checkoutProject(id: string): Promise<CheckoutResponse> {
-    return this.request("POST", `/v2/projects/${encodeURIComponent(id)}/checkout`);
+  /** Resumes the workspace's single plans Checkout, or replaces its plans before payment. */
+  checkoutProject(id: string, body?: { plans: NonNullable<CreateWorkspaceRequest["plans"]> }): Promise<CheckoutResponse> {
+    return this.request("POST", `/v2/projects/${encodeURIComponent(id)}/checkout`, body);
   }
 
   setSelection(id: string, body: Record<string, string>): Promise<Record<string, unknown>> {
@@ -144,10 +150,6 @@ export class GenDragoonClient {
 
   checkoutPerformance(id: string, body: { tier: string; interval: "month" | "year" }): Promise<CheckoutResponse> {
     return this.request("POST", `/v2/workspaces/${encodeURIComponent(id)}/checkout/performance`, body);
-  }
-
-  checkoutByoSubscription(id: string, body: { interval: "month" | "year" }): Promise<CheckoutResponse> {
-    return this.request("POST", `/v2/workspaces/${encodeURIComponent(id)}/checkout/byo`, body);
   }
 
   /**
@@ -280,11 +282,6 @@ export class GenDragoonClient {
       ? { "If-None-Match": "*" }
       : { "If-Match": `"${envelope.version - 1}"` };
     return this.request("PUT", `/v2/workspaces/${encodeURIComponent(id)}/key-envelope`, envelope, headers);
-  }
-
-  /** Proposed. Recurring workspace fee, distinct from one-time project activation. */
-  checkoutWorkspaceFee(id: string): Promise<WorkspaceFeeCheckout> {
-    return this.request("POST", `/v2/workspaces/${encodeURIComponent(id)}/checkout/workspace-fee`);
   }
 
   /** POST /v2/workspaces/:sourceId/merge with `{ targetId, confirmName }`. */

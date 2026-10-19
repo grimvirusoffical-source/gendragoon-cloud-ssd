@@ -212,3 +212,28 @@ input:focus, select:focus { border-color: var(--purple); box-shadow: 0 0 0 3px v
 .check input { width: auto; margin-top: 2px; }
 .grant { display: flex; flex-direction: column; gap: 8px; align-items: flex-start; }
 .grant-code { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; font-size: 13px; word-break: break-all; user-select: all; color: var(--text); }
+
+/* New workspace: plan pickers, total, and the custom storage wizard. */
+.plan-picker { border: 0; margin: 0; padding: 0; }
+.plan-picker legend { font-weight: 600; margin-bottom: 8px; }
+.plan-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(112px, 1fr)); gap: 8px; }
+.plan-card {
+  display: flex; flex-direction: column; gap: 4px; align-items: flex-start; text-align: left;
+  background: var(--input); border: 1px solid var(--input-border); border-radius: var(--radius-md); padding: 10px 12px;
+  transition: border-color var(--dur-fast) var(--ease-out), background-color var(--dur-fast) var(--ease-out), transform var(--dur-fast) var(--ease-out), box-shadow var(--dur-base) var(--ease-out);
+}
+.plan-card span { color: var(--muted); font-size: 12px; }
+.plan-card:hover { transform: translateY(-1px); border-color: var(--purple); }
+.plan-card.active { border-color: var(--purple); background: var(--soft); box-shadow: 0 4px 14px var(--glow); }
+.plan-total { margin: 0; display: flex; flex-direction: column; gap: 6px; animation: pop-in var(--dur-base) var(--ease-out); }
+.plan-total div { display: flex; justify-content: space-between; color: var(--muted); }
+.plan-total dd { margin: 0; }
+.plan-total .total { color: var(--text); font-weight: 700; border-top: 1px solid var(--line); padding-top: 6px; }
+.steps { list-style: none; margin: 0; padding: 0; display: flex; gap: 6px; flex-wrap: wrap; }
+.step { display: inline-flex; align-items: center; gap: 6px; padding: 5px 10px; border-radius: 999px; background: var(--input); color: var(--muted); font-size: 12px; transition: background-color var(--dur-base) var(--ease-out), color var(--dur-base) var(--ease-out); }
+.step-index { display: inline-grid; place-items: center; width: 18px; height: 18px; border-radius: 50%; background: var(--line); font-size: 11px; }
+.step.done { color: var(--text); }
+.step.done .step-index { background: var(--ok); color: var(--white); }
+.step.current { background: var(--soft); color: var(--text); }
+.step.current .step-index { background: var(--purple); color: var(--on-purple); animation: pulse-glow 1.6s var(--ease-in-out) infinite; }
+@media (prefers-reduced-motion: reduce) { .plan-card, .plan-total, .step, .step-index { transition: none; animation: none; } }

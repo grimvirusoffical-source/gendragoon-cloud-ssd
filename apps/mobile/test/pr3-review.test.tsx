@@ -172,37 +172,33 @@ describe("PR #3 review: pricing UI", () => {
     const deadline = Date.UTC(2026, 9, 21, 2); // Oct 20, 22:00 EDT
     expect(graceBanner(deadline)).toContain("Oct 20, 2026");
   });
-
-  // Gap: a feeWaived (owner) quote labels Included, but the explanation says "billed monthly".
-  it("create screen does not say 'billed monthly' for a feeWaived quote", async () => {
-    const s = await render(
-      <NewWorkspaceScreen pricingEnabled quote={price({ feeWaived: true, monthlyPriceCents: 0 })} onCreate={() => undefined} />,
-    );
-    expect(s.getByTestId("new-workspace-price").props.children).toBe("Included");
-    expect(s.getByTestId("new-workspace-explain").props.children).not.toMatch(/billed monthly/);
-  });
 });
 
 describe("PR #3 review: create screen", () => {
-  it("blocks a blank or whitespace name, trims it, and sends the chosen storage", async () => {
+  it("blocks a blank or whitespace name, trims it, and sends the free first workspace request", async () => {
     const onCreate = jest.fn();
-    const s = await render(<NewWorkspaceScreen quote={price({ isFree: true, monthlyPriceCents: 0 })} onCreate={onCreate} />);
-    const create = s.getByTestId("create-workspace");
-    expect(create.props.accessibilityState.disabled).toBe(true);
+    const s = await render(<NewWorkspaceScreen freeProjectAvailable pricing={null} intentId="intent-1" onCreate={onCreate} />);
+    expect(s.getByTestId("create-workspace").props.accessibilityState.disabled).toBe(true);
     await fireEvent.changeText(s.getByTestId("workspace-name"), "   ");
     expect(s.getByTestId("create-workspace").props.accessibilityState.disabled).toBe(true);
     await fireEvent.changeText(s.getByTestId("workspace-name"), "  Photos  ");
-    expect(s.getByTestId("storage-hosted").props.accessibilityState.checked).toBe(true);
+    expect(s.getByTestId("storage-managed").props.accessibilityState.checked).toBe(true);
     await fireEvent.press(s.getByTestId("create-workspace"));
-    expect(onCreate).toHaveBeenLastCalledWith({ name: "Photos", storage: "hosted", providerId: null });
-    await fireEvent.press(s.getByTestId("storage-byo"));
-    expect(s.getByTestId("storage-byo").props.accessibilityState.checked).toBe(true);
-    expect(s.getByTestId("storage-hosted").props.accessibilityState.checked).toBe(false);
+    expect(onCreate).toHaveBeenLastCalledWith({ name: "Photos", intentId: "intent-1" });
+  });
+  it("custom storage needs a performance plan and sends no storage plan", async () => {
+    const onCreate = jest.fn();
+    const s = await render(<NewWorkspaceScreen freeProjectAvailable pricing={null} intentId="intent-2" initialName="Own S3" onCreate={onCreate} />);
+    await fireEvent.press(s.getByTestId("storage-custom"));
+    expect(s.getByTestId("storage-custom").props.accessibilityState.checked).toBe(true);
+    expect(s.queryByTestId("storage-plans")).toBeNull();
+    expect(s.getByTestId("create-workspace").props.accessibilityState.disabled).toBe(true);
+    await fireEvent.press(s.getByTestId("performance-lite"));
     await fireEvent.press(s.getByTestId("create-workspace"));
-    expect(onCreate.mock.calls.at(-1)?.[0].storage).toBe("byo");
-    expect(onCreate.mock.calls.at(-1)?.[0].providerId).toEqual(expect.any(String));
+    expect(onCreate).toHaveBeenLastCalledWith({ name: "Own S3", intentId: "intent-2", storage: "custom", plans: { performanceTier: "lite", interval: "month" } });
   });
 });
+
 
 describe("PR #3 review: merge section", () => {
   const A = ws("11111111-1111-4111-8111-00000000000a", "Alpha", {});

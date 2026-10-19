@@ -33,6 +33,10 @@ contextBridge.exposeInMainWorld("gendragoon", {
   deleteSecret(name: string): Promise<void> {
     return ipcRenderer.invoke("secret:delete", name);
   },
+  /** Opens Stripe Checkout in the system browser. The main process refuses any non-Stripe URL. */
+  openBilling(url: string): Promise<boolean> {
+    return ipcRenderer.invoke("billing:open", url);
+  },
   getIdToken(): Promise<string | undefined> {
     return ipcRenderer.invoke("auth:id-token");
   },

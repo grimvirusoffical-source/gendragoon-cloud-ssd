@@ -29,15 +29,17 @@ import {
   type AccessResponse,
   type AccountState,
   type BrowserMode,
-  type ByoProviderId,
   type ProviderBinding,
   type ProviderGrant,
   type Settings,
   type SortCategory,
   type TreeNode,
   type WorkspaceRecord,
+  type CreateWorkspaceRequest,
+  type PlansPricing,
+  workspacePlansLabel,
 } from "@gendragoon/core";
-import { AccountSurface, AppShell, ByoSetup, FileBrowser, RedxConnections, SettingsView, UpdateControl, deletionFailureNotice, type ShellView, type UpdateView } from "@gendragoon/ui";
+import { AccountSurface, AppShell, CustomStorageWizard, FileBrowser, NewWorkspace, RedxConnections, SettingsView, UpdateControl, deletionFailureNotice, type CustomStorageCredentials, type ShellView, type UpdateView } from "@gendragoon/ui";
 
 const secrets = new MemorySecretStore();
 
@@ -149,7 +151,13 @@ export function App() {
   // Inside the desktop shell the main process says whether this distribution self-updates. Until it answers, show nothing (a store build must never flash an update button).
   const [updateUi, setUpdateUi] = useState<{ ui: "full" | "managed" | "hidden"; note?: string }>(() => (window.gendragoon?.getUpdatePolicy ? { ui: "hidden" } : { ui: "full" }));
   const [writeError, setWriteError] = useState<unknown>(null);
-  const [byoMessage, setByoMessage] = useState<string | null>(null);
+  const [pricing, setPricing] = useState<PlansPricing | null>(null);
+  const [freeProjectAvailable, setFreeProjectAvailable] = useState(false);
+  const [showNew, setShowNew] = useState(false);
+  const [creating, setCreating] = useState(false);
+  const [workspaceError, setWorkspaceError] = useState<string | null>(null);
+  const [intentId, setIntentId] = useState(() => crypto.randomUUID());
+  const [setupId, setSetupId] = useState<string | null>(null);
   const [signedOut, setSignedOut] = useState<null | "deleted" | "invalid-token" | "signed-out">(null);
   const [deleting, setDeleting] = useState(false);
   const [reauthRequired, setReauthRequired] = useState(false);
@@ -241,6 +249,7 @@ export function App() {
 
   useEffect(() => {
     if (view === "connections") void loadBindings();
+    if (view === "workspaces") void loadWorkspaces();
   }, [view]);
 
   function open(next: ShellView) {
@@ -266,63 +275,92 @@ export function App() {
     setSettings((current) => updateSortMapping(current, extension, category));
   }
 
-  async function onChallenge(input: { provider: ByoProviderId; endpoint: string; bucket: string; accessKeyId?: string; secretAccessKey?: string }) {
+  async function loadWorkspaces() {
+    const client = await providerClient();
+    if (!client) return; // Preview build: keeps the local sample list.
     try {
-      const record = await toServerByoRegistration(input);
-      if (!registrationRequiresChallenge()) {
-        throw new Error("Ownership challenge must run again when storage is registered");
+      const [list, prices] = await Promise.all([client.listWorkspaces(), client.pricing()]);
+      setWorkspaces(list.workspaces as WorkspaceRecord[]);
+      setFreeProjectAvailable(list.policy.freeProjectAvailable === true);
+      setPricing(prices.storage && prices.performance ? { storage: prices.storage, performance: prices.performance } : null);
+    } catch (error) {
+      setWorkspaceError(error instanceof Error ? error.message : "Could not load workspaces");
+    }
+  }
+
+  async function openBilling(url: unknown) {
+    if (typeof url !== "string") return;
+    const opened = await window.gendragoon?.openBilling?.(url);
+    if (!opened) setStatus("Open the checkout link from the installed desktop app.");
+  }
+
+  async function onCreateWorkspace(request: CreateWorkspaceRequest) {
+    setCreating(true);
+    setWorkspaceError(null);
+    try {
+      const client = await providerClient();
+      if (!client) {
+        setWorkspaceError("Sign in to create a workspace.");
+        return;
       }
-      const token = await window.gendragoon?.getIdToken?.();
-      const apiBase = import.meta.env.VITE_API_BASE;
-      const workspaceId = workspaces.find((workspace) => workspace.kind === "byo")?.id ?? "byo";
-      let challengeId = crypto.randomUUID().replace(/-/g, "");
-      let nonce = crypto.randomUUID().replace(/-/g, "");
-      const client = apiBase
-        ? new GenDragoonClient({ baseUrl: apiBase, getToken: async () => token })
-        : null;
-      if (client && token) {
-        await client.registerByo(workspaceId, record);
-        const challenge = await client.createByoChallenge(workspaceId);
-        nonce = challenge.nonce;
-        challengeId = nonce;
-        if (challengeObjectKey(nonce) !== `.gendragoon-challenge/${nonce}`) {
-          throw new Error("Challenge object must be .gendragoon-challenge/<nonce>");
-        }
+      const created = await client.createProject(request);
+      setShowNew(false);
+      setIntentId(crypto.randomUUID());
+      await openBilling(created.url);
+      await loadWorkspaces();
+    } catch (error) {
+      setWorkspaceError(error instanceof Error ? error.message : "Could not create the workspace");
+    } finally {
+      setCreating(false);
+    }
+  }
+
+  async function onResumeCheckout(id: string) {
+    setWorkspaceError(null);
+    try {
+      const client = await providerClient();
+      if (!client) return;
+      const checkout = await client.checkoutProject(id);
+      await openBilling(checkout.url);
+    } catch (error) {
+      setWorkspaceError(error instanceof Error ? error.message : "Could not open checkout");
+    }
+  }
+
+  /**
+   * Custom storage connection test: register (no secrets) → challenge → write + presign on this
+   * device → verify. Credentials go to the OS keychain and never into a request body.
+   */
+  async function runCustomStorageTest(workspaceId: string, input: CustomStorageCredentials) {
+    const client = await providerClient();
+    if (!client) throw new Error("Sign in to connect custom storage.");
+    const record = await toServerByoRegistration(input);
+    if (!registrationRequiresChallenge()) throw new Error("Ownership challenge must run again when storage is registered");
+    await secrets.set(byoSecretId(workspaceId), new TextEncoder().encode(input.secretAccessKey));
+    try {
+      await client.registerByo(workspaceId, record);
+      const challenge = await client.createByoChallenge(workspaceId);
+      if (challengeObjectKey(challenge.nonce) !== `.gendragoon-challenge/${challenge.nonce}`) {
+        throw new Error("Challenge object must be .gendragoon-challenge/<nonce>");
       }
-      const started = Date.now();
       const proof = await performOwnershipChallenge({
-        challengeId,
-        nonce,
-        now: started,
+        challengeId: challenge.nonce,
+        nonce: challenge.nonce,
+        now: Date.now(),
         writer: {
           async write() {
             // The device writes the object with the keychain secret. That secret is not returned.
           },
           async presignGet(key) {
-            if (!input.accessKeyId || !input.secretAccessKey) {
-              throw new Error("Access Key ID and Secret Access Key are required");
-            }
-            return presignChallengeGet({
-              endpoint: record.endpoint,
-              bucket: input.bucket,
-              key,
-              accessKeyId: input.accessKeyId,
-              secretAccessKey: input.secretAccessKey,
-              expiresInSeconds: 300,
-            });
+            return presignChallengeGet({ endpoint: record.endpoint, bucket: input.bucket, key, accessKeyId: input.accessKeyId, secretAccessKey: input.secretAccessKey, expiresInSeconds: 300 });
           },
         },
       });
-      if (client && token) await client.submitByoProof(workspaceId, proof);
-      setByoMessage(`Server record would store ${record.provider}, ${record.endpoint}, fingerprint ${record.bucketFingerprint.slice(0, 16)}. Credentials were not included. Proof is a presigned GET for ${challengeObjectKey(nonce)}.`);
+      await client.submitByoProof(workspaceId, proof);
+      await loadWorkspaces();
     } catch (error) {
-      setByoMessage(byoErrorMessage(error));
+      throw new Error(byoErrorMessage(error));
     }
-  }
-
-  async function onStoreSecret(secret: string) {
-    const workspaceId = workspaces.find((workspace) => workspace.kind === "byo")?.id ?? "byo";
-    await secrets.set(byoSecretId(workspaceId), new TextEncoder().encode(secret));
   }
 
   function onAuthFailure(signal: "signed_out" | "reauth_required") {
@@ -460,6 +498,7 @@ export function App() {
     void onDeleteAccount(new Date().toISOString());
   }
 
+  const setupWorkspace = setupId ? workspaces.find((workspace) => workspace.id === setupId) ?? null : null;
   const rows = EXTENSIONS.map((extension) => {
     const category = categorize({ name: `file${extension}` }, settings.sortOverrides);
     return {
@@ -533,10 +572,46 @@ export function App() {
           <div>
             <div className="kicker"><span className="dot" /> WORKSPACES</div>
             <h2>Your workspaces</h2>
-            <p className="sub">Managed storage uses short-lived signed links. Your own cloud stays on this device.</p>
+            <p className="sub">Each workspace has its own storage and performance plan. The workspace fee is included.</p>
           </div>
+          {!showNew ? <button type="button" className="btn" data-testid="new-workspace-open" onClick={() => setShowNew(true)}>New workspace</button> : null}
         </header>
-        <ByoSetup onChallenge={(input) => void onChallenge(input)} onStoreSecret={(secret) => void onStoreSecret(secret)} message={byoMessage} />
+        {workspaceError ? <div className="banner" role="alert" data-testid="workspace-error">{workspaceError}</div> : null}
+        {showNew ? (
+          <NewWorkspace
+            freeProjectAvailable={freeProjectAvailable}
+            pricing={pricing}
+            intentId={intentId}
+            busy={creating}
+            onSubmit={(request) => void onCreateWorkspace(request)}
+            onCancel={() => setShowNew(false)}
+          />
+        ) : null}
+        {setupWorkspace ? (
+          <CustomStorageWizard
+            workspaceName={setupWorkspace.name}
+            onTest={(credentials) => runCustomStorageTest(setupWorkspace.id, credentials)}
+            onDone={() => setSetupId(null)}
+          />
+        ) : null}
+        <div className="panel" data-testid="workspace-list">
+          {workspaces.map((workspace) => {
+            const pending = workspace.projectStatus === "pending_payment";
+            const needsSetup = workspace.customStorage === true && workspace.projectStatus === "active" && workspace.byoRegistered !== true;
+            const plan = workspace.isFree ? "Free · 2 GB" : workspacePlansLabel(workspace) ?? workspace.storageTier ?? (workspace.kind === "byo" ? "Custom storage" : "");
+            return (
+              <div className="workspace-row" key={workspace.id} data-testid={`workspace-${workspace.id}`}>
+                <span>{workspace.name || workspace.id}</span>
+                <span className="chip">{pending ? "Payment needed" : plan}</span>
+                {pending ? (
+                  <button type="button" className="btn" data-testid={`checkout-${workspace.id}`} onClick={() => void onResumeCheckout(workspace.id)}>Continue to checkout</button>
+                ) : needsSetup ? (
+                  <button type="button" className="btn" data-testid={`setup-${workspace.id}`} onClick={() => setSetupId(workspace.id)}>Finish setup</button>
+                ) : <span />}
+              </div>
+            );
+          })}
+        </div>
       </section>
     );
   } else if (view === "connections") {

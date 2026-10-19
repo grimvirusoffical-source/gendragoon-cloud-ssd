@@ -187,7 +187,6 @@ export type {
   CloudFile,
   FileListResponse,
   CreateUploadRequest,
-  WorkspaceFeeCheckout,
   MergePreviewResponse,
   MergeRequest,
   MergeResponse,
@@ -237,3 +236,32 @@ export type {
   ProviderConnectRequest,
   QuotaView,
 } from "./provider.js";
+
+export {
+  STORAGE_PLAN_TIERS,
+  PERFORMANCE_PLAN_TIERS,
+  FIRST_WORKSPACE_INCLUDES,
+  PLANS_MESSAGES,
+  PlansSelectionError,
+  newWorkspaceRequirement,
+  buildCreateWorkspaceRequest,
+  quoteWorkspacePlans,
+  workspacePlansLabel,
+  capitalize,
+  CUSTOM_STORAGE_STEPS,
+  INITIAL_CUSTOM_STORAGE,
+  customStorageWizard,
+} from "./workspace-plans.js";
+export type {
+  StoragePlanTier,
+  PerformancePlanTier,
+  PlanInterval,
+  WorkspaceStorageChoice,
+  WorkspacePlansSelection,
+  CreateWorkspaceRequest,
+  PlansErrorCode,
+  PlansPricing,
+  CustomStorageStep,
+  CustomStorageWizardState,
+  CustomStorageWizardEvent,
+} from "./workspace-plans.js";

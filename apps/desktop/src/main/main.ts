@@ -1,8 +1,9 @@
-import { app, BrowserWindow, dialog, ipcMain, safeStorage, session, type IpcMainInvokeEvent } from "electron";
+import { app, BrowserWindow, dialog, ipcMain, safeStorage, session, shell as electronShell, type IpcMainInvokeEvent } from "electron";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { detectDistribution, updatePolicy, type UpdateState } from "@gendragoon/updater";
 import { createDesktopUpdater } from "./updater-service.js";
+import { isStripeUrl } from "./billing-url.js";
 
 const here = __dirname;
 
@@ -145,6 +146,12 @@ function registerIpc(): void {
     return getUpdater().controller.getState();
   });
   ipcMain.handle("auth:id-token", () => undefined);
+  /** Opens a Stripe Checkout or billing portal page in the system browser. Any other URL is refused. */
+  ipcMain.handle("billing:open", async (event, url: unknown) => {
+    if (!senderIsShell(event) || !isStripeUrl(url)) return false;
+    await electronShell.openExternal(url);
+    return true;
+  });
   ipcMain.handle("secret:get", async (event, name: unknown) => {
     if (!senderIsShell(event)) throw new Error("Refusing secret IPC from an unknown sender");
     requireSafeStorage();

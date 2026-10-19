@@ -137,12 +137,9 @@ export function MobileRoot(props: {
   }, []);
 
   function payWorkspace(id: string) {
-    const checkout = "checkoutWorkspaceFee" in client
-      ? (workspaceId: string) => client.checkoutWorkspaceFee(workspaceId)
-      : undefined;
     void payToRestore({
       unpaidWorkspaceIds: [id],
-      checkoutWorkspaceFee: checkout,
+      checkoutWorkspace: "checkoutProject" in client ? (workspaceId) => client.checkoutProject(workspaceId) : undefined,
       openUrl: (url) => Linking.openURL(url),
     }).catch(() => undefined);
   }
@@ -309,12 +306,9 @@ export function MobileRoot(props: {
               navigationRef.navigate("Main");
             }}
             onPay={() => {
-              const checkout = "checkoutWorkspaceFee" in client
-                ? (id: string) => client.checkoutWorkspaceFee(id)
-                : undefined;
               void payToRestore({
                 unpaidWorkspaceIds: access.unpaidIds,
-                checkoutWorkspaceFee: checkout,
+                checkoutWorkspace: "checkoutProject" in client ? (id) => client.checkoutProject(id) : undefined,
                 openUrl: (url) => Linking.openURL(url),
               }).catch(() => undefined);
             }}

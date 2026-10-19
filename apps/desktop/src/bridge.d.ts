@@ -14,6 +14,7 @@ interface GendragoonBridge {
   setSecret?: (name: string, bytes: Uint8Array) => Promise<void>;
   deleteSecret?: (name: string) => Promise<void>;
   getIdToken?: () => Promise<string | undefined>;
+  openBilling?: (url: string) => Promise<boolean>;
 }
 
 declare global {

@@ -34,17 +34,26 @@ export interface BillingStatusResponse {
 export interface PricingResponse {
   currency: "usd" | string;
   catalogVersion: number;
+  /** Always 0: the workspace fee is included in the storage plans. */
   workspaceFeeMonthlyCents: number;
-  legacyWorkspaceFeeMonthlyCents: number;
+  workspaceFeeIncluded?: boolean;
   projects: {
     firstFree: boolean;
-    additionalOneTimeCents: number;
+    /** 2 GB storage + the free performance plan (1 worker). */
+    firstFreeIncludes?: { storageGB: number; performanceTier: string; workers: number };
+    /** Every additional workspace: `["storage", "performance"]`. */
+    additionalRequires?: ("storage" | "performance")[];
+    /** Custom storage: `["performance"]`. */
+    customStorageRequires?: ("storage" | "performance")[];
     defaultLimit: number;
     qualifiedLimit: number;
     qualifyingStorageTier: string;
     qualifyingPerformanceTier: string;
     qualifyingWorkers: number;
   };
+  customStorage?: { storagePlanRequired: boolean; performancePlanRequired: boolean; extraFeeCents: number; providerFeesExtra?: boolean; setupWizard?: boolean };
+  storage?: Record<string, { gb: number; monthlyCents: number; yearlyCents: number }>;
+  performance?: Record<string, { workers: number; monthlyCents: number; yearlyCents: number }>;
   purchasesEnabled: boolean;
 }
 
@@ -76,6 +85,12 @@ export interface Workspace {
   projectBillingVersion?: number;
   projectFeeStatus?: "free" | "paid" | "owner" | "pending" | "legacy" | string;
   projectFeeCents?: number;
+  /** "plans" when storage + performance plans are billed together (no separate fee). */
+  billingModel?: "plans" | "free" | "legacy";
+  customStorage?: boolean;
+  requiredPlans?: { storage: "managed" | "custom"; storageTier?: string; performanceTier: string; interval: "month" | "year" } | null;
+  plansStatus?: string | null;
+  workspaceFeeIncluded?: boolean;
   workspaceSubscriptionId?: string | null;
   /** Stripe current_period_end. Proposed on the public payload. */
   currentPeriodEnd?: string | null;
@@ -101,7 +116,12 @@ export interface ProjectPolicy {
   firstProjectFree: boolean;
   freeProjectClaimed: boolean;
   freeProjectAvailable: boolean;
+  /** 0: there is no project or workspace fee. */
   newProjectOneTimeCents: number;
+  workspaceFeeIncluded?: boolean;
+  firstWorkspaceIncludes?: { storageGB: number; performanceTier: string; workers: number };
+  additionalWorkspaceRequires?: ("storage" | "performance")[];
+  customStorageRequires?: ("storage" | "performance")[];
   defaultLimit: number;
   qualifiedLimit: number;
   projectLimit: number;
@@ -127,6 +147,8 @@ export interface CheckoutResponse {
   resumed?: boolean;
   alreadyActivated?: boolean;
   oneTimeCents?: number;
+  /** Sum of the chosen plan prices. Never includes a workspace fee. */
+  totalCents?: number;
   quote?: { totalCents?: number; tier?: string; interval?: string };
 }
 
@@ -170,12 +192,6 @@ export interface CreateUploadRequest {
   logicalBytes?: number;
 }
 
-/** Proposed. Recurring workspace fee. `monthlyCents` is the server quote. */
-export interface WorkspaceFeeCheckout {
-  url?: string;
-  workspaceId: string;
-  monthlyCents: number;
-}
 
 /** POST /v2/workspaces/:sourceId/merge. confirmName is the source workspace name. */
 export interface MergeRequest {
