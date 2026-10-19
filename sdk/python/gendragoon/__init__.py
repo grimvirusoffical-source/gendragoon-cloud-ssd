@@ -13,6 +13,7 @@ from .keyring import Keyring
 from .operations import OPERATIONS
 from .share import Identity, create_read_key, export_share, list_read_keys, open_share, open_share_envelope, revoke_read_key
 from .sync import SyncReport, mirror, pull, push
+from .teams import TeamsClient, verify_audit_chain
 
 __version__ = VERSION
 __all__ = [n for n in dir() if not n.startswith("_")]
