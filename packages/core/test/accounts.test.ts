@@ -28,6 +28,8 @@ import {
   usernameKey,
   usernameRules,
   validateSignup,
+  normalizeRules,
+  normalizeTerms,
   type SignupFields,
 } from "../src/index.js";
 
@@ -182,5 +184,24 @@ describe("Red-XAI OIDC sign-in (PKCE S256)", () => {
     expect(tokens).toMatchObject({ accessToken: "at", refreshToken: "rt", expiresAtMs: 600_000 });
     await expect(completeSignIn(config, pending, `${config.redirectUri}?code=c&state=${pending.state}`, { fetchImpl: fetchFor({ ...good, nonce: "x" }) })).rejects.toMatchObject({ code: "id_token_nonce" });
     await expect(completeSignIn(config, pending, `${config.redirectUri}?code=c&state=${pending.state}`, { fetchImpl: fetchFor({ ...good, aud: "rotten-apple" }) })).rejects.toMatchObject({ code: "id_token_audience" });
+  });
+});
+
+describe("Red-XAI Accounts v1.1 shapes", () => {
+  it("2FA rules from {id, enabled, note} and from the transitional {method, available}", () => {
+    const v11 = normalizeRules({ minAge: 13, centralMinAge: 13, twoFactor: [{ id: "phone", enabled: true }, { id: "redxai_auth", enabled: false, note: "Coming soon" }] });
+    expect(v11.twoFactor).toEqual([{ method: "phone", available: true, label: undefined }, { method: "redxai_auth", available: false, label: "Coming soon" }]);
+    expect(normalizeRules({ appMinAge: 16, twoFactor: [{ method: "app", available: true }] })).toMatchObject({ minAge: 16, twoFactor: [{ method: "app", available: true }] });
+  });
+  it("Terms: central then Gendragoon in one scroll text, editor comment removed, app version kept", () => {
+    const t = normalizeTerms({ version: "rxa-1", title: "Red-XAI", text: "Central.", appVersion: "gendragoon-tos-2026-10-19", appTitle: "Gendragoon", appText: "<!--\nDraft\n-->\n# Gendragoon\n\nApp." });
+    expect(t.text).toBe("Central.\n\n# Gendragoon\n\nApp.");
+    expect(t).toMatchObject({ version: "rxa-1", appVersion: "gendragoon-tos-2026-10-19" });
+    expect(normalizeTerms({ version: "gendragoon-tos-2026-10-19", text: "<!-- x -->Only." }).text).toBe("Only.");
+  });
+  it("email_unverifiable (503) and rate limits are retryable; rule failures are not", () => {
+    expect(new AccountsApiError(503, "email_unverifiable", "email").retryable).toBe(true);
+    expect(new AccountsApiError(429, "rate_limited").retryable).toBe(true);
+    expect(new AccountsApiError(400, "username_edges", "username").retryable).toBe(false);
   });
 });

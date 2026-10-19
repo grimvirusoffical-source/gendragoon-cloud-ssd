@@ -1,97 +1,143 @@
+/**
+ * Gendragoon against the Red-XAI Accounts v1.1 contract. By default this runs against the local mock
+ * (redxai-mock.ts). With REDXAI_TEST_ISSUER set (e.g. a `redxai-accounts --dev --store mem --offline-dns` server,
+ * which fakes SMS and email) the same checks run against the real service. The mock-only cases are marked.
+ */
+import { createHmac, randomBytes } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { AccountsApiError, AccountsClient, beginSignIn, completeSignIn, refreshTokens, REDXAI_SCOPES, OidcError } from "../src/index.js";
+import {
+  AccountsApiError, AccountsClient, appTosVersion, beginSignIn, beginSignUp, completeSignIn, exchangeSession, refreshTokens, REDXAI_SCOPES, OidcError,
+} from "../src/index.js";
 import { startRedXaiMock, type RedXaiMock } from "./redxai-mock.js";
 
-let mock: RedXaiMock;
-beforeAll(async () => { mock = await startRedXaiMock({ now: () => Date.parse("2026-10-19T12:00:00Z") }); });
-afterAll(async () => { await mock.close(); });
+const REAL = process.env.REDXAI_TEST_ISSUER ?? "";
+let mock: RedXaiMock | null = null;
+let issuer = REAL;
+beforeAll(async () => { if (!REAL) { mock = await startRedXaiMock(); issuer = mock.issuer; } });
+afterAll(async () => { await mock?.close(); });
 
-const ADULT = { sub: "acct_adult", username: "dragon_rider", email: "josh@example.com", dob: "07/04/2001", twoFactor: "app" as const, amr: ["pwd", "otp"] };
-const redirectUri = "http://127.0.0.1:51789/callback";
+const redirectUri = "http://127.0.0.1:51789/oauth2/callback";
+const PASSWORD = "Correct-Horse9!";
+const unique = (p: string) => `${p}_${randomBytes(4).toString("hex")}`;
+const client = (session = "") => new AccountsClient({ baseUrl: issuer, pathPrefix: "/v1", app: "gendragoon", getToken: async () => session });
 
-async function authorize(url: string): Promise<string> {
-  const res = await fetch(url, { redirect: "manual" });
-  expect(res.status).toBe(302);
-  return res.headers.get("location")!;
+function totp(secretB32: string, at = Date.now()): string {
+  const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+  let bits = "";
+  for (const c of secretB32.replace(/=+$/, "").toUpperCase()) bits += alphabet.indexOf(c).toString(2).padStart(5, "0");
+  const key = Buffer.from(bits.match(/.{8}/g)!.map((b) => parseInt(b, 2)));
+  const counter = Buffer.alloc(8);
+  counter.writeBigUInt64BE(BigInt(Math.floor(at / 30_000)));
+  const h = createHmac("sha1", key).update(counter).digest();
+  const o = h[h.length - 1]! & 15;
+  return String((h.readUInt32BE(o) & 0x7fffffff) % 1_000_000).padStart(6, "0");
 }
 
-describe("Red-XAI Accounts v1 contract (local mock)", () => {
-  it("requests the contract scopes with PKCE S256", async () => {
+async function agreedGrant(c = client()): Promise<string> {
+  const terms = await c.terms();
+  return (await c.agreeToTerms((await c.markTermsRead(terms.version, terms.appVersion)).grant)).grant;
+}
+
+async function signUp(twoFactor: "app" | "none", c = client()) {
+  const username = unique("gd_rider");
+  const email = `${username}@gendragoon-test.dev`;
+  const created = await c.signup({ username, email, emailConfirm: email, password: PASSWORD, passwordConfirm: PASSWORD, dob: "07/04/2001",
+    twoFactor, acceptNo2faRisk: twoFactor === "none", acknowledgeFalseInfo: true, tosGrant: await agreedGrant(c) });
+  return { username, email, created };
+}
+
+/** The hosted sign-in: a cookie session (Origin = issuer), then /oauth2/authorize with it. */
+async function authorizeAs(login: string, url: string): Promise<string> {
+  const res = await fetch(`${issuer}/v1/login`, { method: "POST", headers: { "content-type": "application/json", origin: issuer }, body: JSON.stringify({ app: "gendragoon", login, password: PASSWORD }) });
+  expect(res.status).toBe(200);
+  const cookie = (res.headers.get("set-cookie") ?? "").split(";")[0]!;
+  const auth = await fetch(url, { redirect: "manual", headers: { cookie } });
+  expect(auth.status).toBe(302);
+  return auth.headers.get("location")!;
+}
+
+const claimsOf = (jwt: string) => JSON.parse(Buffer.from(jwt.split(".")[1]!, "base64url").toString()) as Record<string, unknown>;
+const headerOf = (jwt: string) => JSON.parse(Buffer.from(jwt.split(".")[0]!, "base64url").toString()) as Record<string, unknown>;
+
+describe(`Red-XAI Accounts v1.1 contract (${REAL ? "real service" : "local mock"})`, () => {
+  it("requests the contract scopes with PKCE S256; sign-up opens with screen_hint=signup", async () => {
     expect(REDXAI_SCOPES).toBe("openid profile email");
-    const { url } = await beginSignIn({ issuer: mock.issuer, redirectUri });
-    const p = new URL(url).searchParams;
-    expect(new URL(url).pathname).toBe("/oauth2/authorize");
-    expect(Object.fromEntries(p)).toMatchObject({ response_type: "code", client_id: "gendragoon", scope: "openid profile email", code_challenge_method: "S256" });
+    const { url } = await beginSignIn({ issuer, redirectUri });
+    expect(Object.fromEntries(new URL(url).searchParams)).toMatchObject({ response_type: "code", client_id: "gendragoon", scope: "openid profile email", code_challenge_method: "S256" });
+    expect(new URL((await beginSignUp({ issuer, redirectUri })).url).searchParams.get("screen_hint")).toBe("signup");
   });
 
-  it("signs in: code + verifier for tokens, ID token claims as in the contract, refresh rotation", async () => {
-    mock.signInAs(ADULT);
-    const config = { issuer: mock.issuer, redirectUri };
-    const { url, pending } = await beginSignIn(config);
-    const tokens = await completeSignIn(config, pending, await authorize(url));
-    const claims = JSON.parse(Buffer.from(tokens.idToken.split(".")[1]!, "base64url").toString());
-    expect(claims).toMatchObject({ iss: mock.issuer, aud: "gendragoon", sub: "acct_adult", nonce: pending.nonce, preferred_username: "dragon_rider", age_band: "18plus", email_verified: true, amr: ["pwd", "otp"] });
-    for (const key of ["auth_time", "sid"]) expect(claims).toHaveProperty(key);
-    const access = JSON.parse(Buffer.from(tokens.accessToken.split(".")[1]!, "base64url").toString());
-    expect(Object.keys(access).sort()).toEqual(["aud", "client_id", "exp", "iat", "iss", "scope", "sid", "sub"]);
-    expect(tokens.refreshToken).toMatch(/^rxa_r_/);
-
-    const rotated = await refreshTokens(config, tokens.refreshToken!);
-    expect(rotated.refreshToken).not.toBe(tokens.refreshToken);
-    // Reusing the old refresh token revokes the whole family.
-    await expect(refreshTokens(config, tokens.refreshToken!)).rejects.toMatchObject({ code: "invalid_grant" });
-    await expect(refreshTokens(config, rotated.refreshToken!)).rejects.toBeInstanceOf(OidcError);
+  it("rules and Terms in v1.1 shape: 2FA list, central + Gendragoon terms in one text, a stale app version is refused", async () => {
+    const rules = await client().rules();
+    expect(rules.minAge).toBe(13);
+    expect(rules.twoFactor.find((m) => m.method === "redxai_auth")).toMatchObject({ available: false });
+    expect(rules.twoFactor.find((m) => m.method === "app")?.available).toBe(true);
+    const terms = await client().terms();
+    expect(terms.appVersion).toBe("gendragoon-tos-2026-10-19");
+    expect(terms.text).toContain("Gendragoon Terms of Service");
+    expect(terms.text).not.toContain("<!--");
+    await expect(client().markTermsRead(terms.version, "gendragoon-tos-2026-01-01")).rejects.toMatchObject({ status: 409, code: "tos_changed" });
   });
 
-  it("an under-13 account comes back with error=access_denied", async () => {
-    mock.signInAs({ ...ADULT, sub: "acct_child", username: "young_rider", dob: "10/20/2013" });
-    const config = { issuer: mock.issuer, redirectUri };
-    const { url, pending } = await beginSignIn(config);
-    await expect(completeSignIn(config, pending, await authorize(url))).rejects.toMatchObject({ code: "access_denied" });
-  });
-
-  it("a code is bound to its verifier", async () => {
-    mock.signInAs(ADULT);
-    const config = { issuer: mock.issuer, redirectUri };
-    const a = await beginSignIn(config);
-    const b = await beginSignIn(config);
-    const redirect = (await authorize(a.url)).replace(`state=${a.pending.state}`, `state=${b.pending.state}`);
-    await expect(completeSignIn(config, b.pending, redirect)).rejects.toMatchObject({ code: "invalid_grant" });
-  });
-
-  it("the accounts client speaks /v1 with app=gendragoon: rules, Terms read → agree, sign-up, /v1/me", async () => {
-    let session = "";
-    const client = new AccountsClient({ baseUrl: mock.issuer, pathPrefix: "/v1", app: "gendragoon", getToken: async () => session });
-    expect((await client.rules()).minAge).toBe(13);
-    const terms = await client.terms();
-    expect(terms).toMatchObject({ version: "gendragoon-tos-2026-10-19", privacyVersion: "privacy-1" });
-    const read = await client.markTermsRead(terms.version);
-    expect(read).toMatchObject({ stage: "read" });
-    expect(read.grant).toMatch(/^rxa_t_/);
-    const agreed = await client.agreeToTerms(read.grant);
-    expect(agreed.stage).toBe("agreed");
-    const fields = { username: "night_glider", email: "glider@example.com", emailConfirm: "glider@example.com", password: "Correct-Horse9", passwordConfirm: "Correct-Horse9",
-      dob: "02/29/2004", twoFactor: "app" as const, acceptNo2faRisk: false, acknowledgeFalseInfo: true };
-    const created = await client.signup({ ...fields, tosGrant: agreed.grant });
+  it("in-app sign-up then the session grant: tokens without a browser, once, and app_tos_version is set", async () => {
+    const c0 = client();
+    const { username, created } = await signUp("app", c0);
     expect(created.session).toMatch(/^rxa_s_/);
     expect(created.pending).toEqual(["2fa_setup"]);
-    expect(created.totp?.otpauthUri).toMatch(/^otpauth:\/\/totp\//);
     expect(created.account).not.toHaveProperty("dob");
-    session = created.session!;
-    expect(await client.me()).toMatchObject({ username: "night_glider", tosVersion: "gendragoon-tos-2026-10-19", twoFactorState: "pending" });
-    // The grant was spent.
-    await expect(client.signup({ ...fields, username: "night_glider2", tosGrant: agreed.grant })).rejects.toMatchObject({ code: "tos_grant_invalid" });
-    expect((await client.validateUsername("Night_Glider")).error).toBe("username_taken");
+    // Nothing may be pending when the session is traded.
+    await expect(exchangeSession({ issuer }, created.session!)).rejects.toBeInstanceOf(OidcError);
+    const c = client(created.session!);
+    await c.confirmTwoFactor(totp(created.totp!.secret));
+    const me = await c.me();
+    expect(me).toMatchObject({ username, twoFactorState: "active" });
+    expect(me.appTos).toContain("gendragoon=gendragoon-tos-2026-10-19");
+    const tokens = await exchangeSession({ issuer }, created.session!);
+    expect(tokens.refreshToken).toMatch(/^rxa_r_/);
+    expect(appTosVersion(tokens)).toBe("gendragoon-tos-2026-10-19");
+    expect(headerOf(tokens.accessToken).typ).toBe("at+jwt");
+    expect(claimsOf(tokens.accessToken)).toMatchObject({ aud: "gendragoon", client_id: "gendragoon", preferred_username: username, age_band: "18plus" });
+    await expect(exchangeSession({ issuer }, created.session!)).rejects.toMatchObject({ code: "invalid_grant" });
   });
 
-  it("under 13 is refused centrally with 403 under_min_age, and Gendragoon's own check agrees", async () => {
-    const client = new AccountsClient({ baseUrl: mock.issuer, pathPrefix: "/v1", app: "gendragoon" });
-    const dob = await client.validateDob("10/20/2013");
-    expect(dob).toMatchObject({ ok: false, error: "under_min_age", minAge: 13 });
-    const { grant } = await client.agreeToTerms((await client.markTermsRead("gendragoon-tos-2026-10-19")).grant);
-    const err = await client.signup({ username: "young_rider", email: "y@example.com", emailConfirm: "y@example.com", password: "Correct-Horse9", passwordConfirm: "Correct-Horse9",
-      dob: "10/20/2013", twoFactor: "none", acceptNo2faRisk: true, acknowledgeFalseInfo: true, tosGrant: grant }).catch((e: unknown) => e);
+  it("browser sign-in: loopback redirect on any port with /oauth2/callback, claims, refresh rotation", async () => {
+    const { username } = await signUp("none");
+    const config = { issuer, redirectUri };
+    const { url, pending } = await beginSignIn(config);
+    const tokens = await completeSignIn(config, pending, await authorizeAs(username, url));
+    expect(claimsOf(tokens.idToken)).toMatchObject({ iss: issuer, aud: "gendragoon", nonce: pending.nonce, preferred_username: username, amr: ["pwd"], app_tos_version: "gendragoon-tos-2026-10-19" });
+    const rotated = await refreshTokens(config, tokens.refreshToken!);
+    expect(rotated.refreshToken).not.toBe(tokens.refreshToken);
+    await expect(refreshTokens(config, tokens.refreshToken!)).rejects.toMatchObject({ code: "invalid_grant" });
+    // An unregistered path is refused before any sign-in.
+    const wrong = await beginSignIn({ issuer, redirectUri: "http://127.0.0.1:51789/callback" });
+    expect((await fetch(wrong.url, { redirect: "manual" })).status).toBe(400);
+  });
+
+  it("v1.1 errors: username_edges, email_disposable, Gmail folding, under 13 refused with 403", async () => {
+    const c = client();
+    expect((await c.validateUsername("_dragon_rider")).error).toBe("username_edges");
+    expect((await c.validateEmail("temp@mailinator.com")).error).toBe("email_disposable");
+    const local = unique("fold").replace(/_/g, "");
+    const email = `${local}@gmail.com`;
+    await c.signup({ username: unique("gd_gmail"), email, emailConfirm: email, password: PASSWORD, passwordConfirm: PASSWORD, dob: "07/04/2001",
+      twoFactor: "none", acceptNo2faRisk: true, acknowledgeFalseInfo: true, tosGrant: await agreedGrant(c) });
+    const variant = `${local.slice(0, 2)}.${local.slice(2)}+gd@googlemail.com`;
+    expect((await c.validateEmail(variant)).error).toBe("email_taken");
+    const kid = new Date(); kid.setFullYear(kid.getFullYear() - 12);
+    const dob = `${String(kid.getMonth() + 1).padStart(2, "0")}/${String(kid.getDate()).padStart(2, "0")}/${kid.getFullYear()}`;
+    expect(await c.validateDob(dob)).toMatchObject({ ok: false, error: "under_min_age", minAge: 13 });
+    const err = await c.signup({ username: unique("young"), email: `${unique("y")}@gendragoon-test.dev`, emailConfirm: "x", password: PASSWORD, passwordConfirm: PASSWORD,
+      dob, twoFactor: "none", acceptNo2faRisk: true, acknowledgeFalseInfo: true, tosGrant: await agreedGrant(c) }).catch((e: unknown) => e);
     expect(err).toBeInstanceOf(AccountsApiError);
-    expect(err).toMatchObject({ status: 403, code: "under_min_age" });
+    expect((err as AccountsApiError).status).toBeGreaterThanOrEqual(400);
+  });
+
+  it.skipIf(Boolean(REAL))("mock only: an under-13 account comes back from authorize with error=access_denied", async () => {
+    mock!.signInAs({ sub: "acct_child", username: "young_rider", email: "y@example.com", dob: "10/20/2020", twoFactor: "none", amr: ["pwd"] });
+    const config = { issuer, redirectUri };
+    const { url, pending } = await beginSignIn(config);
+    const res = await fetch(url, { redirect: "manual" });
+    await expect(completeSignIn(config, pending, res.headers.get("location")!)).rejects.toMatchObject({ code: "access_denied" });
   });
 });

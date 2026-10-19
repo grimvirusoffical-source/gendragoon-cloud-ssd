@@ -1,6 +1,8 @@
 /**
  * Red-XAI Accounts sign-in for Gendragoon apps: OIDC authorization code with
- * PKCE (S256), as the v1 contract requires for every client. Platform code
+ * PKCE (S256), as the v1.1 contract requires for every client. Registered redirects for
+ * client `gendragoon`: `http://127.0.0.1/oauth2/callback` on any port (desktop),
+ * `gendragoon://oauth2/callback` (mobile), plus the extension and web URIs. Platform code
  * opens the URL (system browser, Expo AuthSession, or the extension's web auth
  * flow) and hands the redirect back to `completeSignIn`.
  */
@@ -70,10 +72,13 @@ export async function beginSignIn(config: OidcConfig, extra: Record<string, stri
   return { url: `${config.issuer.replace(/\/+$/, "")}/oauth2/authorize?${params.toString()}`, pending };
 }
 
-/** The hosted sign-up page, for platforms that can't show the native form. */
+/** The hosted sign-up page (v1.1 `screen_hint=signup`), for platforms that can't show the native form. */
 export function beginSignUp(config: OidcConfig): Promise<{ url: string; pending: PendingSignIn }> {
-  return beginSignIn(config, { prompt: "create" });
+  return beginSignIn(config, { screen_hint: "signup" });
 }
+
+/** The v1.1 grant that trades a fresh in-app session (`rxa_s_`) for tokens. First-party apps only. */
+export const SESSION_GRANT_TYPE = "urn:red-xai:grant-type:session";
 
 function decodeJwtPayload(token: string): Record<string, unknown> {
   const part = token.split(".")[1];
@@ -124,12 +129,50 @@ export async function completeSignIn(
     client_id: config.clientId ?? REDXAI_CLIENT_ID,
     code_verifier: pending.codeVerifier,
   }, options.fetchImpl ?? fetch, now);
-  const claims = decodeJwtPayload(tokens.idToken);
+  checkIdToken(config, tokens.idToken, pending.nonce);
+  return tokens;
+}
+
+function checkIdToken(config: OidcConfig, idToken: string, nonce?: string): void {
+  const claims = decodeJwtPayload(idToken);
   const aud = Array.isArray(claims.aud) ? claims.aud : [claims.aud];
   if (claims.iss !== config.issuer.replace(/\/+$/, "")) throw new OidcError("id_token_issuer");
   if (!aud.includes(config.clientId ?? REDXAI_CLIENT_ID)) throw new OidcError("id_token_audience");
-  if (claims.nonce !== pending.nonce) throw new OidcError("id_token_nonce");
+  if (nonce !== undefined && claims.nonce !== nonce) throw new OidcError("id_token_nonce");
+}
+
+/**
+ * In-app sign-up: after `/v1/signup` (and the 2FA confirmation, if one is pending) the new `rxa_s_` session is
+ * traded once, within 10 minutes, for the same tokens a browser sign-in gives. No second sign-in in the browser.
+ */
+export async function exchangeSession(
+  config: Omit<OidcConfig, "redirectUri"> & { redirectUri?: string },
+  session: string,
+  options: { fetchImpl?: typeof fetch; now?: number } = {},
+): Promise<OidcTokens> {
+  if (!/^rxa_s_/.test(session)) throw new OidcError("invalid_grant");
+  const full = { redirectUri: "", ...config };
+  const tokens = await tokenRequest(full, {
+    grant_type: SESSION_GRANT_TYPE,
+    client_id: config.clientId ?? REDXAI_CLIENT_ID,
+    subject_token: session,
+    scope: config.scope ?? REDXAI_SCOPES,
+  }, options.fetchImpl ?? fetch, options.now ?? Date.now());
+  if (tokens.idToken) checkIdToken(full, tokens.idToken);
   return tokens;
+}
+
+/** The Gendragoon Terms version this account accepted centrally (`app_tos_version`), or null. */
+export function appTosVersion(tokens: Pick<OidcTokens, "accessToken" | "idToken">): string | null {
+  for (const token of [tokens.idToken, tokens.accessToken]) {
+    try {
+      const v = decodeJwtPayload(token).app_tos_version;
+      if (typeof v === "string") return v;
+    } catch {
+      /* not a JWT */
+    }
+  }
+  return null;
 }
 
 /** Refresh tokens rotate on every use; keep the new one and drop the old. */
