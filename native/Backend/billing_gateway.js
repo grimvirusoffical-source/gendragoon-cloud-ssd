@@ -130,7 +130,7 @@ function installedBilling({app,db,bucket,admin,firebaseAuth,firebaseAuthWithoutT
   try{
    const account=db.collection("gd_accounts").doc(accountKey(req.user.uid));
    const user=await account.get(),customer=user.data()?.stripeCustomerId;
-   if(!customer)return res.status(404).json({error:"No billing account exists"});
+   if(!customer||!require("./billing_v2").customerInAccount(user.data(),env.STRIPE_ACCOUNT_ID))return res.status(404).json({error:"No billing account exists"});
    const url=new URL(env.PUBLIC_URL);
    const session=await stripe.billingPortal.sessions.create({customer,return_url:url.origin+"/mobile/",...(env.STRIPE_PORTAL_CONFIGURATION_ID?{configuration:env.STRIPE_PORTAL_CONFIGURATION_ID}:{})});
    res.setHeader("Cache-Control","no-store");

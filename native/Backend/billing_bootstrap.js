@@ -4,9 +4,18 @@
 const express=require('express'),crypto=require('node:crypto');
 const {GoogleAuth}=require('google-auth-library'),Stripe=require('stripe');
 const {installedBilling,STRIPE_API_VERSION}=require('./billing_gateway'),{STORAGE,PERFORMANCE}=require('./catalog');
-const PROJECT='gendragood-ssd',ACCOUNT='acct_1TqS8eIpkwStQhHM';
-const API_SECRET='gendragoon-stripe-live-api',HOOK_SECRET='gendragoon-stripe-live-webhook';
-const HOOK_ID='we_1UQgwBIpkwStQhHM7YZVubdd';
+const PROJECT='gendragood-ssd';
+// Live Stripe account: Red-XAI LLC (moved from acct_1TqS8eIpkwStQhHM on 2026-10-19). Each value can be overridden
+// from the environment (for example to point a rollback revision back at the old account) but never needs a secret.
+const DEFAULTS=Object.freeze({account:'acct_1USFf5CtNDGcw0e6',apiSecret:'gendragoon-stripe-redxai-api',
+ hookSecret:'gendragoon-stripe-redxai-webhook',hookId:'we_1USJZpCtNDGcw0e6MdCN9IYD'});
+function liveStripeConfig(env=process.env){
+ const pick=(name,fallback,re)=>{const v=env[name];if(v===undefined||v==='')return fallback;if(!re.test(v))throw Error('INVALID_STRIPE_CONFIG:'+name);return v;};
+ const secret=/^[A-Za-z0-9_-]{1,255}$/;
+ return Object.freeze({account:pick('STRIPE_ACCOUNT_ID',DEFAULTS.account,/^acct_[A-Za-z0-9]+$/),
+  apiSecret:pick('STRIPE_VAULT_API_SECRET',DEFAULTS.apiSecret,secret),hookSecret:pick('STRIPE_VAULT_WEBHOOK_SECRET',DEFAULTS.hookSecret,secret),
+  hookId:pick('STRIPE_WEBHOOK_ENDPOINT_ID',DEFAULTS.hookId,/^we_[A-Za-z0-9]+$/)});
+}
 const PUBLIC='https://gendragoon-free-10068843866.us-central1.run.app';
 function expectedCatalog(){
  const out={};for(const interval of ['month','year']){const factor=interval==='year'?10:1;
@@ -49,6 +58,9 @@ function validateCatalog(prices,products,{projectPriceId}={}){
  for(const [key,expected]of Object.entries(expectedCatalog())){
   const lookup='gdssd_'+key.split('|').join('_')+'_v1';
   const matches=pick(key,prices.filter(p=>p.metadata?.service==='GenDragoonSSD'&&(p.metadata.catalogKey===key||p.lookup_key===lookup)));
+  // A retired fee Price is only needed where legacy subscriptions on it exist. An account that never had it
+  // (the Red-XAI account) simply has no such key; new Checkout never uses these keys.
+  if(isRetired(key)&&matches.length===0)continue;
   if(matches.length!==1)throw Error('CATALOG_COUNT:'+key);
   const p=matches[0];
   checkValue(key,p,expected);
@@ -95,10 +107,10 @@ async function validateUnpaidCheckoutTemplates(stripe,catalog){
  return scenarios.length;
 }
 function crc32c(bytes){let value=0xffffffff;for(const byte of bytes){value^=byte;for(let bit=0;bit<8;bit++)value=(value>>>1)^((value&1)?0x82f63b78:0);}return (value^0xffffffff)>>>0;}
-async function readVaultSecrets(){
+async function readVaultSecrets({apiSecret,hookSecret}=liveStripeConfig()){
  const auth=await new GoogleAuth({scopes:['https://www.googleapis.com/auth/cloud-platform']}).getClient();
  const result={},missing=[];
- for(const name of [API_SECRET,HOOK_SECRET]){
+ for(const name of [apiSecret,hookSecret]){
   try{
    const response=await auth.request({url:'https://secretmanager.googleapis.com/v1/projects/'+PROJECT+'/secrets/'+name+'/versions/latest:access',timeout:15000});
    const payload=response.data.payload||{},bytes=Buffer.from(payload.data||'','base64');
@@ -110,7 +122,7 @@ async function readVaultSecrets(){
   }
  }
  if(missing.length)throw Object.assign(Error('SECRET_VALUES_REQUIRED'),{missing});
- return {key:result[API_SECRET],webhook:result[HOOK_SECRET]};
+ return {key:result[apiSecret],webhook:result[hookSecret]};
 }
 function installBillingBootstrap(options){
  const env=options.env||process.env;
@@ -120,18 +132,19 @@ function installBillingBootstrap(options){
  };
  let router=buildRouter({...env,STRIPE_CHECKOUT_ENABLED:'false',STRIPE_SECRET_KEY:'',STRIPE_WEBHOOK_SECRET:''});
  let activated=false,inFlight=null,retryAt=0;
- let setup={activationState:'waiting_for_secrets',pendingSecretResources:[API_SECRET,HOOK_SECRET]};
+ const live=liveStripeConfig(env);
+ let setup={activationState:'waiting_for_secrets',pendingSecretResources:[live.apiSecret,live.hookSecret]};
  async function activate(){
-  const secrets=await (options.readVaultSecrets||readVaultSecrets)();
+  const secrets=await (options.readVaultSecrets||readVaultSecrets)(live);
   if(!/^(sk|rk)_live_[A-Za-z0-9]+$/.test(secrets.key)||!/^whsec_[A-Za-z0-9]+$/.test(secrets.webhook))throw Error('INVALID_LIVE_CREDENTIAL_FORMAT');
   setup={activationState:'validating_live_stripe',pendingSecretResources:[]};
   const stripe=options.createStripe?options.createStripe(secrets.key):new Stripe(secrets.key,{apiVersion:STRIPE_API_VERSION,maxNetworkRetries:2,timeout:25000});
   const account=await stripe.accounts.retrieve();
-  if(account.id!==ACCOUNT||account.charges_enabled!==true)throw Error('ACCOUNT_NOT_READY');
+  if(account.id!==live.account||account.charges_enabled!==true)throw Error('ACCOUNT_NOT_READY');
   const [prices,products,hook]=await Promise.all([
    // Include archived Prices: retired legacy keys may be archived and still need reconciling.
    stripe.prices.list({limit:100}).autoPagingToArray({limit:5000}),
-   stripe.products.list({limit:100}).autoPagingToArray({limit:1000}),stripe.webhookEndpoints.retrieve(HOOK_ID)
+   stripe.products.list({limit:100}).autoPagingToArray({limit:1000}),stripe.webhookEndpoints.retrieve(live.hookId)
   ]);
   const catalog=validateCatalog(prices,products,{projectPriceId:env.STRIPE_PROJECT_CREATION_PRICE_ID});
   if(!hook.livemode||hook.status!=='enabled'||hook.url!==PUBLIC+'/billing/stripe-webhook')throw Error('WEBHOOK_CONFIGURATION');
@@ -150,7 +163,7 @@ function installBillingBootstrap(options){
    await checkRef.set({catalogHash:hash,checkedAt:options.admin.firestore.FieldValue.serverTimestamp(),paymentSubmitted:false});
   }
   const values={STRIPE_SECRET_KEY:secrets.key,STRIPE_WEBHOOK_SECRET:secrets.webhook,
-   STRIPE_ENVIRONMENT:'live',STRIPE_CHECKOUT_ENABLED:'true',PAID_STORAGE_READY:'approved',STRIPE_RUNTIME_PROBE:'true',
+   STRIPE_ENVIRONMENT:'live',STRIPE_ACCOUNT_ID:live.account,STRIPE_CHECKOUT_ENABLED:'true',PAID_STORAGE_READY:'approved',STRIPE_RUNTIME_PROBE:'true',
    STRIPE_PRICE_CATALOG_JSON:JSON.stringify(catalog),STRIPE_PORTAL_CONFIGURATION_ID:portal.id,PUBLIC_URL:PUBLIC,
    STRIPE_PROJECT_CHECKOUT_READY:projectCheckoutReady(catalog,hook,prices)?'true':'false'};
   const previous=Object.fromEntries(Object.keys(values).map(key=>[key,process.env[key]]));
@@ -182,4 +195,4 @@ function installBillingBootstrap(options){
  });
  return {attempt,state:()=>({...setup,activated})};
 }
-module.exports={installBillingBootstrap,expectedCatalog,optionalTeamCatalog,isRetired,validateCatalog,projectCheckoutReady,validateUnpaidCheckoutTemplates,crc32c};
+module.exports={installBillingBootstrap,liveStripeConfig,DEFAULTS,expectedCatalog,optionalTeamCatalog,isRetired,validateCatalog,projectCheckoutReady,validateUnpaidCheckoutTemplates,crc32c};

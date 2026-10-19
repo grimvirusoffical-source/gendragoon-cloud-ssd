@@ -55,7 +55,15 @@ function effectiveWorkers(workspace){
  return workspace.performanceActive===true && PERFORMANCE[workspace.performanceTier] ?
   Math.max(base,PERFORMANCE[workspace.performanceTier].workers):base;
 }
- function registerBillingV2({app,db,stripe,admin,auth,agreed,hash,prices,env=process.env,byoFetch=null,bucket=null}){
+ // True when the stored Stripe customer can be used with the configured account. Records written before
+// stripeAccountId existed were all created in the original account (acct_1TqS8eIpkwStQhHM).
+const ORIGINAL_STRIPE_ACCOUNT="acct_1TqS8eIpkwStQhHM";
+function customerInAccount(data,account){
+ if(!data||typeof data.stripeCustomerId!=="string"||!data.stripeCustomerId)return false;
+ if(!account)return true;
+ return (data.stripeAccountId||ORIGINAL_STRIPE_ACCOUNT)===account;
+}
+function registerBillingV2({app,db,stripe,admin,auth,agreed,hash,prices,env=process.env,byoFetch=null,bucket=null}){
  const stamp=()=>admin.firestore.FieldValue.serverTimestamp();
  const accounts=db.collection("gd_accounts");
  const accRef=req=>accounts.doc(hash(req.user.uid));
@@ -98,11 +106,16 @@ function effectiveWorkers(workspace){
    workspaceFeeIncluded:isPlansWorkspace(w.data)||price.isFree};
  }
  async function ensureCustomer(req){
-   const ref=accRef(req), snap=await ref.get();
-   if(snap.exists && snap.data().stripeCustomerId)return snap.data().stripeCustomerId;
+   const ref=accRef(req), snap=await ref.get(), data=snap.exists?snap.data()||{}:{};
+   // A stored customer belongs to the Stripe account it was created in. When the live account changes
+   // (STRIPE_ACCOUNT_ID, set by the live bootstrap), a customer from another account cannot be used here,
+   // so a new one is created and the old id is kept for the record.
+   if(customerInAccount(data,env.STRIPE_ACCOUNT_ID))return data.stripeCustomerId;
+   const account=env.STRIPE_ACCOUNT_ID||null;
    const customer=await stripe.customers.create({...(req.user.email?{email:req.user.email}:{}),metadata:{gdAccountHash:hash(req.user.uid)}},
-       {idempotencyKey:"gd-customer-"+hash(req.user.uid)});
-   await ref.set({stripeCustomerId:customer.id,uid:req.user.uid},{merge:true});
+       {idempotencyKey:"gd-customer-"+(account?account+"-":"")+hash(req.user.uid)});
+   const legacy=data.stripeCustomerId?{legacyStripeCustomerIds:[...new Set([...(Array.isArray(data.legacyStripeCustomerIds)?data.legacyStripeCustomerIds:[]),data.stripeCustomerId])]}:{};
+   await ref.set({stripeCustomerId:customer.id,...(account?{stripeAccountId:account}:{}),...legacy,uid:req.user.uid},{merge:true});
    return customer.id;
  }
  function verifiedPrice(key){
@@ -489,4 +502,4 @@ function effectiveWorkers(workspace){
 }
 module.exports={registerBillingV2,storageQuote,performanceQuote,effectiveWorkers,
  FREE_GB,FREE_WORKERS,REMOVE_ADS_CENTS,matchesStripePrices,priceKeysStorage,priceKeysPerformance,
- byoQuote,priceKeysBYO,effectiveStorageQuota};
+ byoQuote,priceKeysBYO,effectiveStorageQuota,customerInAccount};
