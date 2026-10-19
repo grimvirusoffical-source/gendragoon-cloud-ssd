@@ -62,25 +62,21 @@ try {
   if (restart.length !== 0) throw new Error(`Unexpected controls: ${restart.join(",")}`);
 
   await page.click("[data-testid='nav-workspaces']");
-  await page.waitForSelector("[data-testid='provider-gcs-s3']");
-  const providers = await page.$$eval("[data-testid^='provider-']", (nodes) => nodes.map((node) => ({
-    id: node.getAttribute("data-testid"),
-    disabled: node.hasAttribute("disabled"),
-    text: node.textContent ?? "",
-  })));
-  for (const id of ["provider-aws", "provider-r2", "provider-b2", "provider-wasabi", "provider-minio", "provider-gcs-s3"]) {
-    const node = providers.find((item) => item.id === id);
-    if (!node || node.disabled) throw new Error(`Missing enabled ${id}`);
+  await page.waitForSelector("[data-testid='workspace-list']");
+  await page.click("[data-testid='new-workspace-open']");
+  await page.waitForSelector("[data-testid='storage-plans']");
+  const fee = await page.$eval("[data-testid='new-workspace']", (node) => node.textContent ?? "");
+  if (/fee|\$5\b/i.test(fee)) throw new Error(`New workspace still shows a workspace fee: ${fee}`);
+  if ((await page.$$("[data-testid='storage-plans']")).length !== 1 || (await page.$$("[data-testid='performance-plans']")).length !== 1) {
+    throw new Error("New workspace must show exactly one storage picker and one performance picker");
   }
-  for (const id of ["provider-sftp", "provider-azure-blob", "provider-webdav"]) {
-    const node = providers.find((item) => item.id === id);
-    if (!node?.disabled || !node.text.includes("Coming soon")) throw new Error(`${id} should be a disabled Coming soon option`);
-  }
-  await page.type("[data-testid='byo-access-key-id']", "AKIAIOSFODNN7EXAMPLE");
-  await page.type("[data-testid='byo-secret']", "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY");
-  await page.click("[data-testid='byo-challenge']");
-  await page.waitForFunction(() => document.querySelector("[data-testid='byo-message']")?.textContent?.includes("Credentials were not included"));
-  await shot(page, "connect-storage.png");
+  await page.type("[data-testid='workspace-name']", "Music Studio");
+  await page.click("[data-testid='storage-1TB']");
+  await page.click("[data-testid='performance-turbo']");
+  await shot(page, "new-workspace.png");
+  await page.click("[data-testid='storage-custom']");
+  await page.waitForFunction(() => !document.querySelector("[data-testid='storage-plans']") && !!document.querySelector("[data-testid='performance-plans']"));
+  await shot(page, "new-workspace-custom.png");
 
   await page.click("[data-testid='nav-settings']");
   await page.click("[data-testid='delete-account']");

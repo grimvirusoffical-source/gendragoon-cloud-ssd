@@ -1,7 +1,9 @@
 import { parseWorkspacePrice, workspacePriceLabel, type WorkspacePrice, type WorkspaceRecord } from "@gendragoon/core";
 import { fireEvent, render } from "@testing-library/react-native";
 import { WORKSPACE_PRICING_ENABLED } from "../src/flags";
-import { additionalWorkspaceFeeText, grandfatheringEndedPrice, includedPricingEndsWarning, serverPriceLabel, workspaceQuoteExplanation } from "../src/pricing";
+import { readFileSync } from "node:fs";
+import path from "node:path";
+import { serverPriceLabel } from "../src/pricing";
 import { ConnectStorageScreen, LockScreen, NewWorkspaceScreen, WorkspacesScreen } from "../src/screens";
 import { FIXTURE_SOURCE_SHA_BY_AREA, OWNER_FEE_WAIVED_SHA, loadFixture } from "./loadFixture";
 
@@ -24,11 +26,6 @@ interface ListedBody {
   workspaces: Array<WorkspaceRecord & WorkspacePrice>;
 }
 
-interface CreatedBody {
-  isFree: boolean;
-  monthlyPriceCents: number;
-  project: WorkspaceRecord & WorkspacePrice;
-}
 
 function listed(rel: string): ListedBody {
   const fixture = loadFixture<ListedBody>(rel);
@@ -54,7 +51,6 @@ describe("workspace price labels", () => {
       <WorkspacesScreen
         workspaces={body.workspaces}
         unpaidIds={[]}
-        additionalMonthlyCents={body.policy.workspaceMonthlyCents}
         onDelete={() => undefined}
         onMerge={() => undefined}
       />,
@@ -74,7 +70,6 @@ describe("workspace price labels", () => {
       <WorkspacesScreen
         workspaces={body.workspaces}
         unpaidIds={[]}
-        additionalMonthlyCents={body.policy.workspaceMonthlyCents}
         onDelete={() => undefined}
         onMerge={() => undefined}
       />,
@@ -88,41 +83,28 @@ describe("workspace price labels", () => {
     expect(screen.queryByText("$0.00/mo")).toBeNull();
   });
 
-  it("shows the create quote before the confirm button and waits for a name", async () => {
-    const free = loadFixture<CreatedBody>("workspaces/free-first.json");
-    const paid = loadFixture<CreatedBody>("workspaces/second-paid.json");
-    const replaced = loadFixture<CreatedBody>("workspaces/delete-free-then-create.json");
-    const byo = loadFixture<{ isFree: boolean; monthlyPriceCents: number }>("workspaces/byo-first-paid.json");
-    expect(() => parseWorkspacePrice(free.response.body.project)).toThrow(TypeError);
-    expect(() => parseWorkspacePrice(replaced.response.body.project)).toThrow(TypeError);
-    expect(() => parseWorkspacePrice(paid.response.body.project)).toThrow(TypeError);
-    expect(workspaceQuoteExplanation("hosted", free.response.body.project)).toBe("Your first hosted workspace is free");
-    expect(workspaceQuoteExplanation("hosted", paid.response.body.project)).toBe("Additional workspaces are $5.00/mo");
-    expect(workspaceQuoteExplanation("byo", byo.response.body)).toBe("Bring-your-own storage is $5.00/mo");
-    const screen = await render(
-      <NewWorkspaceScreen quote={free.response.body.project} byoQuote={byo.response.body} onCreate={() => undefined} />,
-    );
-    expect(screen.getByTestId("new-workspace-explain").props.children).toBe("Your first hosted workspace is free");
-    expect(screen.queryByTestId("new-workspace-price")).toBeNull();
-    expect(screen.getByTestId("create-workspace")).toBeDisabled();
-    await fireEvent.changeText(screen.getByTestId("workspace-name"), "Vacation photos");
-    expect(screen.getByTestId("create-workspace")).not.toBeDisabled();
-    await fireEvent.press(screen.getByTestId("storage-byo"));
-    expect(screen.getByTestId("new-workspace-explain").props.children).toBe("Bring-your-own storage is $5.00/mo");
-    expect(screen.getByTestId("create-byo-aws")).toBeTruthy();
-    expect(screen.getByText("SFTP · Coming soon")).toBeTruthy();
-    const second = await render(
-      <NewWorkspaceScreen quote={paid.response.body.project} onCreate={() => undefined} />,
-    );
-    expect(second.getByTestId("new-workspace-explain").props.children).toBe("Additional workspaces are $5.00/mo");
-    expect(second.queryByTestId("new-workspace-price")).toBeNull();
-    const priced = await render(
-      <NewWorkspaceScreen
-        quote={{ isFree: true, grandfathered: false, monthlyPriceCents: 0, feeWaived: false }}
-        onCreate={() => undefined}
-      />,
-    );
-    expect(priced.getByTestId("new-workspace-price").props.children).toBe("Free");
+  it("new workspace: first is free; the next needs storage + performance; no fee line", async () => {
+    const free = await render(<NewWorkspaceScreen freeProjectAvailable pricing={null} intentId="i" onCreate={() => undefined} />);
+    expect(free.getByTestId("first-free")).toHaveTextContent(/2 GB storage and the free performance plan/);
+    expect(free.queryByTestId("storage-plans")).toBeNull();
+    expect(free.getByTestId("create-workspace")).toBeDisabled();
+    await fireEvent.changeText(free.getByTestId("workspace-name"), "Vacation photos");
+    expect(free.getByTestId("create-workspace")).not.toBeDisabled();
+    const onCreate = jest.fn();
+    const pricing = { storage: { "100GB": { gb: 100, monthlyCents: 640, yearlyCents: 6400 } }, performance: { boost: { workers: 4, monthlyCents: 600, yearlyCents: 6000 } } };
+    const second = await render(<NewWorkspaceScreen freeProjectAvailable={false} pricing={pricing} intentId="11111111-1111-4111-8111-000000000002" initialName="Second Workspace" onCreate={onCreate} />);
+    expect(second.getByTestId("storage-plans")).toBeTruthy();
+    expect(second.getByTestId("performance-plans")).toBeTruthy();
+    await fireEvent.press(second.getByTestId("storage-100GB"));
+    expect(second.getByTestId("create-workspace")).toBeDisabled();
+    await fireEvent.press(second.getByTestId("performance-boost"));
+    expect(second.getByTestId("plan-total-amount")).toHaveTextContent("Total $12.40/mo");
+    expect(second.queryByText(/fee/i)).toBeNull();
+    await fireEvent.press(second.getByTestId("create-workspace"));
+    // Same body the cloud-ssd handlers accepted (fixtures generated on feature/workspace-plans).
+    const accepted = JSON.parse(readFileSync(path.join(__dirname, "../../../packages/core/test/fixtures/server-plans/workspaces/second-plans-checkout.json"), "utf8"));
+    expect(onCreate).toHaveBeenLastCalledWith(accepted.request.body);
+    expect(accepted.response.body.totalCents).toBe(1240);
   });
 
   it("labels a BYO register at 500 cents and keeps one free workspace in a concurrent create", () => {
@@ -130,9 +112,7 @@ describe("workspace price labels", () => {
     const converted = loadFixture<{ isFree: boolean; monthlyPriceCents: number }>("workspaces/free-to-byo-billable.json");
     expect(byo.response.body.monthlyPriceCents).toBe(500);
     expect(serverPriceLabel(byo.response.body)).toBeNull();
-    expect(workspaceQuoteExplanation("byo", byo.response.body)).toBe("Bring-your-own storage is $5.00/mo");
     expect(converted.response.body.isFree).toBe(false);
-    expect(workspaceQuoteExplanation("byo", converted.response.body)).toBe("Bring-your-own storage is $5.00/mo");
     const concurrent = listed("workspaces/concurrent-create-one-free.json");
     expect(() => parseWorkspacePrice(concurrent.workspaces[0])).toThrow(TypeError);
     expect(() => parseWorkspacePrice(concurrent.workspaces[1])).toThrow(TypeError);
@@ -156,35 +136,20 @@ describe("workspace price labels", () => {
     expect(serverPriceLabel({ isFree: true, grandfathered: false, monthlyPriceCents: 0, feeWaived: true })).toBe("Free");
   });
 
-  it("a BYO register that ends grandfathering shows the price and warns before confirm", async () => {
-    const fixture = loadFixture<{
-      byoRegistered: boolean;
-      endpoint: string;
-      providerType: string;
-      grandfatheringEnded: boolean;
-      grandfathered: boolean;
-      isFree: boolean;
-      monthlyPriceCents: number;
-      feeWaived: boolean;
-    }>("workspaces/byo-register-ends-grandfathered.json");
-    expect(fixture.sourceSha).toBe(OWNER_FEE_WAIVED_SHA);
-    expect(fixture.sourcePath).toBe("fixtures/workspaces/byo-register-ends-grandfathered.json");
-    const body = fixture.response.body;
-    expect(fixture.response.status).toBe(200);
-    expect(body.grandfatheringEnded).toBe(true);
-    expect(body.feeWaived).toBe(false);
-    expect(body.monthlyPriceCents).toBe(500);
-    expect(grandfatheringEndedPrice({ ...body, feeWaived: undefined })).toBeNull();
-    expect(grandfatheringEndedPrice(body)).toBe("$5.00");
-    expect(includedPricingEndsWarning(body.monthlyPriceCents)).toBe(
-      "Switching to your own storage ends this workspace's included pricing. It will cost $5.00/mo.",
-    );
-    const screen = await render(<ConnectStorageScreen registration={body} />);
-    expect(screen.getByTestId("byo-ended-price").props.children).toBe("$5.00");
-    expect(screen.getByTestId("byo-included-warning")).toHaveTextContent(includedPricingEndsWarning(body.monthlyPriceCents));
-    expect(screen.queryByTestId("byo-registered")).toBeNull();
-    await fireEvent.press(screen.getByTestId("byo-confirm-included"));
-    expect(screen.getByTestId("byo-registered")).toHaveTextContent(`${body.providerType} · ${body.endpoint}`);
+  it("plans workspaces are labelled by their plans, never $0.00", () => {
+    expect(serverPriceLabel({ isFree: false, grandfathered: false, feeWaived: false, monthlyPriceCents: 0, billingModel: "plans", requiredPlans: { storage: "managed", storageTier: "100GB", performanceTier: "boost", interval: "month" } })).toBe("100GB + Boost");
+    expect(serverPriceLabel({ isFree: false, grandfathered: false, feeWaived: false, monthlyPriceCents: 0, billingModel: "plans", requiredPlans: { storage: "custom", performanceTier: "lite", interval: "month" } })).toBe("Custom storage + Lite");
+  });
+
+  it("custom storage setup shows provider → credentials → test → finish with no pricing warnings", async () => {
+    const screen = await render(<ConnectStorageScreen />);
+    expect(screen.getByTestId("custom-steps")).toHaveTextContent(/\[1\. Provider\]/);
+    expect(screen.queryByTestId("byo-included-warning")).toBeNull();
+    const registered = await render(<ConnectStorageScreen registration={{ byoRegistered: true, endpoint: "https://a.r2.cloudflarestorage.com", providerType: "s3" }} challengeNonce="abc" />);
+    expect(registered.getByTestId("custom-steps")).toHaveTextContent(/\[3\. Connection test\]/);
+    expect(registered.getByTestId("byo-registered")).toHaveTextContent("s3 · https://a.r2.cloudflarestorage.com");
+    const done = await render(<ConnectStorageScreen verified={{ verified: true, workspaceId: "w3" }} />);
+    expect(done.getByTestId("custom-steps")).toHaveTextContent(/\[4\. Finish\]/);
   });
 
   it("labels grandfathered-plus-new from the vendored fixture", async () => {
@@ -193,7 +158,6 @@ describe("workspace price labels", () => {
       <WorkspacesScreen
         workspaces={body.workspaces}
         unpaidIds={[]}
-        additionalMonthlyCents={body.policy.workspaceMonthlyCents}
         onDelete={() => undefined}
         onMerge={() => undefined}
       />,
@@ -244,14 +208,12 @@ describe("workspace price labels", () => {
       <WorkspacesScreen
         workspaces={body.workspaces}
         unpaidIds={["11111111-1111-4111-8111-000000000001"]}
-        additionalMonthlyCents={body.policy.workspaceMonthlyCents}
         onDelete={onDelete}
         onMerge={() => undefined}
         onPay={onPay}
       />,
     );
-    expect(additionalWorkspaceFeeText(body.policy.workspaceMonthlyCents)).toBe("An additional workspace is $5.00/mo.");
-    expect(screen.getByTestId("workspace-fee")).toHaveTextContent("An additional workspace is $5.00/mo.");
+    expect(screen.queryByTestId("workspace-fee")).toBeNull();
     expect(screen.getByTestId("workspace-price-11111111-1111-4111-8111-000000000001").props.children).toBe("$5.00/mo · Payment needed");
     expect(screen.getByLabelText("Merge source Free Hosted")).toBeTruthy();
     expect(screen.getByLabelText("Merge target Second Workspace")).toBeTruthy();

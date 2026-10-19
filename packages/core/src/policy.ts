@@ -67,6 +67,12 @@ export interface WorkspaceRecord {
   projectBillingVersion?: number;
   storage?: WorkspaceStorage;
   createdAt?: string | null;
+  /** "plans" when the workspace's storage + performance plans are billed together. */
+  billingModel?: "plans" | "free" | "legacy";
+  customStorage?: boolean;
+  requiredPlans?: { storage: "managed" | "custom"; storageTier?: string; performanceTier: string; interval: "month" | "year" } | null;
+  plansStatus?: string | null;
+  byoRegistered?: boolean;
 }
 
 /** Server lock payload. Clients do not derive `locked` from workspace rows. */

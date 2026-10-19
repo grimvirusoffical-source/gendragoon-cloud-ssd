@@ -7,7 +7,7 @@ import {
   type TreeNode,
   type WorkspaceRecord,
 } from "@gendragoon/core";
-import { colors } from "./src/theme";
+import { ThemeProvider, useTheme } from "./src/themeContext";
 import { NavigationContainer, createNavigationContainerRef } from "@react-navigation/native";
 import { createBottomTabNavigator } from "@react-navigation/bottom-tabs";
 import { createNativeStackNavigator } from "@react-navigation/native-stack";
@@ -33,6 +33,7 @@ import { ENCRYPTED_WORKSPACE_ENABLED } from "./src/flags";
 import { accountLockCoversApp, locksThisWorkspaceOnly, noteWorkspaceLock } from "./src/workspaceState";
 import { createExpoSecureStore } from "./src/platform/secureStore";
 import { ShotFrame, webShot } from "./src/shots";
+import { TeamsTab } from "./src/teams";
 
 type RootStack = {
   SignIn: undefined;
@@ -96,6 +97,7 @@ export function MobileRoot(props: {
   apiBase?: string;
   initialRoute?: keyof RootStack;
 }) {
+  const { colors } = useTheme();
   const secrets = useMemo(() => props.secrets ?? createExpoSecureStore(), [props.secrets]);
   const apiBase = props.apiBase ?? process.env.EXPO_PUBLIC_API_BASE ?? "";
   const [idToken, setIdToken] = useState(freshPreviewToken);
@@ -105,7 +107,7 @@ export function MobileRoot(props: {
   const [overrides, setOverrides] = useState<SortOverrides>({});
   const [activeTransfers, setActiveTransfers] = useState(0);
   const [settingsPage, setSettingsPage] = useState<"home" | "sort" | "connect" | "delete">("home");
-  const [tab, setTab] = useState<"Files" | "Backup" | "Workspaces" | "Settings">("Files");
+  const [tab, setTab] = useState<"Files" | "Backup" | "Workspaces" | "Teams" | "Settings">("Files");
   const [openWorkspaceId, setOpenWorkspaceId] = useState(workspaces[0]?.id ?? "");
   const nodes = PREVIEW_FILES.map((path) => treeNode({
     path,
@@ -136,12 +138,9 @@ export function MobileRoot(props: {
   }, []);
 
   function payWorkspace(id: string) {
-    const checkout = "checkoutWorkspaceFee" in client
-      ? (workspaceId: string) => client.checkoutWorkspaceFee(workspaceId)
-      : undefined;
     void payToRestore({
       unpaidWorkspaceIds: [id],
-      checkoutWorkspaceFee: checkout,
+      checkoutWorkspace: "checkoutProject" in client ? (workspaceId) => client.checkoutProject(workspaceId) : undefined,
       openUrl: (url) => Linking.openURL(url),
     }).catch(() => undefined);
   }
@@ -198,6 +197,15 @@ export function MobileRoot(props: {
           }
         }}
         onMerge={() => undefined}
+      />
+    );
+  }
+  function Teams() {
+    return (
+      <TeamsTab
+        client={client instanceof GenDragoonClient ? client : null}
+        personalWorkspaces={workspaces.map((w) => ({ id: w.id, name: w.name || w.id }))}
+        openUrl={(url) => void Linking.openURL(url)}
       />
     );
   }
@@ -261,6 +269,7 @@ export function MobileRoot(props: {
         <Tabs.Screen name="Files" component={Files} />
         <Tabs.Screen name="Backup" component={Backup} />
         <Tabs.Screen name="Workspaces" component={Spaces} />
+        <Tabs.Screen name="Teams" component={Teams} />
         <Tabs.Screen name="Settings" component={Settings} />
       </Tabs.Navigator>
     );
@@ -308,12 +317,9 @@ export function MobileRoot(props: {
               navigationRef.navigate("Main");
             }}
             onPay={() => {
-              const checkout = "checkoutWorkspaceFee" in client
-                ? (id: string) => client.checkoutWorkspaceFee(id)
-                : undefined;
               void payToRestore({
                 unpaidWorkspaceIds: access.unpaidIds,
-                checkoutWorkspaceFee: checkout,
+                checkoutWorkspace: "checkoutProject" in client ? (id) => client.checkoutProject(id) : undefined,
                 openUrl: (url) => Linking.openURL(url),
               }).catch(() => undefined);
             }}
@@ -325,17 +331,24 @@ export function MobileRoot(props: {
   );
 }
 
+function ThemeStatusBar() {
+  const { scheme } = useTheme();
+  return <StatusBar style={scheme === "dark" ? "light" : "dark"} />;
+}
+
 export function App() {
   const shot = webShot();
   return (
+    <ThemeProvider>
     <SafeAreaProvider>
-      <StatusBar style="light" />
+      <ThemeStatusBar />
       {shot ? <ShotFrame id={shot} /> : (
         <NavigationContainer ref={navigationRef}>
           <MobileRoot />
         </NavigationContainer>
       )}
     </SafeAreaProvider>
+    </ThemeProvider>
   );
 }
 

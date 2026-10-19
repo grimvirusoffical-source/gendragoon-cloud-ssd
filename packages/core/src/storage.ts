@@ -38,12 +38,36 @@ interface IdTokenClaims {
   auth_time?: unknown;
   iat?: unknown;
   sub?: unknown;
+  user_id?: unknown;
 }
 
-/** Firebase ID token `sub`. This is the account uid stored with a deletion job. */
+const BASE64URL_SEGMENT = /^[A-Za-z0-9_-]+$/;
+/** Longest ID token accepted, in characters. Firebase tokens are about 1 KB. */
+const ID_TOKEN_MAX_LENGTH = 16 * 1024;
+/** Firebase uids are 1 to 128 printable ASCII characters. */
+const ACCOUNT_UID = /^[\x21-\x7E]{1,128}$/;
+
+/**
+ * Firebase ID token `sub`: the account uid saved with a local deletion job.
+ *
+ * The uid only ties the local deletion job to the right account. It is never
+ * used for an auth decision, because the token is not verified on the device:
+ * anyone can hand-craft a token with any `sub`. The server checks the real token.
+ *
+ * Returns null, and never throws, when the token is over 16 KB, is not three
+ * non-empty base64url parts (header, payload, signature), the payload is not a
+ * JSON object, `sub` is not 1 to 128 printable ASCII characters, or `user_id`
+ * is present and disagrees with `sub`. `user_id` is never used as a fallback.
+ * The signature is only shape-checked, never verified.
+ */
 export function accountUidFromIdToken(token: string): string | null {
-  const sub = decodeJwtPayload(token)?.sub;
-  if (typeof sub !== "string" || sub.length === 0) return null;
+  if (typeof token !== "string" || token.length > ID_TOKEN_MAX_LENGTH) return null;
+  const parts = token.split(".");
+  if (parts.length !== 3 || !parts.every((part) => BASE64URL_SEGMENT.test(part))) return null;
+  const payload = decodeJwtPayload(token);
+  const sub = payload?.sub;
+  if (typeof sub !== "string" || !ACCOUNT_UID.test(sub)) return null;
+  if (payload?.user_id !== undefined && payload.user_id !== sub) return null;
   return sub;
 }
 

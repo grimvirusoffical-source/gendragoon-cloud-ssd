@@ -13,6 +13,12 @@ import {
   type DeletionFrame,
 } from "./screens";
 
+/** Screenshot-only copy of the catalog shape from GET /v2/pricing (the server owns real prices). */
+const SHOT_PRICING = {
+  storage: { "100GB": { gb: 100, monthlyCents: 640, yearlyCents: 6400 }, "1TB": { gb: 1000, monthlyCents: 3600, yearlyCents: 36000 } },
+  performance: { lite: { workers: 2, monthlyCents: 300, yearlyCents: 3000 }, boost: { workers: 4, monthlyCents: 600, yearlyCents: 6000 }, turbo: { workers: 8, monthlyCents: 900, yearlyCents: 9000 } },
+};
+
 /** Test-data frames captured by the web screenshot job. No secrets. */
 export const SHOTS = [
   "sign-in",
@@ -33,8 +39,9 @@ export const SHOTS = [
   "delete-not-retryable",
   "byo-s3",
   "pricing-free-first",
-  "pricing-hosted-plus-byo",
-  "pricing-create-byo",
+  "pricing-free-plus-plans",
+  "pricing-new-plans",
+  "pricing-new-custom",
   "pricing-grace",
 ] as const;
 
@@ -155,46 +162,31 @@ export function ShotFrame(props: { id: ShotId }) {
         ) : null}
         {props.id === "byo-s3" ? <ConnectStorageScreen /> : null}
         {props.id === "pricing-free-first" ? (
-          <NewWorkspaceScreen
-            quote={{ isFree: true, grandfathered: true, monthlyPriceCents: 0, feeWaived: false }}
-            byoQuote={{ isFree: false, grandfathered: false, monthlyPriceCents: 500, feeWaived: false }}
-            onCreate={() => undefined}
-          />
+          <NewWorkspaceScreen freeProjectAvailable pricing={SHOT_PRICING} intentId="shot" onCreate={() => undefined} />
         ) : null}
-        {props.id === "pricing-create-byo" ? (
-          <NewWorkspaceScreen
-            quote={{ isFree: true, grandfathered: true, monthlyPriceCents: 0, feeWaived: false }}
-            byoQuote={{ isFree: false, grandfathered: false, monthlyPriceCents: 500, feeWaived: false }}
-            initialName="Vacation photos"
-            initialStorage="byo"
-            initialProviderId="aws"
-            onCreate={() => undefined}
-          />
+        {props.id === "pricing-new-plans" ? (
+          <NewWorkspaceScreen freeProjectAvailable={false} pricing={SHOT_PRICING} intentId="shot" initialName="Music Studio" initialStorageTier="1TB" initialPerformanceTier="turbo" onCreate={() => undefined} />
         ) : null}
-        {props.id === "pricing-hosted-plus-byo" ? (
+        {props.id === "pricing-new-custom" ? (
+          <NewWorkspaceScreen freeProjectAvailable={false} pricing={SHOT_PRICING} intentId="shot" initialName="Own S3" initialStorage="custom" initialPerformanceTier="lite" onCreate={() => undefined} />
+        ) : null}
+        {props.id === "pricing-free-plus-plans" ? (
           <WorkspacesScreen
             workspaces={[
-              {
-                id: "11111111-1111-4111-8111-000000000001",
-                name: "Free Hosted",
-                kind: "paid",
-                isFree: false,
-                grandfathered: false,
-                monthlyPriceCents: 500,
-                feeWaived: false,
-              },
+              { id: "11111111-1111-4111-8111-000000000001", name: "Free Hosted", kind: "paid", isFree: true, grandfathered: false, monthlyPriceCents: 0, feeWaived: false },
               {
                 id: "11111111-1111-4111-8111-000000000002",
                 name: "Second Workspace",
                 kind: "paid",
-                isFree: true,
-                grandfathered: true,
+                isFree: false,
+                grandfathered: false,
                 monthlyPriceCents: 0,
                 feeWaived: false,
+                billingModel: "plans",
+                requiredPlans: { storage: "managed", storageTier: "100GB", performanceTier: "boost", interval: "month" },
               },
             ]}
-            unpaidIds={["11111111-1111-4111-8111-000000000001"]}
-            additionalMonthlyCents={500}
+            unpaidIds={[]}
             onDelete={() => undefined}
             onMerge={() => undefined}
             onPay={() => undefined}

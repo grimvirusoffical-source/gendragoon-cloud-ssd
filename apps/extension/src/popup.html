@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="dark light" />
+    <title>GenDragoon Cloud SSD</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <main class="popup">
+      <header class="brand">
+        <img src="icons/gendragoon-48.png" width="36" height="36" alt="" />
+        <div><h1>GENDRAGOON</h1><p>CLOUD SSD</p></div>
+      </header>
+
+      <section class="panel" aria-labelledby="status-title">
+        <h2 id="status-title">Service</h2>
+        <div id="status" aria-live="polite">
+          <div class="skeleton-group" aria-hidden="true"><div class="skeleton" style="height:14px"></div><div class="skeleton" style="height:14px;width:60%"></div></div>
+        </div>
+        <button id="refresh" type="button" class="btn-ghost">Check again</button>
+      </section>
+
+      <section class="panel" aria-labelledby="sort-title">
+        <h2 id="sort-title">Where will it go?</h2>
+        <label class="field" for="filename">File name
+          <input id="filename" type="text" placeholder="holiday.mp4" autocomplete="off" spellcheck="false" />
+        </label>
+        <p id="sort-result" class="help" aria-live="polite">Type a file name to see its GenDragoon type folder.</p>
+      </section>
+
+      <section class="panel" aria-labelledby="account-title">
+        <h2 id="account-title">Account</h2>
+        <p class="help">Uploads, backups and workspaces live in the GenDragoon desktop and mobile apps. Sign-in from the browser extension is not available yet.</p>
+      </section>
+
+      <section class="panel appearance" aria-labelledby="theme-title">
+        <h2 id="theme-title">Appearance</h2>
+        <div class="segmented" role="radiogroup" aria-label="Theme" id="theme"></div>
+        <button id="open-settings" type="button" class="btn-link">All settings</button>
+      </section>
+
+      <footer><a id="support" target="_blank" rel="noreferrer noopener">Support</a> · <a id="privacy" target="_blank" rel="noreferrer noopener">Privacy</a> · <span id="version"></span></footer>
+    </main>
+    <script src="popup.js"></script>
+  </body>
+</html>

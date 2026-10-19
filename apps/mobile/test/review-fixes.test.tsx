@@ -61,7 +61,7 @@ describe("44pt targets, measured on rendered controls", () => {
   it.each([
     ["workspaces", () => <WorkspacesScreen workspaces={[A, B]} unpaidIds={[]} onDelete={() => undefined} onMerge={() => undefined} />],
     ["passphrase", () => <PassphraseScreen onSubmit={() => undefined} />],
-    ["create", () => <NewWorkspaceScreen quote={{ isFree: true, grandfathered: false, feeWaived: false, monthlyPriceCents: 0 }} onCreate={() => undefined} />],
+    ["create", () => <NewWorkspaceScreen freeProjectAvailable={false} pricing={null} intentId="i" initialName="Studio" onCreate={() => undefined} />],
     ["settings", () => <SettingsHome deleteDisabled={false} onSort={() => undefined} onDelete={() => undefined} onSignOut={() => undefined} />],
     ["delete account (retry)", () => (
       <DeleteAccountScreen
@@ -251,11 +251,10 @@ describe("support request edges", () => {
 });
 
 describe("create screen billing line", () => {
-  it.each([
-    ["feeWaived", { isFree: false, grandfathered: false, feeWaived: true, monthlyPriceCents: 0 }],
-    ["grandfathered", { isFree: false, grandfathered: true, feeWaived: false, monthlyPriceCents: 0 }],
-  ])("a %s quote with 0 cents never says billed monthly", async (_n, quote) => {
-    const s = await render(<NewWorkspaceScreen pricingEnabled quote={quote} onCreate={() => undefined} />);
-    expect(s.getByTestId("new-workspace-explain").props.children).not.toMatch(/billed monthly/);
+  it("never shows a workspace-fee line or the old $5 copy", async () => {
+    const s = await render(<NewWorkspaceScreen freeProjectAvailable={false} pricing={{ storage: { "100GB": { gb: 100, monthlyCents: 640, yearlyCents: 6400 } }, performance: { boost: { workers: 4, monthlyCents: 600, yearlyCents: 6000 } } }} intentId="i" initialName="S" initialStorageTier="100GB" initialPerformanceTier="boost" onCreate={() => undefined} />);
+    expect(s.getByTestId("plan-total-amount")).toHaveTextContent("Total $12.40/mo");
+    expect(s.queryByText(/fee|billed monthly|\$5\.00/i)).toBeNull();
   });
 });
+
