@@ -73,6 +73,8 @@ func status(err error, out **C.char) C.int {
 		return errUnauthorized
 	case errors.Is(err, gd.ErrRateLimited):
 		return errRateLimited
+	case errors.Is(err, gd.ErrInvalid):
+		return errInvalid
 	case errors.As(err, &ae):
 		switch ae.Status {
 		case 404:

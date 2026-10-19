@@ -102,15 +102,15 @@ func (d *Drive) mk() []byte {
 // segments, no empty segments, no backslashes or control characters, at most 1024 bytes.
 func CleanPath(p string) (string, error) {
 	if p == "" || len(p) > 1024 || !utf8.ValidString(p) || strings.HasPrefix(p, "/") || strings.HasSuffix(p, "/") || strings.Contains(p, "\\") {
-		return "", fmt.Errorf("gendragoon: invalid path %q", p)
+		return "", fmt.Errorf("%w path %q", ErrInvalid, p)
 	}
 	for _, seg := range strings.Split(p, "/") {
 		if seg == "" || seg == "." || seg == ".." {
-			return "", fmt.Errorf("gendragoon: invalid path %q", p)
+			return "", fmt.Errorf("%w path %q", ErrInvalid, p)
 		}
 		for _, r := range seg {
 			if r < 0x20 || r == 0x7f {
-				return "", fmt.Errorf("gendragoon: invalid path %q", p)
+				return "", fmt.Errorf("%w path %q", ErrInvalid, p)
 			}
 		}
 	}
@@ -528,7 +528,7 @@ func (d *Drive) DeleteSlot(ctx context.Context, folder, slot string) error {
 // drive root) or a valid drive path.
 func SlotPath(folder, slot string) (string, error) {
 	if slot == "" || strings.Contains(slot, "/") {
-		return "", fmt.Errorf("gendragoon: invalid slot name %q", slot)
+		return "", fmt.Errorf("%w slot name %q", ErrInvalid, slot)
 	}
 	p := slot
 	if folder != "" {

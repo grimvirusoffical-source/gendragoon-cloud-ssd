@@ -46,6 +46,7 @@ var (
 	ErrRateLimited        = errors.New("gendragoon: rate limited")
 	ErrChecksum           = errors.New("gendragoon: checksum mismatch")
 	ErrLocked             = errors.New("gendragoon: master key not unlocked")
+	ErrInvalid            = errors.New("gendragoon: invalid")
 )
 
 func (e *APIError) Is(target error) bool {

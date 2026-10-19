@@ -105,7 +105,10 @@ static int first_run(void) {
     CHECK(gd_drive_delete(d, "saves/slot1", &err) == GD_ERR_LEVEL, "C15 general delete refused at L2 (L3)");
     gd_free(err); err = NULL;
     int rc = gd_drive_delete_slot(d, "saves", "../slot1", &err);
-    CHECK(rc != GD_OK && rc != GD_ERR_LEVEL, "C15 slot delete refuses a path");
+    CHECK(rc == GD_ERR_INVALID, "C15 slot delete ../slot1 is GD_ERR_INVALID");
+    gd_free(err); err = NULL;
+    rc = gd_drive_delete_slot(d, "saves", "a/b", &err);
+    CHECK(rc == GD_ERR_INVALID, "C15 slot delete a/b is GD_ERR_INVALID");
     gd_free(err); err = NULL;
     CHECK(gd_drive_delete_slot(d, "saves", "slot1", &err) == GD_OK, "C15 slot delete at L2");
     gd_free(err); err = NULL;
