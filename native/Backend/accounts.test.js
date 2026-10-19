@@ -9,7 +9,7 @@ const totp=require("./accounts/totp");
 const {createSealer}=require("./accounts/seal");
 const {createTosGate,loadTerms}=require("./accounts/tos");
 const {createEmailChecker}=require("./accounts/email_check");
-const {MockSmsProvider,smsProviderFromEnv}=require("./accounts/sms");
+const {MockSmsProvider,TwilioSmsProvider,smsProviderFromEnv}=require("./accounts/sms");
 const {createAccountStore,deleteProfileByHash}=require("./accounts/store");
 const {registerAccounts}=require("./accounts/routes");
 const {createOidcVerifier}=require("./accounts/oidc");
@@ -127,7 +127,7 @@ test("email deliverability: MX, implicit MX (A record), null MX, missing domain,
  assert.equal((await c.check("not-an-email")).code,"email_syntax");
 });
 
-test("SMS: only the mock exists, and production refuses it unless staging opts in",()=>{
+test("SMS mock: staging only, production refuses it unless staging opts in",()=>{
  assert.equal(smsProviderFromEnv({}),null);
  assert.ok(smsProviderFromEnv({SMS_PROVIDER:"mock"}) instanceof MockSmsProvider);
  assert.equal(smsProviderFromEnv({SMS_PROVIDER:"mock",NODE_ENV:"production"}),null);
@@ -301,6 +301,62 @@ test("phone 2FA is refused cleanly when no SMS provider is configured",async()=>
   assert.equal(rules.body.minAge,13);assert.equal(rules.body.centralMinAge,13);
   const r=await h.call("POST","/v1/accounts/signup",form({twoFactor:"phone",phone:"+15551234567",tosGrant:await h.agreedGrant()}));
   assert.equal(r.status,503);assert.equal(r.body.error,"sms_unavailable");
+ }finally{h.close();}
+});
+
+test("phone 2FA through Twilio (HTTP stub): rules show it available, codes arrive, failures don't break sign-up",async()=>{
+ const AC="AC"+"1".repeat(32);
+ const posts=[];let fail=null;
+ const fetchImpl=async(url,init)=>{
+  posts.push(new URLSearchParams(init.body));
+  if(fail)return {ok:false,status:fail.status,json:async()=>fail.body};
+  return {ok:true,status:201,json:async()=>({sid:"SM"+posts.length})};
+ };
+ const twilio=smsProviderFromEnv({TWILIO_ACCOUNT_SID:AC,TWILIO_AUTH_TOKEN:"stub-token",TWILIO_FROM_NUMBER:"+15055550100",NODE_ENV:"production"},{fetchImpl});
+ assert.ok(twilio instanceof TwilioSmsProvider);
+ const h=await harness({sms:twilio});
+ const lastCode=()=>/(\d{6})/.exec(posts.at(-1).get("Body"))[1];
+ try{
+  const rules=await h.call("GET","/v1/accounts/rules");
+  assert.equal(rules.body.twoFactor.find(m=>m.method==="phone").available,true);
+  let r=await h.call("POST","/v1/accounts/signup",form({twoFactor:"phone",phone:"+1 555 123 4567",tosGrant:await h.agreedGrant()}));
+  assert.equal(r.status,201);assert.equal(posts.length,1);
+  assert.equal(posts[0].get("To"),"+15551234567");assert.equal(posts[0].get("From"),"+15055550100");
+  const enroll=lastCode();
+  r=await h.call("POST","/v1/accounts/me/2fa/confirm",{code:enroll},tok("u1",1000));
+  assert.equal(r.body.twoFactorState,"active");
+  const s2=tok("u1",2000);
+  assert.equal((await h.call("POST","/v1/accounts/2fa/sms/send",{},s2)).status,200);
+  const login=lastCode();
+  assert.equal((await h.call("POST","/v1/accounts/2fa/verify",{code:login},s2)).status,200);
+  assert.equal((await h.call("POST","/v1/accounts/2fa/verify",{code:login},tok("u1",3000))).body.error,"code_invalid","an SMS code can't be replayed");
+
+  // Twilio is down: the login send reports a retryable failure and leaves no usable code behind.
+  fail={status:503,body:{code:20500}};
+  const s3=tok("u1",4000);
+  r=await h.call("POST","/v1/accounts/2fa/sms/send",{},s3);
+  assert.equal(r.status,502);assert.equal(r.body.error,"sms_send_failed");
+  assert.equal((await h.store.get("u1")).smsCodeHash,null,"undelivered code withdrawn");
+  // The hourly limit still counts failed sends (5 per hour).
+  fail=null;
+  assert.equal((await h.call("POST","/v1/accounts/2fa/sms/send",{},s3)).status,200);
+  assert.equal((await h.call("POST","/v1/accounts/2fa/sms/send",{},s3)).status,200);
+  r=await h.call("POST","/v1/accounts/2fa/sms/send",{},s3);
+  assert.equal(r.status,429,"enroll, login, failed and two resends reach the hourly cap of 5");
+  assert.equal(posts.length,5,"the capped request never reaches Twilio");
+ }finally{h.close();}
+});
+
+test("phone sign-up still creates the account when Twilio rejects the number",async()=>{
+ const fetchImpl=async()=>({ok:false,status:400,json:async()=>({code:21211,message:"Invalid 'To' Phone Number"})});
+ const twilio=smsProviderFromEnv({TWILIO_ACCOUNT_SID:"AC"+"2".repeat(32),TWILIO_AUTH_TOKEN:"stub-token",TWILIO_FROM_NUMBER:"+15055550100"},{fetchImpl});
+ const h=await harness({sms:twilio});
+ try{
+  const r=await h.call("POST","/v1/accounts/signup",form({twoFactor:"phone",phone:"+15551234567",tosGrant:await h.agreedGrant()}));
+  assert.equal(r.status,201);assert.equal(r.body.smsError,"phone_undeliverable");assert.ok(r.body.smsMessage);
+  assert.deepEqual(r.body.pending,["2fa_setup"],"the app can resend or switch method");
+  const r2=await h.call("POST","/v1/accounts/me/2fa/setup",{method:"phone",phone:"+15551234567"},tok("u1",1000));
+  assert.equal(r2.status,400);assert.equal(r2.body.error,"phone_undeliverable");
  }finally{h.close();}
 });
 

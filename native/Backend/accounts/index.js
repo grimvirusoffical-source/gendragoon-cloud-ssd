@@ -4,12 +4,13 @@
 //   ACCOUNTS_MIN_AGE    optional; values below 13 are raised to 13.
 //   REDXAI_ISSUER       optional; Red-XAI Accounts issuer URL. When set, Red-XAI tokens are accepted.
 //   REDXAI_CLIENT_ID    the OAuth client id Gendragoon is registered under (default "gendragoon").
+//   TWILIO_*            optional; turns on phone 2FA codes through Twilio (see sms.js). Unset keeps Phone unavailable.
 //   SMS_PROVIDER=mock   staging only (see sms.js).
 const crypto=require("node:crypto");
 const {createSealer}=require("./seal");
 const {createTosGate}=require("./tos");
 const {createEmailChecker}=require("./email_check");
-const {smsProviderFromEnv}=require("./sms");
+const {smsProviderFromEnv,smsConfigProblem}=require("./sms");
 const {createAccountStore}=require("./store");
 const {createIdentity}=require("./identity");
 const {registerAccounts}=require("./routes");
@@ -31,7 +32,7 @@ function installAccounts({app,db,accountKey,firebaseAuth,env=process.env,now=()=
   },
   deletePasswordUser:uid=>firebaseAuth().deleteUser(uid),
   emailChecker:emailChecker||createEmailChecker({now}),
-  sms:sms===undefined?smsProviderFromEnv(env):sms,
+  sms:sms===undefined?smsProviderFromEnv(env,{fetchImpl}):sms,
   sealer:createSealer(sealKey.toString("base64")),
   tosGate:createTosGate({key:deriveKey(sealKey,"tos"),now}),
   minAge:env.ACCOUNTS_MIN_AGE?Number(env.ACCOUNTS_MIN_AGE):undefined,now});
@@ -41,6 +42,9 @@ function accountsStartup(env=process.env){
  const production=env.NODE_ENV==="production"||Boolean(env.K_SERVICE);
  const raw=env.ACCOUNTS_SEAL_KEY?Buffer.from(env.ACCOUNTS_SEAL_KEY,"base64"):null;
  if(production&&!(raw&&raw.length===32))return {exit:true,message:"ACCOUNTS_SEAL_KEY (32 bytes, base64) is required"};
+ // Phone 2FA is optional: a broken Twilio setup only switches Phone off, so it warns instead of stopping the server.
+ const smsProblem=smsConfigProblem(env);
+ if(smsProblem)return {exit:false,warn:true,message:"Phone two-factor codes are off: "+smsProblem};
  return {exit:false};
 }
 module.exports={installAccounts,accountsStartup};

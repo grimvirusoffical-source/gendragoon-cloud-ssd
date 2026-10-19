@@ -342,6 +342,7 @@ function start(port=Number(process.env.PORT||8080)){
  if(gate.warn)console.warn(gate.message);
  const accountsGate=require("./accounts").accountsStartup(process.env);
  if(accountsGate.exit){console.error(accountsGate.message);process.exit(1);}
+ if(accountsGate.warn)console.warn(accountsGate.message);
  firestore();
  const timer=setInterval(()=>{
   Promise.resolve(deletion.sweepRegisteredSupportNotifications()).catch(()=>console.error("support_notify_sweep_failed"));

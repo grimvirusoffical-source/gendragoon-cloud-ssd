@@ -21,6 +21,7 @@ const MESSAGES={
  username_taken:"That username is taken.",email_taken:"That email is already used by another account.",
  email_domain:"That email domain can't receive mail.",email_unverifiable:"We couldn't check that email domain. Try again in a moment.",
  under_min_age:"You must be at least 13 to make an account.",sms_unavailable:"Text-message codes aren't available yet.",
+ sms_send_failed:"We couldn't send the text message. Try again in a moment.",phone_undeliverable:"We can't send text messages to that number.",
  code_invalid:"That code isn't right.",rate_limited:"Too many tries. Wait a moment and try again.",
  quick_signin_email:"Your sign-in provider hasn't confirmed this email address.",
 };
@@ -92,7 +93,13 @@ function registerAccounts({app,store,identify,createPasswordUser,deletePasswordU
   const phone=sealer.open(phoneEnc,"phone:"+uid);
   const code=String(crypto.randomInt(0,1_000_000)).padStart(6,"0");
   await store.update(uid,{smsCodeHash:sha(uid+"|"+purpose+"|"+code),smsCodeExpMs:t+SMS_TTL_MS,smsCodePurpose:purpose,smsAttempts:0,smsSent:[...sent,t]});
-  await sms.send({to:phone,body:"Your Gendragoon code is "+code+". It expires in 10 minutes. Don't share it with anyone."});
+  try{await sms.send({to:phone,body:"Your Gendragoon code is "+code+". It expires in 10 minutes. Don't share it with anyone."});}
+  catch(error){
+   // The undelivered code is withdrawn; the attempt still counts toward the hourly limit.
+   await store.update(uid,{smsCodeHash:null,smsCodeExpMs:0,smsCodePurpose:null,smsAttempts:0});
+   if(error?.code==="sms_bad_number")throw httpError(400,"phone_undeliverable","phone");
+   throw httpError(502,"sms_send_failed","twoFactor");
+  }
  }
  async function checkSmsCode(uid,profile,purpose,code){
   if(profile.smsCodePurpose!==purpose||!profile.smsCodeHash||profile.smsCodeExpMs<now()||(profile.smsAttempts||0)>=SMS_MAX_ATTEMPTS)return false;
@@ -199,7 +206,13 @@ function registerAccounts({app,store,identify,createPasswordUser,deletePasswordU
  }
  async function finishSignup(res,uid,profile,body,id){
   let extra={};
-  if(body.twoFactor!=="none")extra=await beginTwoFactor(uid,profile,{method:body.twoFactor,phone:body.phone});
+  if(body.twoFactor!=="none"){
+   // The account already exists here, so a failed text message must not look like a failed sign-up:
+   // it is reported alongside the 201 and the app offers to resend or pick another method.
+   try{extra=await beginTwoFactor(uid,profile,{method:body.twoFactor,phone:body.phone});}
+   catch(error){if(error?.code!=="sms_send_failed"&&error?.code!=="phone_undeliverable")throw error;
+    extra={smsError:error.code,smsMessage:MESSAGES[error.code]};}
+  }
   const fresh=await store.get(uid);
   res.status(201).json({account:view(fresh,id),pending:pendingFor(fresh,id),...extra});
  }
