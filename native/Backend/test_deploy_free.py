@@ -9,6 +9,33 @@ from unittest.mock import patch
 from types import SimpleNamespace
 
 import deploy_free
+import re
+
+
+def require_closure(entry):
+    """Every local module reachable from entry through require("./x") calls (static string paths)."""
+    base = Path(deploy_free.BASE)
+    seen, stack = set(), [entry]
+    while stack:
+        name = stack.pop()
+        if name in seen:
+            continue
+        seen.add(name)
+        text = (base / name).read_text()
+        for target in re.findall(r"require\(\s*[\"']\./([^\"']+)[\"']\s*\)", text):
+            for candidate in (target, target + ".js", target + ".json"):
+                if (base / candidate).is_file():
+                    stack.append(candidate)
+                    break
+            else:
+                raise AssertionError(name + " requires missing ./" + target)
+    return seen
+
+
+class RuntimeAllowlistTests(unittest.TestCase):
+    def test_allowlist_covers_every_module_the_server_loads(self):
+        missing = sorted(require_closure("free_server.js") - set(deploy_free.RUNTIME_FILES))
+        self.assertEqual(missing, [], "add these to deploy_free.RUNTIME_FILES or the deployed revision will not start")
 
 
 class CandidateDeploymentTests(unittest.TestCase):

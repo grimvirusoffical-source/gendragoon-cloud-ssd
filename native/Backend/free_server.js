@@ -87,8 +87,8 @@ require("./key_envelope").registerKeyEnvelope({app,db,firebaseAuth,hash:accountK
 require("./storage_urls").registerStorageUrls({app,db,bucket,firebaseAuth,hash:accountKey,now:()=>Date.now()});
 const paidStorage=require("./paid_storage").registerPaidStorage({app,db,bucket,firebaseAuth,accountKey,FieldValue,apiKeys,getAuth});
 require("./transfer_v3").registerTransferV3({app,db,bucket,firebaseAuth,accountKey,FieldValue,apiKeys,getAuth,freeGovernor:governor,paidGovernor:paidStorage.governor});
-// Storage provider API for RedX (/provider/v1). OFF unless PROVIDER_V1_ENABLED=true, and provider_v1.js is not in
-// deploy_free.py's runtime allow-list yet, so no deploy can enable it by accident. A binding's quota is a snapshot of
+// Storage provider API for RedX (/provider/v1). OFF unless PROVIDER_V1_ENABLED=true. provider_v1.js is shipped
+// (account deletion uses deleteAccountProviderData) but its routes are mounted only behind this flag. A binding's quota is a snapshot of
 // the workspace quota at connect time; charging it against the workspace's own usedBytes is pricing decision 13.2 (open).
 if(process.env.PROVIDER_V1_ENABLED==="true"){
  require("./provider_v1").registerProviderV1({app,db,blobs:require("./provider_blobstore").gcsBlobStore(bucket),firebaseAuth,accountKey,
