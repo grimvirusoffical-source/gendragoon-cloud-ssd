@@ -197,3 +197,39 @@ function fakeApi(): SignupApi {
 function SignupHarness() {
   return <SignupForm api={fakeApi()} now={() => new Date("2026-10-19T12:00:00Z")} onSubmit={async () => ({ account: {} as never, pending: [] })} onConfirmTwoFactor={async () => {}} onDone={() => {}} />;
 }
+
+describe("real-time checks ignore stale answers (QA B3)", () => {
+  it("a slow email_taken for an older address never lands on the newer one", async () => {
+    vi.useFakeTimers();
+    try {
+      const waiting = new Map<string, (r: { ok: boolean; checks: []; error?: string }) => void>();
+      const api: SignupApi = { ...fakeApi(), validateEmail: (email) => new Promise((resolve) => { waiting.set(email, resolve); }) };
+      mount(<SignupForm api={api} now={() => new Date("2026-10-19T12:00:00Z")} onSubmit={async () => ({ account: {} as never, pending: [] })} onConfirmTwoFactor={async () => {}} onDone={() => {}} />);
+      type("email", "taken@example.com");
+      act(() => { vi.advanceTimersByTime(500); });
+      expect(waiting.has("taken@example.com")).toBe(true);
+      type("email", "fresh@example.com");
+      act(() => { vi.advanceTimersByTime(500); });
+      expect(waiting.has("fresh@example.com")).toBe(true);
+      await act(async () => { waiting.get("fresh@example.com")!({ ok: true, checks: [] }); });
+      await act(async () => { waiting.get("taken@example.com")!({ ok: false, checks: [], error: "email_taken" }); });
+      expect($("email").value).toBe("fresh@example.com");
+      expect(host!.textContent).not.toContain("already used by another account");
+      // The same answer for the value on screen does show.
+      type("email", "taken@example.com");
+      act(() => { vi.advanceTimersByTime(500); });
+      await act(async () => { waiting.get("taken@example.com")!({ ok: false, checks: [], error: "email_taken" }); });
+      expect(host!.textContent).toContain("already used by another account");
+    } finally { vi.useRealTimers(); }
+  });
+  it("a temporary email_unverifiable doesn't block the form", async () => {
+    vi.useFakeTimers();
+    try {
+      const api: SignupApi = { ...fakeApi(), validateEmail: async () => ({ ok: false, checks: [], error: "email_unverifiable" }) };
+      mount(<SignupForm api={api} now={() => new Date("2026-10-19T12:00:00Z")} onSubmit={async () => ({ account: {} as never, pending: [] })} onConfirmTwoFactor={async () => {}} onDone={() => {}} />);
+      type("email", "someone@example.com");
+      await act(async () => { vi.advanceTimersByTime(500); });
+      expect(host!.textContent).not.toContain("couldn't check that email domain");
+    } finally { vi.useRealTimers(); }
+  });
+});

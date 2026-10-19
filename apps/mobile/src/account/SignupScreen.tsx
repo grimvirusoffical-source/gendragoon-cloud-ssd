@@ -28,13 +28,17 @@ import {
   type TosGrant,
   type TwoFactorMethod,
 } from "@gendragoon/core";
+import { makeUseRemoteCheck } from "@gendragoon/ui/remote-check";
 import { radii, space, tapTarget, type as typeScale, type MobileColors } from "../theme";
 import { useStyles, useTheme } from "../themeContext";
 import { Banner, Button, Screen, Title } from "../ui";
 
+/** Real-time field checks bound to this app's React (see packages/ui/src/remoteCheckCore.ts). */
+const useRemoteCheck = makeUseRemoteCheck({ useEffect, useRef, useState });
+
 export interface MobileSignupApi {
   terms(): Promise<TermsDocument>;
-  markTermsRead(version: string): Promise<TosGrant>;
+  markTermsRead(version: string, appVersion?: string): Promise<TosGrant>;
   agreeToTerms(grant: string): Promise<TosGrant>;
   validateUsername(username: string): Promise<CheckResult>;
   validateEmail(email: string): Promise<CheckResult>;
@@ -266,7 +270,6 @@ export function SignupScreen(props: {
   const [twoFactor, setTwoFactor] = useState<{ method: TwoFactorMethod | ""; phone: string; ack: boolean }>({ method: "", phone: "", ack: false });
   const [falseInfo, setFalseInfo] = useState(false);
   const [touched, setTouched] = useState(false);
-  const [remote, setRemote] = useState<{ username?: string; email?: string }>({});
   const [terms, setTerms] = useState<TermsDocument | null>(null);
   const [grant, setGrant] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -280,18 +283,11 @@ export function SignupScreen(props: {
   };
   const errors = validateSignup(fields, { now: now(), minAge: props.rules?.minAge, requirePassword: !props.quick });
   const show = (field: string, value: string) => (touched || value.length > 0 ? errors[field] ?? null : null);
+  const remote = {
+    username: useRemoteCheck(username, { enabled: !errors.username, delayMs: 350, check: (v) => props.api.validateUsername(v) }),
+    email: useRemoteCheck(email.value, { enabled: !errors.email && !props.quick, delayMs: 450, check: (v) => props.api.validateEmail(v), ignore: ["email_unverifiable"] }),
+  };
   const blocking = Object.keys(errors).length > 0 || Boolean(remote.username || remote.email);
-
-  useEffect(() => {
-    if (errors.username) return;
-    const t = setTimeout(() => { void props.api.validateUsername(username).then((r) => setRemote((s) => ({ ...s, username: r.ok ? undefined : r.error }))).catch(() => undefined); }, 350);
-    return () => clearTimeout(t);
-  }, [username]); // eslint-disable-line react-hooks/exhaustive-deps
-  useEffect(() => {
-    if (errors.email || props.quick) return;
-    const t = setTimeout(() => { void props.api.validateEmail(email.value).then((r) => setRemote((s) => ({ ...s, email: r.ok ? undefined : r.error }))).catch(() => undefined); }, 450);
-    return () => clearTimeout(t);
-  }, [email.value]); // eslint-disable-line react-hooks/exhaustive-deps
 
   if (step === "twofa" && result) {
     return (
@@ -325,7 +321,7 @@ export function SignupScreen(props: {
       <Screen testID="signup-terms">
         <FadeIn stepKey="terms">
           <TermsGateMobile terms={terms} busy={busy}
-            onRead={async () => setGrant((await props.api.markTermsRead(terms.version)).grant)}
+            onRead={async () => setGrant((await props.api.markTermsRead(terms.version, terms.appVersion)).grant)}
             onAgree={async () => {
               if (!grant) return;
               setBusy(true); setServerError(null);
@@ -353,11 +349,11 @@ export function SignupScreen(props: {
         <Title kicker="Red-XAI Account">{props.quick ? "Finish setting up your account" : "Create your account"}</Title>
         {serverError ? <Banner tone="danger" testID="signup-error">{accountErrorText(serverError)}</Banner> : null}
         <Input label="Username" testID="username" autoComplete="username" value={username} error={remote.username ?? null}
-          onChange={(v) => { setUsername(v.trim()); setRemote((s) => ({ ...s, username: undefined })); }} />
+          onChange={(v) => setUsername(v.trim())} />
         <Hints rules={usernameRules(username)} testID="username-hints" />
         <PairedInput id="email" label="Email" confirmLabel="Confirm email" readOnly={Boolean(props.quick)} value={email.value} confirm={email.confirm}
           error={show("email", email.value) ?? remote.email ?? null} confirmError={show("emailConfirm", email.confirm)}
-          onChange={(next) => { setEmail(next); setRemote((s) => ({ ...s, email: undefined })); }} />
+          onChange={setEmail} />
         {!props.quick ? (
           <PairedInput id="password" label="Password" confirmLabel="Confirm password" secure value={password.value} confirm={password.confirm}
             confirmError={show("passwordConfirm", password.confirm)} hints={passwordRules(password.value)} onChange={setPassword} />

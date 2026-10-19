@@ -10,7 +10,8 @@
     "./theme.css": "./src/theme.css",
     "./tokens.css": "./src/tokens.css",
     "./tokens.json": "./tokens.json",
-    "./theme-runtime": "./src/theme-runtime.ts"
+    "./theme-runtime": "./src/theme-runtime.ts",
+    "./remote-check": "./src/remoteCheckCore.ts"
   },
   "scripts": {
     "typecheck": "node scripts/build-tokens.mjs --check && tsc -p tsconfig.json --noEmit",

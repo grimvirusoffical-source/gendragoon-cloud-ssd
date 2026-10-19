@@ -1,4 +1,4 @@
-import { fireEvent, render, waitFor } from "@testing-library/react-native";
+import { act, fireEvent, render, waitFor } from "@testing-library/react-native";
 import { StyleSheet } from "react-native";
 import type { SignupResult, TermsDocument } from "@gendragoon/core";
 import { Hints, PairedInput, SignupScreen, TermsGateMobile, TwoFactorChoice, type MobileSignupApi } from "../src/account/SignupScreen";
@@ -119,6 +119,25 @@ describe("mobile sign-up", () => {
   });
 });
 
+describe("mobile real-time checks ignore stale answers (QA B3)", () => {
+  it("a slow email_taken for an older address never lands on the newer one", async () => {
+    jest.useFakeTimers();
+    try {
+      const waiting = new Map<string, (r: { ok: boolean; checks: []; error?: string }) => void>();
+      const slow: MobileSignupApi = { ...api(), validateEmail: (email) => new Promise((resolve) => { waiting.set(email, resolve); }) };
+      const screen = await render(<SignupScreen api={slow} now={NOW} onSubmit={jest.fn()} onConfirmTwoFactor={jest.fn()} onDone={jest.fn()} />);
+      await fireEvent.changeText(screen.getByTestId("email"), "taken@example.com");
+      await act(async () => { jest.advanceTimersByTime(500); });
+      expect(waiting.has("taken@example.com")).toBe(true);
+      await fireEvent.changeText(screen.getByTestId("email"), "fresh@example.com");
+      await act(async () => { jest.advanceTimersByTime(500); });
+      await act(async () => { waiting.get("fresh@example.com")!({ ok: true, checks: [] }); });
+      await act(async () => { waiting.get("taken@example.com")!({ ok: false, checks: [], error: "email_taken" }); });
+      expect(screen.queryByText(/already used by another account/)).toBeNull();
+    } finally { jest.useRealTimers(); }
+  });
+});
+
 describe("Red-XAI sign-in on mobile", () => {
   it("opens the authorize URL with PKCE and the app redirect, and returns null when cancelled", async () => {
     let opened = "";
@@ -132,6 +151,6 @@ describe("Red-XAI sign-in on mobile", () => {
     expect(params.get("client_id")).toBe("gendragoon");
     expect(params.get("redirect_uri")).toBe("gendragoon://oauth2/callback");
     expect(params.get("code_challenge_method")).toBe("S256");
-    expect(params.get("prompt")).toBe("create");
+    expect(params.get("screen_hint")).toBe("signup");
   });
 });

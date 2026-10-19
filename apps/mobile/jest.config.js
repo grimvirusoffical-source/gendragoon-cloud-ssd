@@ -10,6 +10,7 @@ module.exports = {
   testMatch: ["<rootDir>/test/**/*.test.ts", "<rootDir>/test/**/*.test.tsx"],
   moduleNameMapper: {
     "^@gendragoon/ui/theme$": "<rootDir>/../../packages/ui/src/theme.ts",
+    "^@gendragoon/ui/remote-check$": "<rootDir>/../../packages/ui/src/remoteCheckCore.ts",
     "^(\\.{1,2}/.*)\\.js$": "$1",
   },
   transformIgnorePatterns: [

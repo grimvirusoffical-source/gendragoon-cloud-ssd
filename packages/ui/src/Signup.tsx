@@ -28,11 +28,15 @@ import {
   type TosGrant,
   type TwoFactorMethod,
 } from "@gendragoon/core";
+import { useRemoteCheck } from "./remoteCheck.js";
+
+/** Temporary DNS failures: shown at submit if they persist, never block typing. */
+const TEMPORARY_EMAIL_ERRORS = ["email_unverifiable"] as const;
 
 /** What the sign-up screens need from the server (AccountsClient implements it). */
 export interface SignupApi {
   terms(): Promise<TermsDocument>;
-  markTermsRead(version: string): Promise<TosGrant>;
+  markTermsRead(version: string, appVersion?: string): Promise<TosGrant>;
   agreeToTerms(grant: string): Promise<TosGrant>;
   validateUsername(username: string): Promise<CheckResult>;
   validateEmail(email: string): Promise<CheckResult>;
@@ -304,7 +308,6 @@ export function SignupForm(props: {
   const [twoFactor, setTwoFactor] = useState<{ method: TwoFactorMethod | ""; phone: string; acceptNo2faRisk: boolean }>({ method: "", phone: "", acceptNo2faRisk: false });
   const [falseInfo, setFalseInfo] = useState(false);
   const [touched, setTouched] = useState(false);
-  const [remote, setRemote] = useState<{ username?: string; email?: string }>({});
   const [terms, setTerms] = useState<TermsDocument | null>(null);
   const [grant, setGrant] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -319,16 +322,10 @@ export function SignupForm(props: {
   const show = (field: string, value: string) => (touched || value.length > 0 ? errors[field] ?? null : null);
 
   // Real-time server checks: availability for the username, deliverability and duplicates for the email.
-  useEffect(() => {
-    if (errors.username) return;
-    const t = setTimeout(() => { void props.api.validateUsername(username).then((r) => setRemote((s) => ({ ...s, username: r.ok ? undefined : r.error }))).catch(() => undefined); }, 350);
-    return () => clearTimeout(t);
-  }, [username]); // eslint-disable-line react-hooks/exhaustive-deps
-  useEffect(() => {
-    if (errors.email || props.quick) return;
-    const t = setTimeout(() => { void props.api.validateEmail(email.value).then((r) => setRemote((s) => ({ ...s, email: r.ok ? undefined : r.error }))).catch(() => undefined); }, 450);
-    return () => clearTimeout(t);
-  }, [email.value]); // eslint-disable-line react-hooks/exhaustive-deps
+  const remote = {
+    username: useRemoteCheck(username, { enabled: !errors.username, delayMs: 350, check: (v) => props.api.validateUsername(v) }),
+    email: useRemoteCheck(email.value, { enabled: !errors.email && !props.quick, delayMs: 450, check: (v) => props.api.validateEmail(v), ignore: TEMPORARY_EMAIL_ERRORS }),
+  };
 
   const blocking = Object.keys(errors).length > 0 || Boolean(remote.username) || Boolean(remote.email);
 
@@ -344,7 +341,7 @@ export function SignupForm(props: {
         <TermsGate
           terms={terms}
           busy={busy}
-          onRead={async () => { if (terms) setGrant((await props.api.markTermsRead(terms.version)).grant); }}
+          onRead={async () => { if (terms) setGrant((await props.api.markTermsRead(terms.version, terms.appVersion)).grant); }}
           onAgree={async () => {
             if (!grant) return;
             setBusy(true); setServerError(null);
@@ -379,13 +376,13 @@ export function SignupForm(props: {
       <label className="field">
         <span>Username</span>
         <input data-testid="username" autoComplete="username" value={username} aria-invalid={show("username", username) || remote.username ? "true" : "false"}
-          onChange={(e) => { setUsername(e.target.value.trim()); setRemote((s) => ({ ...s, username: undefined })); }} />
+          onChange={(e) => setUsername(e.target.value.trim())} />
       </label>
       <RequirementHints rules={usernameRules(username)} testId="username-hints" />
       {remote.username ? <p className="field-error" role="alert" data-testid="username-remote">{accountErrorText(remote.username)}</p> : null}
 
       <PairedField id="email" label="Email" confirmLabel="Confirm email" type="email" autoComplete="email" readOnly={Boolean(props.quick)}
-        value={email.value} confirm={email.confirm} onChange={(next) => { setEmail(next); setRemote((s) => ({ ...s, email: undefined })); }}
+        value={email.value} confirm={email.confirm} onChange={setEmail}
         error={show("email", email.value) ?? remote.email ?? null} confirmError={show("emailConfirm", email.confirm)} />
 
       {requirePassword ? (
