@@ -19,8 +19,22 @@ import {
   type SortOverrides,
   type TreeNode,
   type WorkspaceRecord,
+  PERFORMANCE_PLAN_TIERS,
+  PlansSelectionError,
+  STORAGE_PLAN_TIERS,
+  CUSTOM_STORAGE_STEPS,
+  buildCreateWorkspaceRequest,
+  capitalize,
+  newWorkspaceRequirement,
+  quoteWorkspacePlans,
+  type CreateWorkspaceRequest,
+  type PerformancePlanTier,
+  type PlanInterval,
+  type PlansPricing,
+  type StoragePlanTier,
+  type WorkspaceStorageChoice,
 } from "@gendragoon/core";
-import { colors, space, tapTarget, type as typeScale } from "./theme";
+import { space, tapTarget, type as typeScale } from "./theme";
 import { useEffect, useState } from "react";
 import { Linking, Pressable, StyleSheet, Text, View } from "react-native";
 import {
@@ -36,18 +50,13 @@ import {
 import { SAME_ACCOUNT_MESSAGE, sessionMaySwap } from "./account/session";
 import { byoServerFlowReady } from "./byoReady";
 import { DELETION_SUPPORT_ENDPOINT_ENABLED, ENCRYPTED_WORKSPACE_ENABLED, WORKSPACE_PRICING_ENABLED, isTestBuild } from "./flags";
-import {
-  additionalWorkspaceFeeText,
-  grandfatheringEndedPrice,
-  includedPricingEndsWarning,
-  serverPriceLabel,
-  unpaidWorkspaceSubtitle,
-  workspaceQuoteExplanation,
-} from "./pricing";
+import { formatCents, serverPriceLabel, unpaidWorkspaceSubtitle } from "./pricing";
 import { WORKSPACE_BUSY_MESSAGE, graceBanner, isDeletingWorkspace, isWorkspaceBusy } from "./workspaceState";
 import { SUPPORT_DELETION_STILL_RUNNING, SUPPORT_REQUEST_ALREADY, SUPPORT_REQUEST_SENT } from "./supportRequest";
 import { supportContactTarget } from "./supportContact";
-import { Banner, Button, Field, ProgressCard, Screen, SectionLabel, Title, cardStyle } from "./ui";
+import { Banner, Button, Field, ProgressCard, Screen, SectionLabel, Title, useCardStyle } from "./ui";
+import { useStyles, useTheme } from "./themeContext";
+import type { MobileColors } from "./theme";
 
 export function workspacesWithUnpaid<T extends { id: string }>(
   workspaces: readonly T[],
@@ -62,6 +71,7 @@ export function SignInScreen(props: {
   googleEnabled: boolean;
   blockedMessage?: string | null;
 }) {
+  const styles = useStyles(makeStyles);
   return (
     <Screen testID="sign-in-screen">
       <Title kicker="GenDragoon">Cloud SSD</Title>
@@ -150,6 +160,7 @@ export function LockScreen(props: {
   onReview: () => void;
   onPay?: () => void;
 }) {
+  const styles = useStyles(makeStyles);
   const summary = props.access ? planSummary(props.access) : null;
   const unpaidIds = props.lock?.unpaidWorkspaceIds ?? props.access?.unpaidIds ?? [];
   const rows = workspacesWithUnpaid(props.workspaces, unpaidIds);
@@ -204,6 +215,8 @@ export function FileTree(props: {
   onBackup?: () => void;
   onRefresh: () => void;
 }) {
+  const styles = useStyles(makeStyles);
+  const cardStyle = useCardStyle();
   const actions = actionsForMode(props.mode, props.selected, { uploadsBlocked: props.locked });
   const groups = new Map<string, TreeNode[]>();
   for (const node of props.nodes) {
@@ -259,29 +272,49 @@ export interface ServerMergeResult {
 export type ListedProjectStatus = NonNullable<WorkspaceRecord["projectStatus"]> | "deleting";
 export type ListedWorkspace = Omit<WorkspaceRecord, "projectStatus"> & { projectStatus?: ListedProjectStatus; feeWaived?: boolean };
 
+/**
+ * New workspace. First hosted workspace: free (2 GB + free performance plan), no pickers.
+ * Every other workspace: one storage plan + one performance plan, billed together.
+ * Custom storage: performance plan only; setup continues in Connect storage after payment.
+ * No workspace-fee line: the fee is included in the storage plans.
+ */
 export function NewWorkspaceScreen(props: {
-  /** Server quote for a hosted workspace. Not a client-side count. */
-  quote: unknown;
-  /** Server quote for bring-your-own storage. Falls back to rule text when the amount is missing. */
-  byoQuote?: unknown;
-  onCreate: (input: { name: string; storage: "hosted" | "byo"; providerId: string | null }) => void;
-  /** Overrides `WORKSPACE_PRICING_ENABLED` in tests. */
-  pricingEnabled?: boolean;
+  /** Server policy `freeProjectAvailable`. Not a client-side count. */
+  freeProjectAvailable: boolean;
+  /** GET /v2/pricing storage/performance tables. Without them no amount is shown. */
+  pricing: PlansPricing | null;
+  intentId: string;
+  onCreate: (request: CreateWorkspaceRequest) => void;
   initialName?: string;
-  initialStorage?: "hosted" | "byo";
-  initialProviderId?: string | null;
+  initialStorage?: WorkspaceStorageChoice;
+  initialStorageTier?: StoragePlanTier;
+  initialPerformanceTier?: PerformancePlanTier;
+  initialInterval?: PlanInterval;
 }) {
+  const styles = useStyles(makeStyles);
   const [name, setName] = useState(props.initialName ?? "");
-  const [storage, setStorage] = useState<"hosted" | "byo">(props.initialStorage ?? "hosted");
-  const [providerId, setProviderId] = useState<string | null>(props.initialProviderId ?? LAUNCH_BYO_PROVIDERS[0]?.id ?? null);
-  const showPrice = props.pricingEnabled ?? WORKSPACE_PRICING_ENABLED;
-  const quote = storage === "byo" ? (props.byoQuote ?? props.quote) : props.quote;
-  const label = showPrice ? serverPriceLabel(quote) : null;
-  const explanation = showPrice ? workspaceQuoteExplanation(storage, quote) : null;
-  const ready = name.trim().length > 0;
+  const [storage, setStorage] = useState<WorkspaceStorageChoice>(props.initialStorage ?? "managed");
+  const [storageTier, setStorageTier] = useState<StoragePlanTier | undefined>(props.initialStorageTier);
+  const [performanceTier, setPerformanceTier] = useState<PerformancePlanTier | undefined>(props.initialPerformanceTier);
+  const [interval, setInterval] = useState<PlanInterval>(props.initialInterval ?? "month");
+  const [error, setError] = useState<string | null>(null);
+  const free = newWorkspaceRequirement({ freeProjectAvailable: props.freeProjectAvailable, storage }).kind === "free";
+  const selection = { storageTier, performanceTier, interval };
+  const quote = free ? null : quoteWorkspacePlans(props.pricing, { storage, selection });
+  const per = interval === "year" ? "/yr" : "/mo";
+  const ready = name.trim().length > 0 && (free || (performanceTier !== undefined && (storage === "custom" || storageTier !== undefined)));
+  function submit() {
+    try {
+      setError(null);
+      props.onCreate(buildCreateWorkspaceRequest({ name: name.trim(), intentId: props.intentId, storage, freeProjectAvailable: props.freeProjectAvailable, selection }));
+    } catch (failure: unknown) {
+      if (failure instanceof PlansSelectionError) setError(failure.message);
+      else throw failure;
+    }
+  }
   return (
     <Screen testID="new-workspace-screen">
-      <Title kicker="Workspaces" subtitle="Name it, then choose where its files live.">New workspace</Title>
+      <Title kicker="Workspaces" subtitle="Name it, then choose its plans.">New workspace</Title>
       <Field
         label="Workspace name"
         placeholder="e.g. Photos"
@@ -293,54 +326,46 @@ export function NewWorkspaceScreen(props: {
       />
       <SectionLabel>Storage</SectionLabel>
       <View accessibilityRole="radiogroup" accessibilityLabel="Storage" style={styles.choices}>
-        <Button
-          label="Hosted"
-          tone={storage === "hosted" ? "secondary" : "ghost"}
-          selected={storage === "hosted"}
-          testID="storage-hosted"
-          accessibilityLabel="Hosted storage"
-          accessibilityHint="GenDragoon stores the files for you."
-          onPress={() => setStorage("hosted")}
-        />
-        <Button
-          label="Bring your own storage"
-          tone={storage === "byo" ? "secondary" : "ghost"}
-          selected={storage === "byo"}
-          testID="storage-byo"
-          accessibilityLabel="Bring your own storage"
-          accessibilityHint="Use your own S3-compatible bucket."
-          onPress={() => setStorage("byo")}
-        />
+        <Button label="GenDragoon storage" tone={storage === "managed" ? "secondary" : "ghost"} selected={storage === "managed"} testID="storage-managed" accessibilityHint="GenDragoon stores the files for you." onPress={() => setStorage("managed")} />
+        <Button label="Custom storage" tone={storage === "custom" ? "secondary" : "ghost"} selected={storage === "custom"} testID="storage-custom" accessibilityHint="Use your own S3, VPS or cloud." onPress={() => setStorage("custom")} />
       </View>
-      <Text style={styles.help}>
-        {storage === "hosted" ? "GenDragoon stores and encrypts this workspace's files." : "Files go to your own S3-compatible bucket."}
-      </Text>
-      {storage === "byo" ? (
-        <View testID="create-byo-providers" accessibilityRole="radiogroup" accessibilityLabel="Storage provider" style={styles.choices}>
-          {LAUNCH_BYO_PROVIDERS.map((provider) => (
-            <Button
-              key={provider.id}
-              label={provider.label}
-              tone={providerId === provider.id ? "secondary" : "ghost"}
-              selected={providerId === provider.id}
-              testID={`create-byo-${provider.id}`}
-              accessibilityLabel={provider.label}
-              onPress={() => setProviderId(provider.id)}
-            />
-          ))}
-          {COMING_SOON_BYO_PROVIDERS.map((provider) => (
-            <Text key={provider.id} testID={`create-byo-soon-${provider.id}`} style={styles.soon}>{`${provider.label} · Coming soon`}</Text>
-          ))}
-        </View>
-      ) : null}
-      {explanation ? <Text testID="new-workspace-explain" style={styles.help}>{explanation}</Text> : null}
-      {label ? <Text testID="new-workspace-price" style={styles.help}>{label}</Text> : null}
-      <Button
-        label="Create workspace"
-        testID="create-workspace"
-        disabled={!ready}
-        onPress={() => props.onCreate({ name: name.trim(), storage, providerId: storage === "byo" ? providerId : null })}
-      />
+      {free ? (
+        <Text testID="first-free" style={styles.help}>Your first workspace is free: 2 GB storage and the free performance plan.</Text>
+      ) : (
+        <>
+          {storage === "custom" ? (
+            <Text testID="custom-explain" style={styles.help}>No storage plan. Pick a performance plan; setup continues after payment. Your provider bills its own storage.</Text>
+          ) : null}
+          <View accessibilityRole="radiogroup" accessibilityLabel="Billing period" style={styles.choices}>
+            <Button label="Monthly" compact tone={interval === "month" ? "secondary" : "ghost"} selected={interval === "month"} testID="interval-month" onPress={() => setInterval("month")} />
+            <Button label="Yearly" compact tone={interval === "year" ? "secondary" : "ghost"} selected={interval === "year"} testID="interval-year" onPress={() => setInterval("year")} />
+          </View>
+          {storage === "managed" ? (
+            <>
+              <SectionLabel>Storage plan</SectionLabel>
+              <View testID="storage-plans" accessibilityRole="radiogroup" accessibilityLabel="Storage plan" style={styles.choices}>
+                {STORAGE_PLAN_TIERS.map((tier) => (
+                  <Button key={tier} label={tier} compact tone={storageTier === tier ? "secondary" : "ghost"} selected={storageTier === tier} testID={`storage-${tier}`} onPress={() => setStorageTier(tier)} />
+                ))}
+              </View>
+            </>
+          ) : null}
+          <SectionLabel>Performance plan</SectionLabel>
+          <View testID="performance-plans" accessibilityRole="radiogroup" accessibilityLabel="Performance plan" style={styles.choices}>
+            {PERFORMANCE_PLAN_TIERS.map((tier) => (
+              <Button key={tier} label={capitalize(tier)} compact tone={performanceTier === tier ? "secondary" : "ghost"} selected={performanceTier === tier} testID={`performance-${tier}`} onPress={() => setPerformanceTier(tier)} />
+            ))}
+          </View>
+          {quote ? (
+            <View testID="plan-total">
+              {quote.lines.map((line) => <Text key={line.label} style={styles.help}>{`${line.label} · ${formatCents(line.cents)}${per}`}</Text>)}
+              <Text testID="plan-total-amount" style={styles.category}>{`Total ${formatCents(quote.totalCents)}${per}`}</Text>
+            </View>
+          ) : null}
+        </>
+      )}
+      {error ? <Banner alert testID="new-workspace-error">{error}</Banner> : null}
+      <Button label={free ? "Create free workspace" : "Continue to checkout"} testID="create-workspace" disabled={!ready} onPress={submit} />
     </Screen>
   );
 }
@@ -348,8 +373,6 @@ export function NewWorkspaceScreen(props: {
 export function WorkspacesScreen(props: {
   workspaces: readonly ListedWorkspace[];
   unpaidIds: readonly string[];
-  /** Server `workspaceMonthlyCents`. The fee banner is omitted when this is missing. */
-  additionalMonthlyCents?: number;
   capMessage?: string | null;
   serverPreview?: ServerMergePreview | null;
   mergeError?: string | null;
@@ -366,8 +389,9 @@ export function WorkspacesScreen(props: {
   /** Overrides `WORKSPACE_PRICING_ENABLED` in tests. */
   pricingEnabled?: boolean;
 }) {
+  const styles = useStyles(makeStyles);
+  const cardStyle = useCardStyle();
   const showPrice = props.pricingEnabled ?? WORKSPACE_PRICING_ENABLED;
-  const feeText = additionalWorkspaceFeeText(props.additionalMonthlyCents);
   const rows = workspacesWithUnpaid(props.workspaces, props.unpaidIds);
   const [pickedSourceId, setSourceId] = useState(rows[0]?.id ?? "");
   const [pickedTargetId, setTargetId] = useState(rows[1]?.id ?? "");
@@ -408,7 +432,6 @@ export function WorkspacesScreen(props: {
   return (
     <Screen testID="workspaces-screen">
       <Title kicker="Workspaces">Your spaces</Title>
-      {feeText ? <Banner testID="workspace-fee">{feeText}</Banner> : null}
       {busyMessage ? <Banner alert testID="workspace-busy">{busyMessage}</Banner> : null}
       {props.capMessage ? <Banner testID="workspace-cap">{props.capMessage}</Banner> : null}
       {rows.map((workspace) => {
@@ -570,6 +593,7 @@ export function SortScreen(props: {
   overrides: SortOverrides;
   onChange: (overrides: SortOverrides) => void;
 }) {
+  const styles = useStyles(makeStyles);
   const sample = "vacation.jpg";
   const category = categorize({ name: sample }, props.overrides);
   return (
@@ -589,70 +613,47 @@ export function SortScreen(props: {
   );
 }
 
+/**
+ * Custom storage setup for a custom-storage workspace whose performance plan is paid:
+ * provider → credentials (stay on the device) → connection test (challenge) → finish.
+ */
 export function ConnectStorageScreen(props: {
   registration?: {
     endpoint: string;
     providerType: string;
     byoRegistered: boolean;
-    grandfatheringEnded?: boolean;
-    grandfathered?: boolean;
-    isFree?: boolean;
-    monthlyPriceCents?: number;
   } | null;
   challengeNonce?: string | null;
   verified?: { verified: boolean; workspaceId: string } | null;
   error?: unknown;
   onSelectProvider?: (providerId: string) => void;
-  /**
-   * Set when this workspace is grandfathered. Registering BYO ends that
-   * pricing. Provisional until the server quote is on the register route.
-   */
-  endsIncludedPricingCents?: number | null;
 }) {
+  const styles = useStyles(makeStyles);
   const [selected, setSelected] = useState<string | null>(null);
-  const endedPrice = grandfatheringEndedPrice(props.registration);
-  const [acceptedLoss, setAcceptedLoss] = useState(props.endsIncludedPricingCents == null);
-  const [confirmedEnd, setConfirmedEnd] = useState(endedPrice == null);
   const ready = byoServerFlowReady();
   const challengeKey = props.challengeNonce ? challengeObjectKey(props.challengeNonce) : null;
   const errorText = props.error ? byoErrorMessage(props.error) : null;
-  const providersOpen = ready && acceptedLoss;
-  const endedCents = props.registration?.monthlyPriceCents;
+  const step = props.verified?.verified ? "finish" : challengeKey || props.registration?.byoRegistered ? "test" : selected ? "credentials" : "provider";
+  const stepIndex = CUSTOM_STORAGE_STEPS.indexOf(step);
   return (
     <Screen testID="connect-storage">
-      <Title kicker="Settings">Connect storage</Title>
+      <Title kicker="Custom storage">Connect storage</Title>
+      <Text testID="custom-steps" accessibilityLabel={`Step ${stepIndex + 1} of ${CUSTOM_STORAGE_STEPS.length}`} style={styles.help}>
+        {["Provider", "Credentials", "Connection test", "Finish"].map((label, index) => (index === stepIndex ? `[${index + 1}. ${label}]` : `${index + 1}. ${label}`)).join("  ")}
+      </Text>
       {ready ? (
-        <Text style={styles.help}>S3-compatible buckets only. Verification runs through the server.</Text>
+        <Text style={styles.help}>S3-compatible buckets only. Keys stay on this device; verification runs through the server.</Text>
       ) : (
         <Text testID="byo-unavailable" style={styles.help}>
-          Bring-your-own storage is unavailable until the server can register, challenge, and verify the bucket.
+          Custom storage is unavailable until the server can register, challenge, and verify the bucket.
         </Text>
       )}
-      {endedPrice ? <Text testID="byo-ended-price" style={styles.help}>{endedPrice}</Text> : null}
-      {endedPrice != null && typeof endedCents === "number" ? (
-        <Banner testID="byo-included-warning">{includedPricingEndsWarning(endedCents)}</Banner>
-      ) : props.endsIncludedPricingCents != null ? (
-        <Banner testID="byo-included-warning">{includedPricingEndsWarning(props.endsIncludedPricingCents)}</Banner>
-      ) : null}
-      {endedPrice != null && !confirmedEnd ? (
-        <Button
-          label="Confirm"
-          testID="byo-confirm-included"
-          onPress={() => setConfirmedEnd(true)}
-        />
-      ) : null}
-      {props.endsIncludedPricingCents != null && endedPrice == null && !acceptedLoss ? (
-        <Button
-          label="Continue"
-          testID="byo-end-included"
-          onPress={() => setAcceptedLoss(true)}
-        />
-      ) : null}
-      {providersOpen ? LAUNCH_BYO_PROVIDERS.map((provider) => (
+      {ready ? LAUNCH_BYO_PROVIDERS.map((provider) => (
         <Button
           key={provider.id}
           label={provider.label}
-          tone="ghost"
+          tone={selected === provider.id ? "secondary" : "ghost"}
+          selected={selected === provider.id}
           testID={`byo-${provider.id}`}
           onPress={() => {
             setSelected(provider.id);
@@ -660,12 +661,11 @@ export function ConnectStorageScreen(props: {
           }}
         />
       )) : null}
-      {providersOpen && selected ? <Text testID="byo-selected" style={styles.help}>{selected}</Text> : null}
-      <Text style={styles.help}>Coming soon</Text>
+      {ready && selected ? <Text testID="byo-selected" style={styles.help}>{selected}</Text> : null}
       {COMING_SOON_BYO_PROVIDERS.map((provider) => (
         <Text key={provider.id} testID={`byo-soon-${provider.id}`} style={styles.soon}>{`${provider.label} · Coming soon`}</Text>
       ))}
-      {props.registration?.byoRegistered && confirmedEnd ? (
+      {props.registration?.byoRegistered ? (
         <Text testID="byo-registered" style={styles.help}>{`${props.registration.providerType} · ${props.registration.endpoint}`}</Text>
       ) : null}
       {challengeKey ? <Text testID="byo-challenge-key" style={styles.help}>{challengeKey}</Text> : null}
@@ -686,6 +686,7 @@ export function PassphraseScreen(props: {
   initialChecked?: boolean;
   initialRevealed?: boolean;
 }) {
+  const styles = useStyles(makeStyles);
   const [value, setValue] = useState(props.initialPassphrase ?? "");
   const [again, setAgain] = useState(props.initialConfirm ?? "");
   const [ack, setAck] = useState(props.initialChecked ?? false);
@@ -819,6 +820,7 @@ export function DeleteAccountScreen(props: {
   apiBase?: string;
   supportFetch?: typeof fetch;
 }) {
+  const styles = useStyles(makeStyles);
   const [step, setStep] = useState<"review" | "confirm">(props.frame === "confirm" ? "confirm" : "review");
   const [notice, setNotice] = useState<DeletionNotice | null>(
     props.frame && props.frame !== "confirm" ? { ...deletionNotice(props.frame), jobId: props.jobId } : null,
@@ -997,6 +999,28 @@ export function DeleteAccountScreen(props: {
   );
 }
 
+const THEME_OPTIONS: { id: "dark" | "light" | "system"; label: string }[] = [
+  { id: "dark", label: "Dark" },
+  { id: "light", label: "Light" },
+  { id: "system", label: "System" },
+];
+
+/** Dark / Light / System choice. Saved on the device and applied at once. */
+export function ThemePicker() {
+  const { preference, setPreference } = useTheme();
+  const styles = useStyles(makeStyles);
+  return (
+    <View style={styles.themeRow} accessibilityRole="radiogroup" testID="theme-picker">
+      <Text style={styles.label} accessibilityRole="header">Appearance</Text>
+      <View style={styles.themeButtons}>
+        {THEME_OPTIONS.map((option) => (
+          <Button key={option.id} label={option.label} tone="secondary" compact selected={preference === option.id} testID={`theme-${option.id}`} onPress={() => setPreference(option.id)} />
+        ))}
+      </View>
+    </View>
+  );
+}
+
 export function SettingsHome(props: {
   onSort: () => void;
   onConnect?: () => void;
@@ -1009,6 +1033,7 @@ export function SettingsHome(props: {
   return (
     <Screen testID="settings-screen">
       <Title kicker="Settings">Account</Title>
+      <ThemePicker />
       <Button label="Type sort" tone="ghost" testID="open-sort" onPress={props.onSort} />
       {props.connectEnabled && props.onConnect ? (
         <Button label="Connect storage" tone="ghost" testID="open-connect" onPress={props.onConnect} />
@@ -1019,8 +1044,10 @@ export function SettingsHome(props: {
   );
 }
 
-const styles = StyleSheet.create({
+const makeStyles = (colors: MobileColors) => StyleSheet.create({
   help: { color: colors.muted, fontSize: typeScale.helpSize },
+  themeRow: { gap: space.sm },
+  themeButtons: { flexDirection: "row", gap: space.sm, flexWrap: "wrap" },
   label: { color: colors.text, fontSize: typeScale.bodySize },
   checkRow: { flexDirection: "row", alignItems: "center", gap: space.sm, minHeight: tapTarget, minWidth: tapTarget },
   checkbox: { width: 22, height: 22, borderRadius: 6, borderWidth: 1.5, borderColor: colors.controlBorder, alignItems: "center", justifyContent: "center" },

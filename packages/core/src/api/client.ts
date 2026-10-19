@@ -1,7 +1,11 @@
+import type { CreateWorkspaceRequest } from "../workspace-plans.js";
+import { parseChatEvents, type ChatMessage, type CreateTeamRequest, type JoinTeamRequest, type ModerationAction, type SharedWorkspace, type Team, type TeamColorChoices, type TeamInvite, type TeamMember, type TeamTierId, type TeamWorkspace, type WorkspaceCard } from "../teams.js";
 import { assertNoCredentialFields, BYO_PRESIGNED_URL_MESSAGE, BYO_UNSUPPORTED_MESSAGE, BYO_UNVERIFIABLE_MESSAGE } from "../byo.js";
 import { assertKeyEnvelope } from "../envelope.js";
-import { AccountDeletedError, ApiError, DeletionNotFoundError, DeletionNotRetryableError, InvalidTokenError, ReauthRequiredError, SUPPORT_CONTACT, WorkspaceLockedError, deletionAuthFailure, isAccountDeleted, isInvalidToken, isReauthRequired } from "./errors.js";
+import { AccountDeletedError, ApiError, DeletionNotFoundError, DeletionNotRetryableError,
+  TeamOwnerMustTransferError, InvalidTokenError, ReauthRequiredError, SUPPORT_CONTACT, WorkspaceLockedError, deletionAuthFailure, isAccountDeleted, isInvalidToken, isReauthRequired } from "./errors.js";
 import { parseWorkspacePrice } from "../policy.js";
+import { PROVIDER_BASE_PATH, parseProviderAuthorization, parseProviderBindings, parseProviderGrant, type ProviderAuthorization, type ProviderBinding, type ProviderConnectRequest, type ProviderGrant, type ProviderRevokeResult, type ProviderScope } from "../provider.js";
 import { assertStorageUrlResponse, reauthIsRecent, reauthenticatedAtForDelete } from "../storage.js";
 import type {
   BillingStatusResponse,
@@ -24,7 +28,6 @@ import type {
   ProjectListResponse,
   UploadStatus,
   Workspace,
-  WorkspaceFeeCheckout,
   WorkspaceListResponse,
   StorageUrlRequest,
   StorageUrlResponse,
@@ -39,6 +42,7 @@ export {
   ApiError,
   DeletionNotFoundError,
   DeletionNotRetryableError,
+  TeamOwnerMustTransferError,
   InvalidTokenError,
   ReauthRequiredError,
   SUPPORT_CONTACT,
@@ -115,14 +119,128 @@ export class GenDragoonClient {
     return this.request("POST", `/v2/projects/${encodeURIComponent(id)}/make-hosted`);
   }
 
-  async createProject(body: { name: string; intentId: string }): Promise<Record<string, unknown>> {
+  /**
+   * POST /v2/projects. The free first workspace sends `{ name, intentId }`; every other
+   * workspace sends `plans` (and `storage: "custom"` for custom storage). Build the body with
+   * `buildCreateWorkspaceRequest` so the rules match the server.
+   */
+  async createProject(body: CreateWorkspaceRequest): Promise<Record<string, unknown>> {
     const created = await this.request<Record<string, unknown>>("POST", "/v2/projects", body);
     assertServerPrices(created);
     return created;
   }
 
-  checkoutProject(id: string): Promise<CheckoutResponse> {
-    return this.request("POST", `/v2/projects/${encodeURIComponent(id)}/checkout`);
+  /** Resumes the workspace's single plans Checkout, or replaces its plans before payment. */
+  checkoutProject(id: string, body?: { plans: NonNullable<CreateWorkspaceRequest["plans"]> }): Promise<CheckoutResponse> {
+    return this.request("POST", `/v2/projects/${encodeURIComponent(id)}/checkout`, body);
+  }
+
+  // Teams (cloud-ssd feature/teams, docs/API-teams.md)
+  teamsCatalog(): Promise<{ tiers: Array<{ id: TeamTierId; name: string; members: number; monthlyCents: number; yearlyCents: number }>; enterprise: { contact: true }; colors: TeamColorChoices }> {
+    return this.request("GET", "/v2/teams/catalog");
+  }
+
+  checkoutTeamWorkspace(id: string, workspaceId: string): Promise<CheckoutResponse> {
+    return this.request("POST", `/v2/teams/${encodeURIComponent(id)}/workspaces/${encodeURIComponent(workspaceId)}/checkout`, {});
+  }
+
+  setTeamMemberRole(id: string, memberId: string, role: "member" | "viewer"): Promise<{ memberId: string; role: "member" | "viewer" }> {
+    return this.request("POST", `/v2/teams/${encodeURIComponent(id)}/members/${encodeURIComponent(memberId)}/role`, { role });
+  }
+  transferTeam(id: string, body: { memberId: string; color: string; ownerShade?: string }): Promise<{ transferred: true; ownerMemberId: string }> {
+    return this.request("POST", `/v2/teams/${encodeURIComponent(id)}/transfer`, body);
+  }
+  deleteTeam(id: string, confirmName: string): Promise<{ deleted: true; canceledSubscriptions: number }> {
+    return this.request("POST", `/v2/teams/${encodeURIComponent(id)}/delete`, { confirmName });
+  }
+  listTeams(): Promise<{ teams: Team[] }> {
+    return this.request("GET", "/v2/teams");
+  }
+
+  createTeam(body: CreateTeamRequest): Promise<{ team: Team; resumed: boolean; url?: string; totalCents?: number; checkoutError?: string }> {
+    return this.request("POST", "/v2/teams", body);
+  }
+
+  previewTeamInvite(code: string): Promise<{ teamName: string; memberCount: number; memberLimit: number; colors: TeamColorChoices }> {
+    return this.request("POST", "/v2/teams/join/preview", { code });
+  }
+
+  joinTeam(body: JoinTeamRequest): Promise<{ teamId: string; alreadyMember: boolean }> {
+    return this.request("POST", "/v2/teams/join", body);
+  }
+
+  getTeam(id: string): Promise<{ team: Team; colors: TeamColorChoices }> {
+    return this.request("GET", `/v2/teams/${encodeURIComponent(id)}`);
+  }
+
+  checkoutTeam(id: string, body?: { tier?: TeamTierId; interval?: "month" | "year" }): Promise<CheckoutResponse> {
+    return this.request("POST", `/v2/teams/${encodeURIComponent(id)}/checkout`, body ?? {});
+  }
+
+  createTeamInvite(id: string, body?: { expiresInHours?: number; maxUses?: number }): Promise<TeamInvite> {
+    return this.request("POST", `/v2/teams/${encodeURIComponent(id)}/invites`, body ?? {});
+  }
+
+  updateTeamMe(id: string, body: { displayName?: string; color?: string }): Promise<TeamMember> {
+    return this.request("PATCH", `/v2/teams/${encodeURIComponent(id)}/me`, body);
+  }
+
+  leaveTeam(id: string): Promise<{ left: boolean }> {
+    return this.request("POST", `/v2/teams/${encodeURIComponent(id)}/leave`, {});
+  }
+
+  teamWorkspaces(id: string): Promise<{ teamWorkspaces: TeamWorkspace[]; sharedWorkspaces: SharedWorkspace[]; subscriptionActive: boolean }> {
+    return this.request("GET", `/v2/teams/${encodeURIComponent(id)}/workspaces`);
+  }
+
+  createTeamWorkspace(id: string, body: CreateWorkspaceRequest): Promise<{ workspace: TeamWorkspace; url?: string; totalCents?: number }> {
+    return this.request("POST", `/v2/teams/${encodeURIComponent(id)}/workspaces`, body);
+  }
+
+  shareWorkspace(id: string, workspaceId: string): Promise<{ shared: boolean }> {
+    return this.request("POST", `/v2/teams/${encodeURIComponent(id)}/shares`, { workspaceId });
+  }
+
+  unshareWorkspace(id: string, workspaceId: string): Promise<{ shared: boolean }> {
+    return this.request("DELETE", `/v2/teams/${encodeURIComponent(id)}/shares/${encodeURIComponent(workspaceId)}`);
+  }
+
+  teamChat(id: string, after = 0): Promise<{ messages: ChatMessage[]; latestSeq: number; pollAfterMs: number }> {
+    return this.request("GET", `/v2/teams/${encodeURIComponent(id)}/chat?after=${after}`);
+  }
+
+  postTeamChat(id: string, body: { text?: string; card?: WorkspaceCard & { share?: boolean } }): Promise<{ message: ChatMessage; shared: boolean }> {
+    return this.request("POST", `/v2/teams/${encodeURIComponent(id)}/chat`, body);
+  }
+
+  reportTeamMessage(id: string, seq: number, body: { category: string; note?: string }): Promise<{ reported: boolean }> {
+    return this.request("POST", `/v2/teams/${encodeURIComponent(id)}/chat/${seq}/report`, body);
+  }
+
+  deleteTeamMessage(id: string, seq: number, reason: string): Promise<{ ok: boolean }> {
+    return this.request("POST", `/v2/teams/${encodeURIComponent(id)}/chat/${seq}/delete`, { reason });
+  }
+
+  moderateTeamMember(id: string, memberId: string, action: ModerationAction, body: { reason?: string; until?: number | null }): Promise<{ ok: boolean }> {
+    return this.request("POST", `/v2/teams/${encodeURIComponent(id)}/members/${encodeURIComponent(memberId)}/${action}`, body);
+  }
+
+  /** SSE stream; resolves when the stream ends. Falls back to polling when streaming is unavailable. */
+  async streamTeamChat(id: string, after: number, onMessages: (messages: ChatMessage[]) => void, signal?: AbortSignal): Promise<"ended" | "removed" | "unsupported"> {
+    const response = await this.raw("GET", `/v2/teams/${encodeURIComponent(id)}/chat/stream?after=${after}`, undefined, { Accept: "text/event-stream" });
+    if (!response.ok || !response.body || typeof response.body.getReader !== "function") return "unsupported";
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    signal?.addEventListener("abort", () => { void reader.cancel(); });
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) return "ended";
+      const parsed = parseChatEvents(buffer + decoder.decode(value, { stream: true }));
+      buffer = parsed.rest;
+      if (parsed.messages.length) onMessages(parsed.messages);
+      if (parsed.removed) return "removed";
+    }
   }
 
   setSelection(id: string, body: Record<string, string>): Promise<Record<string, unknown>> {
@@ -143,10 +261,6 @@ export class GenDragoonClient {
 
   checkoutPerformance(id: string, body: { tier: string; interval: "month" | "year" }): Promise<CheckoutResponse> {
     return this.request("POST", `/v2/workspaces/${encodeURIComponent(id)}/checkout/performance`, body);
-  }
-
-  checkoutByoSubscription(id: string, body: { interval: "month" | "year" }): Promise<CheckoutResponse> {
-    return this.request("POST", `/v2/workspaces/${encodeURIComponent(id)}/checkout/byo`, body);
   }
 
   /**
@@ -239,6 +353,34 @@ export class GenDragoonClient {
   }
 
   /** Server stores this envelope and nothing else about the workspace key. */
+  /** Connections from other apps (RedX) to this account's workspaces. Never includes keys. */
+  async providerBindings(): Promise<ProviderBinding[]> {
+    return parseProviderBindings(await this.request<unknown>("GET", `${PROVIDER_BASE_PATH}/bindings`));
+  }
+
+  /** One-time connect code (5 minutes) the user pastes into the other app. */
+  async createProviderGrant(workspaceId: string, requester: { name: string; host: string }, scopes: ProviderScope[] = ["blobs:rw"]): Promise<ProviderGrant> {
+    return parseProviderGrant(await this.request<unknown>("POST", `${PROVIDER_BASE_PATH}/connect/grants`, { workspaceId, scopes, requester }));
+  }
+
+  /** Approves a PKCE connect request; the returned code goes back to the requesting app's loopback listener. */
+  async authorizeProvider(workspaceId: string, request: ProviderConnectRequest): Promise<ProviderAuthorization> {
+    return parseProviderAuthorization(await this.request<unknown>("POST", `${PROVIDER_BASE_PATH}/connect/authorize`, {
+      workspaceId,
+      scopes: request.scopes,
+      requester: request.requester,
+      codeChallenge: request.codeChallenge,
+      codeChallengeMethod: request.codeChallengeMethod,
+    }));
+  }
+
+  /** Revokes the connection and its keys at once. deleteData also removes what the app stored. */
+  async revokeProviderBinding(id: string, deleteData = false): Promise<ProviderRevokeResult> {
+    const query = deleteData ? "?deleteData=true" : "";
+    const body = await this.request<{ revoked?: unknown; purgedObjects?: unknown }>("DELETE", `${PROVIDER_BASE_PATH}/bindings/${encodeURIComponent(id)}${query}`);
+    return { revoked: body?.revoked === true, purgedObjects: typeof body?.purgedObjects === "number" ? body.purgedObjects : null };
+  }
+
   async getKeyEnvelope(id: string): Promise<KeyEnvelope> {
     const envelope = await this.request<KeyEnvelope>("GET", `/v2/workspaces/${encodeURIComponent(id)}/key-envelope`);
     assertKeyEnvelope(envelope);
@@ -251,11 +393,6 @@ export class GenDragoonClient {
       ? { "If-None-Match": "*" }
       : { "If-Match": `"${envelope.version - 1}"` };
     return this.request("PUT", `/v2/workspaces/${encodeURIComponent(id)}/key-envelope`, envelope, headers);
-  }
-
-  /** Proposed. Recurring workspace fee, distinct from one-time project activation. */
-  checkoutWorkspaceFee(id: string): Promise<WorkspaceFeeCheckout> {
-    return this.request("POST", `/v2/workspaces/${encodeURIComponent(id)}/checkout/workspace-fee`);
   }
 
   /** POST /v2/workspaces/:sourceId/merge with `{ targetId, confirmName }`. */
@@ -468,6 +605,15 @@ function toError(status: number, parsed: unknown): ApiError {
   }
   if (machine === "byo_external") {
     return new ApiError(status || 409, "byo_external", "This workspace uses its own bucket.");
+  }
+  if (machine === "team_owner_must_transfer") {
+    const raw = (parsed as { teams?: unknown })?.teams;
+    const teams = Array.isArray(raw)
+      ? raw.filter((t): t is { teamId: string; name: string; otherMembers: number } =>
+        !!t && typeof t === "object" && typeof (t as { teamId?: unknown }).teamId === "string")
+        .map((t) => ({ teamId: t.teamId, name: typeof t.name === "string" ? t.name : "", otherMembers: Number(t.otherMembers) || 0 }))
+      : [];
+    return new TeamOwnerMustTransferError(teams);
   }
   if (machine === "deletion_not_retryable") {
     const jobId = typeof record.jobId === "string" ? record.jobId : "";

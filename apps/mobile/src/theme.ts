@@ -3,12 +3,11 @@
  * extended with the roles mobile screens use. Every text/background pair below
  * is checked for WCAG AA (4.5:1 body, 3:1 large/UI) in test/theme.test.ts.
  */
-import { colors as shared, radii as sharedRadii, shadow, space as sharedSpace, tapTarget, type as sharedType } from "@gendragoon/ui/theme";
+import { darkColors, lightColors, motion, radii as sharedRadii, shadow, space as sharedSpace, tapTarget, type as sharedType, type ThemeName } from "@gendragoon/ui/theme";
 
-export const colors = {
-  ...shared,
+const mobileDark = {
+  ...darkColors,
   /** Screen and surface layers, darkest to lightest. */
-  bg: "#100e17",
   surface: "#1c1828",
   surfaceRaised: "#241f34",
   border: "#3a3352",
@@ -18,9 +17,6 @@ export const colors = {
    * on: 4.2:1 on `bg`, 3.8:1 on `surface`, 3.5:1 on `surfaceRaised`.
    */
   controlBorder: "#7a6fa0",
-  /** Text roles. `muted` is lifted from the shared value to clear AA on raised cards. */
-  text: "#f6f3fb",
-  muted: "#b3adc4",
   /** Brand purple. White label on `primary` is 5.15:1. */
   primary: "#6d4aff",
   primaryPressed: "#5a3ae0",
@@ -46,6 +42,40 @@ export const colors = {
   /** Focus ring and selected-choice outline: brighter than every resting outline. */
   focus: "#a58bff",
 } as const;
+
+export type MobileColors = { readonly [K in keyof typeof mobileDark]: string };
+
+/** Light variant. Same roles, light surfaces, AA-checked in test/theme.test.ts. */
+const mobileLight: MobileColors = {
+  ...lightColors,
+  surface: "#ffffff",
+  surfaceRaised: "#eee9fa",
+  border: "#cfc6e8",
+  controlBorder: "#6f6690",
+  primary: "#5b3be0",
+  primaryPressed: "#4a2bc4",
+  primaryText: "#ffffff",
+  secondaryBg: "rgba(91, 59, 224, 0.08)",
+  secondaryBorder: "#6a4fd8",
+  secondaryText: "#3f2aa8",
+  dangerBg: "rgba(179, 32, 63, 0.07)",
+  dangerBorder: "#c2506a",
+  dangerText: "#8f1632",
+  warnBg: "rgba(138, 90, 0, 0.08)",
+  warnBorder: "#c9a04a",
+  warnText: "#5e3d00",
+  infoBg: "rgba(91, 59, 224, 0.07)",
+  infoBorder: "#a898e8",
+  infoText: "#33229a",
+  focus: "#4a2bd0",
+};
+
+export const palettes: { readonly dark: MobileColors; readonly light: MobileColors } = { dark: mobileDark, light: mobileLight };
+
+/** Dark palette. Static imports keep working; themed components use `useTheme()`. */
+export const colors: MobileColors = mobileDark;
+export { motion };
+export type { ThemeName };
 
 export const space = { ...sharedSpace } as const;
 

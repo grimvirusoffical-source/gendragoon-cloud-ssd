@@ -209,7 +209,7 @@ describe("vendored cloud-ssd fixtures", () => {
     expect(lockReasonMessage("over_cap", 2)).toBe("This account is over the workspace cap. You're 2 workspaces over your plan.");
   });
 
-  it("workspaces screen lists the server project and the monthly fee", async () => {
+  it("workspaces screen lists the server project and shows no separate workspace fee", async () => {
     const list = loadFixture<WorkspaceListBody>("workspaces/list.json");
     const created = loadFixture<CreateBody>("workspaces/create.json");
     const capped = loadFixture<CapBody>("workspaces/cap-reached.json");
@@ -219,7 +219,6 @@ describe("vendored cloud-ssd fixtures", () => {
       <WorkspacesScreen
         workspaces={listedWorkspaces()}
         unpaidIds={[]}
-        additionalMonthlyCents={list.response.body.policy.workspaceMonthlyCents}
         capMessage={capped.response.body.message}
         onDelete={() => undefined}
         onMerge={() => undefined}
@@ -228,7 +227,7 @@ describe("vendored cloud-ssd fixtures", () => {
     const listed = list.response.body.workspaces[0];
     expect(listed).toBeTruthy();
     expect(textOf(screen.getByTestId(`workspace-name-${listed!.id}`))).toBe(listed!.name);
-    expect(screen.getByText("An additional workspace is $5.00/mo.")).toBeTruthy();
+    expect(screen.queryByText(/additional workspace is/i)).toBeNull();
     expect(screen.getByText(capped.response.body.message)).toBeTruthy();
     expect(created.response.body.project.name).toBe(listed!.name);
     expect(created.response.body.policy.workspaceMonthlyCents).toBe(list.response.body.policy.workspaceMonthlyCents);
@@ -242,12 +241,10 @@ describe("vendored cloud-ssd fixtures", () => {
     expect(preview.request.path).toContain("/merge/preview");
     expect(denied.response.status).toBe(400);
     expect(denied.response.body.error).toBe("CONFIRM_NAME_REQUIRED");
-    const list = loadFixture<WorkspaceListBody>("workspaces/list.json");
     const screen = await render(
       <WorkspacesScreen
         workspaces={listedWorkspaces()}
         unpaidIds={[]}
-        additionalMonthlyCents={list.response.body.policy.workspaceMonthlyCents}
         serverPreview={preview.response.body}
         mergeError={denied.response.body.message}
         mergeResult={completed.response.body}

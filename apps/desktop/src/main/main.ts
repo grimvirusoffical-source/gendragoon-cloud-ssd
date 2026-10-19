@@ -1,24 +1,13 @@
-import { app, BrowserWindow, dialog, ipcMain, safeStorage, session, type IpcMainInvokeEvent } from "electron";
-import { spawn } from "node:child_process";
+import { app, BrowserWindow, dialog, ipcMain, safeStorage, session, shell as electronShell, type IpcMainInvokeEvent } from "electron";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
-import {
-  chooseRelease,
-  fetchReleaseManifests,
-  publicReleaseFeed,
-  relaunchIfIdle,
-  runUpdate,
-  settleHealth,
-  silentInstallPlan,
-  updateWouldLoop,
-  HEALTH_WINDOW_MS,
-  type InstalledVersion,
-  type ReleaseManifest,
-} from "@gendragoon/updater";
+import { detectDistribution, updatePolicy, type UpdateState } from "@gendragoon/updater";
+import { createDesktopUpdater } from "./updater-service.js";
+import { isStripeUrl } from "./billing-url.js";
 
 const here = __dirname;
 
-const FEED = { ...publicReleaseFeed(), channel: "stable" as const };
 const CSP = [
   "default-src 'self'",
   "script-src 'self'",
@@ -45,12 +34,22 @@ export async function readGitHubToken(): Promise<string | undefined> {
   }
 }
 
-async function pendingPath(): Promise<string> {
-  return path.join(app.getPath("userData"), "pending-update.json");
+/** Test harness only: an unpackaged run (electron <app-dir>) with GENDRAGOON_E2E=1 skips the keychain requirement. A packaged app can never take this path. */
+declare const __GD_DISTRIBUTION__: string | undefined;
+/** Which store/channel this build came from. Baked in at build time (scripts/build-main.mjs), plus process.mas and the launcher marker. */
+function distributionPolicy() {
+  return updatePolicy(detectDistribution({
+    buildFlag: typeof __GD_DISTRIBUTION__ === "string" ? __GD_DISTRIBUTION__ : undefined,
+    mas: (process as NodeJS.Process & { mas?: boolean }).mas === true,
+    env: process.env,
+    packaged: app.isPackaged,
+  }));
 }
 
+const E2E = !app.isPackaged && process.env.GENDRAGOON_E2E === "1";
+
 function requireSafeStorage(): void {
-  if (safeStorage.isEncryptionAvailable()) return;
+  if (E2E || safeStorage.isEncryptionAvailable()) return;
   dialog.showErrorBox(
     "Secure storage is unavailable",
     "GenDragoon cannot store secrets because the operating system keychain is unavailable.",
@@ -85,8 +84,9 @@ function createWindow(): BrowserWindow {
   const window = new BrowserWindow({
     width: 1440,
     height: 900,
-    backgroundColor: "#100e17",
+    backgroundColor: "#0d0b14",
     title: "GenDragoon Cloud SSD",
+    icon: path.join(here, "..", "build", "icon.png"),
     webPreferences: {
       preload: path.join(here, "preload.js"),
       contextIsolation: true,
@@ -99,103 +99,24 @@ function createWindow(): BrowserWindow {
   return window;
 }
 
-async function readPending(): Promise<InstalledVersion | null> {
-  try {
-    const raw = await readFile(await pendingPath(), "utf8");
-    const parsed = JSON.parse(raw) as { version?: unknown; location?: unknown };
-    if (typeof parsed.version !== "string" || parsed.version.length === 0) return null;
-    const location = typeof parsed.location === "string" && parsed.location.length > 0 ? parsed.location : undefined;
-    return { version: parsed.version, location };
-  } catch {
-    return null;
-  }
-}
-
 let transferActive = false;
-let deferredInstall: InstalledVersion | null = null;
 let shell: BrowserWindow | null = null;
 
-function notifyUpdating(): void {
-  shell?.webContents.send("updater-notice", "Updating...");
-}
-
-async function relaunchInstalled(installed: InstalledVersion): Promise<void> {
-  notifyUpdating();
-  await writeFile(await pendingPath(), JSON.stringify({ version: installed.version, location: installed.location ?? "" }));
-  app.relaunch();
-  app.exit(0);
-}
-
-async function rolledBackVersion(): Promise<string | null> {
-  try {
-    const raw = await readFile(path.join(app.getPath("userData"), "rolled-back-version.txt"), "utf8");
-    const version = raw.trim();
-    return version.length > 0 ? version : null;
-  } catch {
-    return null;
-  }
-}
-
-async function rememberRollback(version: string): Promise<void> {
-  await writeFile(path.join(app.getPath("userData"), "rolled-back-version.txt"), version);
-}
-
-function runSilentInstaller(file: string): Promise<void> {
-  const plan = silentInstallPlan(file);
-  return new Promise((resolve, reject) => {
-    const child = spawn(plan.file, [...plan.args], { stdio: "ignore", windowsHide: true });
-    child.once("error", reject);
-    child.once("exit", (code) => {
-      if (code === 0) resolve();
-      else reject(new Error(`Installer exited ${code ?? "unknown"}`));
-    });
+let updaterInstance: ReturnType<typeof createDesktopUpdater> | null = null;
+function getUpdater(): ReturnType<typeof createDesktopUpdater> {
+  updaterInstance ??= createDesktopUpdater({
+  userData: app.getPath("userData"),
+  version: app.getVersion(),
+  platform: E2E ? "win32" : process.platform,
+  policy: distributionPolicy(),
+  send: (state: UpdateState) => {
+    shell?.webContents.send("updater-state", state);
+    if (state.status === "installing" || state.status === "relaunching") shell?.webContents.send("updater-notice", "Updating...");
+  },
+  quit: () => app.quit(),
+  transferActive: () => transferActive,
   });
-}
-
-async function previousInstaller(): Promise<string | null> {
-  try {
-    const raw = await readFile(path.join(app.getPath("userData"), "previous-installer.txt"), "utf8");
-    const location = raw.trim();
-    return location.length > 0 ? location : null;
-  } catch {
-    return null;
-  }
-}
-
-async function checkForUpdate(): Promise<void> {
-  const manifests = await fetchReleaseManifests(FEED);
-  const chosen = chooseRelease(manifests, "stable");
-  if (!chosen || chosen.version === app.getVersion()) return;
-  if (updateWouldLoop(chosen.version, await rolledBackVersion())) return;
-  const outcome = await runUpdate({
-    manifest: chosen,
-    download: (manifest) => download(manifest),
-    install: async (manifest, bytes) => {
-      const location = path.join(app.getPath("userData"), "installers", `GenDragoon-Cloud-SSD-Setup-${manifest.version}.exe`);
-      await mkdir(path.dirname(location), { recursive: true });
-      await writeFile(location, bytes);
-      await runSilentInstaller(silentInstallPlan(location).file);
-      return { version: manifest.version, location };
-    },
-    notifyUpdating,
-    transferActive: () => transferActive,
-    relaunch: async (installed) => {
-      await relaunchInstalled(installed);
-    },
-    // The process exits in relaunch. The 60s window runs on the next launch.
-    healthCheck: async () => true,
-    rollback: async (previous) => {
-      await rememberRollback(chosen.version);
-      const location = previous?.location;
-      if (location) {
-        await runSilentInstaller(location);
-        await writeFile(path.join(app.getPath("userData"), "previous-installer.txt"), location);
-      }
-      await clearPending();
-    },
-    previous: { version: app.getVersion(), location: await previousInstaller() ?? undefined },
-  });
-  if (outcome.outcome === "deferred") deferredInstall = outcome.installed;
+  return updaterInstance;
 }
 
 async function healthyFor(windowMs: number): Promise<boolean> {
@@ -210,16 +131,30 @@ async function healthyFor(windowMs: number): Promise<boolean> {
 function registerIpc(): void {
   ipcMain.on("transfer-active", (_event, active: unknown) => {
     transferActive = active === true;
-    if (transferActive || !deferredInstall) return;
-    const installed = deferredInstall;
-    deferredInstall = null;
-    void relaunchIfIdle({
-      deferred: installed,
-      transferActive: () => transferActive,
-      relaunch: (pending) => relaunchInstalled(pending),
-    });
+    if (!transferActive) void getUpdater().onTransferIdle();
+  });
+  // The manual "Check for updates" button. Joins a check that is already running.
+  ipcMain.handle("updater:check", (event) => {
+    if (!senderIsShell(event)) throw new Error("Refusing updater IPC from an unknown sender");
+    return getUpdater().check(true);
+  });
+  ipcMain.handle("updater:policy", (event) => {
+    if (!senderIsShell(event)) throw new Error("Refusing updater IPC from an unknown sender");
+    return getUpdater().policy;
+  });
+  ipcMain.handle("updater:state", (event) => {
+    if (!senderIsShell(event)) throw new Error("Refusing updater IPC from an unknown sender");
+    return getUpdater().controller.getState();
   });
   ipcMain.handle("auth:id-token", () => undefined);
+  /** Opens a Stripe Checkout or billing portal page in the system browser. Any other URL is refused. */
+  ipcMain.handle("billing:open", async (event, url: unknown) => {
+    if (!senderIsShell(event) || !isStripeUrl(url)) return false;
+    await electronShell.openExternal(url);
+    return true;
+  });
+  /** The computer name, used as the default Teams chat name. Changeable in the app. */
+  ipcMain.handle("device:name", (event) => (senderIsShell(event) ? os.hostname().slice(0, 40) : null));
   ipcMain.handle("secret:get", async (event, name: unknown) => {
     if (!senderIsShell(event)) throw new Error("Refusing secret IPC from an unknown sender");
     requireSafeStorage();
@@ -263,42 +198,15 @@ function toBuffer(bytes: unknown): Buffer | null {
   return null;
 }
 
-async function clearPending(): Promise<void> {
-  await rm(await pendingPath(), { force: true });
-}
-
-async function download(manifest: ReleaseManifest): Promise<Uint8Array> {
-  const response = await fetch(manifest.url);
-  if (!response.ok) throw new Error(`Download failed (${response.status})`);
-  return new Uint8Array(await response.arrayBuffer());
-}
-
 void app.whenReady().then(async () => {
   requireSafeStorage();
   registerIpc();
   const window = createWindow();
   shell = window;
-  const pendingUpdate = await readPending();
-  const settlement = await settleHealth({
-    pending: pendingUpdate !== null,
-    healthCheck: () => healthyFor(HEALTH_WINDOW_MS),
-    rollback: async () => {
-      if (pendingUpdate) await rememberRollback(pendingUpdate.version);
-      const previous = await previousInstaller();
-      if (previous) await runSilentInstaller(previous);
-      await clearPending();
-      app.relaunch();
-      app.exit(0);
-    },
+  // Startup: settle a just-installed update (keep or roll back), then check for the next one.
+  void getUpdater().settleOnLaunch(healthyFor).then((settled) => {
+    if (settled !== "rolled_back" && getUpdater().policy.selfUpdate) void getUpdater().check(false);
   });
-  if (settlement === "rolled_back") return;
-  if (settlement === "healthy") {
-    if (pendingUpdate?.location) {
-      await writeFile(path.join(app.getPath("userData"), "previous-installer.txt"), pendingUpdate.location);
-    }
-    await clearPending();
-  }
-  void checkForUpdate().catch(() => undefined);
 });
 
 app.on("window-all-closed", () => {
