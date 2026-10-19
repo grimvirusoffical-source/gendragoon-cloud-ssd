@@ -70,6 +70,7 @@ export function SignInScreen(props: {
   onSignIn: () => void;
   googleEnabled: boolean;
   blockedMessage?: string | null;
+  onCreateAccount?: () => void;
 }) {
   const styles = useStyles(makeStyles);
   return (
@@ -78,6 +79,7 @@ export function SignInScreen(props: {
       <Text style={styles.help}>Files stay encrypted on this device before they upload.</Text>
       {props.blockedMessage ? <Banner alert testID="session-error">{props.blockedMessage}</Banner> : null}
       <Button label="Sign in" testID="sign-in" onPress={props.onSignIn} />
+      {props.onCreateAccount ? <Button label="Create account" tone="secondary" testID="create-account" onPress={props.onCreateAccount} /> : null}
       {props.googleEnabled ? <Text style={styles.help}>Google is configured for this build.</Text> : null}
     </Screen>
   );
@@ -93,6 +95,7 @@ export function SignInSession(props: {
   nextToken: string;
   googleEnabled: boolean;
   onSwapped: (token: string) => void;
+  onCreateAccount?: () => void;
 }) {
   const [token, setToken] = useState(props.sessionToken);
   const [error, setError] = useState<string | null>(null);
@@ -114,6 +117,7 @@ export function SignInSession(props: {
       <SignInScreen
         googleEnabled={props.googleEnabled}
         blockedMessage={error}
+        onCreateAccount={props.onCreateAccount}
         onSignIn={() => void signIn()}
       />
     </View>
