@@ -1,0 +1,22 @@
+{
+  "name": "@gendragoon/red-xai-updater",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Menu-bar updater for grim's Mac apps. Uses the public gendragoon-cloud-ssd GitHub releases feed.",
+  "type": "module",
+  "main": "dist/main.js",
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "build": "esbuild src/main.ts --bundle --platform=node --format=cjs --outfile=dist/main.js --external:electron"
+  },
+  "dependencies": {
+    "@gendragoon/updater": "workspace:*"
+  },
+  "devDependencies": {
+    "electron": "33.4.11",
+    "esbuild": "0.25.4",
+    "typescript": "5.8.3",
+    "vitest": "3.1.4"
+  }
+}
