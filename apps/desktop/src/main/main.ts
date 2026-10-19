@@ -157,6 +157,13 @@ function registerIpc(): void {
     await session.signIn(mode === "sign-up" ? "sign-up" : "sign-in");
     return true;
   });
+  /** Finishes an in-app sign-up: trades the one-time Red-XAI session (rxa_s_…) for tokens. */
+  ipcMain.handle("auth:adopt-session", async (event, signupSession: unknown) => {
+    const session = redxai();
+    if (!senderIsShell(event) || !session || typeof signupSession !== "string" || !/^rxa_s_[A-Za-z0-9_-]{8,200}$/.test(signupSession)) return false;
+    await session.adoptSession(signupSession);
+    return true;
+  });
   ipcMain.handle("auth:sign-out", async (event) => {
     if (senderIsShell(event)) await redxai()?.signOut();
   });

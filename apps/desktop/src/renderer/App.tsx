@@ -154,6 +154,7 @@ function useAccountDeps(): AccountGateDeps | null {
       centralWithSession: (session) => central(session),
       gendragoon: new AccountsClient({ baseUrl: apiBase, getToken: async () => (await bridge.getIdToken!()) ?? null }),
       signIn: (mode) => bridge.signIn!(mode),
+      adoptSession: async (session) => (await bridge.adoptSignupSession?.(session)) ?? false,
     };
   }, []);
 }

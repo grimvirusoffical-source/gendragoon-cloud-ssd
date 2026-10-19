@@ -4,7 +4,8 @@ import type { SignupResult, TermsDocument } from "@gendragoon/core";
 import { Hints, PairedInput, SignupScreen, TermsGateMobile, TwoFactorChoice, type MobileSignupApi } from "../src/account/SignupScreen";
 import { palettes } from "../src/theme";
 import { usernameRules } from "@gendragoon/core";
-import { MOBILE_REDIRECT_URI, signInWithRedXai } from "../src/account/redxaiSignIn";
+import { MOBILE_REDIRECT_URI, REDXAI_REFRESH_SECRET, adoptSignupSession, signInWithRedXai } from "../src/account/redxaiSignIn";
+import { MemorySecretStore } from "@gendragoon/core";
 
 const NOW = () => new Date("2026-10-19T12:00:00Z");
 const TERMS: TermsDocument = { version: "gendragoon-tos-2026-10-19", title: "Gendragoon Terms of Service", text: "Section one.\n\nSection two.", falseInfoWarning: "", no2faWarning: "" };
@@ -152,5 +153,27 @@ describe("Red-XAI sign-in on mobile", () => {
     expect(params.get("redirect_uri")).toBe("gendragoon://oauth2/callback");
     expect(params.get("code_challenge_method")).toBe("S256");
     expect(params.get("screen_hint")).toBe("signup");
+  });
+});
+
+describe("mobile in-app sign-up signs in with the session grant", () => {
+  // The React Native jest preset replaces fetch, so this plays the token endpoint (the real exchange runs in
+  // packages/core/test/redxai-contract.test.ts against the mock and the real service).
+  it("posts the session grant and keeps the refresh token in the keychain", async () => {
+    const b64 = (o: object) => Buffer.from(JSON.stringify(o)).toString("base64url");
+    const idToken = `${b64({ alg: "ES256", typ: "JWT" })}.${b64({ iss: "https://accounts.test", aud: "gendragoon", sub: "rxa_1" })}.sig`;
+    const seen: URLSearchParams[] = [];
+    const fetchImpl = (async (url: string, init: { body: string }) => {
+      expect(url).toBe("https://accounts.test/oauth2/token");
+      seen.push(new URLSearchParams(init.body));
+      return new Response(JSON.stringify({ access_token: "a.b.c", id_token: idToken, refresh_token: "rxa_r_new", token_type: "Bearer", expires_in: 600 }), { status: 200, headers: { "content-type": "application/json" } });
+    }) as unknown as typeof fetch;
+    const secrets = new MemorySecretStore();
+    const tokens = await adoptSignupSession("https://accounts.test", "rxa_s_onetime", secrets, fetchImpl);
+    expect(tokens.accessToken).toBe("a.b.c");
+    expect(Object.fromEntries(seen[0]!)).toMatchObject({ grant_type: "urn:red-xai:grant-type:session", client_id: "gendragoon", subject_token: "rxa_s_onetime" });
+    expect(seen[0]!.get("scope")).toContain("openid");
+    expect(new TextDecoder().decode((await secrets.get(REDXAI_REFRESH_SECRET))!)).toBe("rxa_r_new");
+    await expect(adoptSignupSession("https://accounts.test", "not-a-session", secrets, fetchImpl)).rejects.toMatchObject({ code: "invalid_grant" });
   });
 });

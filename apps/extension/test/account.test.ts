@@ -38,7 +38,7 @@ describe("extension Red-XAI Account sign-in", () => {
     expect(await status(d)).toEqual({ state: "signed-out" });
     expect(await signIn(d, "sign-up")).toEqual({ state: "ready", username: "dragon_rider" });
     const params = new URL(d.launched[0]!).searchParams;
-    expect(params.get("prompt")).toBe("create");
+    expect(params.get("screen_hint")).toBe("signup");
     expect(params.get("redirect_uri")).toBe("https://abcdefghijklmnop.chromiumapp.org/oauth2");
     await signOut(d);
     expect(await status(d)).toEqual({ state: "signed-out" });

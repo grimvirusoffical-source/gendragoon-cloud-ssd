@@ -53,8 +53,9 @@ function authDeps(): ExtensionAuthDeps | null {
 
 const SETUP_TEXT: Record<string, string> = {
   account_setup_required: "Finish setting up Gendragoon in the desktop or mobile app (Terms and account details).",
-  tos: "The Terms have changed. Open the Gendragoon app to read and agree to them.",
-  tos_required: "The Terms have changed. Open the Gendragoon app to read and agree to them.",
+  // Red-XAI keeps the Gendragoon Terms record; the hosted account page asks for the new version at the next sign-in.
+  tos: "The Gendragoon Terms have changed. Sign out, then sign in again to read and agree to them on your Red-XAI account page.",
+  tos_required: "The Gendragoon Terms have changed. Sign out, then sign in again to read and agree to them on your Red-XAI account page.",
   two_factor_setup_required: "Finish turning on two-factor sign-in in the Gendragoon app.",
   two_factor_required: "Confirm your two-factor code in the Gendragoon app.",
 };

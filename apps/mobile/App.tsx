@@ -14,6 +14,7 @@ import { createNativeStackNavigator } from "@react-navigation/native-stack";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { AccountsClient, type AccountRules } from "@gendragoon/core";
 import { SignupScreen } from "./src/account/SignupScreen";
+import { adoptSignupSession } from "./src/account/redxaiSignIn";
 import { Linking } from "react-native";
 import { StatusBar } from "expo-status-bar";
 import { SafeAreaProvider } from "react-native-safe-area-context";
@@ -336,8 +337,18 @@ export function MobileRoot(props: {
                 return created;
               }}
               onConfirmTwoFactor={async (code) => { await accounts.withSession(accountSession.current).confirmTwoFactor(code); }}
-              onResendPhoneCode={(phone) => accounts.withSession(accountSession.current).setupTwoFactor({ method: "phone", phone })}
-              onDone={() => navigationRef.navigate("SignIn")}
+              onResendPhoneCode={(phone) => accounts.withSession(accountSession.current).resendSignupCode(phone)}
+              onDone={() => {
+                const session = accountSession.current;
+                accountSession.current = null;
+                const issuer = process.env.EXPO_PUBLIC_REDXAI_ISSUER ?? "";
+                if (!issuer || !session) { navigationRef.navigate("SignIn"); return; }
+                // In-app sign-up signs in directly with the session grant; a used-up or expired session falls back to Sign in.
+                void adoptSignupSession(issuer, session, secrets).then(
+                  (tokens) => { setIdToken(tokens.accessToken); navigationRef.navigate(accountLockCoversApp(access) ? "Lock" : "Main"); },
+                  () => navigationRef.navigate("SignIn"),
+                );
+              }}
             />
           )}
         </Stack.Screen>

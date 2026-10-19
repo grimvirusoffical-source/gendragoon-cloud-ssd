@@ -17,6 +17,7 @@ interface GendragoonBridge {
   getIdToken?: () => Promise<string | undefined>;
   isAccountSignInConfigured?: () => Promise<boolean>;
   signIn?: (mode: "sign-in" | "sign-up") => Promise<boolean>;
+  adoptSignupSession?: (session: string) => Promise<boolean>;
   signOut?: () => Promise<void>;
   openBilling?: (url: string) => Promise<boolean>;
   getDeviceName?: () => Promise<string | null>;

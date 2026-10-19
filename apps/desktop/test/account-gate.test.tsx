@@ -10,7 +10,7 @@ const TERMS = { version: "gendragoon-tos-2026-10-19", title: "Gendragoon Terms o
 
 function deps(gendragoon: Partial<AccountsClient>): AccountGateDeps {
   const central = { rules: async () => ({ minAge: 13, centralMinAge: 13, twoFactor: [] }) } as unknown as AccountsClient;
-  return { central, centralWithSession: () => central, gendragoon: gendragoon as AccountsClient, signIn: vi.fn(async () => true) };
+  return { central, centralWithSession: () => central, gendragoon: gendragoon as AccountsClient, signIn: vi.fn(async () => true), adoptSession: vi.fn(async () => true) };
 }
 async function mount(d: AccountGateDeps, onReady = vi.fn()) {
   const host = document.createElement("div");
@@ -27,26 +27,22 @@ describe("desktop account gate", () => {
     expect(q("twofa-redxai_auth").textContent).toContain("Coming soon");
   });
 
-  it("a Red-XAI sign-in without a Gendragoon profile asks for the false-info acknowledgement and the Gendragoon Terms", async () => {
-    const complete = vi.fn(async () => ({}));
-    const d = deps({
-      me: async () => { throw new AccountsApiError(404, "account_setup_required"); },
-      terms: async () => TERMS,
-      markTermsRead: async () => ({ grant: "r", stage: "read" as const, version: TERMS.version }),
-      agreeToTerms: async () => ({ grant: "a", stage: "agreed" as const, version: TERMS.version }),
-      complete: complete as unknown as AccountsClient["complete"],
-    });
+  it("after sign-in the backend profile is enough; no local Terms or false-info step", async () => {
+    const d = deps({ me: async () => ({ pending: [] }) as never });
     const { q, onReady } = await mount(d);
     await act(async () => { q("account-sign-in").click(); });
     expect(d.signIn).toHaveBeenCalledWith("sign-in");
     expect(q("tos")).toBeNull();
-    await act(async () => { q("complete-false-info").click(); });
-    const box = q("tos-text");
-    Object.defineProperties(box, { scrollHeight: { value: 100 }, clientHeight: { value: 100 } });
-    await act(async () => { box.dispatchEvent(new Event("scroll")); });
-    await act(async () => { q("tos-read").click(); });
-    await act(async () => { q("tos-agree").click(); });
-    expect(complete).toHaveBeenCalledWith({ tosGrant: "a", acknowledgeFalseInfo: true });
     expect(onReady).toHaveBeenCalled();
+  });
+
+  it("changed Gendragoon Terms send the person to Red-XAI to re-accept, not to a local Terms gate", async () => {
+    const d = deps({ me: async () => ({ pending: ["tos"] }) as never });
+    const { q, onReady } = await mount(d);
+    await act(async () => { q("account-sign-in").click(); });
+    expect(onReady).not.toHaveBeenCalled();
+    expect(q("tos")).toBeNull();
+    await act(async () => { q("account-terms-sign-in").click(); });
+    expect(d.signIn).toHaveBeenCalledTimes(2);
   });
 });

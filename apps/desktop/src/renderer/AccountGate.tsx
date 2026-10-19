@@ -1,17 +1,22 @@
 import { useEffect, useRef, useState } from "react";
-import { FALSE_INFO_WARNING, accountErrorText, type AccountRules, type AccountsClient, type TermsDocument } from "@gendragoon/core";
-import { SignupForm, TermsGate } from "@gendragoon/ui";
+import { accountErrorText, type AccountRules, type AccountsClient } from "@gendragoon/core";
+import { SignupForm } from "@gendragoon/ui";
 
 /**
- * Sign-in and sign-up with a Red-XAI Account.
+ * Sign-in and sign-up with a Red-XAI Account (contract v1.1).
  *
  * - "Create account" renders the sign-up form here and sends it to Red-XAI
- *   Accounts (`/v1/signup`, app `gendragoon`). The second factor is confirmed
- *   with the new account session, then the person signs in once in the browser
- *   to give Gendragoon its tokens.
- * - After any sign-in, Gendragoon checks its own side (`/v1/accounts/me`): the
- *   Gendragoon Terms and the false-information acknowledgement, and finishes
- *   the profile if needed.
+ *   Accounts (`/v1/signup`, app `gendragoon`). The Gendragoon Terms and the
+ *   false-information acknowledgement are part of that central sign-up. The
+ *   second factor is confirmed with the new session, and then the same one-time
+ *   session is traded for tokens with the session grant
+ *   (`urn:red-xai:grant-type:session`), so there is no second sign-in in the
+ *   browser. If that trade fails (the session is used up or older than 10
+ *   minutes), the person signs in in the browser instead.
+ * - After any sign-in Gendragoon asks its backend (`/v1/accounts/me`), which
+ *   reads the `app_tos_version` claim. If the Gendragoon Terms changed since
+ *   then, the person re-accepts them on the Red-XAI account page during the
+ *   next browser sign-in (Red-XAI keeps the record, not Gendragoon).
  */
 export interface AccountGateDeps {
   central: AccountsClient;
@@ -19,25 +24,19 @@ export interface AccountGateDeps {
   centralWithSession: (session: string) => AccountsClient;
   gendragoon: AccountsClient;
   signIn: (mode: "sign-in" | "sign-up") => Promise<boolean>;
+  /** Trades the one-time sign-up session for tokens (session grant). */
+  adoptSession: (session: string) => Promise<boolean>;
 }
 
-type Stage =
-  | { name: "start" }
-  | { name: "signup" }
-  | { name: "finish-in-browser" }
-  | { name: "checking" }
-  | { name: "complete"; terms: TermsDocument }
-  | { name: "accept-terms"; terms: TermsDocument };
+type Stage = { name: "start" } | { name: "signup" } | { name: "finish-in-browser" } | { name: "checking" } | { name: "terms-changed" };
 
 export function AccountGate(props: { deps: AccountGateDeps; onReady: () => void }) {
   const { deps } = props;
   const [stage, setStage] = useState<Stage>({ name: "start" });
   const [rules, setRules] = useState<AccountRules | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [falseInfo, setFalseInfo] = useState(false);
-  const [grant, setGrant] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  const sessionRef = useRef<AccountsClient | null>(null);
+  const signupSession = useRef<{ token: string; client: AccountsClient } | null>(null);
 
   useEffect(() => {
     void deps.central.rules().then(setRules).catch(() => undefined);
@@ -47,12 +46,11 @@ export function AccountGate(props: { deps: AccountGateDeps; onReady: () => void 
     setStage({ name: "checking" });
     try {
       const me = await deps.gendragoon.me();
-      if (me.pending.includes("tos")) setStage({ name: "accept-terms", terms: await deps.gendragoon.terms() });
+      if (me.pending.includes("tos")) setStage({ name: "terms-changed" });
       else props.onReady();
     } catch (e) {
-      const code = (e as { code?: string }).code;
-      if (code === "account_setup_required") setStage({ name: "complete", terms: await deps.gendragoon.terms() });
-      else { setError(code ?? "unavailable"); setStage({ name: "start" }); }
+      setError((e as { code?: string }).code ?? "unavailable");
+      setStage({ name: "start" });
     }
   }
 
@@ -65,21 +63,23 @@ export function AccountGate(props: { deps: AccountGateDeps; onReady: () => void 
     } finally { setBusy(false); }
   }
 
-  const gendragoonTerms = (terms: TermsDocument, finish: (agreed: string) => Promise<unknown>) => (
-    <TermsGate
-      terms={terms}
-      busy={busy}
-      onRead={async () => setGrant((await deps.gendragoon.markTermsRead(terms.version)).grant)}
-      onAgree={async () => {
-        if (!grant) return;
-        setBusy(true); setError(null);
-        try {
-          await finish((await deps.gendragoon.agreeToTerms(grant)).grant);
-          props.onReady();
-        } catch (e) { setError((e as { code?: string }).code ?? "unavailable"); } finally { setBusy(false); }
-      }}
-    />
-  );
+  async function finishSignup() {
+    const session = signupSession.current?.token;
+    signupSession.current = null;
+    if (!session) { setStage({ name: "finish-in-browser" }); return; }
+    setBusy(true); setError(null);
+    try {
+      if (await deps.adoptSession(session)) await afterSignIn();
+      else setStage({ name: "finish-in-browser" });
+    } catch {
+      setStage({ name: "finish-in-browser" });
+    } finally { setBusy(false); }
+  }
+
+  const needSession = () => {
+    if (!signupSession.current) throw Object.assign(new Error("unavailable"), { code: "unavailable" });
+    return signupSession.current.client;
+  };
 
   return (
     <main className="main account-gate page-in" data-testid="account-gate">
@@ -100,15 +100,12 @@ export function AccountGate(props: { deps: AccountGateDeps; onReady: () => void 
           rules={rules}
           onSubmit={async (fields) => {
             const created = await deps.central.signup(fields);
-            if (created.session) sessionRef.current = deps.centralWithSession(created.session);
+            if (created.session) signupSession.current = { token: created.session, client: deps.centralWithSession(created.session) };
             return created;
           }}
-          onConfirmTwoFactor={async (code) => { await sessionRef.current?.confirmTwoFactor(code); }}
-          onResendPhoneCode={async (phone) => {
-            if (!sessionRef.current) throw Object.assign(new Error("unavailable"), { code: "unavailable" });
-            return sessionRef.current.setupTwoFactor({ method: "phone", phone });
-          }}
-          onDone={() => setStage({ name: "finish-in-browser" })}
+          onConfirmTwoFactor={async (code) => { await needSession().confirmTwoFactor(code); }}
+          onResendPhoneCode={async (phone) => needSession().resendSignupCode(phone)}
+          onDone={() => void finishSignup()}
           onSignIn={() => setStage({ name: "start" })}
         />
       ) : null}
@@ -120,24 +117,11 @@ export function AccountGate(props: { deps: AccountGateDeps; onReady: () => void 
         </section>
       ) : null}
       {stage.name === "checking" ? <p className="sub" data-testid="account-checking">Checking your account…</p> : null}
-      {stage.name === "complete" ? (
-        <section className="signup">
-          <h2>Finish setting up Gendragoon</h2>
-          <div className="warn-box">
-            <p>{FALSE_INFO_WARNING}</p>
-            <label className="check">
-              <input type="checkbox" data-testid="complete-false-info" checked={falseInfo} onChange={(e) => setFalseInfo(e.target.checked)} />
-              My details are true
-            </label>
-          </div>
-          {falseInfo ? gendragoonTerms(stage.terms, (tosGrant) => deps.gendragoon.complete({ tosGrant, acknowledgeFalseInfo: true })) : null}
-        </section>
-      ) : null}
-      {stage.name === "accept-terms" ? (
-        <section className="signup">
+      {stage.name === "terms-changed" ? (
+        <section className="account-start">
           <h2>The Terms have changed</h2>
-          <p className="sub">Read and agree to the new Terms to keep using Gendragoon.</p>
-          {gendragoonTerms(stage.terms, (tosGrant) => deps.gendragoon.acceptTerms(tosGrant))}
+          <p className="sub">Sign in again in your browser. Your Red-XAI account page shows the new Gendragoon Terms to read and agree to.</p>
+          <button type="button" className="btn" data-testid="account-terms-sign-in" disabled={busy} aria-busy={busy} onClick={() => void browserSignIn("sign-in")}>Review the Terms</button>
         </section>
       ) : null}
     </main>
