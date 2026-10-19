@@ -69,6 +69,9 @@ func (c *Client) OpenDrive(name string, keys *Keyring, opts *DriveOptions) (*Dri
 		d.chunkSize = opts.ChunkSize
 	}
 	if opts == nil || !opts.Plain {
+		if keys == nil {
+			return nil, errors.New("gendragoon: an encrypted drive needs a keyring (or DriveOptions.Plain)")
+		}
 		mk, err := keys.master()
 		if err != nil {
 			return nil, err

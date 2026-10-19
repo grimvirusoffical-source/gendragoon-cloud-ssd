@@ -3,7 +3,7 @@
 # binding, and runs every SDK's interop participant twice against the same encrypted drive. Each participant
 # must decrypt the files the others wrote. The first participant creates the master key.
 #
-#   sdk/contract/run.sh [lang ...]        languages: go js python csharp swift godot (default: all available)
+#   sdk/contract/run.sh [lang ...]        languages: go js python csharp swift godot unreal (default: all available)
 #
 # Environment:
 #   GD_DEV_SERVER   path to provider_dev_server.js (required unless GD_SDK_BASE is set)
@@ -13,7 +13,7 @@ set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
 sdk="$(dirname "$here")"
 langs=("$@")
-[ ${#langs[@]} -gt 0 ] || langs=(go js python csharp swift godot)
+[ ${#langs[@]} -gt 0 ] || langs=(go js python csharp swift godot unreal)
 DOTNET="${DOTNET:-$(command -v dotnet || echo "$HOME/.dotnet/dotnet")}"
 SWIFT="${SWIFT:-$(command -v swift || true)}"
 GODOT="${GODOT:-$(command -v godot || true)}"
@@ -51,6 +51,7 @@ participant() { # lang, extra flag
     python) (cd "$sdk/python" && "$PYTHON" tests/interop.py ${2:+--init}) ;;
     csharp) (cd "$sdk/csharp" && "$DOTNET" run -c Release --project tests/Gendragoon.Sdk.Tests -- --interop ${2:+--init}) ;;
     swift)  (cd "$sdk/swift" && .build/release/gd-interop ${2:+--init}) ;;
+    unreal) "$sdk/engines/unreal/test/build/cabi_test" --interop ${2:+--init} ;;
     godot)  (cd "$sdk/engines/godot" && "$GODOT" --headless --path . --script res://tests/interop.gd -- ${2:+--init} | grep '^{') ;;
   esac
 }
@@ -64,6 +65,7 @@ available() {
     swift) [ -n "$SWIFT" ] && (cd "$sdk/swift" && "$SWIFT" build -c release --product gd-interop >/dev/null 2>&1) ;;
     # The first editor run registers the addon's class names (.godot/ is not committed).
     godot) [ -n "$GODOT" ] && (cd "$sdk/engines/godot" && "$GODOT" --headless --editor --quit --path . >/dev/null 2>&1) ;;
+    unreal) command -v go >/dev/null && command -v cc >/dev/null && "$sdk/engines/unreal/test/build.sh" >/dev/null ;;
     *) return 1 ;;
   esac
 }
