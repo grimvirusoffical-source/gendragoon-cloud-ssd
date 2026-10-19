@@ -38,6 +38,8 @@ test("shared rule vectors (same file as gendragoon-apps core)",()=>{
 
 test("minimum age: 13 is the floor even when configured lower",()=>{
  const now=new Date(NOW);
+ assert.equal(R.checkBirthDate("10/20/2026",{now}).code,"dob_range","a future date is out of range, as on the central service (QA N3)");
+ assert.equal(R.checkBirthDate("02/30/2001",{now}).code,"dob_invalid","a date that doesn't exist stays dob_invalid");
  assert.equal(R.checkBirthDate("10/20/2013",{now,minAge:0}).code,"under_min_age");
  assert.equal(R.checkBirthDate("10/20/2013",{now,minAge:5}).code,"under_min_age");
  assert.equal(R.checkBirthDate("10/19/2010",{now,minAge:18}).code,"under_min_age");
@@ -534,6 +536,13 @@ test("Red-XAI sign-in (v1.1): profile from the access token, Terms from app_tos_
   const young=f.sign(f.claims({sub:"rxa_KID",sid:"s3",age_band:undefined}));
   r=await call("GET","/v1/protected",undefined,young);
   assert.equal(r.status,403);assert.equal(await store.get("rxa:rxa_KID"),null);
+  // QA N1: the gated 403 uses the contract shape with the real code, not the old provider message.
+  assert.equal(r.body.error,"under_min_age",JSON.stringify(r.body));assert.equal(r.body.code,"under_min_age");assert.equal(r.body.field,"dob");
+  assert.match(r.body.message,/at least 13/);assert.equal(r.body.pending,undefined);
+  for(const band of ["under13","0to12","garbage"]){
+   r=await call("GET","/v1/protected",undefined,f.sign(f.claims({sub:"rxa_KID_"+band,sid:"s3"+band,age_band:band})));
+   assert.equal(r.status,403);assert.equal(r.body.error,"under_min_age",band);
+  }
 
   // Only v1.1 access tokens for the gendragoon client: not ID tokens, not other apps' tokens.
   assert.equal((await call("GET","/v1/protected",undefined,f.sign(f.claims({sid:"s8"}),{typ:"JWT"}))).status,401,"ID token refused");
