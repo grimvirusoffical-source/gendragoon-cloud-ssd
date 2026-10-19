@@ -48,3 +48,19 @@ describe("UpdateControl states", () => {
     expect(html({ status: "available", version: "0.2.0", url: "https://example.test/a.exe" })).toContain("Download version 0.2.0");
   });
 });
+
+describe("UpdateControl per distribution", () => {
+  const render = (ui: "full" | "managed" | "hidden", note?: string) =>
+    renderToStaticMarkup(<UpdateControl state={{ status: "idle" }} onCheck={() => undefined} ui={ui} note={note} />);
+  it("full (direct build): shows the check button", () => {
+    expect(render("full")).toContain('data-testid="update-check"');
+  });
+  it("managed (Rotten Apple): note only, no button", () => {
+    const out = render("managed", "Updates are handled by the Rotten Apple launcher.");
+    expect(out).toContain("Rotten Apple launcher");
+    expect(out).not.toContain("update-check");
+  });
+  it("hidden (Mac App Store): renders nothing", () => {
+    expect(render("hidden")).toBe("");
+  });
+});

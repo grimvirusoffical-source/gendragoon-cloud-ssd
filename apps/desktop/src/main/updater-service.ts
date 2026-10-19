@@ -1,4 +1,4 @@
-import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import {
   HEALTH_WINDOW_MS,
@@ -11,6 +11,8 @@ import {
   startInstallerDetached,
   type FeedConfig,
   type InstalledVersion,
+  type UpdatePolicy,
+  updatePolicy,
   type UpdateState,
 } from "@gendragoon/updater";
 
@@ -27,6 +29,8 @@ export interface DesktopUpdaterEnv {
   fetch?: typeof fetch;
   startInstaller?: (file: string) => Promise<unknown>;
   autoInstall?: boolean;
+  /** Distribution policy. Defaults to the direct (GitHub) build. Non-self-updating builds never touch the network or the installer. */
+  policy?: UpdatePolicy;
 }
 
 /** Feed from the environment, so a local test feed or a beta channel needs no rebuild. */
@@ -50,6 +54,7 @@ export function createDesktopUpdater(env: DesktopUpdaterEnv) {
   const file = (name: string) => path.join(env.userData, name);
   const start = env.startInstaller ?? ((installer: string) => startInstallerDetached(installer));
   const feed = env.feed ?? feedFromEnv();
+  const policy = env.policy ?? updatePolicy("direct");
 
   async function readText(name: string): Promise<string | null> {
     try {
@@ -85,6 +90,7 @@ export function createDesktopUpdater(env: DesktopUpdaterEnv) {
       const location = path.join(env.userData, "installers", `GenDragoon-Cloud-SSD-Setup-${manifest.version}.exe`);
       await mkdir(path.dirname(location), { recursive: true });
       await writeFile(location, bytes);
+      await chmod(location, 0o755);
       // Marker first: if the installer relaunches us, the next start knows to check health.
       await writeFile(file("pending-update.json"), JSON.stringify({ version: manifest.version, location }));
       try {
@@ -102,7 +108,9 @@ export function createDesktopUpdater(env: DesktopUpdaterEnv) {
 
   return {
     controller,
-    check: (manual: boolean) => controller.check({ manual }),
+    policy,
+    /** Direct build only. Rotten Apple and Mac App Store builds return idle without any network call. */
+    check: async (manual: boolean): Promise<UpdateState> => (policy.selfUpdate ? controller.check({ manual }) : { status: "idle" }),
     /** Hosts call this when an upload or backup ends. */
     onTransferIdle: () => controller.resumeIfIdle(),
     /**
@@ -110,6 +118,7 @@ export function createDesktopUpdater(env: DesktopUpdaterEnv) {
      * when the shell stays healthy for the window; otherwise reinstall the previous installer.
      */
     async settleOnLaunch(isHealthy: (windowMs: number) => Promise<boolean>): Promise<"idle" | "healthy" | "rolled_back"> {
+      if (!policy.selfUpdate) return "idle";
       const pending = await readPending();
       const result = await settleHealth({
         pending: pending !== null,

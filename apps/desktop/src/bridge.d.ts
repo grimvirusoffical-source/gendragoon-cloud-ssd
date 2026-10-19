@@ -7,6 +7,7 @@ interface GendragoonBridge {
   setTransferActive?: (active: boolean) => void;
   onUpdaterNotice?: (callback: (text: string) => void) => void;
   checkForUpdates?: () => Promise<unknown>;
+  getUpdatePolicy?: () => Promise<unknown>;
   getUpdateState?: () => Promise<unknown>;
   onUpdateState?: (callback: (state: unknown) => void) => void;
   getSecret?: (name: string) => Promise<Uint8Array | null>;

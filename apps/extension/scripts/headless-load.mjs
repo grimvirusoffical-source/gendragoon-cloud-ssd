@@ -1,4 +1,4 @@
-/* global process, console, document, getComputedStyle, localStorage */
+/* global process, console, document, getComputedStyle, URL, setTimeout */
 /**
  * Loads each Chromium-family zip (chrome, edge, opera) as a real unpacked extension in headless Chrome,
  * opens the popup, and drives it. Firefox is linted separately with web-ext (see package.json).

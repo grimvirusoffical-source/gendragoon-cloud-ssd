@@ -14,6 +14,10 @@ contextBridge.exposeInMainWorld("gendragoon", {
   checkForUpdates(): Promise<unknown> {
     return ipcRenderer.invoke("updater:check");
   },
+  /** Which distribution this build is and whether it self-updates. */
+  getUpdatePolicy(): Promise<unknown> {
+    return ipcRenderer.invoke("updater:policy");
+  },
   getUpdateState(): Promise<unknown> {
     return ipcRenderer.invoke("updater:state");
   },

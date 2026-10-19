@@ -34,3 +34,6 @@ export type { DownloadProgress } from "./download.js";
 export { UpdateController, friendlyUpdateError } from "./controller.js";
 export type { UpdateState, UpdateControllerDeps } from "./controller.js";
 export { startInstallerDetached } from "./installer.js";
+
+export { detectDistribution, updatePolicy } from "./distribution.js";
+export type { DetectInput, Distribution, UpdatePolicy, UpdateUiMode } from "./distribution.js";

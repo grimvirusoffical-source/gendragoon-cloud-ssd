@@ -37,8 +37,24 @@ export function updateLabel(state: UpdateView, currentVersion?: string): string 
   }
 }
 
-export function UpdateControl(props: { state: UpdateView; currentVersion?: string; onCheck: () => void }) {
+export function UpdateControl(props: {
+  state: UpdateView;
+  currentVersion?: string;
+  onCheck: () => void;
+  /** full (default): button + progress. managed: read-only note (the store launcher updates). hidden: renders nothing (Mac App Store). */
+  ui?: "full" | "managed" | "hidden";
+  note?: string;
+}) {
   const { state } = props;
+  if (props.ui === "hidden") return null;
+  if (props.ui === "managed") {
+    return (
+      <section className="panel update-control" data-testid="update-managed" aria-labelledby="update-title">
+        <h3 id="update-title">Updates</h3>
+        <p className="help">{props.note ?? "Updates are managed by the app store you installed this from."}</p>
+      </section>
+    );
+  }
   const busy = isUpdateBusy(state);
   const percent = state.status === "downloading" ? state.percent : null;
   return (

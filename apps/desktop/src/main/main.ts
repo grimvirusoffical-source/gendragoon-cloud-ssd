@@ -1,7 +1,7 @@
 import { app, BrowserWindow, dialog, ipcMain, safeStorage, session, type IpcMainInvokeEvent } from "electron";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { type UpdateState } from "@gendragoon/updater";
+import { detectDistribution, updatePolicy, type UpdateState } from "@gendragoon/updater";
 import { createDesktopUpdater } from "./updater-service.js";
 
 const here = __dirname;
@@ -32,8 +32,22 @@ export async function readGitHubToken(): Promise<string | undefined> {
   }
 }
 
+/** Test harness only: an unpackaged run (electron <app-dir>) with GENDRAGOON_E2E=1 skips the keychain requirement. A packaged app can never take this path. */
+declare const __GD_DISTRIBUTION__: string | undefined;
+/** Which store/channel this build came from. Baked in at build time (scripts/build-main.mjs), plus process.mas and the launcher marker. */
+function distributionPolicy() {
+  return updatePolicy(detectDistribution({
+    buildFlag: typeof __GD_DISTRIBUTION__ === "string" ? __GD_DISTRIBUTION__ : undefined,
+    mas: (process as NodeJS.Process & { mas?: boolean }).mas === true,
+    env: process.env,
+    packaged: app.isPackaged,
+  }));
+}
+
+const E2E = !app.isPackaged && process.env.GENDRAGOON_E2E === "1";
+
 function requireSafeStorage(): void {
-  if (safeStorage.isEncryptionAvailable()) return;
+  if (E2E || safeStorage.isEncryptionAvailable()) return;
   dialog.showErrorBox(
     "Secure storage is unavailable",
     "GenDragoon cannot store secrets because the operating system keychain is unavailable.",
@@ -70,6 +84,7 @@ function createWindow(): BrowserWindow {
     height: 900,
     backgroundColor: "#0d0b14",
     title: "GenDragoon Cloud SSD",
+    icon: path.join(here, "..", "build", "icon.png"),
     webPreferences: {
       preload: path.join(here, "preload.js"),
       contextIsolation: true,
@@ -90,7 +105,8 @@ function getUpdater(): ReturnType<typeof createDesktopUpdater> {
   updaterInstance ??= createDesktopUpdater({
   userData: app.getPath("userData"),
   version: app.getVersion(),
-  platform: process.platform,
+  platform: E2E ? "win32" : process.platform,
+  policy: distributionPolicy(),
   send: (state: UpdateState) => {
     shell?.webContents.send("updater-state", state);
     if (state.status === "installing" || state.status === "relaunching") shell?.webContents.send("updater-notice", "Updating...");
@@ -119,6 +135,10 @@ function registerIpc(): void {
   ipcMain.handle("updater:check", (event) => {
     if (!senderIsShell(event)) throw new Error("Refusing updater IPC from an unknown sender");
     return getUpdater().check(true);
+  });
+  ipcMain.handle("updater:policy", (event) => {
+    if (!senderIsShell(event)) throw new Error("Refusing updater IPC from an unknown sender");
+    return getUpdater().policy;
   });
   ipcMain.handle("updater:state", (event) => {
     if (!senderIsShell(event)) throw new Error("Refusing updater IPC from an unknown sender");
@@ -175,7 +195,7 @@ void app.whenReady().then(async () => {
   shell = window;
   // Startup: settle a just-installed update (keep or roll back), then check for the next one.
   void getUpdater().settleOnLaunch(healthyFor).then((settled) => {
-    if (settled !== "rolled_back") void getUpdater().check(false);
+    if (settled !== "rolled_back" && getUpdater().policy.selfUpdate) void getUpdater().check(false);
   });
 });
 

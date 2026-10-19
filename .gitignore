@@ -22,3 +22,5 @@ apps/mobile/android/
 apps/mobile/ios/
 apps/mobile/.expo/
 apps/mobile/dist/
+!apps/desktop/.env.production
+!apps/mobile/.env.production

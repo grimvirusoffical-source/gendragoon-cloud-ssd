@@ -126,6 +126,8 @@ export function App() {
   const [status, setStatus] = useState("Ready");
   const [notice, setNotice] = useState<string | null>(null);
   const [updateState, setUpdateState] = useState<UpdateView>({ status: "idle" });
+  // Inside the desktop shell the main process says whether this distribution self-updates. Until it answers, show nothing (a store build must never flash an update button).
+  const [updateUi, setUpdateUi] = useState<{ ui: "full" | "managed" | "hidden"; note?: string }>(() => (window.gendragoon?.getUpdatePolicy ? { ui: "hidden" } : { ui: "full" }));
   const [writeError, setWriteError] = useState<unknown>(null);
   const [byoMessage, setByoMessage] = useState<string | null>(null);
   const [signedOut, setSignedOut] = useState<null | "deleted" | "invalid-token" | "signed-out">(null);
@@ -149,6 +151,10 @@ export function App() {
   useEffect(() => {
     window.gendragoon?.onUpdaterNotice?.((text) => setNotice(text));
     window.gendragoon?.onUpdateState?.((next) => setUpdateState(next as UpdateView));
+    void window.gendragoon?.getUpdatePolicy?.().then((policy) => {
+      const p = policy as { ui?: string; note?: string } | undefined;
+      setUpdateUi({ ui: p?.ui === "managed" || p?.ui === "hidden" ? p.ui : "full", note: p?.note });
+    }).catch(() => setUpdateUi({ ui: "hidden" }));
     void window.gendragoon?.getUpdateState?.().then((current) => setUpdateState(current as UpdateView));
   }, []);
 
@@ -462,7 +468,7 @@ export function App() {
   } else if (view === "settings") {
     body = (
       <>
-      <UpdateControl state={updateState} onCheck={checkForUpdates} />
+      <UpdateControl state={updateState} onCheck={checkForUpdates} ui={updateUi.ui} note={updateUi.note} />
       <SettingsView
         settings={settings}
         rows={rows}

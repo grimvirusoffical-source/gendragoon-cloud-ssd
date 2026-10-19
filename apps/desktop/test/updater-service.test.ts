@@ -3,7 +3,7 @@ import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
-import type { UpdateState } from "@gendragoon/updater";
+import { updatePolicy, type Distribution, type UpdateState } from "@gendragoon/updater";
 import { createDesktopUpdater, feedFromEnv } from "../src/main/updater-service.js";
 
 const installerBytes = new TextEncoder().encode("MZ-fake-installer");
@@ -25,23 +25,26 @@ function mockFetch(version: string, opts: { sha?: string; failDownload?: boolean
   }) as typeof fetch;
 }
 
-async function setup(over: { version?: string; feedVersion?: string; sha?: string; transfer?: boolean; platform?: NodeJS.Platform; failDownload?: boolean } = {}) {
+async function setup(over: { version?: string; feedVersion?: string; sha?: string; transfer?: boolean; platform?: NodeJS.Platform; failDownload?: boolean; distribution?: Distribution } = {}) {
   const userData = await mkdtemp(path.join(tmpdir(), "gd-desktop-"));
   const states: UpdateState[] = [];
   const log: string[] = [];
   let transfer = over.transfer ?? false;
+  const calls = { fetch: 0 };
+  const inner = mockFetch(over.feedVersion ?? "0.2.0", { sha: over.sha, failDownload: over.failDownload });
   const updater = createDesktopUpdater({
+    policy: updatePolicy(over.distribution ?? "direct"),
     userData,
     version: over.version ?? "0.1.0",
     platform: over.platform ?? "win32",
     send: (s) => states.push(s),
     quit: () => { log.push("quit"); },
     transferActive: () => transfer,
-    fetch: mockFetch(over.feedVersion ?? "0.2.0", { sha: over.sha, failDownload: over.failDownload }),
+    fetch: ((...args: Parameters<typeof fetch>) => { calls.fetch += 1; return inner(...args); }) as typeof fetch,
     startInstaller: async (file) => { log.push(`installer:${path.basename(file)}`); },
     feed: { repo: "o/r", assetPattern: "\\.exe$", channel: "stable" },
   });
-  return { updater, userData, states, log, setTransfer: (v: boolean) => { transfer = v; } };
+  return { updater, userData, states, log, calls, setTransfer: (v: boolean) => { transfer = v; } };
 }
 
 describe("desktop updater service (mock feed)", () => {
@@ -128,5 +131,34 @@ describe("desktop updater service (mock feed)", () => {
   it("feedFromEnv reads a local test feed without rebuilding", () => {
     expect(feedFromEnv({}).repo).toBe("grimvirusoffical-source/gendragoon-cloud-ssd");
     expect(feedFromEnv({ GENDRAGOON_UPDATE_REPO: "a/b", GENDRAGOON_UPDATE_API_BASE: "http://127.0.0.1:9" })).toMatchObject({ repo: "a/b", apiBase: "http://127.0.0.1:9" });
+  });
+});
+
+describe.each([["rotten-apple"], ["mas"]] as const)("%s distribution leaves updating alone", (distribution) => {
+  it("manual and startup checks do nothing: no network, no download, no installer, no quit", async () => {
+    const { updater, userData, states, log, calls } = await setup({ distribution });
+    expect(updater.policy.selfUpdate).toBe(false);
+    expect(await updater.check(true)).toEqual({ status: "idle" });
+    expect(await updater.check(false)).toEqual({ status: "idle" });
+    expect(calls.fetch).toBe(0);
+    expect(states).toEqual([]);
+    expect(log).toEqual([]);
+    await expect(readFile(path.join(userData, "pending-update.json"), "utf8")).rejects.toThrow();
+  });
+  it("never rolls back or reinstalls an old installer, even with a stale pending marker", async () => {
+    const { updater, userData, log } = await setup({ distribution });
+    await writeFile(path.join(userData, "pending-update.json"), JSON.stringify({ version: "0.2.0", location: "/x/Setup.exe" }));
+    await writeFile(path.join(userData, "previous-installer.txt"), "/x/Old.exe");
+    expect(await updater.settleOnLaunch(async () => false)).toBe("idle");
+    expect(log).toEqual([]);
+  });
+});
+
+describe("direct distribution is the only one that self-updates", () => {
+  it("policy shows the full UI and a real check goes to the feed", async () => {
+    const { updater, calls } = await setup({ feedVersion: "0.1.0" });
+    expect(updater.policy).toMatchObject({ distribution: "direct", selfUpdate: true, ui: "full" });
+    expect((await updater.check(true)).status).toBe("up_to_date");
+    expect(calls.fetch).toBeGreaterThan(0);
   });
 });
