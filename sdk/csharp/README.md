@@ -42,9 +42,9 @@ To open argon2id envelopes, set `Crypto.Argon2id` to an implementation.
 ## Tests
 
 ```sh
-dotnet test sdk/csharp/tests/Gendragoon.Sdk.Tests                                      # unit tests and vectors (net8.0 and netstandard2.1 paths)
-GD_DEV_SERVER=<provider_dev_server.js> dotnet test sdk/csharp/tests/Gendragoon.Sdk.Tests
-GD_TEAMS_SERVER=../contract/teams_dev_server.cjs GD_TEAMS_BACKEND=<cloud-ssd>/native/Backend dotnet test sdk/csharp/tests/Gendragoon.Sdk.Tests
+dotnet run -c Release --project sdk/csharp/tests/Gendragoon.Sdk.Tests     # add -p:SdkTfm=netstandard2.1 for the managed crypto path
+GD_DEV_SERVER=<provider_dev_server.js> dotnet run -c Release --project sdk/csharp/tests/Gendragoon.Sdk.Tests
+GD_TEAMS_SERVER=../contract/teams_dev_server.cjs GD_TEAMS_BACKEND=<cloud-ssd>/native/Backend dotnet run -c Release --project sdk/csharp/tests/Gendragoon.Sdk.Tests
 ```
 
 ## Limitations
