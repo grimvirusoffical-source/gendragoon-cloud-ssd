@@ -59,4 +59,4 @@ License: to be announced. All rights reserved until a license file is added.
 
 ## Support
 
-Contact: support@example.com (placeholder)
+Contact: support@infected-nation.com
