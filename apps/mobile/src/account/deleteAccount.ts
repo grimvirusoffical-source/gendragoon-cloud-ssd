@@ -1,9 +1,11 @@
 import {
+  DELETION_UID_KEY,
   DeletionNotRetryableError,
   accountUidFromIdToken,
   deleteAccountAndWipe,
   deletionAuthFailure,
   dismissAccountDeletion,
+  readDeletionUid,
   resumeAccountDeletion,
   retryDeletion,
   type DeletionAuthSignal,
@@ -11,8 +13,7 @@ import {
   type SecretStore,
 } from "@gendragoon/core";
 
-/** Same SecureStore as core's deletion job. The uid is the account that started it. */
-const DELETION_UID_KEY = "account-deletion:uid";
+/** The uid key (`DELETION_UID_KEY`) is owned by core and written by it with the job; mobile also writes it before DELETE so a crash mid-request still has it. */
 const DELETION_JOB_KEY = "account-deletion:job-id";
 const DELETION_TOKEN_KEY = "account-deletion:status-token";
 
@@ -105,7 +106,7 @@ export async function dismissSignedInDeletion(secrets: SecretStore): Promise<voi
 }
 
 export async function savedDeletionUid(secrets: SecretStore): Promise<string | null> {
-  return readSecret(secrets, DELETION_UID_KEY);
+  return readDeletionUid(secrets);
 }
 
 export async function savedDeletionStatusToken(secrets: SecretStore): Promise<string | null> {

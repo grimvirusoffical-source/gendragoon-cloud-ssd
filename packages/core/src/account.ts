@@ -2,7 +2,7 @@ import { AccountDeletedError, ApiError, DeletionNotFoundError, ReauthRequiredErr
 import type { AccountDeletionStatus, DeletionSupportResult } from "./api/types.js";
 import type { LockAssessment } from "./policy.js";
 import { wipeWorkspaceKeys, type SecretStore, type SecureStore } from "./seal.js";
-import { reauthIsRecent, reauthenticatedAtForDelete } from "./storage.js";
+import { accountUidFromIdToken, reauthIsRecent, reauthenticatedAtForDelete } from "./storage.js";
 
 /**
  * Account session states the shell is allowed to render.
@@ -103,6 +103,13 @@ const DELETION_TIMEOUT_MS = 120_000;
 const DELETION_JOB_KEY = "account-deletion:job-id";
 const DELETION_TOKEN_KEY = "account-deletion:status-token";
 const DELETION_RECOVERY_KEY = "account-deletion:needs-token-recovery";
+/**
+ * SecureStore key for the account uid saved with a deletion job (Firebase `sub`,
+ * see `accountUidFromIdToken`). Core owns this key; the mobile app uses the same name.
+ * The uid only ties the local job to the right account. It is never an auth decision.
+ * Callers should use `readDeletionUid`; core writes and clears this key itself.
+ */
+export const DELETION_UID_KEY = "account-deletion:uid";
 
 /** Shell hook while a deletion poll is still running. */
 export type DeletionAuthSignal = "signed_out" | "reauth_required";
@@ -138,6 +145,8 @@ export async function deleteAccountAndWipe(input: DeletionRunInput): Promise<Acc
   const recover = await loadRecovery(input.secureStore);
   let job: DeletionJob;
   let credential: PollCredential = "status";
+  // True when this run's DELETE returned the job: the uid is then the current token's.
+  let fromDelete = true;
   if (!saved) {
     job = await startDeletion(input).catch(async (error: unknown) => {
       if (isInvalidToken(error)) {
@@ -167,9 +176,14 @@ export async function deleteAccountAndWipe(input: DeletionRunInput): Promise<Acc
   } else {
     job = saved;
     credential = "firebase";
+    fromDelete = false;
   }
   if (input.secureStore && job.statusToken) {
     await saveDeletionJob(input.secureStore, job.jobId, job.statusToken);
+    // A job returned by this run's DELETE (new or sign-in recovery) gets the
+    // current token's uid, or loses any older uid when the token has none.
+    // A plain resume sends no DELETE and keeps the uid saved with the job.
+    if (fromDelete) await saveDeletionUid(input.secureStore, accountUidFromIdToken(input.idToken ?? ""));
   }
   return pollDeletion({
     ...pollInput(input),
@@ -198,6 +212,8 @@ export async function retryDeletion(input: DeletionRunInput): Promise<AccountDel
   }
   const job = { jobId: saved.jobId, statusToken: fresh.statusToken };
   await saveDeletionJob(input.secureStore, job.jobId, job.statusToken);
+  // The retry DELETE returned this job, so it carries the current token's uid (or none).
+  await saveDeletionUid(input.secureStore, accountUidFromIdToken(input.idToken ?? ""));
   return pollDeletion({
     ...pollInput(input),
     client: input.client,
@@ -252,6 +268,11 @@ type PollCredential = "firebase" | "status";
 interface DeletionRunInput {
   client: DeletionClient;
   reauthenticatedAt: string;
+  /**
+   * Firebase ID token for the 5-minute re-auth check. When this run starts a
+   * new job, its `sub` (via `accountUidFromIdToken`) is also saved under
+   * `DELETION_UID_KEY` with the job. A missing or invalid token saves no uid.
+   */
   idToken?: string;
   workspaceIds: readonly string[];
   secrets: SecretStore;
@@ -395,6 +416,46 @@ async function clearDeletionJob(store?: SecureStore): Promise<void> {
   await store.delete(DELETION_JOB_KEY);
   await store.delete(DELETION_TOKEN_KEY);
   await store.delete(DELETION_RECOVERY_KEY);
+  await clearDeletionUid(store);
+}
+
+/**
+ * Best effort, unlike the job keys: the uid is advisory, so a SecureStore
+ * write or delete that rejects is swallowed and never fails a deletion.
+ * Every job saved from a DELETE response (new, sign-in recovery, retry)
+ * replaces or removes any older uid, so a stale uid survives only if both
+ * its clear and the next job's write fail.
+ * A null uid (no or invalid ID token) removes any older uid and writes nothing.
+ */
+async function saveDeletionUid(store: SecureStore, uid: string | null): Promise<void> {
+  try {
+    if (uid === null) {
+      await store.delete(DELETION_UID_KEY);
+      return;
+    }
+    await store.set(DELETION_UID_KEY, new TextEncoder().encode(uid));
+  } catch {
+    // A failed write must not keep an older uid: try to remove it.
+    await clearDeletionUid(store);
+  }
+}
+
+async function clearDeletionUid(store: SecureStore): Promise<void> {
+  try {
+    await store.delete(DELETION_UID_KEY);
+  } catch {
+    // Advisory key; see saveDeletionUid.
+  }
+}
+
+/**
+ * Account uid saved with the current deletion job, or null when none is saved.
+ * Use it to keep a different account from taking over a pending deletion's
+ * session. A SecureStore read that rejects propagates, like the job keys.
+ * Never an auth decision: the uid comes from an unverified token.
+ */
+export async function readDeletionUid(store: SecureStore): Promise<string | null> {
+  return decodeSecret(await store.get(DELETION_UID_KEY));
 }
 
 async function markRecovery(store?: SecureStore): Promise<void> {
@@ -413,7 +474,8 @@ async function loadRecovery(store?: SecureStore): Promise<boolean> {
 }
 
 /**
- * Forget a saved deletion job without wiping workspace keys or BYO secrets.
+ * Forget a saved deletion job, including its account uid, without wiping
+ * workspace keys or BYO secrets.
  * Used when the user dismisses a failed or retryable deletion.
  */
 export async function dismissDeletion(store: SecureStore): Promise<void> {
@@ -431,6 +493,12 @@ export async function dismissAccountDeletion(store: SecureStore): Promise<void> 
  * Does not call `onAuthFailure` or `clearSession`, and does not clear the job.
  * A saved job id that does not match `jobId`, or a SecureStore read that
  * rejects, returns the email fallback and sends nothing.
+ *
+ * `currentUid` is the signed-in account's uid, if any. When it is given and a
+ * uid is saved with the job that differs from it, the job is not this
+ * account's: return the fallback, send nothing, and leave the store alone.
+ * With no `currentUid` (omitted or null) the saved uid is not read, so
+ * today's behavior is unchanged. A job with no saved uid also proceeds. This is not an auth decision; the server checks the status token.
  */
 export async function requestDeletionSupport(
   jobId: string,
@@ -439,20 +507,26 @@ export async function requestDeletionSupport(
     secureStore: SecureStore;
     onAuthFailure?: (signal: DeletionAuthSignal, error: unknown) => void;
     clearSession?: () => void;
+    /** Signed-in account uid, e.g. `accountUidFromIdToken(idToken)`. Omit or null when signed out or unknown. */
+    currentUid?: string | null;
   },
 ): Promise<DeletionSupportResult> {
   void deps.onAuthFailure;
   void deps.clearSession;
   let savedJobId: string | null;
   let statusToken: string | null;
+  let savedUid: string | null = null;
   try {
     savedJobId = decodeSecret(await deps.secureStore.get(DELETION_JOB_KEY));
     statusToken = decodeSecret(await deps.secureStore.get(DELETION_TOKEN_KEY));
+    if (deps.currentUid != null) savedUid = decodeSecret(await deps.secureStore.get(DELETION_UID_KEY));
   } catch {
     // A SecureStore read that rejects (e.g. a locked keychain) sends nothing.
     return { kind: "fallback", contact: SUPPORT_CONTACT };
   }
   if (!statusToken || savedJobId !== jobId) return { kind: "fallback", contact: SUPPORT_CONTACT };
+  // A job saved by another account is not this one's: no request, no store change.
+  if (savedUid !== null && savedUid !== deps.currentUid) return { kind: "fallback", contact: SUPPORT_CONTACT };
   return deps.client.postDeletionSupport(jobId, statusToken);
 }
 
