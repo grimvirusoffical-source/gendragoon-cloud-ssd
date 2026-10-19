@@ -5,7 +5,7 @@
   "description": "GenDragoon Cloud SSD for Windows. The Mac app stays the SwiftUI client.",
   "author": {
     "name": "GenDragoon",
-    "email": "support@example.com"
+    "email": "support@infected-nation.com"
   },
   "main": "dist/main.js",
   "scripts": {
