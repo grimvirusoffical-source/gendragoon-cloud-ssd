@@ -37,7 +37,7 @@ function createEmailChecker({resolver=dns,ttlMs=10*60_000,timeoutMs=4000,now=()=
   if(!format.ok)return format;
   const status=await domainStatus(emailDomain(email));
   if(status==="deliverable")return {ok:true};
-  return {ok:false,code:status==="undeliverable"?"email_undeliverable":"email_unverifiable"};
+  return {ok:false,code:status==="undeliverable"?"email_domain":"email_unverifiable"};
  }
  return {check,domainStatus};
 }
