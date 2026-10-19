@@ -10,7 +10,8 @@
 //     are verified, TLS 1.2 minimum, no plaintext mode. AUTH PLAIN is sent only after TLS.
 //   * One plain address per message; CR/LF, several recipients or display-name forms are refused (ErrBadMessage).
 //     Subjects are RFC 2047 Q-encoded, bodies quoted-printable, "Auto-Submitted: auto-generated".
-//   * Rate limits: 5 per recipient per hour and 60 per minute overall by default (ErrRateLimited).
+//   * Rate limits: 5 per recipient per hour and 60 per minute overall by default (ErrRateLimited). The recipient
+//     key folds case, Gmail dots and "+tag" (recipientKey), so address variants share one budget.
 //   * Every attempt is recorded to an event log: sent, bounced (permanent 5xx), error, rate_limited, refused;
 //     recipients masked (s******@example.com) plus a short hash; no bodies, no password.
 //   * Templates: the same built-ins (password_reset, email_verify, twofa_setup_link, moderation_notice,
@@ -45,12 +46,66 @@ function hashAddr(a){return crypto.createHash("sha256").update(String(a).trim().
 const ADDRESS=/^[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]{1,64}@[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+$/;
 function validAddress(a){return typeof a==="string"&&a.length<=254&&ADDRESS.test(a)&&!/\.\.|^\.|\.@/.test(a);}
 
-// RFC 2047 Q encoding (what Go's mime.QEncoding produces for non-ASCII; ASCII stays as is).
+// RFC 2047 encoded-words, byte for byte what Go's mime.QEncoding.Encode("utf-8", s) and
+// mime.BEncoding.Encode produce. Text that is printable ASCII (or tab) is returned as is. Otherwise each
+// encoded-word is at most 75 characters ("=?utf-8?q?" + at most 63 + "?="); words are joined by a single
+// space (folded by the header writer) and a multi-byte character is never split between two words.
+const WORD_OPEN={q:"=?utf-8?q?",b:"=?utf-8?b?"},WORD_CLOSE="?=",MAX_WORD_CONTENT=75-"=?UTF-8?q?".length-WORD_CLOSE.length;
+const needsEncoding=s=>/[^\t\x20-\x7e]/.test(s);
+// One code point at a time as UTF-8 (a lone surrogate becomes U+FFFD, as Go writes invalid UTF-8 as is).
+const runes=s=>Array.from(s,ch=>Buffer.from(ch,"utf8"));
+function qWord(bytes){let out="";
+ for(const b of bytes)out+=b===0x20?"_":(b>=0x21&&b<=0x7e&&b!==0x3d&&b!==0x3f&&b!==0x5f)?String.fromCharCode(b):"="+b.toString(16).toUpperCase().padStart(2,"0");
+ return out;}
 function qEncode(s){
- if(/^[\x20-\x7e]*$/.test(s))return s;
- const bytes=Buffer.from(s,"utf8");let out="";
- for(const b of bytes){const c=String.fromCharCode(b);out+=(/[A-Za-z0-9!*+\-/]/.test(c))?c:(b===0x20?"_":"="+b.toString(16).toUpperCase().padStart(2,"0"));}
- return "=?utf-8?q?"+out+"?=";
+ if(!needsEncoding(s))return s;
+ const words=[];let cur="",len=0;
+ for(const r of runes(s)){
+  const literal=r.length===1&&r[0]>=0x20&&r[0]<=0x7e&&r[0]!==0x3d&&r[0]!==0x3f&&r[0]!==0x5f;
+  const n=literal?1:3*r.length;
+  if(len+n>MAX_WORD_CONTENT){words.push(cur);cur="";len=0;}
+  cur+=qWord(r);len+=n;
+ }
+ words.push(cur);
+ return words.map(w=>WORD_OPEN.q+w+WORD_CLOSE).join(" ");
+}
+function bEncode(s){
+ if(!needsEncoding(s))return s;
+ const all=Buffer.from(s,"utf8");
+ if(Math.ceil(all.length/3)*4<=MAX_WORD_CONTENT)return WORD_OPEN.b+all.toString("base64")+WORD_CLOSE;
+ const maxBytes=Math.floor(MAX_WORD_CONTENT/4)*3,words=[];let cur=[],len=0;
+ for(const r of runes(s)){
+  if(len+r.length>maxBytes){words.push(Buffer.concat(cur));cur=[];len=0;}
+  cur.push(r);len+=r.length;
+ }
+ words.push(Buffer.concat(cur));
+ return words.map(w=>WORD_OPEN.b+w.toString("base64")+WORD_CLOSE).join(" ");
+}
+// The From header as Go's (&mail.Address{Name, Address}).String() writes it.
+function formatAddress(name,addr){
+ if(!name)return "<"+addr+">";
+ if(/^[\t\x20-\x7e]*$/.test(name))return "\""+name.replace(/["\\]/g,m=>"\\"+m)+"\" <"+addr+">";
+ if(/["#$%&'(),.:;<>@[\]^`{|}~]/.test(name))return bEncode(name)+" <"+addr+">";
+ return qEncode(name)+" <"+addr+">";
+}
+// Header lines longer than 78 characters are folded at the spaces between encoded-words (RFC 5322 2.2.3). The
+// first word stays on the header's own line ("Subject: =?utf-8?q?...?=" is at most 9 + 75 characters).
+function foldHeader(line){
+ if(line.length<=78||!line.includes(" "))return line;
+ const parts=line.split(" ");let out=parts.shift()+" "+parts.shift(),cur=out.length;
+ for(const p of parts){if(cur+1+p.length>78){out+="\r\n "+p;cur=1+p.length;}else{out+=" "+p;cur+=1+p.length;}}
+ return out;
+}
+// The key the per-recipient limits count on: lower case; for Gmail (gmail.com, googlemail.com) dots and a
+// "+tag" in the local part are dropped and the domain is gmail.com; for other domains a "+tag" is dropped.
+// So v.ictim@gmail.com, victim+1@gmail.com and VICTIM@googlemail.com share one budget.
+function recipientKey(addr){
+ const a=String(addr||"").trim().toLowerCase(),at=a.lastIndexOf("@");
+ if(at<=0)return a;
+ let local=a.slice(0,at),domain=a.slice(at+1);
+ const plus=local.indexOf("+");if(plus>0)local=local.slice(0,plus);
+ if(domain==="gmail.com"||domain==="googlemail.com"){local=local.replace(/\./g,"");domain="gmail.com";}
+ return local+"@"+domain;
 }
 // Quoted-printable (RFC 2045), CRLF line breaks, soft breaks at 76.
 function quotedPrintable(text){
@@ -101,7 +156,7 @@ function createMailer(cfgIn,{log=null,now=()=>Date.now(),env=process.env,tlsOpti
   log.record(e);
  }
  function allow(to){
-  const t=now(),key=to.toLowerCase();
+  const t=now(),key=recipientKey(to);
   const list=(perTo.get(key)||[]).filter(x=>t-x<3_600_000);global=global.filter(x=>t-x<60_000);
   if(cfg.perRecipientPerHour>0&&list.length>=cfg.perRecipientPerHour){perTo.set(key,list);return false;}
   if(cfg.perMinute>0&&global.length>=cfg.perMinute){perTo.set(key,list);return false;}
@@ -112,13 +167,12 @@ function createMailer(cfgIn,{log=null,now=()=>Date.now(),env=process.env,tlsOpti
   if(!validAddress(msg.to.trim())||msg.to.trim()!==msg.to)throw ErrBadMessage("not a single plain address");
   if(typeof msg.body!=="string"||Buffer.byteLength(msg.body)>256*1024||msg.subject.length>300)throw ErrBadMessage("too long");
   const domain=cfg.from.slice(cfg.from.lastIndexOf("@")+1);
-  const name=(cfg.fromName||"").replace(/["\\]/g,"");
-  const from=name?"\""+qEncode(name)+"\" <"+cfg.from+">":"<"+cfg.from+">";
+  const from=formatAddress(cfg.fromName||"",cfg.from);
   const hdr=[["From",from],["To",msg.to],["Subject",qEncode(msg.subject)],["Date",new Date(now()).toUTCString().replace("GMT","+0000")],
    ["Message-ID","<"+crypto.randomBytes(12).toString("hex")+"@"+domain+">"],["MIME-Version","1.0"],["Content-Type","text/plain; charset=utf-8"],
    ["Content-Transfer-Encoding","quoted-printable"],["Auto-Submitted","auto-generated"]];
   const body=msg.body.replace(/\r\n/g,"\n").replace(/\n/g,"\r\n");
-  return hdr.map(([k,v])=>k+": "+v).join("\r\n")+"\r\n\r\n"+quotedPrintable(body);
+  return hdr.map(([k,v])=>foldHeader(k+": "+v)).join("\r\n")+"\r\n\r\n"+quotedPrintable(body);
  }
  function open(){
   return new Promise((resolve,reject)=>{
@@ -268,21 +322,27 @@ function createNotifier({sender,adminAuth,templates:tpl=gendragoonTemplates(),lo
 }
 
 // POST /v1/auth/password-reset {email}: always 202 with the same body, whether or not the account exists.
-// Firebase generates the one-time link; the mailer's per-recipient limit (5 per hour) caps mail to one address.
+// Firebase generates the one-time link. Two limits apply before a link is generated:
+//   * per client IP (req.ip; the app must set "trust proxy" to the real proxy hop count, see free_server.js):
+//     perIpPer10Min (10) requests, then 429 with Retry-After;
+//   * per address (recipientKey: case, Gmail dots and "+tag" folded): perEmailPerHour (5) requests. Over it
+//     the answer is the same 202, so the limit reveals nothing about the address, and no link is generated.
+// The mailer's own per-recipient limit (5 per hour, same key) still applies to the send.
 function registerPasswordReset({app,adminAuth,sender,templates:tpl=gendragoonTemplates(),continueUrl,now=Date.now,log=()=>{},
   limits={},path:routePath="/v1/auth/password-reset"}){
  if(!app||!adminAuth||!sender)throw Error("registerPasswordReset needs app, adminAuth and sender");
- const L={perIpPer10Min:10,...limits};
+ const L={perIpPer10Min:10,perEmailPerHour:5,...limits};
  const hits=new Map();
- const limited=key=>{const t=now(),list=(hits.get(key)||[]).filter(x=>x>t-600_000);
-  if(list.length>=L.perIpPer10Min){hits.set(key,list);return true;}list.push(t);hits.set(key,list);
-  if(hits.size>50_000)for(const [k,v] of hits)if(!v.length||v.at(-1)<t-600_000)hits.delete(k);return false;};
+ const limited=(key,max,windowMs)=>{const t=now(),list=(hits.get(key)||[]).filter(x=>x>t-windowMs);
+  if(list.length>=max){hits.set(key,list);return true;}list.push(t);hits.set(key,list);
+  if(hits.size>50_000)for(const [k,v] of hits)if(!v.length||v.at(-1)<t-3_600_000)hits.delete(k);return false;};
  const express=require("express");
  app.post(routePath,express.json({limit:"2kb"}),async(req,res)=>{
   const email=typeof req.body?.email==="string"?req.body.email.trim():"";
   if(!validAddress(email))return res.status(400).json({error:"invalid_email"});
-  if(limited("ip:"+(req.ip||"?"))){res.set("Retry-After","600");return res.status(429).json({error:"rate_limited"});}
+  if(limited("ip:"+(req.ip||"?"),L.perIpPer10Min,600_000)){res.set("Retry-After","600");return res.status(429).json({error:"rate_limited"});}
   res.status(202).json({ok:true,message:"If an account uses this address, a reset link is on its way."});
+  if(limited("to:"+recipientKey(email),L.perEmailPerHour,3_600_000)){log("password_reset.limited",{toHash:hashAddr(recipientKey(email))});return;}
   let link;
   try{link=await adminAuth.generatePasswordResetLink(email,continueUrl?{url:continueUrl}:undefined);}
   catch(e){log("password_reset.no_link",{toHash:hashAddr(email),code:String(e?.code||e?.errorInfo?.code||"error")});return;}
@@ -292,4 +352,5 @@ function registerPasswordReset({app,adminAuth,sender,templates:tpl=gendragoonTem
 }
 
 module.exports={DEFAULT_PASSWORD_ENV,SUPPORT_ADDRESS,defaultInfectedNation,createMailer,memLog,fileLog,logSender,recordingSender,
- templates,gendragoonTemplates,senderFromEnv,createNotifier,registerPasswordReset,mask,hashAddr,validAddress,quotedPrintable,qEncode,Bounce};
+ templates,gendragoonTemplates,senderFromEnv,createNotifier,registerPasswordReset,mask,hashAddr,validAddress,quotedPrintable,qEncode,bEncode,
+ formatAddress,foldHeader,recipientKey,Bounce};

@@ -159,14 +159,87 @@ test("senderFromEnv: off by default; refuses to start without the password varia
  assert.equal(s.config().host,"smtp.gmail.com");assert.ok(!JSON.stringify(s.config()).includes(PASSWORD));
 });
 
-async function resetRig(users={"josh@example.com":"uid-josh"}){
+test("subjects and names encode exactly as Go's mime.QEncoding, mime.BEncoding and mail.Address",()=>{
+ const vectors=JSON.parse(fs.readFileSync(path.join(__dirname,"test_helpers/rfc2047_go_vectors.json"),"utf8"));
+ assert.ok(vectors.length>=10);
+ for(const v of vectors){
+  assert.equal(mail.qEncode(v.In),v.Q,"Q "+v.In);
+  assert.equal(mail.bEncode(v.In),v.B,"B "+v.In);
+  assert.equal(mail.formatAddress(v.In,"support@infected-nation.com"),v.Addr,"address "+v.In);
+  for(const w of v.Q.split(" ").filter(w=>w.startsWith("=?")))assert.ok(w.length<=75,"encoded-word over 75: "+w);
+ }
+});
+
+test("long encoded subjects are split into words of at most 75 characters and folded",()=>{
+ const m=mail.createMailer({...mail.defaultInfectedNation(),host:"127.0.0.1",port:1},{env:{}});
+ const subject="Grüße ".repeat(40).trim();
+ const raw=m.build({to:"a@example.com",subject,body:"b"});
+ const header=raw.split("\r\n\r\n")[0];
+ const lines=header.split("\r\n");
+ assert.ok(lines.every(l=>l.length<=(l.startsWith("Subject: ")?9+75:78)),"header lines are at most 78 characters (the Subject line holds its first word)");
+ assert.match(header,/\r\nSubject: =\?utf-8\?q\?/);
+ const subj=header.match(/\r\nSubject: ([\s\S]*?)\r\n(?! )/)[1].replace(/\r\n /g," ");
+ assert.equal(subj,mail.qEncode(subject));
+ const words=subj.split(" ");
+ assert.ok(words.length>1&&words.every(w=>w.length<=75&&/^=\?utf-8\?q\?[^?]*\?=$/.test(w)));
+ const qDecode=w=>{const bytes=[];const t=w.slice(10,-2);
+  for(let k=0;k<t.length;k++){if(t[k]==="="){bytes.push(parseInt(t.slice(k+1,k+3),16));k+=2;}else bytes.push(t[k]==="_"?0x20:t.charCodeAt(k));}
+  return Buffer.from(bytes);};
+ assert.equal(Buffer.concat(words.map(qDecode)).toString("utf8"),subject);
+});
+
+test("the per-recipient limit folds case, Gmail dots and +tags",async()=>{
+ assert.equal(mail.recipientKey("V.Ictim+promo@GoogleMail.com"),"victim@gmail.com");
+ assert.equal(mail.recipientKey("victim@gmail.com"),"victim@gmail.com");
+ assert.equal(mail.recipientKey("first.last+x@example.com"),"first.last@example.com");
+ assert.equal(mail.recipientKey("first.last@example.com"),"first.last@example.com");
+ let t=1_800_000_000_000;
+ const m=mail.createMailer({...mail.defaultInfectedNation(),host:"127.0.0.1",port:1},{env:{},now:()=>t});
+ const variants=["victim@gmail.com","v.ictim@gmail.com","victim+1@gmail.com","VICTIM@googlemail.com","vic.tim+2@gmail.com"];
+ for(const to of variants)await assert.rejects(m.send({to,subject:"s",body:"b"}),e=>e.code==="ErrNoPassword");
+ await assert.rejects(m.send({to:"v.i.c.t.i.m+3@gmail.com",subject:"s",body:"b"}),e=>e.code==="ErrRateLimited");
+ await assert.rejects(m.send({to:"other@gmail.com",subject:"s",body:"b"}),e=>e.code==="ErrNoPassword");
+ for(let i=0;i<5;i++)await assert.rejects(m.send({to:"user+"+i+"@example.com",subject:"s",body:"b"}),e=>e.code!=="ErrBadMessage");
+ await assert.rejects(m.send({to:"user@example.com",subject:"s",body:"b"}),e=>e.code==="ErrRateLimited");
+});
+
+async function resetRig(users={"josh@example.com":"uid-josh"},{trustProxy=false,limits}={}){
  const app=express();const sender=mail.recordingSender();const logs=[];
- const adminAuth={async generatePasswordResetLink(email){if(!users[email])throw Object.assign(Error("no user"),{code:"auth/user-not-found"});return "https://gendragoon.example/reset?oobCode=abc";}};
- mail.registerPasswordReset({app,adminAuth,sender,log:(e,f)=>logs.push([e,f])});
+ if(trustProxy!==false)app.set("trust proxy",trustProxy);
+ let links=0;
+ const adminAuth={async generatePasswordResetLink(email){links++;if(!users[email])throw Object.assign(Error("no user"),{code:"auth/user-not-found"});return "https://gendragoon.example/reset?oobCode=abc";}};
+ mail.registerPasswordReset({app,adminAuth,sender,log:(e,f)=>logs.push([e,f]),limits});
  const server=await new Promise(r=>{const s=app.listen(0,"127.0.0.1",()=>r(s));});
- const post=body=>fetch("http://127.0.0.1:"+server.address().port+"/v1/auth/password-reset",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify(body)});
- return {sender,logs,post,settle:()=>new Promise(r=>setTimeout(r,30)),close:()=>server.close()};
+ const post=(body,headers={})=>fetch("http://127.0.0.1:"+server.address().port+"/v1/auth/password-reset",{method:"POST",headers:{"content-type":"application/json",...headers},body:JSON.stringify(body)});
+ return {sender,logs,post,links:()=>links,settle:()=>new Promise(r=>setTimeout(r,30)),close:()=>server.close()};
 }
+
+test("password reset: per-IP limit uses the proxy-appended client address, not a forged one",async()=>{
+ const r=await resetRig({},{trustProxy:1});
+ try{
+  // The client rotates its own X-Forwarded-For; the proxy appends the same real address each time.
+  for(let i=0;i<10;i++)assert.equal((await r.post({email:"x"+i+"@example.com"},{"X-Forwarded-For":"10.9.9."+i+", 203.0.113.7"})).status,202);
+  assert.equal((await r.post({email:"y@example.com"},{"X-Forwarded-For":"10.9.9.99, 203.0.113.7"})).status,429);
+  assert.equal((await r.post({email:"y@example.com"},{"X-Forwarded-For":"198.51.100.20"})).status,202,"another client is not limited");
+ }finally{r.close();}
+});
+
+test("password reset: per-address limit across IPs and address variants, with the same 202",async()=>{
+ const r=await resetRig({"victim@gmail.com":"uid-v"},{trustProxy:1});
+ try{
+  const variants=["victim@gmail.com","v.ictim@gmail.com","victim+a@gmail.com","VICTIM@googlemail.com","vi.ctim+b@gmail.com","victim@gmail.com","v.i.ctim@gmail.com"];
+  const bodies=[];
+  for(const [i,email] of variants.entries()){
+   const res=await r.post({email},{"X-Forwarded-For":"198.51.100."+i});
+   assert.equal(res.status,202);bodies.push(JSON.stringify(await res.json()));
+  }
+  await r.settle();
+  assert.equal(new Set(bodies).size,1,"limited and unlimited answers are identical");
+  assert.equal(r.links(),5,"no reset link is generated over the per-address limit");
+  assert.equal(r.logs.filter(([e])=>e==="password_reset.limited").length,2);
+  assert.ok(!JSON.stringify(r.logs).includes("victim"));
+ }finally{r.close();}
+});
 
 test("password reset: same 202 for known and unknown addresses; only real accounts get mail",async()=>{
  const r=await resetRig();
