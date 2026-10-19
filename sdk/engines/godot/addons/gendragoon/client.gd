@@ -16,7 +16,7 @@ const VERSION := "0.1.0"
 
 var api_key := ""
 
-const _METHODS := {"GET": HTTPClient.METHOD_GET, "HEAD": HTTPClient.METHOD_HEAD, "POST": HTTPClient.METHOD_POST, "PUT": HTTPClient.METHOD_PUT, "DELETE": HTTPClient.METHOD_DELETE}
+const _METHODS := {"GET": HTTPClient.METHOD_GET, "HEAD": HTTPClient.METHOD_HEAD, "POST": HTTPClient.METHOD_POST, "PUT": HTTPClient.METHOD_PUT, "PATCH": HTTPClient.METHOD_PATCH, "DELETE": HTTPClient.METHOD_DELETE}
 
 
 static func is_api_key(k: String) -> bool:

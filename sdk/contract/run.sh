@@ -62,7 +62,8 @@ available() {
     python) [ -n "$PYTHON" ] ;;
     csharp) [ -x "$DOTNET" ] && "$DOTNET" build -c Release "$sdk/csharp/tests/Gendragoon.Sdk.Tests" >/dev/null ;;
     swift) [ -n "$SWIFT" ] && (cd "$sdk/swift" && "$SWIFT" build -c release --product gd-interop >/dev/null 2>&1) ;;
-    godot) [ -n "$GODOT" ] ;;
+    # The first editor run registers the addon's class names (.godot/ is not committed).
+    godot) [ -n "$GODOT" ] && (cd "$sdk/engines/godot" && "$GODOT" --headless --editor --quit --path . >/dev/null 2>&1) ;;
     *) return 1 ;;
   esac
 }
