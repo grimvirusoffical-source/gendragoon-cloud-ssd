@@ -185,7 +185,7 @@ export function checkBirthDate(value: unknown, options: { now: Date; minAge?: nu
   const dob = parseBirthDate(value);
   if (!dob) return { ok: false, code: "dob_invalid" };
   const age = ageOn(dob, options.now);
-  if (age < 0) return { ok: false, code: "dob_invalid" };
+  if (age < 0) return { ok: false, code: "dob_range" };
   if (age > AGE_MAX) return { ok: false, code: "dob_range" };
   if (age < effectiveMinAge(options.minAge)) return { ok: false, code: "under_min_age" };
   return { ok: true };
@@ -277,8 +277,8 @@ export const ACCOUNT_ERROR_TEXT: Record<string, string> = {
   email_mismatch: "The email addresses don't match.",
   dob_required: "Enter your date of birth.",
   dob_format: "Use MM/DD/YYYY.",
-  dob_invalid: "Enter a real date that isn't in the future.",
-  dob_range: "Check your date of birth.",
+  dob_invalid: "Enter a real date.",
+  dob_range: "Your date of birth can't be in the future or more than 100 years ago.",
   under_min_age: "You must be at least 13 to make an account.",
   twofactor_invalid: "Choose how to protect your account.",
   twofactor_unavailable: "Red-XAI Auth is coming soon. Choose another option.",

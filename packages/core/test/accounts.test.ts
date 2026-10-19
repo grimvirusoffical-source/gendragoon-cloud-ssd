@@ -52,6 +52,9 @@ describe("shared sign-up rules (same vectors as the backend)", () => {
   it("date of birth, age range and the minimum age of 13", () => {
     for (const [v, want] of vectors.dob) expect(code(checkBirthDate(v, { now })), v).toBe(want);
     for (const [v, want] of vectors.minAge) expect(effectiveMinAge(v as number)).toBe(want);
+    // QA N3: a future date is out of range, as on the central service; a date that doesn't exist stays dob_invalid.
+    expect(checkBirthDate("10/20/2026", { now })).toEqual({ ok: false, code: "dob_range" });
+    expect(checkBirthDate("02/30/2001", { now })).toEqual({ ok: false, code: "dob_invalid" });
     expect(checkBirthDate("10/20/2013", { now, minAge: 0 })).toEqual({ ok: false, code: "under_min_age" });
   });
   it("phone", () => {
