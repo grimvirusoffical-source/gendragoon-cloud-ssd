@@ -19,3 +19,5 @@ export { THEME_STORAGE_KEY, applyThemePreference, loadThemePreference, saveTheme
 export type { ThemeName, ThemePreference } from "./theme.js";
 export { ColorPicker, TeamsHome, CreateTeam, JoinTeam, TeamChat, TeamMembers, TeamWorkspaces, TeamFiles } from "./Teams.js";
 export type { ChatPickable, TeamFile } from "./Teams.js";
+export { SignupForm, TermsGate, RequirementHints, PairedField, BirthDateField, TwoFactorPicker, TwoFactorSetup, QrCode } from "./Signup.js";
+export type { SignupApi, SignupSubmit } from "./Signup.js";
