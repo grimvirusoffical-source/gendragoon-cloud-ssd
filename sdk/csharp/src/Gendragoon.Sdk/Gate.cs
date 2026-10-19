@@ -6,7 +6,7 @@ namespace Gendragoon.Sdk
     /// L3 Trusted, L4 By approval). data.storage and gendragoon are L2 services.</summary>
     public enum Level { L0 = 0, L1 = 1, L2 = 2, L3 = 3, L4 = 4 }
 
-    public enum Risk { Read, Write, Credential, Destructive, BulkDestructive, Key, KeyExport, Sharing }
+    public enum Risk { Read, Write, Credential, Destructive, BulkDestructive, Key, KeyExport, Sharing, Billing }
 
     /// <summary>One entry of the shared operation table (spec/operations.json).</summary>
     public sealed class Operation

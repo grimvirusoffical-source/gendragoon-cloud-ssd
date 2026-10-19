@@ -42,6 +42,7 @@ const (
 	RiskKey             Risk = "key"
 	RiskKeyExport       Risk = "key-export"
 	RiskSharing         Risk = "sharing"
+	RiskBilling         Risk = "billing"
 )
 
 // Operation is one entry of the shared operation table (spec/operations.json).

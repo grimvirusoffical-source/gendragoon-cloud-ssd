@@ -57,7 +57,9 @@ func IdentityFromPrivate(b []byte) (*Identity, error) {
 }
 
 // PrivateBytes serializes the identity: scalar (32 bytes) then public point (65). Keep it secret.
-func (i *Identity) PrivateBytes() []byte { return append(i.priv.Bytes(), i.priv.PublicKey().Bytes()...) }
+func (i *Identity) PrivateBytes() []byte {
+	return append(i.priv.Bytes(), i.priv.PublicKey().Bytes()...)
+}
 
 // Public is the shareable recipient id: "gdid1_" + base64url(uncompressed P-256 point).
 func (i *Identity) Public() string {

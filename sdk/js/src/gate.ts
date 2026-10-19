@@ -1,6 +1,6 @@
 /** Rotten Apple developer unlock levels (SPEC §9.2). data.storage is an L2 service. */
 export type Level = "L0" | "L1" | "L2" | "L3" | "L4";
-export type Risk = "read" | "write" | "credential" | "destructive" | "bulk-destructive" | "key" | "key-export" | "sharing";
+export type Risk = "read" | "write" | "credential" | "destructive" | "bulk-destructive" | "key" | "key-export" | "sharing" | "billing";
 
 export interface Operation {
   readonly id: string;

@@ -15,7 +15,8 @@
     "bulk-destructive": "Deletes many items or everything",
     "key": "Creates, unlocks or re-wraps encryption keys",
     "key-export": "Releases raw key material to the caller",
-    "sharing": "Grants or revokes access for someone else"
+    "sharing": "Grants or revokes access for someone else",
+    "billing": "Starts or changes a paid subscription (opens a checkout)"
   },
   "defaultMaxLevel": "L3",
   "levelSource": {
@@ -586,6 +587,383 @@
       },
       "scope": null,
       "summary": "Disconnect an app and delete its data"
+    },
+    {
+      "id": "teams.catalog",
+      "level": "L2",
+      "service": "gendragoon",
+      "risk": "read",
+      "context": "user",
+      "http": {
+        "method": "GET",
+        "path": "/v2/teams/catalog"
+      },
+      "scope": null,
+      "summary": "Team tiers, Enterprise contact and the color palette"
+    },
+    {
+      "id": "teams.list",
+      "level": "L2",
+      "service": "gendragoon",
+      "risk": "read",
+      "context": "user",
+      "http": {
+        "method": "GET",
+        "path": "/v2/teams"
+      },
+      "scope": null,
+      "summary": "Teams the account belongs to"
+    },
+    {
+      "id": "teams.create",
+      "level": "L3",
+      "service": "gendragoon",
+      "risk": "billing",
+      "context": "user",
+      "http": {
+        "method": "POST",
+        "path": "/v2/teams"
+      },
+      "scope": null,
+      "summary": "Create a team and open its subscription checkout"
+    },
+    {
+      "id": "teams.get",
+      "level": "L2",
+      "service": "gendragoon",
+      "risk": "read",
+      "context": "user",
+      "http": {
+        "method": "GET",
+        "path": "/v2/teams/{id}"
+      },
+      "scope": null,
+      "summary": "A team, its members and the color choices"
+    },
+    {
+      "id": "teams.checkout",
+      "level": "L3",
+      "service": "gendragoon",
+      "risk": "billing",
+      "context": "user",
+      "http": {
+        "method": "POST",
+        "path": "/v2/teams/{id}/checkout"
+      },
+      "scope": null,
+      "summary": "Resume or replace the team subscription checkout"
+    },
+    {
+      "id": "teams.createInvite",
+      "level": "L3",
+      "service": "gendragoon",
+      "risk": "sharing",
+      "context": "user",
+      "http": {
+        "method": "POST",
+        "path": "/v2/teams/{id}/invites"
+      },
+      "scope": null,
+      "summary": "Create an invite code"
+    },
+    {
+      "id": "teams.revokeInvite",
+      "level": "L3",
+      "service": "gendragoon",
+      "risk": "sharing",
+      "context": "user",
+      "http": {
+        "method": "POST",
+        "path": "/v2/teams/{id}/invites/{inviteId}/revoke"
+      },
+      "scope": null,
+      "summary": "Revoke an invite code"
+    },
+    {
+      "id": "teams.previewInvite",
+      "level": "L2",
+      "service": "gendragoon",
+      "risk": "read",
+      "context": "user",
+      "http": {
+        "method": "POST",
+        "path": "/v2/teams/join/preview"
+      },
+      "scope": null,
+      "summary": "Team name, size and free colors for an invite code"
+    },
+    {
+      "id": "teams.join",
+      "level": "L3",
+      "service": "gendragoon",
+      "risk": "sharing",
+      "context": "user",
+      "http": {
+        "method": "POST",
+        "path": "/v2/teams/join"
+      },
+      "scope": null,
+      "summary": "Join a team with an invite code"
+    },
+    {
+      "id": "teams.updateMe",
+      "level": "L2",
+      "service": "gendragoon",
+      "risk": "write",
+      "context": "user",
+      "http": {
+        "method": "PATCH",
+        "path": "/v2/teams/{id}/me"
+      },
+      "scope": null,
+      "summary": "Change your display name or color in a team"
+    },
+    {
+      "id": "teams.leave",
+      "level": "L3",
+      "service": "gendragoon",
+      "risk": "destructive",
+      "context": "user",
+      "http": {
+        "method": "POST",
+        "path": "/v2/teams/{id}/leave"
+      },
+      "scope": null,
+      "summary": "Leave a team; your shares are removed"
+    },
+    {
+      "id": "teams.workspaces",
+      "level": "L2",
+      "service": "gendragoon",
+      "risk": "read",
+      "context": "user",
+      "http": {
+        "method": "GET",
+        "path": "/v2/teams/{id}/workspaces"
+      },
+      "scope": null,
+      "summary": "Team workspaces and shared personal workspaces"
+    },
+    {
+      "id": "teams.createWorkspace",
+      "level": "L3",
+      "service": "gendragoon",
+      "risk": "billing",
+      "context": "user",
+      "http": {
+        "method": "POST",
+        "path": "/v2/teams/{id}/workspaces"
+      },
+      "scope": null,
+      "summary": "Create a team workspace and open its plans checkout"
+    },
+    {
+      "id": "teams.checkoutWorkspace",
+      "level": "L3",
+      "service": "gendragoon",
+      "risk": "billing",
+      "context": "user",
+      "http": {
+        "method": "POST",
+        "path": "/v2/teams/{id}/workspaces/{wid}/checkout"
+      },
+      "scope": null,
+      "summary": "Resume a team workspace's plans checkout"
+    },
+    {
+      "id": "teams.share",
+      "level": "L3",
+      "service": "gendragoon",
+      "risk": "sharing",
+      "context": "user",
+      "http": {
+        "method": "POST",
+        "path": "/v2/teams/{id}/shares"
+      },
+      "scope": null,
+      "summary": "Show one of your personal workspaces to the team (view only)"
+    },
+    {
+      "id": "teams.unshare",
+      "level": "L3",
+      "service": "gendragoon",
+      "risk": "sharing",
+      "context": "user",
+      "http": {
+        "method": "DELETE",
+        "path": "/v2/teams/{id}/shares/{wid}"
+      },
+      "scope": null,
+      "summary": "Stop showing a personal workspace to the team"
+    },
+    {
+      "id": "teams.chat.list",
+      "level": "L2",
+      "service": "gendragoon",
+      "risk": "read",
+      "context": "user",
+      "http": {
+        "method": "GET",
+        "path": "/v2/teams/{id}/chat"
+      },
+      "scope": null,
+      "summary": "Chat messages after a sequence number"
+    },
+    {
+      "id": "teams.chat.watch",
+      "level": "L2",
+      "service": "gendragoon",
+      "risk": "read",
+      "context": "user",
+      "http": {
+        "method": "GET",
+        "path": "/v2/teams/{id}/chat"
+      },
+      "scope": null,
+      "summary": "Poll for new chat messages"
+    },
+    {
+      "id": "teams.chat.post",
+      "level": "L2",
+      "service": "gendragoon",
+      "risk": "write",
+      "context": "user",
+      "http": {
+        "method": "POST",
+        "path": "/v2/teams/{id}/chat"
+      },
+      "scope": null,
+      "summary": "Post a text message or a workspace card"
+    },
+    {
+      "id": "teams.chat.report",
+      "level": "L2",
+      "service": "gendragoon",
+      "risk": "write",
+      "context": "user",
+      "http": {
+        "method": "POST",
+        "path": "/v2/teams/{id}/chat/{seq}/report"
+      },
+      "scope": null,
+      "summary": "Report a message to the platform"
+    },
+    {
+      "id": "teams.chat.delete",
+      "level": "L3",
+      "service": "gendragoon",
+      "risk": "destructive",
+      "context": "user",
+      "http": {
+        "method": "POST",
+        "path": "/v2/teams/{id}/chat/{seq}/delete"
+      },
+      "scope": null,
+      "summary": "Remove a message (owner, reason required)"
+    },
+    {
+      "id": "teams.members.mute",
+      "level": "L3",
+      "service": "gendragoon",
+      "risk": "destructive",
+      "context": "user",
+      "http": {
+        "method": "POST",
+        "path": "/v2/teams/{id}/members/{memberId}/mute"
+      },
+      "scope": null,
+      "summary": "Mute a member (owner, reason required)"
+    },
+    {
+      "id": "teams.members.unmute",
+      "level": "L3",
+      "service": "gendragoon",
+      "risk": "write",
+      "context": "user",
+      "http": {
+        "method": "POST",
+        "path": "/v2/teams/{id}/members/{memberId}/unmute"
+      },
+      "scope": null,
+      "summary": "Unmute a member (owner)"
+    },
+    {
+      "id": "teams.members.kick",
+      "level": "L3",
+      "service": "gendragoon",
+      "risk": "destructive",
+      "context": "user",
+      "http": {
+        "method": "POST",
+        "path": "/v2/teams/{id}/members/{memberId}/kick"
+      },
+      "scope": null,
+      "summary": "Remove a member (owner, reason required)"
+    },
+    {
+      "id": "teams.members.ban",
+      "level": "L3",
+      "service": "gendragoon",
+      "risk": "destructive",
+      "context": "user",
+      "http": {
+        "method": "POST",
+        "path": "/v2/teams/{id}/members/{memberId}/ban"
+      },
+      "scope": null,
+      "summary": "Remove a member and block rejoining (owner, reason required)"
+    },
+    {
+      "id": "teams.members.setRole",
+      "level": "L3",
+      "service": "gendragoon",
+      "risk": "sharing",
+      "context": "user",
+      "http": {
+        "method": "POST",
+        "path": "/v2/teams/{id}/members/{memberId}/role"
+      },
+      "scope": null,
+      "summary": "Make a member a viewer or a full member (owner)"
+    },
+    {
+      "id": "teams.audit",
+      "level": "L2",
+      "service": "gendragoon",
+      "risk": "read",
+      "context": "user",
+      "http": {
+        "method": "GET",
+        "path": "/v2/teams/{id}/audit"
+      },
+      "scope": null,
+      "summary": "The team's hash-chained audit log (owner)"
+    },
+    {
+      "id": "teams.transfer",
+      "level": "L4",
+      "service": "gendragoon",
+      "risk": "sharing",
+      "context": "user",
+      "http": {
+        "method": "POST",
+        "path": "/v2/teams/{id}/transfer"
+      },
+      "scope": null,
+      "summary": "Hand the team to another member (owner)"
+    },
+    {
+      "id": "teams.delete",
+      "level": "L4",
+      "service": "gendragoon",
+      "risk": "bulk-destructive",
+      "context": "user",
+      "http": {
+        "method": "POST",
+        "path": "/v2/teams/{id}/delete"
+      },
+      "scope": null,
+      "summary": "Delete the team, its chat and its team workspaces with their files (owner)"
     }
   ]
 }

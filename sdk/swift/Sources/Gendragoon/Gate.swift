@@ -17,7 +17,7 @@ public enum Level: Int, Comparable, CustomStringConvertible, Sendable {
 }
 
 public enum Risk: String, Sendable {
-    case read, write, credential, destructive, bulkDestructive = "bulk-destructive", key, keyExport = "key-export", sharing
+    case read, write, credential, destructive, bulkDestructive = "bulk-destructive", key, keyExport = "key-export", sharing, billing
 }
 
 /// One entry of the shared operation table (spec/operations.json).
