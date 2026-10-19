@@ -706,8 +706,8 @@ final class AccountLogicTests: XCTestCase {
     }
 
     func testNotRetryableFailureShowsSupportAndDismissWipesNothing() async {
-        XCTAssertTrue(SupportContact.isPlaceholder)
-        XCTAssertEqual(SupportContact.address,"SUPPORT_CONTACT_PLACEHOLDER@invalid")
+        XCTAssertFalse(SupportContact.isPlaceholder)
+        XCTAssertEqual(SupportContact.address,"support@infected-nation.com")
         let dead=fixture("status-failed-not-retryable")
         var failed=AccountDeletion.resume(DeletionReceipt.of(jobId:dead.jobId ?? "",statusToken:token))
         let deadScript=ScriptedDeletionTransport()
@@ -781,12 +781,8 @@ final class AccountLogicTests: XCTestCase {
     }
 
     func testReleaseBuildRejectsPlaceholderSupportContact() {
-        #if DEBUG
-        XCTAssertTrue(SupportContact.isPlaceholder)
-        XCTAssertEqual(SupportContact.address,"SUPPORT_CONTACT_PLACEHOLDER@invalid")
-        #else
         XCTAssertFalse(SupportContact.isPlaceholder,"RELEASE BLOCKER: replace SupportContact.address with packages/core SUPPORT_CONTACT before shipping")
-        #endif
+        XCTAssertEqual(SupportContact.address,"support@infected-nation.com")
     }
 
     func testRetryAfterNetworkErrorSendsDeleteAgain() async {
@@ -926,7 +922,7 @@ final class AccountLogicTests: XCTestCase {
         XCTAssertFalse(limited.opensMailto)
         XCTAssertTrue(DeletionSupport.interpret(status:503,body:"",transportFailed:false).opensMailto)
         XCTAssertTrue(DeletionSupport.interpret(status:0,body:"",transportFailed:true).opensMailto)
-        XCTAssertTrue(SupportContact.mailto(jobId:job)?.absoluteString.hasPrefix("mailto:SUPPORT_CONTACT_PLACEHOLDER@invalid") ?? false)
+        XCTAssertTrue(SupportContact.mailto(jobId:job)?.absoluteString.hasPrefix("mailto:support@infected-nation.com") ?? false)
     }
 
     func testSupport404ShowsMailtoAndNeverSignIn() async {
@@ -958,7 +954,7 @@ final class AccountLogicTests: XCTestCase {
         XCTAssertFalse(flow.message?.contains("Sign in") ?? true)
         XCTAssertTrue(flow.showSupport)
         XCTAssertFalse(flow.requestsWipe())
-        XCTAssertTrue(SupportContact.mailto(jobId:flow.jobId)?.absoluteString.hasPrefix("mailto:SUPPORT_CONTACT_PLACEHOLDER@invalid") ?? false)
+        XCTAssertTrue(SupportContact.mailto(jobId:flow.jobId)?.absoluteString.hasPrefix("mailto:support@infected-nation.com") ?? false)
     }
 
     /// PR #6 at `0486412`: `support-unauthorized.json`. Required, no auth header at all.
@@ -1125,7 +1121,7 @@ final class AccountLogicTests: XCTestCase {
             XCTAssertNotEqual(flow.step,.reauth)
             XCTAssertNotEqual(flow.step,.signedOut)
             XCTAssertFalse(flow.clearSession)
-            XCTAssertTrue(SupportContact.mailto(jobId:job)?.absoluteString.hasPrefix("mailto:SUPPORT_CONTACT_PLACEHOLDER@invalid") ?? false)
+            XCTAssertTrue(SupportContact.mailto(jobId:job)?.absoluteString.hasPrefix("mailto:support@infected-nation.com") ?? false)
         }
         XCTAssertFalse(DeletionSupport.call(jobId:job,savedJobId:job,statusToken:nil,enabled:true).send)
     }

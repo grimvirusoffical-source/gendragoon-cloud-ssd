@@ -59,4 +59,4 @@ License: to be announced. © Red-XAI LLC. All rights reserved until a license fi
 
 ## Support
 
-Contact: support@example.com (placeholder)
+Contact: support@infected-nation.com
