@@ -22,3 +22,12 @@ export const DELETION_SUPPORT_ENDPOINT_ENABLED = false;
  * On now that cloud-ssd PR #5 fixtures at `4c3dd13` are vendored.
  */
 export const WORKSPACE_PRICING_ENABLED = true;
+
+/**
+ * True only under Jest. Debug-only elements (e.g. `session-uid`) render behind
+ * this, so a release or dev build never shows them. Read at call time so a test
+ * can check the non-test branch.
+ */
+export function isTestBuild(): boolean {
+  return process.env.NODE_ENV === "test";
+}

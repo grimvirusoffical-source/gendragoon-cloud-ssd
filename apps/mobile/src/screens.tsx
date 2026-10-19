@@ -35,7 +35,7 @@ import {
 } from "./account/deleteAccount";
 import { SAME_ACCOUNT_MESSAGE, sessionMaySwap } from "./account/session";
 import { byoServerFlowReady } from "./byoReady";
-import { DELETION_SUPPORT_ENDPOINT_ENABLED, ENCRYPTED_WORKSPACE_ENABLED, WORKSPACE_PRICING_ENABLED } from "./flags";
+import { DELETION_SUPPORT_ENDPOINT_ENABLED, ENCRYPTED_WORKSPACE_ENABLED, WORKSPACE_PRICING_ENABLED, isTestBuild } from "./flags";
 import {
   additionalWorkspaceFeeText,
   grandfatheringEndedPrice,
@@ -100,7 +100,7 @@ export function SignInSession(props: {
   }
   return (
     <View>
-      <Text testID="session-uid">{accountUidFromIdToken(token) ?? ""}</Text>
+      {isTestBuild() ? <Text testID="session-uid">{accountUidFromIdToken(token) ?? ""}</Text> : null}
       <SignInScreen
         googleEnabled={props.googleEnabled}
         blockedMessage={error}
@@ -1022,13 +1022,13 @@ export function SettingsHome(props: {
 const styles = StyleSheet.create({
   help: { color: colors.muted, fontSize: typeScale.helpSize },
   label: { color: colors.text, fontSize: typeScale.bodySize },
-  checkRow: { flexDirection: "row", alignItems: "center", gap: space.sm, minHeight: tapTarget },
+  checkRow: { flexDirection: "row", alignItems: "center", gap: space.sm, minHeight: tapTarget, minWidth: tapTarget },
   checkbox: { width: 22, height: 22, borderRadius: 6, borderWidth: 1.5, borderColor: colors.controlBorder, alignItems: "center", justifyContent: "center" },
   checkboxOn: { backgroundColor: colors.primary, borderColor: colors.primary },
   checkMark: { color: colors.primaryText, fontSize: 14, fontWeight: "700" },
   choices: { gap: space.sm },
   devNote: { color: colors.muted, fontSize: 12 },
   category: { color: colors.text, fontSize: typeScale.bodySize },
-  openRow: { minHeight: tapTarget, justifyContent: "center" },
+  openRow: { minHeight: tapTarget, minWidth: tapTarget, justifyContent: "center" },
   soon: { color: colors.muted, fontSize: typeScale.helpSize },
 });

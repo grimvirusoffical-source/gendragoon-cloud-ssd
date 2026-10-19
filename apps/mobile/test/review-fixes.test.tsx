@@ -50,28 +50,49 @@ describe("44pt targets, measured on rendered controls", () => {
   function controls(s: { queryAllByRole: (role: "button" | "radio" | "checkbox") => unknown[] }) {
     return [...s.queryAllByRole("button"), ...s.queryAllByRole("radio"), ...s.queryAllByRole("checkbox")] as Styled[];
   }
-  function height(node: Styled): number {
+  /** The visible box only: minHeight/minWidth (or fixed height/width). hitSlop and padding do not count. */
+  function box(node: Styled): { h: number; w: number } {
     const style = flat(node);
-    const slop = node.props.hitSlop;
-    const vertical = typeof slop === "number" ? slop * 2 : slop && typeof slop === "object" ? Number((slop as { top?: number }).top ?? 0) + Number((slop as { bottom?: number }).bottom ?? 0) : 0;
-    return Math.max(Number(style.minHeight) || 0, Number(style.height) || 0) + vertical;
+    return {
+      h: Math.max(Number(style.minHeight) || 0, Number(style.height) || 0),
+      w: Math.max(Number(style.minWidth) || 0, Number(style.width) || 0),
+    };
   }
   it.each([
     ["workspaces", () => <WorkspacesScreen workspaces={[A, B]} unpaidIds={[]} onDelete={() => undefined} onMerge={() => undefined} />],
     ["passphrase", () => <PassphraseScreen onSubmit={() => undefined} />],
     ["create", () => <NewWorkspaceScreen quote={{ isFree: true, grandfathered: false, feeWaived: false, monthlyPriceCents: 0 }} onCreate={() => undefined} />],
     ["settings", () => <SettingsHome deleteDisabled={false} onSort={() => undefined} onDelete={() => undefined} onSignOut={() => undefined} />],
-  ])("every control on the %s screen is at least 44pt tall", async (_name, ui) => {
+    ["delete account (retry)", () => (
+      <DeleteAccountScreen
+        frame="retry"
+        jobId="job-1"
+        activeTransfers={0}
+        secrets={new MemorySecretStore()}
+        workspaceIds={["ws-1"]}
+        idToken=""
+        client={{ async deleteAccount() { return { jobId: "job-1" }; }, async deletionStatus() { return { jobId: "job-1", status: "failed" }; } }}
+        onReauth={() => undefined}
+        onSignedOut={() => undefined}
+        onDone={() => undefined}
+        onError={() => undefined}
+      />
+    )],
+  ])("every control on the %s screen has a visible box of at least 44x44pt", async (_name, ui) => {
     const s = await render(ui());
     const found = controls(s as never);
     expect(found.length).toBeGreaterThan(0);
-    for (const node of found) expect(height(node)).toBeGreaterThanOrEqual(tapTarget);
+    for (const node of found) {
+      const { h, w } = box(node);
+      expect(h).toBeGreaterThanOrEqual(tapTarget);
+      expect(w).toBeGreaterThanOrEqual(tapTarget);
+    }
   });
-  it("fails if a button shrinks to 30pt", async () => {
+  it("fails if a button shrinks to 30pt, even with hitSlop and padding", async () => {
     const s = await render(<Button label="x" testID="b" onPress={() => undefined} />);
     const node = s.getByTestId("b");
-    const shrunk = { props: { ...node.props, style: [flat(node), { minHeight: 30 }], hitSlop: 4 } };
-    expect(height(shrunk)).toBeLessThan(tapTarget);
+    const shrunk = { props: { ...node.props, style: [flat(node), { minHeight: 30, paddingVertical: 20 }], hitSlop: 10 } };
+    expect(box(shrunk).h).toBeLessThan(tapTarget);
   });
 });
 
