@@ -23,7 +23,7 @@ def go():
     rows = []
     for o in OPS:
         m, p = http(o)
-        rows.append(f'\t{{ID: {json.dumps(o["id"])}, Level: {o["level"]}, Risk: {json.dumps(o["risk"])}, Context: {json.dumps(o["context"])}, '
+        rows.append(f'\t{{ID: {json.dumps(o["id"])}, Level: {o["level"]}, Service: {json.dumps(o["service"])}, Risk: {json.dumps(o["risk"])}, Context: {json.dumps(o["context"])}, '
                     f'Method: {json.dumps(m)}, Path: {json.dumps(p)}, Scope: {json.dumps(o["scope"] or "")}, Summary: {json.dumps(o["summary"])}}},')
     return f"// {HEADER}\n\npackage gendragoon\n\n// Operations is the shared operation table with each call's level and risk.\nvar Operations = []Operation{{\n" + "\n".join(rows) + "\n}\n"
 
@@ -32,7 +32,7 @@ def ts():
     rows = []
     for o in OPS:
         m, p = http(o)
-        rows.append(f'  {{ id: {json.dumps(o["id"])}, level: {json.dumps(o["level"])}, risk: {json.dumps(o["risk"])}, context: {json.dumps(o["context"])}, '
+        rows.append(f'  {{ id: {json.dumps(o["id"])}, level: {json.dumps(o["level"])}, service: {json.dumps(o["service"])}, risk: {json.dumps(o["risk"])}, context: {json.dumps(o["context"])}, '
                     f'method: {json.dumps(m)}, path: {json.dumps(p)}, scope: {json.dumps(o["scope"] or "")}, summary: {json.dumps(o["summary"])} }},')
     ids = " | ".join(json.dumps(o["id"]) for o in OPS)
     return (f"// {HEADER}\n\nimport type {{ Operation }} from \"./gate.js\";\n\nexport type OperationId = {ids};\n\n"
@@ -43,7 +43,7 @@ def py():
     rows = []
     for o in OPS:
         m, p = http(o)
-        rows.append(f'    Operation({o["id"]!r}, {o["level"]!r}, {o["risk"]!r}, {o["context"]!r}, {m!r}, {p!r}, {(o["scope"] or "")!r}, {o["summary"]!r}),')
+        rows.append(f'    Operation({o["id"]!r}, {o["level"]!r}, {o["service"]!r}, {o["risk"]!r}, {o["context"]!r}, {m!r}, {p!r}, {(o["scope"] or "")!r}, {o["summary"]!r}),')
     return f'# {HEADER}\n"""Shared operation table with each call\'s level and risk."""\nfrom .gate import Operation\n\nOPERATIONS = (\n' + "\n".join(rows) + "\n)\n"
 
 
@@ -53,7 +53,7 @@ def swift():
         m, p = http(o)
         lvl = o["level"].lower()
         risk = {"bulk-destructive": "bulkDestructive", "key-export": "keyExport"}.get(o["risk"], o["risk"])
-        rows.append(f'        Operation(id: {json.dumps(o["id"])}, level: .{lvl}, risk: .{risk}, context: {json.dumps(o["context"])}, '
+        rows.append(f'        Operation(id: {json.dumps(o["id"])}, level: .{lvl}, service: {json.dumps(o["service"])}, risk: .{risk}, context: {json.dumps(o["context"])}, '
                     f'method: {json.dumps(m)}, path: {json.dumps(p)}, scope: {json.dumps(o["scope"] or "")}, summary: {json.dumps(o["summary"])}),')
     return f"// {HEADER}\n\npublic extension Operation {{\n    /// The shared operation table with each call's level and risk.\n    static let all: [Operation] = [\n" + "\n".join(rows) + "\n    ]\n}\n"
 
@@ -63,7 +63,7 @@ def cs():
     for o in OPS:
         m, p = http(o)
         risk = "".join(w.capitalize() for w in o["risk"].split("-"))
-        rows.append(f'            new Operation({json.dumps(o["id"])}, Level.{o["level"]}, Risk.{risk}, {json.dumps(o["context"])}, '
+        rows.append(f'            new Operation({json.dumps(o["id"])}, Level.{o["level"]}, {json.dumps(o["service"])}, Risk.{risk}, {json.dumps(o["context"])}, '
                     f'{json.dumps(m)}, {json.dumps(p)}, {json.dumps(o["scope"] or "")}, {json.dumps(o["summary"])}),')
     return (f"// {HEADER}\n\nnamespace Gendragoon.Sdk\n{{\n    public static partial class Operations\n    {{\n"
             f"        /// <summary>The shared operation table with each call's level and risk.</summary>\n"
@@ -74,7 +74,7 @@ def gd():
     rows = []
     for o in OPS:
         m, p = http(o)
-        rows.append(f'\t{json.dumps(o["id"])}: {{"level": {o["level"][1]}, "risk": {json.dumps(o["risk"])}, "context": {json.dumps(o["context"])}, '
+        rows.append(f'\t{json.dumps(o["id"])}: {{"level": {o["level"][1]}, "service": {json.dumps(o["service"])}, "risk": {json.dumps(o["risk"])}, "context": {json.dumps(o["context"])}, '
                     f'"method": {json.dumps(m)}, "path": {json.dumps(p)}, "scope": {json.dumps(o["scope"] or "")}}},')
     return f"# {HEADER}\nclass_name GendragoonOperations\nextends RefCounted\n\nconst ALL := {{\n" + "\n".join(rows) + "\n}\n"
 

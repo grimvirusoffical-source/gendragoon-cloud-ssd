@@ -1,6 +1,7 @@
 package gendragoon
 
 import (
+	"bytes"
 	"context"
 	"crypto/ecdh"
 	"crypto/rand"
@@ -39,17 +40,24 @@ func (c *Client) NewIdentity() (*Identity, error) {
 	return &Identity{k}, nil
 }
 
-// IdentityFromPrivate restores an identity from PrivateBytes.
+// IdentityFromPrivate restores an identity from PrivateBytes (97 bytes: the 32-byte scalar followed by
+// the 65-byte uncompressed public point, so platforms without point arithmetic can import it).
 func IdentityFromPrivate(b []byte) (*Identity, error) {
-	k, err := ecdh.P256().NewPrivateKey(b)
+	if len(b) != 97 {
+		return nil, errors.New("gendragoon: identity must be 97 bytes")
+	}
+	k, err := ecdh.P256().NewPrivateKey(b[:32])
 	if err != nil {
 		return nil, err
+	}
+	if !bytes.Equal(k.PublicKey().Bytes(), b[32:]) {
+		return nil, errors.New("gendragoon: identity public key does not match")
 	}
 	return &Identity{k}, nil
 }
 
-// PrivateBytes is the 32-byte private scalar. Keep it secret; store it like a password.
-func (i *Identity) PrivateBytes() []byte { return i.priv.Bytes() }
+// PrivateBytes serializes the identity: scalar (32 bytes) then public point (65). Keep it secret.
+func (i *Identity) PrivateBytes() []byte { return append(i.priv.Bytes(), i.priv.PublicKey().Bytes()...) }
 
 // Public is the shareable recipient id: "gdid1_" + base64url(uncompressed P-256 point).
 func (i *Identity) Public() string {

@@ -66,7 +66,7 @@ func TestVectors() ([]byte, error) {
 		"chunk":            kv{"fileKey": h(fk), "plaintext": h(chunkPT), "nonce": h(chunkNonce), "id": chunkID, "blob": h(chunkBlob)},
 		"manifest": kv{"masterKey": h(mk), "driveName": drive, "manifestKey": mkey, "plainManifestKey": DriveManifestKey(nil, drive),
 			"nonce": h(manNonce), "plaintext": doc, "sealed": h(sealedMan)},
-		"share": kv{"recipientPrivate": h(rpriv.Bytes()), "recipientPublic": (&Identity{rpriv}).Public(), "ephemeralPrivate": h(epriv.Bytes()),
+		"share": kv{"recipientPrivate": h((&Identity{rpriv}).PrivateBytes()), "recipientPublic": (&Identity{rpriv}).Public(), "ephemeralPrivate": h(epriv.Bytes()),
 			"nonce": h(shareNonce), "payload": payload, "share": share},
 		"pkce": kv{"verifier": verifier, "challenge": b64.EncodeToString(vs[:])},
 	}

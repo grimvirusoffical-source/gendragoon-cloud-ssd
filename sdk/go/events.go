@@ -68,19 +68,19 @@ func (c *Client) Watch(ctx context.Context, opts WatchOptions) (<-chan Event, er
 				return false
 			}
 		}
-		for first := true; ; first = false {
+		for {
 			u, err := c.Usage(ctx)
 			if errors.Is(err, ErrUnauthorized) {
 				emit(Event{Type: BindingRevoked})
 				return
 			}
 			if err == nil {
-				if !first && (u.UsedBytes != last.UsedBytes || u.ObjectCount != last.ObjectCount || u.QuotaBytes != last.QuotaBytes) {
+				if last != nil && (u.UsedBytes != last.UsedBytes || u.ObjectCount != last.ObjectCount || u.QuotaBytes != last.QuotaBytes) {
 					if !emit(Event{Type: UsageChanged, Usage: u}) {
 						return
 					}
 				}
-				if first || u.ChangeSeq != last.ChangeSeq || time.Since(lastList) >= opts.ResyncEvery {
+				if last == nil || u.ChangeSeq != last.ChangeSeq || time.Since(lastList) >= opts.ResyncEvery {
 					if items, err := c.AllManifests(ctx); err == nil {
 						lastList = time.Now()
 						now := map[string]string{}

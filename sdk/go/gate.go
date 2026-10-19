@@ -6,8 +6,9 @@ import (
 	"strings"
 )
 
-// Level is a Rotten Apple developer unlock level (SPEC §9.2). Every SDK operation carries one; see
-// Operations and docs/LEVELS.md. L0 and L1 unlock nothing in this SDK: data.storage is an L2 service.
+// Level is a Rotten Apple developer unlock level (Rotten Apple docs/SDK_LEVELS.md section 2: L0 Applicant,
+// L1 Starter, L2 Established, L3 Trusted, L4 By approval). Every SDK operation carries one; see Operations
+// and docs/LEVELS.md. L0 and L1 unlock nothing in this SDK: data.storage and gendragoon are L2 services.
 type Level int
 
 const (
@@ -47,6 +48,7 @@ const (
 type Operation struct {
 	ID      string
 	Level   Level
+	Service string // Rotten Apple service id the call belongs to ("data.storage" or "gendragoon")
 	Risk    Risk
 	Context string // "app" (API key), "user" (signed-in account) or "local" (no network)
 	Method  string

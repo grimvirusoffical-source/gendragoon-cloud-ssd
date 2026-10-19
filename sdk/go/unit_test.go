@@ -135,8 +135,11 @@ func TestGateDefaultsAndEnvironmentCap(t *testing.T) {
 func TestOperationTableMatchesSpec(t *testing.T) {
 	raw, _ := os.ReadFile("../spec/operations.json")
 	var spec struct {
+		LevelSource struct {
+			Services map[string]struct{ Level string }
+		}
 		Operations []struct {
-			ID, Level, Risk, Context string
+			ID, Level, Service, Risk, Context string
 		}
 	}
 	json.Unmarshal(raw, &spec)
@@ -145,8 +148,15 @@ func TestOperationTableMatchesSpec(t *testing.T) {
 	}
 	for i, o := range spec.Operations {
 		g := Operations[i]
-		if g.ID != o.ID || g.Level.String() != o.Level || string(g.Risk) != o.Risk || g.Context != o.Context {
+		if g.ID != o.ID || g.Level.String() != o.Level || g.Service != o.Service || string(g.Risk) != o.Risk || g.Context != o.Context {
 			t.Fatalf("operation %s differs from spec", o.ID)
+		}
+		svc, ok := spec.LevelSource.Services[o.Service]
+		if !ok {
+			t.Fatalf("operation %s names unknown service %q", o.ID, o.Service)
+		}
+		if min, _ := ParseLevel(svc.Level); g.Level < min {
+			t.Fatalf("operation %s is below its service's level %s", o.ID, svc.Level)
 		}
 	}
 }
