@@ -38,7 +38,7 @@ code such as `not_found`, `precondition_failed`, `quota_exceeded`, `level`, `loc
 | `GendragoonClient` (Node) | `capabilities`, `health`, `usage`, `put_blob`, `put_sealed_blob`, `get_blob`, `delete_blob`, `has_blobs`, `all_blobs`, `all_manifests`, `get_manifest`, `put_manifest`, `delete_manifest`, `get_key_envelope`, `rotate_api_key`; exports `base_url`, `max_level`, `timeout_seconds` |
 | `GendragoonConnect` | `redeem_grant`, `exchange_code` |
 | `GendragoonKeyring` | `unlock`, `create`, `change_passphrase`, `import_master_key`, `export_master_key`, `lock`, `is_unlocked` |
-| `GendragoonDrive` | `snapshot`, `list`, `stat`, `write_file`, `read_file`, `mkdir`, `move`, `delete`, `delete_folder` |
+| `GendragoonDrive` | `snapshot`, `list`, `stat`, `write_file`, `read_file`, `mkdir`, `move`, `delete`, `delete_slot`, `delete_folder`; `slot_path` |
 | `GendragoonWatcher` (Node) | `start`, `stop`; signal `changed` |
 | `GendragoonTeams` (Node) | `catalog`, `list_teams`, `get_team`, `preview_invite`, `join`, `update_me`, `leave`, `workspaces`, `messages`, `post`, `report`, `watch_chat`, `stop_watching`; signals `message_received`, `team_lost` |
 

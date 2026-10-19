@@ -25,13 +25,17 @@ let back = try await d.readFile("slots/slot1.sav")
 | Connect | `Connector.redeemGrant`, `exchangeCode`, `PKCE.create`, `Connector.connectLink`, `Loopback.wait` |
 | Provider | `Client`: `capabilities`, `health`, `usage`, `putBlob`, `putSealedBlob`, `getBlob`, `deleteBlob`, `listBlobs`, `allBlobs`, `hasBlobs`, `getManifest`, `putManifest`, `deleteManifest`, `listManifests`, `allManifests`, `getKeyEnvelope`, `rotateApiKey`, `wipe` |
 | Keys | `Keyring`: `unlock`, `create`, `changePassphrase`, `importMasterKey`, `exportMasterKey`, `lockKey` |
-| Files and folders | `Drive`: `list`, `stat`, `writeFile`, `readFile`, `mkdir`, `move`, `delete`, `deleteFolder`, `snapshot`; `Drive.cleanPath`, `collectGarbage` |
+| Files and folders | `Drive`: `list`, `stat`, `writeFile`, `readFile`, `mkdir`, `move`, `delete`, `deleteSlot`, `deleteFolder`, `snapshot`; `Drive.cleanPath`, `Drive.slotPath`, `collectGarbage` |
 | Sync | `Sync.push`, `Sync.pull`, `Sync.mirror` |
 | Sharing | `Identity.create`, `Sharing.export`, `Sharing.openEnvelope`, `Sharing.open`, `Sharing.createReadKey`, `Sharing.listReadKeys`, `Sharing.revokeReadKey` |
 | Events | `Events.watch` (`AsyncStream`, polling) |
 | Account | `AccountClient`: `createGrant`, `parseConnectLink`, `authorize`, `listBindings`, `revokeBinding`, `revokeAndDelete` |
 | Teams | `TeamsClient`: `catalog`, `list`, `create`, `get`, `checkout`, `createInvite`, `revokeInvite`, `previewInvite`, `join`, `updateMe`, `leave`, `workspaces`, `createWorkspace`, `checkoutWorkspace`, `share`, `unshare`, `messages`, `watchChat`, `post`, `postCard`, `report`, `deleteMessage`, `mute`, `unmute`, `kick`, `ban`, `setRole`, `audit`, `transfer`, `delete`; `TeamsClient.verifyAuditChain` |
 | Levels | `Operation`, `Gating.levelGate`, `Level`, `LevelError`, `ClientOptions(gate:)` |
+
+Folder sync never writes outside the local folder: pull refuses drive paths that are not valid drive paths
+and any target whose path goes through a symbolic link or a non-folder in the local folder, and push skips
+symbolic links.
 
 Errors: `APIError` (`status`, `code`, `retryAfter`, and `notFound`, `preconditionFailed`, `quotaExceeded`,
 `unauthorized`), `LevelError`, `GendragoonError` (`checksum`, `corrupt`, `wrongPassphrase`, `locked`,

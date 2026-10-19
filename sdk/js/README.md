@@ -22,13 +22,17 @@ const back = await d.readFile("slots/slot1.sav");
 | Connect | `Connector.redeemGrant`, `exchangeCode`, `newPKCE`, `pkceChallenge`, `connectLink`, `Loopback` (node) |
 | Provider | `Client`: `capabilities`, `health`, `usage`, `putBlob`, `putSealedBlob`, `getBlob`, `headBlob`, `deleteBlob`, `listBlobs`, `allBlobs`, `hasBlobs`, `getManifest`, `putManifest`, `deleteManifest`, `listManifests`, `allManifests`, `getKeyEnvelope`, `rotateApiKey`, `wipe` |
 | Keys | `Keyring`: `unlock`, `create`, `changePassphrase`, `importMasterKey`, `exportMasterKey`, `lock`; `wrapMasterKey`, `unwrapMasterKey` |
-| Files and folders | `Drive.open`, `list`, `stat`, `writeFile`, `readFile`, `mkdir`, `move`, `delete`, `deleteFolder`, `snapshot`; `cleanPath`, `collectGarbage` |
+| Files and folders | `Drive.open`, `list`, `stat`, `writeFile`, `readFile`, `mkdir`, `move`, `delete`, `deleteSlot`, `deleteFolder`, `snapshot`; `cleanPath`, `slotPath`, `collectGarbage` |
 | Sync (node) | `pushFolder`, `pullFolder`, `mirrorFolder` |
 | Sharing | `Identity`, `exportShare`, `openShareEnvelope`, `openShare`, `createReadKey`, `listReadKeys`, `revokeReadKey` |
 | Events | `watch` (async iterator, polling) |
 | Account | `AccountClient`: `createGrant`, `authorize`, `listBindings`, `revokeBinding`, `revokeAndDelete`; `parseConnectLink` |
 | Teams | `TeamsClient`: `catalog`, `list`, `create`, `get`, `checkout`, `createInvite`, `revokeInvite`, `previewInvite`, `join`, `updateMe`, `leave`, `workspaces`, `createWorkspace`, `checkoutWorkspace`, `share`, `unshare`, `messages`, `watchChat`, `post`, `postCard`, `report`, `deleteMessage`, `mute`, `unmute`, `kick`, `ban`, `setRole`, `audit`, `transfer`, `delete`; `verifyAuditChain` |
 | Levels | `OPERATIONS`, `levelGate`, `parseLevel`, `LevelError`, `Options.gate` |
+
+Folder sync never writes outside the local folder: pull refuses drive paths that are not valid drive paths
+and any target whose path goes through a symbolic link or a non-folder in the local folder, and push skips
+symbolic links.
 
 Errors: `APIError` (`status`, `code`, `retryAfterSeconds`, and `notFound`, `preconditionFailed`, `quotaExceeded`,
 `unauthorized`, `rateLimited`), `LevelError`, `ChecksumError`. argon2id is not in WebCrypto: to open argon2id

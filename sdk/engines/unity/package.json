@@ -1,6 +1,6 @@
 {
   "name": "com.gendragoon.sdk",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "displayName": "GenDragoon Cloud SSD",
   "description": "Encrypted cloud saves, files and folders, sync and sharing on GenDragoon Cloud SSD. Wraps the GenDragoon .NET SDK.",
   "unity": "2021.3",

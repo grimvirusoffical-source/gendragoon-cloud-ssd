@@ -29,18 +29,18 @@ The **Cloud save** sample in the Package Manager shows the full flow.
 | `ConnectAsync(code)` | Redeems a connect code and stores the API key. |
 | `ConnectWithBrowserAsync(timeout)` | Opens the connect page and waits on a loopback redirect (PKCE). Desktop only. |
 | `Disconnect()` | Forgets the API key and the unlocked key. |
-| `UnlockAsync(passphrase)` | Unlocks the master key, creating it on first use. |
+| `UnlockAsync(passphrase)` | Unlocks the master key, creating it on first use (L2; the first key only, it never replaces one). |
 | `UnlockWithKey(masterKey)` | Uses a master key supplied by the host. |
 | `SaveAsync`, `SaveJsonAsync<T>` | Writes a slot. |
 | `LoadAsync`, `LoadJsonAsync<T>` | Reads a slot; returns `null` when it does not exist. |
 | `ListSlotsAsync()` | Lists slots with sizes and modification times. |
-| `DeleteSlotAsync(slot)` | Deletes one slot. |
+| `DeleteSlotAsync(slot)` | Deletes one slot: a single file directly inside `slotFolder` (`files.deleteSlot`, L2). Folders and nested paths are refused. |
 | `UsageAsync()` | Bytes used and quota. |
 | `Connected`, `Unlocked` | State. |
 | `Credentials` | `ICredentialStore`; defaults to `FileCredentialStore` under `Application.persistentDataPath`. |
 
 Inspector fields: `baseUrl`, `appName`, `driveName` (default `saves`), `slotFolder` (default `slots`) and
-`maxLevel` (default L2, which covers every call above). For files, folders, sync, sharing or Teams, use the
+`maxLevel` (default L2, which covers every call above; see [LEVELS.md](../../docs/LEVELS.md)). For files, folders, sync, sharing or Teams, use the
 SDK types in `Gendragoon.Sdk` directly; see [`sdk/csharp`](../../csharp/README.md).
 
 ## Limitations

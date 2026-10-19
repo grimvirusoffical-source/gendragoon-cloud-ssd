@@ -33,10 +33,10 @@ Calls run on a worker thread and invoke their delegate on the game thread.
 |---|---|
 | `Connect` | Redeems a connect code; returns the API key. |
 | `Open` | Opens a client with a stored API key. |
-| `Unlock`, `IsUnlocked`, `Close` | Unlocks the master key and opens the save drive. |
+| `Unlock`, `IsUnlocked`, `Close` | Unlocks the master key, creating it on first use (L2; the first key only), and opens the save drive. |
 | `SaveSlot`, `LoadSlot` | Raw bytes. |
 | `SaveGameObject`, `LoadGameObject` | `USaveGame` objects. |
-| `ListSlots`, `DeleteSlot`, `Usage` | Slot management and quota. |
+| `ListSlots`, `DeleteSlot`, `Usage` | Slot management and quota. `DeleteSlot` deletes one file directly inside `SlotFolder` (`gd_drive_delete_slot`, `files.deleteSlot`, L2). |
 | `MaxLevel` (2), `DriveName` (`cloud-save`), `SlotFolder` (`saves`) | Settings. |
 
 The C header, `Source/ThirdParty/GenDragoonLib/include/gendragoon.h`, also exposes drive listing, mkdir, move and
@@ -46,6 +46,7 @@ player Teams calls (`gd_teams_*`) for use from your own code.
 
 ```sh
 test/build.sh && test/build/cabi_test                 # C ABI checks without a server
+GD_SDK_BASE=<provider url> GD_FIRST_RUN_GRANT=<connect code> test/build/cabi_test --first-run   # C15 at L2
 ```
 
 The plugin itself is exercised through the C ABI tests and the cross-language interop check in `sdk/contract`.

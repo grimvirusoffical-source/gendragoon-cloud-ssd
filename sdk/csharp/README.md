@@ -26,13 +26,17 @@ byte[] back = await d.ReadFileAsync("slots/slot1.sav");
 | Connect | `Connector.RedeemGrantAsync`, `ExchangeCodeAsync`, `Pkce.Create`, `Connector.ConnectLink`, `Loopback.Listen`, `Loopback.WaitAsync` |
 | Provider | `Client`: `CapabilitiesAsync`, `HealthAsync`, `UsageAsync`, `PutBlobAsync`, `PutSealedBlobAsync`, `GetBlobAsync`, `DeleteBlobAsync`, `ListBlobsAsync`, `AllBlobsAsync`, `HasBlobsAsync`, `GetManifestAsync`, `PutManifestAsync`, `DeleteManifestAsync`, `ListManifestsAsync`, `AllManifestsAsync`, `GetKeyEnvelopeAsync`, `RotateApiKeyAsync`, `WipeAsync` |
 | Keys | `Keyring`: `UnlockAsync`, `CreateAsync`, `ChangePassphraseAsync`, `ImportMasterKey`, `ExportMasterKey`, `Lock` |
-| Files and folders | `Drive`: `ListAsync`, `StatAsync`, `WriteFileAsync`, `ReadFileAsync`, `MkdirAsync`, `MoveAsync`, `DeleteAsync`, `DeleteFolderAsync`, `SnapshotAsync`, `CollectGarbageAsync`; `Drive.CleanPath` |
+| Files and folders | `Drive`: `ListAsync`, `StatAsync`, `WriteFileAsync`, `ReadFileAsync`, `MkdirAsync`, `MoveAsync`, `DeleteAsync`, `DeleteSlotAsync`, `DeleteFolderAsync`, `SnapshotAsync`, `CollectGarbageAsync`; `Drive.CleanPath`, `Drive.SlotPath` |
 | Sync | `Sync.PushAsync`, `Sync.PullAsync`, `Sync.MirrorAsync` |
 | Sharing | `Identity.Create`, `Identity.FromPrivate`, `Sharing.ExportAsync`, `Sharing.OpenEnvelope`, `Sharing.OpenAsync`, `Sharing.CreateReadKeyAsync`, `Sharing.ListReadKeysAsync`, `Sharing.RevokeReadKeyAsync` |
 | Events | `Events.WatchAsync` (`IAsyncEnumerable`, polling) |
 | Account | `AccountClient`: `CreateGrantAsync`, `AuthorizeAsync`, `ListBindingsAsync`, `RevokeBindingAsync`, `RevokeAndDeleteAsync`; `AccountClient.ParseConnectLink` |
 | Teams | `TeamsClient`: `CatalogAsync`, `ListAsync`, `CreateAsync`, `GetAsync`, `CheckoutAsync`, `CreateInviteAsync`, `RevokeInviteAsync`, `PreviewInviteAsync`, `JoinAsync`, `UpdateMeAsync`, `LeaveAsync`, `WorkspacesAsync`, `CreateWorkspaceAsync`, `CheckoutWorkspaceAsync`, `ShareAsync`, `UnshareAsync`, `MessagesAsync`, `WatchChatAsync`, `PostAsync`, `PostCardAsync`, `ReportAsync`, `DeleteMessageAsync`, `MuteAsync`, `UnmuteAsync`, `KickAsync`, `BanAsync`, `SetRoleAsync`, `AuditAsync`, `TransferAsync`, `DeleteAsync`; `TeamsClient.VerifyAuditChain` |
 | Levels | `Operations.All`, `Operations.LevelGate`, `Operations.ParseLevel`, `Level`, `LevelException`, `ClientOptions.Gate` |
+
+Folder sync never writes outside the local folder: pull refuses drive paths that are not valid drive paths
+and any target whose path goes through a symbolic link or a non-folder in the local folder, and push skips
+symbolic links.
 
 Every network call takes an optional `CancellationToken`. Errors: `ApiException` (`Status`, `Code`,
 `RetryAfterSeconds`, and `NotFound`, `PreconditionFailed`, `QuotaExceeded`, `Unauthorized`, `RateLimited`),

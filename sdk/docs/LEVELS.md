@@ -25,7 +25,8 @@ list under section 8 of `SDK_LEVELS.md`; ra-core registers them and confirms the
 * `GENDRAGOON_SDK_MAX_LEVEL` (`L0`–`L4` or `0`–`4`) lowers the cap for every client in the process. It cannot
   raise it. An unreadable value locks the client to L0. The Rotten Apple launcher sets it to the developer's
   level.
-* The Unity component and the Unreal plugin default to L2, which is all that cloud saves need.
+* The Unity component and the Unreal plugin default to L2, which is all that cloud saves need: creating the
+  player's first master key, saving, overwriting and deleting single slots, and reading (see below).
 * The gate is a guard against mistakes in the app, not a security boundary: the server enforces scopes,
   ownership and roles on its own.
 
@@ -47,7 +48,8 @@ list under section 8 of `SDK_LEVELS.md`; ra-core registers them and confirms the
 
 | Operation | Level | Risk |
 |---|---|---|
-| `keyEnvelope.create`, `keyEnvelope.replace` | L3 | key |
+| `keyEnvelope.replace` | L3 | key |
+| `files.delete`, `blobs.delete`, `manifests.delete` | L3 | destructive |
 | `files.deleteFolder`, `files.collectGarbage`, `sync.mirror` | L3 | bulk-destructive |
 | `share.export`, `share.createReadKey`, `share.revokeReadKey` | L3 | sharing |
 | `account.createGrant`, `account.authorize`, `account.revokeBinding` | L3 | sharing |
@@ -59,7 +61,30 @@ list under section 8 of `SDK_LEVELS.md`; ra-core registers them and confirms the
 | `storage.wipe`, `account.revokeAndDelete`, `teams.delete` | L4 | bulk-destructive |
 | `teams.transfer` | L4 | sharing |
 
-Posting a workspace card for a *personal* workspace to team chat also shares that workspace, so the SDKs check
-`teams.share` (L3) in addition to `teams.chat.post` (L2).
+## Keys, deletes and cloud saves at L2
+
+Decisions of 2026-10-19 (QA findings B1 and B2):
+
+* `keyEnvelope.create` is L2. It stores the first recovery envelope and is create-only: the request carries
+  `If-None-Match: *` and the server answers `envelope_exists`, which every SDK reports as a failed precondition
+  (412). An L2 client can therefore never replace or rotate an existing key. Replacing the envelope (passphrase
+  change, re-wrap) is `keyEnvelope.replace` at L3, and exporting the key is `crypto.exportMasterKey` at L4.
+* The raw deletes `blobs.delete` and `manifests.delete` and the general file delete `files.delete` are L3.
+* Overwriting a save does not delete anything: the SDKs upload the new blobs and replace the drive manifest
+  with a compare-and-swap, so `files.write` (L2) covers it. Old blobs stay until garbage collection (L3).
+* `files.deleteSlot` (L2, destructive) removes one save slot: a file directly inside the given slot folder,
+  named by a single path segment. It refuses folders, nested paths and anything outside that folder, and it
+  changes only the drive manifest of the app's own drive (the API key is bound to one app and workspace).
+  Its reach equals overwriting that slot, which L2 already allows. The Unity and Unreal cloud-save
+  components use it for `DeleteSlot`.
+
+## Workspace cards
+
+Posting a workspace card for a *personal* workspace to team chat shares that workspace with the team (view
+only), so the SDKs check `teams.share` (L3) in addition to `teams.chat.post` (L2) for every personal card. The
+server only shares the workspace when the card asks for it explicitly: pass the share flag (`ChatCard.Share`
+in Go, `{ share: true }` in JS, `share=True` in Python, `share: true` in C# and Swift) and the SDK sends
+`card.share: true`. Without it the server refuses a card for a workspace that is not shared yet with
+`403 SHARE_REQUIRED`; a card for a workspace that is already shared needs no flag.
 
 The full list, including every L2 call, is in [OPERATIONS.md](OPERATIONS.md).
