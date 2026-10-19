@@ -32,7 +32,7 @@ enum TeamsServer {
     }()
 }
 
-/// The Teams contract suite (sdk/spec/CONTRACT.md, T01-T10).
+/// The Teams contract suite (sdk/spec/CONTRACT.md, T01-T11).
 final class TeamsTests: XCTestCase {
     var origin: String!
 
@@ -62,8 +62,9 @@ final class TeamsTests: XCTestCase {
         do { try await f(); return false } catch is LevelError { return true } catch { return false }
     }
 
-    func testT01toT10() async throws {
-        let alice = user("alice" + Bytes.hex(Bytes.random(4))), bob = user("bob" + Bytes.hex(Bytes.random(4)))
+    func testT01toT11() async throws {
+        let aliceUid = "alice" + Bytes.hex(Bytes.random(4))
+        let alice = user(aliceUid), bob = user("bob" + Bytes.hex(Bytes.random(4)))
 
         // T01 catalog
         let tiers = try await alice.catalog()
@@ -124,6 +125,25 @@ final class TeamsTests: XCTestCase {
         let spaces = try await bob.workspaces(id)
         XCTAssertTrue(spaces.team.count == 1 && spaces.team[0].access == "read" && spaces.subscriptionActive)
         try await alice.setRole(id, memberId: b.memberId, role: "member")
+
+        // T11 personal workspace card
+        let wid = UUID().uuidString.lowercased()
+        var seed = URLRequest(url: URL(string: origin + "/__dev/personal-workspace")!)
+        seed.httpMethod = "POST"
+        seed.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        seed.httpBody = JV.obj([("uid", .str(aliceUid)), ("workspaceId", .str(wid)), ("name", .str("Sketches"))]).data
+        let (_, seeded) = try await URLSession.shared.data(for: seed)
+        XCTAssertEqual((seeded as! HTTPURLResponse).statusCode, 200)
+        let l2Refused = await refused { _ = try await self.user(aliceUid, .l2).postCard(id, scope: "personal", workspaceId: wid, share: true) }
+        XCTAssertTrue(l2Refused)
+        do { _ = try await alice.postCard(id, scope: "personal", workspaceId: wid, text: "not shared yet"); XCTFail("unshared personal card") }
+        catch let e as APIError { XCTAssertEqual(e.status, 403); XCTAssertEqual(e.code, "SHARE_REQUIRED") }
+        let card = try await alice.postCard(id, scope: "personal", workspaceId: wid, text: "have a look", share: true)
+        XCTAssertEqual(card.kind, "workspace_card")
+        let bobSees = try await bob.workspaces(id)
+        XCTAssertEqual(bobSees.shared.count, 1)
+        _ = try await alice.postCard(id, scope: "personal", workspaceId: wid, text: "again")
+        try await alice.unshare(id, workspaceId: wid)
 
         // T08 mute and unmute
         try await alice.mute(id, memberId: b.memberId, reason: "cool down")

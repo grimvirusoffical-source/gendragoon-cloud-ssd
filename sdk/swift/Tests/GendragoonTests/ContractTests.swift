@@ -170,6 +170,72 @@ final class ContractTests: XCTestCase {
         XCTAssertEqual(e?.operation.level, .l3)
         let w = await fails { _ = try await r.client.wipe() }
         XCTAssertTrue(w is LevelError)
+        let d = try Drive(r.client, name: "x", keys: nil, plain: true)
+        let calls: [(String, () async throws -> Void)] = [
+            ("files.delete", { try await d.delete("a.txt") }),
+            ("blobs.delete", { try await r.client.deleteBlob(String(repeating: "0", count: 64)) }),
+            ("manifests.delete", { try await r.client.deleteManifest(d.manifestKey) }),
+            ("keyEnvelope.replace", { try await r.keys.changePassphrase("new passphrase") }),
+        ]
+        for (id, call) in calls {
+            let le = await fails(call) as? LevelError
+            XCTAssertEqual(le?.operation.id, id)
+            XCTAssertEqual(le?.operation.level, .l3, id)
+        }
+    }
+
+    /// What the engine cloud-save components do on a fresh binding at their default level (L2).
+    func testC15CloudSaveAtL2() async throws {
+        let r = try await rig("ws", ContractTests.max(.l2))
+        let missing = await apiError { try await r.keys.unlock(self.pass) }
+        XCTAssertEqual(missing?.notFound, true)
+        try await r.keys.create(pass)
+        let second = await apiError { try await Keyring(r.client).create("other passphrase") }
+        XCTAssertEqual(second?.preconditionFailed, true)
+        let replace = await fails { try await r.keys.changePassphrase("new passphrase") } as? LevelError
+        XCTAssertEqual(replace?.operation.id, "keyEnvelope.replace")
+        let d = try Drive(r.client, name: "saves", keys: r.keys)
+        for v in ["first", "second, overwritten in place"] { try await d.writeFile("slots/one.sav", Data(v.utf8)) }
+        let saved = try await d.readFile("slots/one.sav")
+        XCTAssertEqual(String(decoding: saved, as: UTF8.self), "second, overwritten in place")
+        try await d.mkdir("slots/sub")
+        let folder = await apiError { try await d.deleteSlot(folder: "slots", slot: "sub") }
+        XCTAssertEqual(folder?.notFound, true)
+        for bad in ["", "sub/x.sav", "..", "."] { _ = await fails { try await d.deleteSlot(folder: "slots", slot: bad) } }
+        try await d.deleteSlot(folder: "slots", slot: "one.sav")
+        let gone = await apiError { _ = try await d.readFile("slots/one.sav") }
+        XCTAssertEqual(gone?.notFound, true)
+        try await Keyring(r.client).unlock(pass)
+    }
+
+    func testC16SyncStaysInside() async throws {
+        let r = try await rig("ws")
+        let d = try Drive(r.client, name: "hostile", keys: nil, plain: true)
+        try await d.writeFile("ok.txt", Data("ok".utf8))
+        var doc = try await d.snapshot()
+        let hostile = ["../dotdot.txt", "a/../../mid.txt", "/abs.txt", "out/link.txt", "in/inner.txt"]
+        for p in hostile { doc.files[p] = doc.files["ok.txt"] }
+        _ = try await r.client.putManifest(d.manifestKey, try GDCrypto.sealManifest(nil, key: d.manifestKey, doc.encode()))
+        let fm = FileManager.default
+        let tmp = fm.temporaryDirectory.appendingPathComponent("gd-c16-" + Bytes.hex(Bytes.random(4)))
+        defer { try? fm.removeItem(at: tmp) }
+        let local = tmp.appendingPathComponent("local"), outside = tmp.appendingPathComponent("outside")
+        try fm.createDirectory(at: local.appendingPathComponent("real"), withIntermediateDirectories: true)
+        try fm.createDirectory(at: outside, withIntermediateDirectories: true)
+        try fm.createSymbolicLink(at: local.appendingPathComponent("out"), withDestinationURL: outside)
+        try fm.createSymbolicLink(at: local.appendingPathComponent("in"), withDestinationURL: local.appendingPathComponent("real"))
+        for p in hostile {
+            let e = await fails { _ = try await Sync.pull(r.client, drive: d, to: local, options: SyncOptions(skip: { $0 != p && "/" + $0 != p })) }
+            XCTAssertNotNil(e, p)
+        }
+        for f in [tmp.appendingPathComponent("dotdot.txt"), tmp.appendingPathComponent("mid.txt"), outside.appendingPathComponent("link.txt"), local.appendingPathComponent("real/inner.txt")] {
+            XCTAssertFalse(fm.fileExists(atPath: f.path), "pull wrote \(f.path)")
+        }
+        _ = try await Sync.pull(r.client, drive: d, to: local, options: SyncOptions(skip: { $0 != "ok.txt" }))
+        try Data("secret".utf8).write(to: outside.appendingPathComponent("secret.txt"))
+        try fm.createSymbolicLink(at: local.appendingPathComponent("real/secret.txt"), withDestinationURL: outside.appendingPathComponent("secret.txt"))
+        let pushed = try await Sync.push(r.client, drive: try Drive(r.client, name: "pushed", keys: nil, plain: true), from: local)
+        XCTAssertEqual(pushed.uploaded, ["ok.txt"])
     }
 
     func testC09Events() async throws {

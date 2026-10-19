@@ -28,7 +28,8 @@ public final class Keyring: CustomStringConvertible, @unchecked Sendable {
         set(try GDCrypto.unwrapMasterKey(env, passphrase: passphrase))
     }
 
-    /// Generates a master key and stores its envelope (create-only). Level L3, risk key.
+    /// Generates a master key and stores its first recovery envelope. Create-only: it fails with
+    /// `412 Precondition Failed` when an envelope already exists, so it can never replace one. Level L2, risk key.
     public func create(_ passphrase: String) async throws {
         try client.check("keyEnvelope.create")
         let k = Bytes.random(GDCrypto.keyBytes)

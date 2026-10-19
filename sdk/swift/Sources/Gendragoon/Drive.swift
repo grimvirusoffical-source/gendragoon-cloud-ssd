@@ -234,7 +234,8 @@ public final class Drive: @unchecked Sendable {
         }
     }
 
-    /// Removes one file or one empty folder. Level L2, risk destructive. Blobs stay until collectGarbage.
+    /// Removes one file or one empty folder. Level L3, risk destructive. Blobs stay until collectGarbage.
+    /// Cloud saves at L2 use `deleteSlot`.
     public func delete(_ p: String) async throws {
         try client.check("files.delete")
         try await update { doc in
@@ -244,6 +245,26 @@ public final class Drive: @unchecked Sendable {
             if s.contains(where: { $0.hasPrefix(p + "/") }) || doc.files.keys.contains(where: { $0.hasPrefix(p + "/") }) { throw GendragoonError.invalid("folder \"\(p)\" is not empty") }
             doc.folders.removeAll { $0 == p }
         }
+    }
+
+    /// Removes one save slot: the file `folder/slot`, where `slot` is a single path segment. It never removes a
+    /// folder, a nested file or anything outside `folder`, and it only changes this drive's manifest (the slot's
+    /// blobs stay until collectGarbage). Its reach is the same as overwriting that slot, which L2 already allows,
+    /// so it is level L2, risk destructive. The engine cloud-save components use it.
+    public func deleteSlot(folder: String, slot: String) async throws {
+        try client.check("files.deleteSlot")
+        let p = try Drive.slotPath(folder: folder, slot: slot)
+        try await update { doc in
+            guard doc.files.removeValue(forKey: p) != nil else { throw Drive.notFound }
+        }
+    }
+
+    /// `folder/slot` for a save slot. `slot` must be one path segment; `folder` may be "" (the drive root).
+    public static func slotPath(folder: String, slot: String) throws -> String {
+        if slot.isEmpty || slot.contains("/") { throw GendragoonError.invalid("invalid slot name \"\(slot)\"") }
+        let p = folder.isEmpty ? slot : folder + "/" + slot
+        _ = try cleanPath(p)
+        return p
     }
 
     /// Removes a folder and everything in it; returns how many files were removed. Level L3, risk bulk-destructive.

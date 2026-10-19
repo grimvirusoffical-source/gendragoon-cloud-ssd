@@ -73,6 +73,39 @@ public enum Sync {
         return rep
     }
 
+    static func unsafe(_ rel: String, _ why: String) -> GendragoonError {
+        GendragoonError.invalid("unsafe path \"\(rel)\": \(why)")
+    }
+
+    static func isInside(_ p: String, _ root: String) -> Bool { p == root || p.hasPrefix(root.hasSuffix("/") ? root : root + "/") }
+
+    /// The local file a pull writes for `rel`. Nothing on the way may be a symbolic link (checked with lstat, so links
+    /// are never followed), every existing component must be a folder, an existing target must be a regular file, and
+    /// the resolved folder must stay inside the local root.
+    static func localTarget(_ local: URL, _ rel: String) throws -> URL {
+        let fm = FileManager.default
+        try fm.createDirectory(at: local, withIntermediateDirectories: true)
+        let root = local.standardizedFileURL.resolvingSymlinksInPath()
+        let parts = rel.split(separator: "/", omittingEmptySubsequences: false).map(String.init)
+        if parts.contains(where: { $0.isEmpty || $0 == "." || $0 == ".." }) { throw unsafe(rel, "is not a valid drive path") }
+        var cur = root
+        for (i, part) in parts.enumerated() {
+            cur = cur.appendingPathComponent(part)
+            guard let attrs = try? fm.attributesOfItem(atPath: cur.path) else { break } // does not follow links
+            let type = attrs[.type] as? FileAttributeType
+            if type == .typeSymbolicLink { throw unsafe(rel, "\"\(cur.path)\" is a symbolic link") }
+            let last = i == parts.count - 1
+            if !last && type != .typeDirectory { throw unsafe(rel, "\"\(cur.path)\" is not a folder") }
+            if last && type != .typeRegular { throw unsafe(rel, "\"\(cur.path)\" is not a regular file") }
+        }
+        let target = root.appendingPathComponent(rel).standardizedFileURL
+        guard isInside(target.path, root.path), target.path != root.path else { throw unsafe(rel, "escapes the local folder") }
+        let dir = target.deletingLastPathComponent()
+        try fm.createDirectory(at: dir, withIntermediateDirectories: true)
+        guard isInside(dir.resolvingSymlinksInPath().path, root.path) else { throw unsafe(rel, "escapes the local folder") }
+        return target
+    }
+
     static func writeAtomic(_ target: URL, _ data: Data, _ mtime: Int64) throws {
         let fm = FileManager.default
         try fm.createDirectory(at: target.deletingLastPathComponent(), withIntermediateDirectories: true)
@@ -83,20 +116,18 @@ public enum Sync {
     static func pull(_ c: Client, _ d: Drive, _ local: URL, _ o: SyncOptions, mirror: Bool) async throws -> SyncReport {
         let doc = try await d.load().0
         let files = scan(local, o.skip)
-        let root = local.standardizedFileURL.path
         var rep = SyncReport()
         var remote = Set<String>()
         for p in doc.files.keys.sorted(by: Drive.ordered) where under(p, o.prefix) {
             let e = doc.files[p]!
             let r = rel(p, o.prefix)
             if let s = o.skip, s(r) { continue }
+            guard (try? Drive.cleanPath(p)) == p else { throw unsafe(p, "is not a valid drive path") }
             remote.insert(r)
             if let u = files[r], let have = try? Data(contentsOf: u), Int64(have.count) == e.size, Bytes.hex(Bytes.sha256(have)) == e.sha256 { rep.unchanged += 1; continue }
             rep.downloaded.append(p)
             if o.dryRun { continue }
-            let target = local.appendingPathComponent(r).standardizedFileURL
-            guard target.path.hasPrefix(root + "/") else { throw GendragoonError.invalid("drive path escapes the local folder") }
-            try writeAtomic(target, try await Drive.readEntry(c, e), e.mtime)
+            try writeAtomic(try localTarget(local, r), try await Drive.readEntry(c, e), e.mtime)
         }
         if mirror {
             for r in files.keys.sorted(by: Drive.ordered) where !remote.contains(r) {

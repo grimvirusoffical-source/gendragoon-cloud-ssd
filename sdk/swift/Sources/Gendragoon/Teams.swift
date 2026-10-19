@@ -271,12 +271,16 @@ public final class TeamsClient: Transport, @unchecked Sendable {
         ChatMessage(try await call("teams.chat.post", "POST", try t(teamId) + "/chat", .obj([("text", .str(text))])).o("message"))
     }
 
-    /// Posts a workspace card (scope "team" or "personal"). A personal-workspace card also shares it with the team, so
-    /// it needs the sharing level too. Level L2, risk write.
+    /// Posts a workspace card (scope "team" or "personal"). Level L2, risk write. A card for a personal workspace is
+    /// also checked at teams.share (L3): pass `share: true` to share the workspace with the team (view only) in the
+    /// same call, or share it first with `share(_:workspaceId:)`. Without either the server refuses the card
+    /// (403 SHARE_REQUIRED).
     @discardableResult
-    public func postCard(_ teamId: String, scope: String, workspaceId: String, text: String = "") async throws -> ChatMessage {
+    public func postCard(_ teamId: String, scope: String, workspaceId: String, text: String = "", share: Bool = false) async throws -> ChatMessage {
         if scope == "personal" { try check("teams.share") }
-        let card = JV.obj([("scope", .str(scope)), ("workspaceId", .str(workspaceId))])
+        var fields: [(String, JV)] = [("scope", .str(scope)), ("workspaceId", .str(workspaceId))]
+        if scope == "personal" && share { fields.append(("share", .bool(true))) }
+        let card = JV.obj(fields)
         return ChatMessage(try await call("teams.chat.post", "POST", try t(teamId) + "/chat", .obj([("text", .str(text)), ("card", card)])).o("message"))
     }
 

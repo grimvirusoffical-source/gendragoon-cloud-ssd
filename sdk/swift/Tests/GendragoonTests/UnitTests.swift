@@ -97,6 +97,15 @@ final class UnitTests: XCTestCase {
         XCTAssertThrowsError(try Gating.levelGate(.l3)(Operation.named("storage.wipe")))
         setenv(Gating.maxLevelEnv, "banana", 1)
         XCTAssertThrowsError(try Gating.levelGate(.l4)(Operation.named("usage")))
+        for padded in ["L2\n", " 2 ", "\tl2\r\n"] {
+            setenv(Gating.maxLevelEnv, padded, 1)
+            XCTAssertNoThrow(try Gating.levelGate(.l4)(Operation.named("files.write")), padded)
+            XCTAssertThrowsError(try Gating.levelGate(.l4)(Operation.named("files.delete")), padded)
+        }
+        for locked in ["", "  ", "L"] {
+            setenv(Gating.maxLevelEnv, locked, 1)
+            XCTAssertThrowsError(try Gating.levelGate(.l4)(Operation.named("usage")), "\"\(locked)\" locks to L0")
+        }
     }
 
     func testPathsAndLinks() throws {

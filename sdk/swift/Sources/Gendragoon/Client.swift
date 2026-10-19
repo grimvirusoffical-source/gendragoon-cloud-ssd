@@ -160,7 +160,7 @@ public final class Client: Transport, CustomStringConvertible, @unchecked Sendab
         return r.body
     }
 
-    /// Level L2, risk destructive. Deleting a missing blob succeeds.
+    /// Level L3, risk destructive. Deleting a missing blob succeeds.
     public func deleteBlob(_ id: String) async throws {
         try Client.needHex(id, "blob id")
         _ = try await request("blobs.delete", "DELETE", "/blobs/" + id)
@@ -221,7 +221,7 @@ public final class Client: Transport, CustomStringConvertible, @unchecked Sendab
         return PutResult(created: r.status == 201, generation: r.etag)
     }
 
-    /// Level L2, risk destructive.
+    /// Level L3, risk destructive.
     public func deleteManifest(_ key: String, ifGeneration: String? = nil) async throws {
         try Client.needHex(key, "manifest key")
         var h: [String: String] = [:]
