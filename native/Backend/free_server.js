@@ -29,7 +29,18 @@ function firestore(){
 // Property access connects. Requiring this module does not.
 const db=new Proxy({},{get(_target,prop){const real=firestore();const value=real[prop];return typeof value==="function"?value.bind(real):value;}});
 const bucket=new Storage({projectId:process.env.STORAGE_PROJECT_ID}).bucket(process.env.CUSTOMER_BUCKET);
+// Cloud Run's front end is one proxy hop: it appends the address it received the request from to
+// X-Forwarded-For. Trusting exactly that one hop makes req.ip the real client address, while any
+// X-Forwarded-For value the client sent itself is ignored. TRUST_PROXY_HOPS overrides the count
+// (0 when the server is reached directly, for example in local runs).
+function trustProxyHops(env=process.env){
+ const v=env.TRUST_PROXY_HOPS;
+ if(v===undefined||v==="")return 1;
+ if(!/^[0-3]$/.test(v))throw Error("TRUST_PROXY_HOPS must be 0, 1, 2 or 3");
+ return Number(v);
+}
 const app=express();
+app.set("trust proxy",trustProxyHops());
 app.disable("x-powered-by");app.use((req,res,next)=>{
   res.set({"Cache-Control":"no-store","X-Content-Type-Options":"nosniff",
     "Referrer-Policy":"no-referrer","X-Frame-Options":"DENY"});
@@ -357,4 +368,4 @@ function start(port=Number(process.env.PORT||8080)){
  return app.listen(port,()=>console.log("GenDragoon free storage API ready"));
 }
 if(require.main===module)start();
-module.exports={app,QUOTA,CHUNK,safeName,validID,lockedWrite,start};
+module.exports={app,QUOTA,CHUNK,safeName,validID,lockedWrite,start,trustProxyHops};

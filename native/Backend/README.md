@@ -89,6 +89,8 @@ python3 native/Backend/deploy_free.py --project gendragood-ssd --region us-centr
 
 The deployment command uses the active Google application-default account through a temporary file readable only by the current user. No credential value is printed. Use `--customer-bucket` or `--service-account` only when intentionally configuring or changing those service properties. Keep real `customer-storage.json` outside version control; `customer-storage.example.json` documents its purpose without a production customer bucket name.
 
+Client IP: `free_server.js` sets Express `trust proxy` to `TRUST_PROXY_HOPS` (default `1`, Cloud Run's front end; `0` to `3` allowed, anything else refuses to start), so `req.ip` is the address Cloud Run appended to `X-Forwarded-For` and a value the client forged there is ignored. The per-IP limits (password reset, provider connect redeem) count on it.
+
 `SUPPORT_DISCORD_WEBHOOK_URL` is loaded from Secret Manager in production and is never written in this repo. `free_server.js` exits before it listens if that variable is missing or is not an `https://discord.com/api/webhooks/` URL when `NODE_ENV=production`. Whenever Cloud Run sets `K_SERVICE`, that gate stays on even if `NODE_ENV` is `development`, `dev`, or `test`. `deploy_free.py` sets `NODE_ENV=production` on every Cloud Run deploy. The error names the variable and does not print the value, so Cloud Run keeps serving the previous revision. `npm run predeploy:check` is an optional extra that confirms the secret exists (`gcloud secrets versions describe`) without printing it. It is not the promotion gate.
 
 ## Validation

@@ -2,7 +2,8 @@
 const test=require("node:test"),assert=require("node:assert/strict");
 process.env.CUSTOMER_BUCKET="gendragoon-test-placeholder";
 process.env.STORAGE_PROJECT_ID="gendragood-ssd";
-const {app,QUOTA,CHUNK,safeName,validID}=require("./free_server");
+const {app,QUOTA,CHUNK,safeName,validID,trustProxyHops}=require("./free_server");
+const express=require("express");
 const {TransferGovernor}=require("./free_performance");
 test("free storage quota is 2 decimal GB and chunks are bounded to 8 MiB",()=>{
  assert.equal(QUOTA,2_000_000_000);assert.equal(CHUNK,8*1024*1024);
@@ -45,4 +46,21 @@ test("unprovisioned customer transfers are always denied",async()=>{
  const gov=new TransferGovernor();
  await assert.rejects(()=>gov.run("test",{kind:"free",provisioned:false},async()=>{}));
  await assert.rejects(()=>gov.run("test",{kind:"paid",provisioned:true},async()=>{}));
+});
+
+test("req.ip is the client address Cloud Run appended, not one the client forged",async()=>{
+ assert.equal(app.get("trust proxy"),1);
+ assert.equal(trustProxyHops({}),1);assert.equal(trustProxyHops({TRUST_PROXY_HOPS:"0"}),0);assert.equal(trustProxyHops({TRUST_PROXY_HOPS:"2"}),2);
+ for(const bad of ["true","-1","4","1.5"," 1"])assert.throws(()=>trustProxyHops({TRUST_PROXY_HOPS:bad}),/TRUST_PROXY_HOPS/);
+ const ipOf=async(hops,xff)=>{
+  const a=express();a.set("trust proxy",hops);a.get("/ip",(req,res)=>res.json({ip:req.ip}));
+  const s=await new Promise(r=>{const x=a.listen(0,"127.0.0.1",()=>r(x));});
+  try{return (await (await fetch("http://127.0.0.1:"+s.address().port+"/ip",{headers:xff?{"X-Forwarded-For":xff}:{}})).json()).ip;}
+  finally{s.close();}
+ };
+ // Cloud Run appends the peer address: "<whatever the client sent>, <client>".
+ assert.equal(await ipOf(app.get("trust proxy"),"203.0.113.7"),"203.0.113.7");
+ assert.equal(await ipOf(app.get("trust proxy"),"198.51.100.1, 10.0.0.9, 203.0.113.7"),"203.0.113.7");
+ assert.equal(await ipOf(0,"203.0.113.7"),"127.0.0.1");
+ assert.equal(await ipOf(true,"198.51.100.1, 203.0.113.7"),"198.51.100.1"); // why "trust everything" is wrong
 });
