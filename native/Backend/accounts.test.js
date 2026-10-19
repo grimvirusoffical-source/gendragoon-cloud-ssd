@@ -115,7 +115,20 @@ function fakeResolver(table){
 }
 const DNS={"example.com":{mx:[{exchange:"mx.example.com",priority:10}]},"gmail.com":{mx:[{exchange:"gmail-smtp-in.l.google.com",priority:5}]},"googlemail.com":{mx:[{exchange:"gmail-smtp-in.l.google.com",priority:5}]},
  "infected-nation.com":{mx:[{exchange:"mx.infected-nation.com",priority:10}]},"business.dev":{a:["203.0.113.5"]},
- "nullmx.com":{mx:[{exchange:"",priority:0}]},"flaky.com":"servfail"};
+ "nullmx.com":{mx:[{exchange:"",priority:0}]},"flaky.com":"servfail",
+ "mailinator.com":{mx:[{exchange:"mail.mailinator.com",priority:10}]},"10minutemail.com":{mx:[{exchange:"mx.10minutemail.com",priority:10}]}};
+
+test("disposable email domains are refused from the local list (no network), subdomains included",async()=>{
+ const {isDisposable,loadDisposable}=require("./accounts/email_check");
+ const list=loadDisposable();
+ assert.ok(list.size>=80,"maintained list is loaded");
+ for(const d of ["mailinator.com","10minutemail.com","guerrillamail.com","yopmail.com","temp-mail.org","mx.mailinator.com","MAILINATOR.COM."])assert.ok(isDisposable(d),d);
+ for(const d of ["gmail.com","example.com","business.dev","notmailinator.com","mailinator.com.example.org"])assert.ok(!isDisposable(d),d);
+ let lookups=0;
+ const c=createEmailChecker({resolver:{resolveMx:async()=>{lookups++;return [{exchange:"mx.x",priority:1}];},resolve4:async()=>[],resolve6:async()=>[]}});
+ assert.deepEqual(await c.check("temp@mailinator.com"),{ok:false,code:"email_disposable"});
+ assert.equal(lookups,0,"refused before any DNS lookup");
+});
 
 test("email deliverability: MX, implicit MX (A record), null MX, missing domain, DNS failure",async()=>{
  const c=createEmailChecker({resolver:fakeResolver(DNS)});
@@ -234,7 +247,14 @@ test("usernames are unique ignoring case; emails are unique after normalizing (G
   r=await h.call("POST","/v1/accounts/signup",form({username:"other_rider",email:"JOSHGAMER+x@gmail.com",emailConfirm:"joshgamer+x@gmail.com",tosGrant:await h.agreedGrant()}));
   assert.equal(r.status,409);assert.equal(r.body.error,"email_taken");
   r=await h.call("POST","/v1/accounts/validate/email",{email:"fresh@business.dev"});
-  assert.equal(r.body.ok,true);
+  assert.equal(r.body.ok,true);assert.ok(r.body.checks.some(c=>c.id==="disposable"&&c.ok));
+  for(const email of ["temp@mailinator.com","x@10minutemail.com","y@inbox.Mailinator.com"]){
+   r=await h.call("POST","/v1/accounts/validate/email",{email});
+   assert.equal(r.body.ok,false,email);assert.equal(r.body.error,"email_disposable",email);
+   assert.deepEqual(r.body.checks.find(c=>c.id==="disposable"),{id:"disposable",ok:false,code:"email_disposable"});
+  }
+  r=await h.call("POST","/v1/accounts/signup",form({username:"temp_rider",email:"temp@mailinator.com",emailConfirm:"temp@mailinator.com",tosGrant:await h.agreedGrant()}));
+  assert.equal(r.status,400);assert.equal(r.body.error,"email_disposable");assert.equal(r.body.field,"email");
   r=await h.call("POST","/v1/accounts/validate/username",{username:"free_name_1"});
   assert.equal(r.body.ok,true);
   assert.equal(h.firebaseUsers.size,1,"failed sign-ups leave no sign-in account");

@@ -19,7 +19,7 @@ const MESSAGES={
  two_factor_setup_required:"Finish setting up two-factor sign-in to continue.",
  two_factor_required:"Enter your two-factor code to continue.",
  username_taken:"That username is taken.",email_taken:"That email is already used by another account.",
- email_domain:"That email domain can't receive mail.",email_unverifiable:"We couldn't check that email domain. Try again in a moment.",
+ email_domain:"That email domain can't receive mail.",email_disposable:"Disposable email addresses can't be used. Use your own email or a business address.",email_unverifiable:"We couldn't check that email domain. Try again in a moment.",
  under_min_age:"You must be at least 13 to make an account.",sms_unavailable:"Text-message codes aren't available yet.",
  sms_send_failed:"We couldn't send the text message. Try again in a moment.",phone_undeliverable:"We can't send text messages to that number.",
  code_invalid:"That code isn't right.",rate_limited:"Too many tries. Wait a moment and try again.",
@@ -175,9 +175,10 @@ function registerAccounts({app,store,identify,createPasswordUser,deletePasswordU
   const v=req.body?.email;const f=R.checkEmailFormat(v);
   if(!f.ok)return res.json(checks([{id:"syntax",ok:false,code:f.code}]));
   const d=await emailChecker.check(v);
-  if(!d.ok)return res.json(checks([{id:"syntax",ok:true},{id:"domain",ok:false,code:d.code}]));
+  if(!d.ok&&d.code==="email_disposable")return res.json(checks([{id:"syntax",ok:true},{id:"disposable",ok:false,code:d.code}]));
+  if(!d.ok)return res.json(checks([{id:"syntax",ok:true},{id:"disposable",ok:true},{id:"domain",ok:false,code:d.code}]));
   const taken=await store.emailTaken(R.emailKey(v));
-  res.json(checks([{id:"syntax",ok:true},{id:"domain",ok:true},taken?{id:"available",ok:false,code:"email_taken"}:{id:"available",ok:true}]));
+  res.json(checks([{id:"syntax",ok:true},{id:"disposable",ok:true},{id:"domain",ok:true},taken?{id:"available",ok:false,code:"email_taken"}:{id:"available",ok:true}]));
  }));
 
  // ---- shared server-side checks for every way in (email sign-up and quick sign-in completion)
