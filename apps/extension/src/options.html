@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="dark light" />
+    <title>GenDragoon Cloud SSD settings</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body class="options-page">
+    <main class="popup options">
+      <header class="brand">
+        <img src="icons/gendragoon-48.png" width="44" height="44" alt="" />
+        <div><h1>GENDRAGOON</h1><p>CLOUD SSD · SETTINGS</p></div>
+      </header>
+
+      <section class="panel" aria-labelledby="theme-title">
+        <h2 id="theme-title">Appearance</h2>
+        <p class="help">Dark is the default. System follows your operating system and changes with it.</p>
+        <div class="segmented" role="radiogroup" aria-label="Theme" id="theme"></div>
+      </section>
+
+      <section class="panel" aria-labelledby="service-title">
+        <h2 id="service-title">Service</h2>
+        <p class="help">Connected to <code id="endpoint"></code></p>
+        <div id="status" aria-live="polite"></div>
+        <button id="refresh" type="button" class="btn-ghost">Check again</button>
+      </section>
+
+      <section class="panel" aria-labelledby="privacy-title">
+        <h2 id="privacy-title">Privacy and permissions</h2>
+        <ul class="plain">
+          <li>This extension asks for <strong>no browser permissions</strong>: no tabs, history, cookies, bookmarks or page access.</li>
+          <li>Its only network request is a health check to the service address above. No account data, cookies or file names are sent.</li>
+          <li>The file-type preview runs entirely on your device.</li>
+          <li>Your theme choice is stored locally in this browser.</li>
+        </ul>
+      </section>
+
+      <section class="panel" aria-labelledby="about-title">
+        <h2 id="about-title">About</h2>
+        <p class="help"><span id="name">GenDragoon Cloud SSD</span> <span id="version"></span></p>
+        <p class="help"><a id="support" target="_blank" rel="noreferrer noopener">Support</a> · <a id="privacy" target="_blank" rel="noreferrer noopener">Privacy policy</a></p>
+        <p class="help" id="about-ownership">Gendragoon is developed and maintained by Red-XAI LLC. Red-XAI LLC is wholly owned by GRIM-VIRUS, an independent recording artist who leads development under the alias MainDirectory. © Red-XAI LLC. All rights reserved.</p>
+      </section>
+    </main>
+    <script src="options.js"></script>
+  </body>
+</html>

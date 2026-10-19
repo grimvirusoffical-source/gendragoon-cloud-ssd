@@ -24,6 +24,8 @@ export interface FeedConfig {
    * The token must never be logged, bundled, or written into a manifest.
    */
   readToken?: () => Promise<string | undefined>;
+  /** GitHub API origin. Defaults to https://api.github.com. Only a loopback http origin is allowed besides https (local test feeds). */
+  apiBase?: string;
   /** Public feeds use `stable` and do not pass a token. Prereleases are omitted. */
   channel?: UpdateChannel;
 }
@@ -84,7 +86,11 @@ export async function fetchReleaseManifests(config: FeedConfig, deps: FetchLike 
     const token = await config.readToken();
     if (token) headers.set("Authorization", `Bearer ${token}`);
   }
-  const releasesUrl = `https://api.github.com/repos/${owner}/${name}/releases?per_page=100`;
+  const apiBase = (config.apiBase ?? "https://api.github.com").replace(/\/+$/, "");
+  if (!/^https:\/\//.test(apiBase) && !/^http:\/\/(127\.0\.0\.1|localhost)(:\d+)?$/.test(apiBase)) {
+    throw new Error("Feed apiBase must be https (or loopback http)");
+  }
+  const releasesUrl = `${apiBase}/repos/${owner}/${name}/releases?per_page=100`;
   let response: Response;
   try {
     response = await fetchImpl(releasesUrl, { headers });
@@ -101,10 +107,13 @@ export async function fetchReleaseManifests(config: FeedConfig, deps: FetchLike 
   return manifests;
 }
 
+/** Release checksum files this feed understands (the Mac packager writes sha256.txt, the release helper SHA256SUMS). */
+const CHECKSUM_ASSETS = new Set(["sha256.txt", "sha256sums", "sha256sums.txt"]);
+
 async function loadChecksums(releases: readonly GitHubRelease[], fetchImpl: typeof fetch): Promise<Record<string, string>> {
   const sums: Record<string, string> = {};
   for (const release of releases) {
-    const asset = release.assets?.find((item) => item.name === "sha256.txt");
+    const asset = release.assets?.find((item) => CHECKSUM_ASSETS.has(item.name.toLowerCase()));
     if (!asset) continue;
     try {
       const response = await fetchImpl(asset.browser_download_url);

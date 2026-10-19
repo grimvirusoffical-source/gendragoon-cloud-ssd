@@ -3,13 +3,21 @@
   "version": "0.1.0",
   "private": true,
   "description": "GenDragoon Cloud SSD for Windows. The Mac app stays the SwiftUI client.",
-  "author": "GenDragoon",
+  "author": {
+    "name": "Red-XAI LLC",
+    "email": "support@infected-nation.com"
+  },
   "main": "dist/main.js",
   "scripts": {
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "build": "vite build && esbuild src/main/main.ts --bundle --platform=node --format=cjs --outfile=dist/main.js --external:electron && esbuild src/main/preload.ts --bundle --platform=node --format=cjs --outfile=dist/preload.js --external:electron",
+    "build": "vite build && node scripts/build-main.mjs",
+    "build:rotten-apple": "GENDRAGOON_DISTRIBUTION=rotten-apple pnpm build",
     "dist:win": "pnpm build && electron-builder --win nsis --publish never",
-    "screenshots": "vite build && node scripts/capture.mjs"
+    "screenshots": "vite build && node scripts/capture.mjs",
+    "test": "vitest run",
+    "dist:linux": "pnpm build && electron-builder --linux AppImage deb tar.gz --publish never",
+    "e2e:electron": "node scripts/e2e-electron.mjs",
+    "dist:win-zip": "pnpm build && electron-builder --win dir --publish never"
   },
   "dependencies": {
     "@gendragoon/core": "workspace:*",
@@ -27,6 +35,8 @@
     "react": "18.3.1",
     "react-dom": "18.3.1",
     "typescript": "5.8.3",
-    "vite": "6.3.5"
-  }
+    "vite": "6.3.5",
+    "vitest": "3.1.4"
+  },
+  "homepage": "https://example.com/gendragoon"
 }

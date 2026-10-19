@@ -1,25 +1,25 @@
 import { payToRestore } from "../src/billing";
 
 describe("pay to restore", () => {
-  it("opens the checkout URL for an unpaid workspace", async () => {
+  it("opens the plans checkout URL for an unpaid workspace (no fee checkout)", async () => {
     const opened: string[] = [];
-    const checkoutWorkspaceFee = jest.fn(async (id: string) => ({ url: `https://billing.example.test/${id}`, workspaceId: id, monthlyCents: 500 as const }));
+    const checkoutWorkspace = jest.fn(async (id: string) => ({ url: `https://checkout.stripe.com/c/pay/${id}`, workspaceId: id }));
     await payToRestore({
       unpaidWorkspaceIds: ["ws-1"],
-      checkoutWorkspaceFee,
+      checkoutWorkspace,
       openUrl: async (url) => {
         opened.push(url);
       },
     });
-    expect(checkoutWorkspaceFee).toHaveBeenCalledWith("ws-1");
-    expect(opened).toEqual(["https://billing.example.test/ws-1"]);
+    expect(checkoutWorkspace).toHaveBeenCalledWith("ws-1");
+    expect(opened).toEqual(["https://checkout.stripe.com/c/pay/ws-1"]);
   });
 
   it("opens the web billing page when checkout returns no URL", async () => {
     const opened: string[] = [];
     await payToRestore({
       unpaidWorkspaceIds: ["ws-1"],
-      checkoutWorkspaceFee: async () => ({ url: undefined, workspaceId: "ws-1", monthlyCents: 500 as const }),
+      checkoutWorkspace: async () => ({ url: undefined, alreadyActivated: true }),
       openUrl: async (url) => {
         opened.push(url);
       },

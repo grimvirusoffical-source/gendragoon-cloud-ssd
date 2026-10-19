@@ -11,6 +11,7 @@ import {
   DeletionNotRetryableError,
   SUPPORT_CONTACT,
   deleteAccountAndWipe,
+  TeamOwnerMustTransferError,
   deletionAuthFailure,
   establishWorkspaceKey,
   dismissDeletion,
@@ -18,6 +19,7 @@ import {
   MemorySecretStore,
   performOwnershipChallenge,
   presignChallengeGet,
+  providerErrorMessage,
   reduceAccount,
   retryDeletion,
   registrationRequiresChallenge,
@@ -28,13 +30,18 @@ import {
   type AccessResponse,
   type AccountState,
   type BrowserMode,
-  type ByoProviderId,
+  type ProviderBinding,
+  type ProviderGrant,
   type Settings,
   type SortCategory,
   type TreeNode,
   type WorkspaceRecord,
+  type CreateWorkspaceRequest,
+  type PlansPricing,
+  workspacePlansLabel,
 } from "@gendragoon/core";
-import { AccountSurface, AppShell, ByoSetup, FileBrowser, SettingsView, deletionFailureNotice, type ShellView } from "@gendragoon/ui";
+import { AccountSurface, AppShell, CustomStorageWizard, FileBrowser, NewWorkspace, RedxConnections, SettingsView, UpdateControl, deletionFailureNotice, type CustomStorageCredentials, type ShellView, type UpdateView } from "@gendragoon/ui";
+import { TeamsView } from "./TeamsView";
 
 const secrets = new MemorySecretStore();
 
@@ -106,11 +113,28 @@ function sampleWorkspaces(): WorkspaceRecord[] {
   ];
 }
 
+/** Shown when no API base or token is configured (preview builds, screenshots). */
+const SAMPLE_BINDINGS: ProviderBinding[] = [
+  {
+    id: "5b0e8f7a-2c41-4d6e-9a13-7f2c4b8d1e90",
+    workspaceId: "paid-1",
+    client: { name: "RedX", host: "studio-mac" },
+    scopes: ["blobs:rw"],
+    usedBytes: 3_400_000_000,
+    quotaBytes: 10_000_000_000,
+    objectCount: 1820,
+    createdAt: "2026-10-12T09:30:00Z",
+    lastUsedAt: "2026-10-19T06:10:00Z",
+    lastError: null,
+    active: true,
+  },
+];
+
 const EXTENSIONS = [".jpg", ".mp4", ".mp3", ".pdf", ".zip", ".app", ".bin"];
 
 function viewFromHash(hash: string): ShellView {
   const name = hash.replace("#/", "");
-  if (name === "backup" || name === "settings" || name === "files") return name;
+  if (name === "backup" || name === "settings" || name === "files" || name === "connections" || name === "teams") return name;
   if (name === "workspaces" || name === "lock" || name === "connect") return "workspaces";
   return "files";
 }
@@ -125,12 +149,26 @@ export function App() {
   });
   const [status, setStatus] = useState("Ready");
   const [notice, setNotice] = useState<string | null>(null);
+  const [updateState, setUpdateState] = useState<UpdateView>({ status: "idle" });
+  // Inside the desktop shell the main process says whether this distribution self-updates. Until it answers, show nothing (a store build must never flash an update button).
+  const [updateUi, setUpdateUi] = useState<{ ui: "full" | "managed" | "hidden"; note?: string }>(() => (window.gendragoon?.getUpdatePolicy ? { ui: "hidden" } : { ui: "full" }));
   const [writeError, setWriteError] = useState<unknown>(null);
-  const [byoMessage, setByoMessage] = useState<string | null>(null);
+  const [pricing, setPricing] = useState<PlansPricing | null>(null);
+  const [freeProjectAvailable, setFreeProjectAvailable] = useState(false);
+  const [showNew, setShowNew] = useState(false);
+  const [creating, setCreating] = useState(false);
+  const [workspaceError, setWorkspaceError] = useState<string | null>(null);
+  const [intentId, setIntentId] = useState(() => crypto.randomUUID());
+  const [setupId, setSetupId] = useState<string | null>(null);
   const [signedOut, setSignedOut] = useState<null | "deleted" | "invalid-token" | "signed-out">(null);
   const [deleting, setDeleting] = useState(false);
   const [reauthRequired, setReauthRequired] = useState(false);
   const [deletionNotice, setDeletionNotice] = useState<{ message: string; retryable: boolean; support?: string } | null>(null);
+  const [bindings, setBindings] = useState<ProviderBinding[] | null>(null);
+  const [bindingsError, setBindingsError] = useState<string | null>(null);
+  const [grant, setGrant] = useState<ProviderGrant | null>(null);
+  const [connecting, setConnecting] = useState(false);
+  const [revokingId, setRevokingId] = useState<string | null>(null);
   const [access, setAccess] = useState<AccessResponse>(LOCKED_ACCESS);
   const [account, setAccount] = useState<AccountState>(() => accountFromAssessment(LOCKED_ACCESS));
   const mode: BrowserMode = view === "backup" ? "backup" : "upload";
@@ -147,7 +185,74 @@ export function App() {
 
   useEffect(() => {
     window.gendragoon?.onUpdaterNotice?.((text) => setNotice(text));
+    window.gendragoon?.onUpdateState?.((next) => setUpdateState(next as UpdateView));
+    void window.gendragoon?.getUpdatePolicy?.().then((policy) => {
+      const p = policy as { ui?: string; note?: string } | undefined;
+      setUpdateUi({ ui: p?.ui === "managed" || p?.ui === "hidden" ? p.ui : "full", note: p?.note });
+    }).catch(() => setUpdateUi({ ui: "hidden" }));
+    void window.gendragoon?.getUpdateState?.().then((current) => setUpdateState(current as UpdateView));
   }, []);
+
+  /** Manual "Check for updates": a real check in the main process. Progress arrives through onUpdateState. */
+  function checkForUpdates() {
+    const check = window.gendragoon?.checkForUpdates;
+    if (!check) {
+      setUpdateState({ status: "error", message: "Updates are only available in the installed desktop app." });
+      return;
+    }
+    setUpdateState({ status: "checking", manual: true });
+    void check().then((final) => setUpdateState(final as UpdateView)).catch(() => setUpdateState({ status: "error", message: "Could not check for updates. Try again." }));
+  }
+
+  async function providerClient(): Promise<GenDragoonClient | null> {
+    const token = await window.gendragoon?.getIdToken?.();
+    const apiBase = import.meta.env.VITE_API_BASE;
+    return apiBase && token ? new GenDragoonClient({ baseUrl: apiBase, getToken: async () => token }) : null;
+  }
+
+  async function loadBindings() {
+    setBindingsError(null);
+    setBindings(null);
+    try {
+      const client = await providerClient();
+      setBindings(client ? await client.providerBindings() : SAMPLE_BINDINGS);
+    } catch (error) {
+      setBindingsError(providerErrorMessage(error));
+    }
+  }
+
+  async function onCreateGrant(workspaceId: string) {
+    setConnecting(true);
+    try {
+      const client = await providerClient();
+      setGrant(client
+        ? await client.createProviderGrant(workspaceId, { name: "RedX", host: "" })
+        : { grant: `gdpg_${"x".repeat(43)}`, expiresAt: new Date(Date.now() + 300_000).toISOString(), ttlSeconds: 300 });
+    } catch (error) {
+      setBindingsError(providerErrorMessage(error));
+    } finally {
+      setConnecting(false);
+    }
+  }
+
+  async function onRevokeBinding(id: string, deleteData: boolean) {
+    setRevokingId(id);
+    try {
+      const client = await providerClient();
+      if (client) await client.revokeProviderBinding(id, deleteData);
+      else setBindings((current) => current?.map((b) => (b.id === id ? { ...b, active: false, usedBytes: deleteData ? 0 : b.usedBytes } : b)) ?? null);
+      if (client) await loadBindings();
+    } catch (error) {
+      setBindingsError(providerErrorMessage(error));
+    } finally {
+      setRevokingId(null);
+    }
+  }
+
+  useEffect(() => {
+    if (view === "connections") void loadBindings();
+    if (view === "workspaces" || view === "teams") void loadWorkspaces();
+  }, [view]);
 
   function open(next: ShellView) {
     window.location.hash = `#/${next}`;
@@ -172,63 +277,92 @@ export function App() {
     setSettings((current) => updateSortMapping(current, extension, category));
   }
 
-  async function onChallenge(input: { provider: ByoProviderId; endpoint: string; bucket: string; accessKeyId?: string; secretAccessKey?: string }) {
+  async function loadWorkspaces() {
+    const client = await providerClient();
+    if (!client) return; // Preview build: keeps the local sample list.
     try {
-      const record = await toServerByoRegistration(input);
-      if (!registrationRequiresChallenge()) {
-        throw new Error("Ownership challenge must run again when storage is registered");
+      const [list, prices] = await Promise.all([client.listWorkspaces(), client.pricing()]);
+      setWorkspaces(list.workspaces as WorkspaceRecord[]);
+      setFreeProjectAvailable(list.policy.freeProjectAvailable === true);
+      setPricing(prices.storage && prices.performance ? { storage: prices.storage, performance: prices.performance } : null);
+    } catch (error) {
+      setWorkspaceError(error instanceof Error ? error.message : "Could not load workspaces");
+    }
+  }
+
+  async function openBilling(url: unknown) {
+    if (typeof url !== "string") return;
+    const opened = await window.gendragoon?.openBilling?.(url);
+    if (!opened) setStatus("Open the checkout link from the installed desktop app.");
+  }
+
+  async function onCreateWorkspace(request: CreateWorkspaceRequest) {
+    setCreating(true);
+    setWorkspaceError(null);
+    try {
+      const client = await providerClient();
+      if (!client) {
+        setWorkspaceError("Sign in to create a workspace.");
+        return;
       }
-      const token = await window.gendragoon?.getIdToken?.();
-      const apiBase = import.meta.env.VITE_API_BASE;
-      const workspaceId = workspaces.find((workspace) => workspace.kind === "byo")?.id ?? "byo";
-      let challengeId = crypto.randomUUID().replace(/-/g, "");
-      let nonce = crypto.randomUUID().replace(/-/g, "");
-      const client = apiBase
-        ? new GenDragoonClient({ baseUrl: apiBase, getToken: async () => token })
-        : null;
-      if (client && token) {
-        await client.registerByo(workspaceId, record);
-        const challenge = await client.createByoChallenge(workspaceId);
-        nonce = challenge.nonce;
-        challengeId = nonce;
-        if (challengeObjectKey(nonce) !== `.gendragoon-challenge/${nonce}`) {
-          throw new Error("Challenge object must be .gendragoon-challenge/<nonce>");
-        }
+      const created = await client.createProject(request);
+      setShowNew(false);
+      setIntentId(crypto.randomUUID());
+      await openBilling(created.url);
+      await loadWorkspaces();
+    } catch (error) {
+      setWorkspaceError(error instanceof Error ? error.message : "Could not create the workspace");
+    } finally {
+      setCreating(false);
+    }
+  }
+
+  async function onResumeCheckout(id: string) {
+    setWorkspaceError(null);
+    try {
+      const client = await providerClient();
+      if (!client) return;
+      const checkout = await client.checkoutProject(id);
+      await openBilling(checkout.url);
+    } catch (error) {
+      setWorkspaceError(error instanceof Error ? error.message : "Could not open checkout");
+    }
+  }
+
+  /**
+   * Custom storage connection test: register (no secrets) → challenge → write + presign on this
+   * device → verify. Credentials go to the OS keychain and never into a request body.
+   */
+  async function runCustomStorageTest(workspaceId: string, input: CustomStorageCredentials) {
+    const client = await providerClient();
+    if (!client) throw new Error("Sign in to connect custom storage.");
+    const record = await toServerByoRegistration(input);
+    if (!registrationRequiresChallenge()) throw new Error("Ownership challenge must run again when storage is registered");
+    await secrets.set(byoSecretId(workspaceId), new TextEncoder().encode(input.secretAccessKey));
+    try {
+      await client.registerByo(workspaceId, record);
+      const challenge = await client.createByoChallenge(workspaceId);
+      if (challengeObjectKey(challenge.nonce) !== `.gendragoon-challenge/${challenge.nonce}`) {
+        throw new Error("Challenge object must be .gendragoon-challenge/<nonce>");
       }
-      const started = Date.now();
       const proof = await performOwnershipChallenge({
-        challengeId,
-        nonce,
-        now: started,
+        challengeId: challenge.nonce,
+        nonce: challenge.nonce,
+        now: Date.now(),
         writer: {
           async write() {
             // The device writes the object with the keychain secret. That secret is not returned.
           },
           async presignGet(key) {
-            if (!input.accessKeyId || !input.secretAccessKey) {
-              throw new Error("Access Key ID and Secret Access Key are required");
-            }
-            return presignChallengeGet({
-              endpoint: record.endpoint,
-              bucket: input.bucket,
-              key,
-              accessKeyId: input.accessKeyId,
-              secretAccessKey: input.secretAccessKey,
-              expiresInSeconds: 300,
-            });
+            return presignChallengeGet({ endpoint: record.endpoint, bucket: input.bucket, key, accessKeyId: input.accessKeyId, secretAccessKey: input.secretAccessKey, expiresInSeconds: 300 });
           },
         },
       });
-      if (client && token) await client.submitByoProof(workspaceId, proof);
-      setByoMessage(`Server record would store ${record.provider}, ${record.endpoint}, fingerprint ${record.bucketFingerprint.slice(0, 16)}. Credentials were not included. Proof is a presigned GET for ${challengeObjectKey(nonce)}.`);
+      await client.submitByoProof(workspaceId, proof);
+      await loadWorkspaces();
     } catch (error) {
-      setByoMessage(byoErrorMessage(error));
+      throw new Error(byoErrorMessage(error));
     }
-  }
-
-  async function onStoreSecret(secret: string) {
-    const workspaceId = workspaces.find((workspace) => workspace.kind === "byo")?.id ?? "byo";
-    await secrets.set(byoSecretId(workspaceId), new TextEncoder().encode(secret));
   }
 
   function onAuthFailure(signal: "signed_out" | "reauth_required") {
@@ -274,6 +408,11 @@ export function App() {
     } catch (error) {
       if (error instanceof DeletionNotRetryableError) {
         setDeletionNotice({ message: error.message, retryable: false, support: SUPPORT_CONTACT.value });
+        return;
+      }
+      if (error instanceof TeamOwnerMustTransferError) {
+        // Nothing was deleted: the user owns teams with other members.
+        setDeletionNotice({ message: error.message, retryable: false });
         return;
       }
       if (error instanceof DeletionNotFoundError) {
@@ -366,6 +505,7 @@ export function App() {
     void onDeleteAccount(new Date().toISOString());
   }
 
+  const setupWorkspace = setupId ? workspaces.find((workspace) => workspace.id === setupId) ?? null : null;
   const rows = EXTENSIONS.map((extension) => {
     const category = categorize({ name: `file${extension}` }, settings.sortOverrides);
     return {
@@ -439,14 +579,81 @@ export function App() {
           <div>
             <div className="kicker"><span className="dot" /> WORKSPACES</div>
             <h2>Your workspaces</h2>
-            <p className="sub">Managed storage uses short-lived signed links. Your own cloud stays on this device.</p>
+            <p className="sub">Each workspace has its own storage and performance plan. The workspace fee is included.</p>
           </div>
+          {!showNew ? <button type="button" className="btn" data-testid="new-workspace-open" onClick={() => setShowNew(true)}>New workspace</button> : null}
         </header>
-        <ByoSetup onChallenge={(input) => void onChallenge(input)} onStoreSecret={(secret) => void onStoreSecret(secret)} message={byoMessage} />
+        {workspaceError ? <div className="banner" role="alert" data-testid="workspace-error">{workspaceError}</div> : null}
+        {showNew ? (
+          <NewWorkspace
+            freeProjectAvailable={freeProjectAvailable}
+            pricing={pricing}
+            intentId={intentId}
+            busy={creating}
+            onSubmit={(request) => void onCreateWorkspace(request)}
+            onCancel={() => setShowNew(false)}
+          />
+        ) : null}
+        {setupWorkspace ? (
+          <CustomStorageWizard
+            workspaceName={setupWorkspace.name}
+            onTest={(credentials) => runCustomStorageTest(setupWorkspace.id, credentials)}
+            onDone={() => setSetupId(null)}
+          />
+        ) : null}
+        <div className="panel" data-testid="workspace-list">
+          {workspaces.map((workspace) => {
+            const pending = workspace.projectStatus === "pending_payment";
+            const needsSetup = workspace.customStorage === true && workspace.projectStatus === "active" && workspace.byoRegistered !== true;
+            const plan = workspace.isFree ? "Free · 2 GB" : workspacePlansLabel(workspace) ?? workspace.storageTier ?? (workspace.kind === "byo" ? "Custom storage" : "");
+            return (
+              <div className="workspace-row" key={workspace.id} data-testid={`workspace-${workspace.id}`}>
+                <span>{workspace.name || workspace.id}</span>
+                <span className="chip">{pending ? "Payment needed" : plan}</span>
+                {pending ? (
+                  <button type="button" className="btn" data-testid={`checkout-${workspace.id}`} onClick={() => void onResumeCheckout(workspace.id)}>Continue to checkout</button>
+                ) : needsSetup ? (
+                  <button type="button" className="btn" data-testid={`setup-${workspace.id}`} onClick={() => setSetupId(workspace.id)}>Finish setup</button>
+                ) : <span />}
+              </div>
+            );
+          })}
+        </div>
       </section>
+    );
+  } else if (view === "teams") {
+    body = (
+      <TeamsView
+        client={providerClient}
+        openBilling={openBilling}
+        pricing={pricing}
+        personalWorkspaces={workspaces.map((w) => ({ id: w.id, name: w.name || w.id }))}
+      />
+    );
+  } else if (view === "connections") {
+    body = (
+      <RedxConnections
+        bindings={bindings}
+        error={bindingsError}
+        workspaces={workspaces.filter((w) => w.kind !== "byo").map((w) => ({ id: w.id, name: w.name || w.id }))}
+        grant={grant}
+        // TODO(connect links): gendragoon://connect?… from RedX (PKCE) needs a protocol handler in main.ts and a
+        // preload bridge; parseConnectRequest/authorizeProvider/connectRedirect in core are ready for it.
+        pendingRequest={null}
+        busyId={revokingId}
+        connecting={connecting}
+        onCreateGrant={(id) => void onCreateGrant(id)}
+        onApproveRequest={() => {}}
+        onDenyRequest={() => {}}
+        onRevoke={(id, deleteData) => void onRevokeBinding(id, deleteData)}
+        onRetry={() => void loadBindings()}
+        onCopy={(value) => void navigator.clipboard?.writeText(value)}
+      />
     );
   } else if (view === "settings") {
     body = (
+      <>
+      <UpdateControl state={updateState} onCheck={checkForUpdates} ui={updateUi.ui} note={updateUi.note} />
       <SettingsView
         settings={settings}
         rows={rows}
@@ -462,6 +669,7 @@ export function App() {
         onRetryDeletion={() => void onRetryDeletion()}
         onDismissDeletion={() => void onDismissDeletion()}
       />
+      </>
     );
   }
 

@@ -14,8 +14,9 @@ const require = createRequire(import.meta.url);
 describe("silent install, health window, and the public feed", () => {
   it("installs with NSIS /S, waits 60s, and does not offer a rolled-back version again", () => {
     const plan = silentInstallPlan("C:\\Users\\me\\Setup.exe");
-    expect(plan.args).toEqual(NSIS_SILENT_ARGS);
-    expect(plan.args).toEqual(["/S"]);
+    expect(NSIS_SILENT_ARGS).toEqual(["/S"]);
+    // --force-run restarts the app after a silent install; --updated makes NSIS wait for the exit.
+    expect(plan.args).toEqual(["/S", "--updated", "--force-run"]);
     expect(plan.healthWindowMs).toBe(HEALTH_WINDOW_MS);
     expect(HEALTH_WINDOW_MS).toBe(60_000);
     expect(updateWouldLoop("1.2.0", "1.2.0")).toBe(true);

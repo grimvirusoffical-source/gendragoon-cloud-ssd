@@ -5,23 +5,27 @@
     "scheme": "gendragoon",
     "version": "0.1.0",
     "orientation": "portrait",
-    "userInterfaceStyle": "dark",
+    "userInterfaceStyle": "automatic",
     "newArchEnabled": true,
     "icon": "./assets/icon.png",
-    "backgroundColor": "#100e17",
+    "backgroundColor": "#0d0b14",
     "ios": {
       "bundleIdentifier": "com.gendragoon.cloudssd",
-      "supportsTablet": true
+      "supportsTablet": true,
+      "infoPlist": {
+        "NSHumanReadableCopyright": "© Red-XAI LLC"
+      }
     },
     "android": {
       "package": "com.gendragoon.cloudssd",
       "adaptiveIcon": {
-        "foregroundImage": "./assets/icon.png",
-        "backgroundColor": "#100e17"
+        "foregroundImage": "./assets/adaptive-icon.png",
+        "backgroundColor": "#0d0b14"
       }
     },
     "web": {
-      "bundler": "metro"
+      "bundler": "metro",
+      "favicon": "./assets/favicon.png"
     },
     "plugins": [
       "expo-secure-store"
@@ -30,6 +34,11 @@
       "enabled": false,
       "checkAutomatically": "ON_LOAD",
       "fallbackToCacheTimeout": 0
+    },
+    "splash": {
+      "image": "./assets/splash.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#0d0b14"
     }
   }
 }

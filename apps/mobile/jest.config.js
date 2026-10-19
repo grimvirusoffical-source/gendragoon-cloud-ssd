@@ -5,6 +5,8 @@ process.env.TZ = "America/New_York";
 module.exports = {
   preset: "jest-expo",
   setupFiles: ["<rootDir>/jest.setup.ts"],
+  // Rendering suites can pass 5s under heavy box load (QA L2); 15s keeps them stable.
+  testTimeout: 15000,
   testMatch: ["<rootDir>/test/**/*.test.ts", "<rootDir>/test/**/*.test.tsx"],
   moduleNameMapper: {
     "^@gendragoon/ui/theme$": "<rootDir>/../../packages/ui/src/theme.ts",

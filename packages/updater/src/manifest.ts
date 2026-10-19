@@ -101,7 +101,15 @@ function parseHttpsUrl(value: string): string {
   } catch {
     throw new Error("Release manifest url must be https");
   }
-  if (url.protocol !== "https:") throw new Error("Release manifest url must be https");
+  if (url.protocol !== "https:" && !isLoopbackHttp(url)) throw new Error("Release manifest url must be https");
   if (url.username || url.password) throw new Error("Release manifest url must not include credentials");
   return url.toString();
+}
+
+/**
+ * Plain http is accepted only for a loopback host (a local test feed). The
+ * SHA-256 check still applies, and nothing off this machine is ever fetched over http.
+ */
+function isLoopbackHttp(url: URL): boolean {
+  return url.protocol === "http:" && (url.hostname === "127.0.0.1" || url.hostname === "localhost" || url.hostname === "[::1]");
 }
