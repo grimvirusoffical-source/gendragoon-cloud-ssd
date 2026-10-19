@@ -104,7 +104,7 @@ require("./transfer_v3").registerTransferV3({app,db,bucket,firebaseAuth,accountK
 // Support email (password resets, account notices) from support@infected-nation.com, through the Node port of
 // Rotten Apple's shared mailer (support_email.js, docs/SUPPORT_EMAIL.md). OFF unless SUPPORT_EMAIL_ENABLED=true;
 // the SMTP password is read only from SUPPORT_EMAIL_PASSWORD at send time and is never logged.
-// support_email.js is not in deploy_free.py's allow-list yet, so it is required only when enabled.
+// support_email.js is in deploy_free.py's allow-list; it is required only when enabled.
 let supportNotify=null;
 if(process.env.SUPPORT_EMAIL_ENABLED==="true"){
  const supportEmail=require("./support_email");
