@@ -14,7 +14,7 @@ RUNTIME_FILES = (
     "free_server.js", "free_performance.js", "billing_bootstrap.js",
     "billing_gateway.js", "billing_v2.js", "projects.js", "workspace_policy.js", "locked_write.js", "catalog.js", "performance.js", "performance_profiles.json",
     "gpu_catalog.js", "owner_benefits.js", "api_keys.js", "paid_storage.js",
-    "transfer_v3.js", "range_download.js", "account_delete.js", "key_envelope.js", "package.json", "package-lock.json",
+    "transfer_v3.js", "range_download.js", "account_delete.js", "key_envelope.js", "storage_urls.js", "package.json", "package-lock.json",
 )
 
 def stage_runtime(destination):

@@ -305,5 +305,7 @@ async function main(){
  if(deletion.status!==0)throw Error((deletion.stderr||"")+(deletion.stdout||"")||"account deletion fixtures failed");
  const envelope=spawnSync(process.execPath,[path.join(__dirname,"export_key_envelope_fixtures.js"),outDir],{encoding:"utf8"});
  if(envelope.status!==0)throw Error((envelope.stderr||"")+(envelope.stdout||"")||"key-envelope fixtures failed");
+ const storage=spawnSync(process.execPath,[path.join(__dirname,"export_storage_fixtures.js"),outDir],{encoding:"utf8"});
+ if(storage.status!==0)throw Error((storage.stderr||"")+(storage.stdout||"")||"storage fixtures failed");
 }
 main().catch(error=>{console.error(error);process.exit(1);});
