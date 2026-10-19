@@ -8,10 +8,10 @@ using System.Threading.Tasks;
 namespace Gendragoon.Sdk.Tests
 {
     [AttributeUsage(AttributeTargets.Method)]
-    sealed class TestAttribute : Attribute { public bool NeedsServer; }
+    sealed class TestAttribute : Attribute { public bool NeedsServer, NeedsTeams; }
 
     /// <summary>A dependency-free runner, so the same tests run under Unity's .NET profile and plain dotnet.
-    /// Usage: dotnet run [-- filter], or dotnet run -- --interop [--init] for sdk/contract/run.sh. The contract tests need GD_SDK_BASE or GD_DEV_SERVER.</summary>
+    /// Usage: dotnet run [-- filter], or dotnet run -- --interop [--init] for sdk/contract/run.sh. The contract tests need GD_SDK_BASE or GD_DEV_SERVER; the Teams tests need GD_TEAMS_ORIGIN or GD_TEAMS_SERVER.</summary>
     static class Harness
     {
         static async Task<int> Main(string[] args)
@@ -21,6 +21,8 @@ namespace Gendragoon.Sdk.Tests
             string? baseUrl = null;
             using var server = DevServer.StartIfConfigured(out baseUrl);
             Contract.Base = baseUrl;
+            using var teamsServer = DevServer.StartIfConfigured("GD_TEAMS_ORIGIN", "GD_TEAMS_SERVER", "origin", out var teamsOrigin);
+            Teams.Origin = teamsOrigin;
             int pass = 0, fail = 0, skip = 0;
             var tests = typeof(Harness).Assembly.GetTypes().SelectMany(t => t.GetMethods(BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic))
                 .Select(m => (m, a: m.GetCustomAttribute<TestAttribute>())).Where(x => x.a != null).OrderBy(x => x.m.DeclaringType!.Name).ThenBy(x => x.m.Name);
@@ -29,6 +31,7 @@ namespace Gendragoon.Sdk.Tests
                 var name = m.DeclaringType!.Name + "." + m.Name;
                 if (filter != null && !name.Contains(filter)) continue;
                 if (a!.NeedsServer && baseUrl == null) { Console.WriteLine($"SKIP {name} (set GD_SDK_BASE or GD_DEV_SERVER)"); skip++; continue; }
+                if (a.NeedsTeams && teamsOrigin == null) { Console.WriteLine($"SKIP {name} (set GD_TEAMS_ORIGIN or GD_TEAMS_SERVER)"); skip++; continue; }
                 var sw = Stopwatch.StartNew();
                 try
                 {
@@ -71,16 +74,18 @@ namespace Gendragoon.Sdk.Tests
         readonly Process? p;
         DevServer(Process? p) { this.p = p; }
 
-        public static DevServer StartIfConfigured(out string? baseUrl)
+        public static DevServer StartIfConfigured(out string? baseUrl) => StartIfConfigured("GD_SDK_BASE", "GD_DEV_SERVER", "base", out baseUrl);
+
+        public static DevServer StartIfConfigured(string urlVar, string scriptVar, string field, out string? baseUrl)
         {
-            baseUrl = Environment.GetEnvironmentVariable("GD_SDK_BASE");
-            var script = Environment.GetEnvironmentVariable("GD_DEV_SERVER");
+            baseUrl = Environment.GetEnvironmentVariable(urlVar);
+            var script = Environment.GetEnvironmentVariable(scriptVar);
             if (baseUrl != null || script == null) return new DevServer(null);
             var psi = new ProcessStartInfo("node") { RedirectStandardInput = true, RedirectStandardOutput = true, UseShellExecute = false };
             psi.ArgumentList.Add(script); psi.ArgumentList.Add("--exit-with-stdin");
             psi.Environment["PROVIDER_V1_ENABLED"] = "true";
             var p = Process.Start(psi)!;
-            baseUrl = Json.Obj(p.StandardOutput.ReadLine() ?? "{}").S("base");
+            baseUrl = Json.Obj(p.StandardOutput.ReadLine() ?? "{}").S(field);
             return new DevServer(p);
         }
 
