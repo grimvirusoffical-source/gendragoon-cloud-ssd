@@ -101,14 +101,22 @@ class DriveCleanupTests(unittest.TestCase):
         source = self.file("file.txt")
         plan = self.preview()
         source.write_bytes(b"different bytes")
+        stamp = source.stat().st_mtime_ns + 2_000_000_000  # avoid coarse-clock-tick flake
+        os.utime(source, ns=(stamp, stamp))
         self.assertCode("changed", self.apply, plan)
         self.assertTrue(source.exists())
         plan = self.preview()
         self.file("new.txt")
+        self.bump_dir_mtime()
         self.assertCode("changed", self.apply, plan)
         plan = self.preview()
         source.unlink()
+        self.bump_dir_mtime()
         self.assertCode("changed", self.apply, plan)
+
+    def bump_dir_mtime(self):
+        stamp = self.root.stat().st_mtime_ns + 2_000_000_000  # avoid coarse-clock-tick flake
+        os.utime(self.root, ns=(stamp, stamp))
 
     def test_destination_added_or_changed_after_preview_is_rejected(self):
         self.file("Files/existing.txt")
