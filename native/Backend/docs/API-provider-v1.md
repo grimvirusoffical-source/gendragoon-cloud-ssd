@@ -26,12 +26,12 @@ Any grant/code failure is `400 invalid_grant` (unknown, used, expired, wrong kin
 | `HEAD /blobs/:id` | `200` with `Content-Length`, `ETag`, `X-Content-SHA256`; `404` |
 | `GET /blobs/:id` | bytes + `X-Content-SHA256`; `404 not_found` |
 | `DELETE /blobs/:id` | `204`, also when absent |
-| `GET /blobs?cursor=&limit=` | `{ids, next}` sorted, ≤ 1000 per page |
+| `GET /blobs?cursor=&limit=` | `{ids, items:[{id,size,generation}], next}` sorted, ≤ 1000 per page |
 | `POST /blobs/batch-has` | `{ids:[≤1000]}` → `{present:[…]}` |
 
 ## Manifests (ManifestStore)
 
-`GET/PUT/DELETE /manifests/:key`, `GET /manifests`. `PUT` is atomic. Preconditions: `If-None-Match: *` (create only) or `If-Match: "<etag>"` (compare-and-swap on the storage generation); neither = atomic overwrite. Losing a race is `412 precondition_failed`. Max 4 MiB.
+`GET/PUT/DELETE /manifests/:key`, `GET /manifests` (`{ids, items:[{id,size,generation}], next}`). `PUT` is atomic. Preconditions: `If-None-Match: *` (create only) or `If-Match: "<etag>"` (compare-and-swap on the storage generation); neither = atomic overwrite. Losing a race is `412 precondition_failed`. Max 4 MiB.
 
 ## Key envelope (per binding)
 
@@ -39,7 +39,17 @@ Any grant/code failure is `400 invalid_grant` (unknown, used, expired, wrong kin
 
 ## Usage, health, capabilities
 
-`GET /usage` → `{usedBytes, quotaBytes, objectCount, workspaceId}`; `GET /health`; `GET /capabilities` (no auth).
+`GET /usage` → `{usedBytes, quotaBytes, objectCount, workspaceId, changeSeq, lastChangeAt}`; `GET /health`; `GET /capabilities` (no auth; includes `events`).
+
+## Change events (polling)
+
+There is no webhook or stream. A client watches a binding by polling:
+
+1. `GET /usage` and compare `changeSeq`. It increases by one after every manifest write or delete that took effect (a failed precondition or deleting an absent manifest does not count). Blob writes do not change it, because a blob is not visible to a reader until a manifest references it.
+2. When `changeSeq` moved, `GET /manifests` and compare each item's `generation` with the last seen one: new id = created, different generation = updated, missing id = deleted.
+3. `401` on a key that worked before means the binding was revoked or the key expired.
+
+Increments are best effort: if the counter update fails after a commit, the commit still stands, so clients also do a full list on a slow timer (the SDKs use 10 minutes). `capabilities.events` is `{poll:true, changeSeq:true, webhook:false, stream:false}`.
 
 ## Errors
 
@@ -70,7 +80,13 @@ Each binding has `quotaBytes` (snapshot of the workspace quota at connect time) 
 - `provider_v1.test.js` (12 tests, `node --test`, including G9): both connect legs, replay and expiry, checksums, quota and refunds, 16 MiB cap, manifest CAS with 8 racing writers, pagination, scopes, tenant isolation, rotation grace, revoke and purge, rate limit, reconcile, no secrets in audit rows.
 - `provider_blobstore.test.js`: BlobStore contract on the memory fake and, with `GD_FAKE_GCS_BIN=/path/fake-gcs-server` (or `STORAGE_EMULATOR_HOST`), on `gcsBlobStore` via the real client, plus an end-to-end run of the routes on it. Skipped otherwise.
 - `provider_v1_deletion.test.js`: G7.
+- `provider_v1_events.test.js`: `changeSeq`, list generations, notices on connect and revoke.
+- `scripts/provider_dev_server.js`: the routes on memory stores for SDK tests (`PROVIDER_V1_ENABLED=true` required; development tokens `Bearer dev-user:<uid>` for signed-in calls; loopback only).
 - `contract/redxpack` (Go): a client with RedX's exact `ChunkStore`/`ManifestStore` method set, contract tests against the Node server (`scripts/provider_contract_server.js`, memory fakes), and with `-tags redx` (`REDX_DIR=… contract/redxpack/run_redx.sh`) RedX's real `pack.New(...)` doing put/get/verify/list/delete over this API.
+
+## Account notices
+
+With `SUPPORT_EMAIL_ENABLED=true`, connecting and revoking an app send a notice to the account's address (resolved through Firebase Auth at send time; no address is stored). Notices never contain keys, grants or codes, and a mail failure never fails the request. See `docs/SUPPORT_EMAIL.md`.
 
 ## Account deletion
 

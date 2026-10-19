@@ -90,8 +90,19 @@ require("./transfer_v3").registerTransferV3({app,db,bucket,firebaseAuth,accountK
 // Storage provider API for RedX (/provider/v1). OFF unless PROVIDER_V1_ENABLED=true, and provider_v1.js is not in
 // deploy_free.py's runtime allow-list yet, so no deploy can enable it by accident. A binding's quota is a snapshot of
 // the workspace quota at connect time; charging it against the workspace's own usedBytes is pricing decision 13.2 (open).
+// Support email (password resets, account notices) from support@infected-nation.com. OFF unless
+// SUPPORT_EMAIL_ENABLED=true; the SMTP password comes only from SUPPORT_EMAIL_PASSWORD and is never logged.
+// support_email.js is not in deploy_free.py's allow-list yet, so it is required only when enabled.
+let supportNotify=null;
+if(process.env.SUPPORT_EMAIL_ENABLED==="true"){
+ const supportEmail=require("./support_email");
+ const sender=supportEmail.senderFromEnv(process.env);
+ const log=(event,fields)=>console.log(JSON.stringify({event,...fields}));
+ supportEmail.registerPasswordReset({app,adminAuth:getAuth(),sender,continueUrl:process.env.PASSWORD_RESET_CONTINUE_URL||undefined,log});
+ supportNotify=supportEmail.createNotifier({sender,adminAuth:getAuth(),log});
+}
 if(process.env.PROVIDER_V1_ENABLED==="true"){
- require("./provider_v1").registerProviderV1({app,db,blobs:require("./provider_blobstore").gcsBlobStore(bucket),firebaseAuth,accountKey,
+ require("./provider_v1").registerProviderV1({app,db,blobs:require("./provider_blobstore").gcsBlobStore(bucket),firebaseAuth,accountKey,notify:supportNotify,
   async resolveWorkspace(uid,workspaceId){
    const ref=workspaceId==="free"?workspaceRef(uid):db.collection("gd_accounts").doc(accountKey(uid)).collection("workspaces").doc(workspaceId);
    if(workspaceId!=="free"&&!/^[0-9a-f-]{36}$/.test(workspaceId))return null;
