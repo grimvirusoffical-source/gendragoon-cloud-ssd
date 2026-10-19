@@ -11,16 +11,15 @@
 <section class="card" id="billing-card" hidden>
 <div class="row"><div><p class="eyebrow">PLANS &amp; BILLING</p><h2>Choose what you need.</h2></div><span class="badge" id="billing-mode">CHECKING STRIPE</span></div>
 <p class="small" id="billing-state">Checking payment availability…</p>
-<div class="billing-grid"><div class="billing-option"><h3>Storage or a bundle</h3>
+<div class="billing-grid"><div class="billing-option"><h3>New workspace</h3><p class="small">Each workspace after your first includes a storage plan and a performance plan, billed together on one subscription.</p>
 <label for="buy-workspace-name">Workspace name</label><input class="billing-input" id="buy-workspace-name" value="My Cloud Project" maxlength="64">
-<label for="buy-kind">Plan type</label><select id="buy-kind"><option value="standard">Storage only</option><option value="bundle">Storage + performance</option></select>
-<div class="billing-two"><div><label for="buy-tier">Capacity</label><select id="buy-tier"><option>100GB</option></select></div><div><label for="buy-period">Billing</label><select id="buy-period"><option value="month">Monthly</option><option value="year">Yearly</option></select></div></div>
+<div class="billing-two"><div><label for="buy-tier">Storage</label><select id="buy-tier"><option>100GB</option></select></div><div><label for="buy-plan-performance">Performance</label><select id="buy-plan-performance"><option value="lite">Lite</option></select></div></div>
+<label for="buy-period">Billing</label><select id="buy-period"><option value="month">Monthly</option><option value="year">Yearly</option></select>
 <strong class="billing-total" id="storage-total">—</strong><p class="small" id="storage-breakdown"></p><button id="buy-storage" disabled>Continue to Stripe</button></div>
 <div class="billing-option"><h3>Performance upgrade</h3><p class="small">Add parallel transfers to an active managed or configured BYO workspace. This does not change your internet connection speed.</p>
 <label for="performance-workspace">Active workspace</label><select id="performance-workspace"><option value="">Choose an active workspace</option></select>
 <div class="billing-two"><div><label for="buy-performance-tier">Performance</label><select id="buy-performance-tier"><option value="lite">Lite</option></select></div><div><label for="performance-period">Billing</label><select id="performance-period"><option value="month">Monthly</option><option value="year">Yearly</option></select></div></div>
-<strong class="billing-total" id="performance-total">—</strong><button id="buy-performance" disabled>Continue to Stripe</button>
-<p class="small">Bring Your Own Cloud: complete and test provider configuration in the Mac app before purchasing its subscription.</p></div></div>
+<strong class="billing-total" id="performance-total">—</strong><button id="buy-performance" disabled>Continue to Stripe</button></div></div>
 <div class="billing-footer"><div><h3>Permanent ad-free</h3><p class="small">One payment, tied to your Google account. No recurring ad-removal subscription.</p><button id="buy-ads" disabled>Remove ads · $4.99 once</button></div><div><h3>Already subscribed?</h3><p class="small">View invoices, update payment details or cancel renewal in Stripe.</p><button class="secondary" id="manage-billing" disabled>Manage billing</button></div></div>
 <button class="secondary" id="billing-refresh">Refresh payment status</button>
 </section>

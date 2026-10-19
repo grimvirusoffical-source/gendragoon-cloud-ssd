@@ -126,10 +126,12 @@ function registerBillingV2({app,db,stripe,admin,auth,agreed,hash,prices,env=proc
  }
  async function checkoutSession(req,kind,w,keys){
    if(env.STRIPE_CHECKOUT_ENABLED!=="true")throw Error("Checkout disabled until paid storage is provisioned");
-   const customer=await ensureCustomer(req);
+   // Check the return address and every price before touching Stripe, so a missing or
+   // misconfigured price never leaves an orphan Customer behind.
    const origin=new URL(env.PUBLIC_URL);
    if(origin.protocol!=="https:")throw Error("HTTPS backend is required");
    const lineItems=keys.map(k=>({price:verifiedPrice(k),quantity:1}));
+   const customer=await ensureCustomer(req);
    const metadata={accountHash:hash(req.user.uid),workspaceId:w.id,kind};
    const session=await stripe.checkout.sessions.create({
       mode:"subscription",customer,line_items:lineItems,
