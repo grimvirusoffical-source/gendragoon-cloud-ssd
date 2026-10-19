@@ -62,6 +62,8 @@ function effectiveWorkers(workspace){
  const coll=req=>accRef(req).collection("workspaces");
  const safeWorkspaceId=safeProjectId;
  const projects=createProjectService({db,stamp,hash,stripe,env,prices,ensureCustomer,byoFetch});
+ const teams=require("./teams").createTeamService({db,stamp,hash,stripe,env,prices,ensureCustomer});
+ if(app)require("./teams").registerTeams({app,auth,agreed,service:teams});
  function projectError(res,error){
    if(!(error instanceof ProjectError))return res.status(503).json({error:"PROJECT_UNAVAILABLE"});
    const body={error:error.code};
@@ -152,7 +154,10 @@ function effectiveWorkers(workspace){
    }])),
    gpu:{available:GPU_READY,tiers:Object.fromEntries(Object.entries(GPU).map(([tier,plan])=>[tier,{name:plan.name,monthlyCents:plan.monthlyCents,yearlyCents:plan.monthlyCents*10,gpuMinutesPerMonth:plan.gpuMinutes,maxSessionMinutes:plan.maxSessionMinutes}]))},
    gpuBundles:{available:GPU_READY,discountPercent:10,requires:["storage","performance","gpu"],note:"GPU compute is not yet provisioned. Not purchasable."},
-   removeAds:{oneTimeCents:REMOVE_ADS_CENTS}
+   removeAds:{oneTimeCents:REMOVE_ADS_CENTS},
+   // Team subscription; each team workspace still needs its own plans on top.
+   teams:(({tiers,enterprise,perWorkspace})=>({tiers,enterprise,perWorkspace,yearlyMonthsCharged:10,
+     purchasable:Object.keys(require("./teams").TEAM_TIERS).every(t=>["month","year"].every(iv=>typeof prices[require("./teams").teamPriceKey(t,iv)]==="string"))}))(require("./teams").catalog())
  }));
  app.post("/v2/gpu/quote",auth,agreed,(req,res)=>{
    try{const quote=req.body?.bundle===true ? tripleBundleQuote({storageTier:req.body.storageTier,performanceTier:req.body.performanceTier,gpuTier:req.body.gpuTier,interval:req.body.interval||"month"}) : gpuQuote(req.body?.gpuTier,req.body?.interval||"month");res.json(quote)}
@@ -409,6 +414,7 @@ function effectiveWorkers(workspace){
  });
  async function reconcileSubscription(sub){
    if(sub?.metadata?.kind==="workspace_plans")return projects.reconcilePlans(sub);
+   if(String(sub?.metadata?.kind||"").startsWith("team_"))return teams.reconcileSubscription(sub);
    const m=sub.metadata||{},kind=m.kind,owner=m.accountHash,id=m.workspaceId;
    if(!["storage","performance","byo"].includes(kind)||typeof owner!=="string"||
       !/^[a-f0-9]{64}$/.test(owner)||!safeWorkspaceId(id))return false;
@@ -479,7 +485,7 @@ function effectiveWorkers(workspace){
      return true;
    });
  }
- return {reconcileSubscription,reconcileAds,effectiveWorkers,projects};
+ return {reconcileSubscription,reconcileAds,effectiveWorkers,projects,teams};
 }
 module.exports={registerBillingV2,storageQuote,performanceQuote,effectiveWorkers,
  FREE_GB,FREE_WORKERS,REMOVE_ADS_CENTS,matchesStripePrices,priceKeysStorage,priceKeysPerformance,

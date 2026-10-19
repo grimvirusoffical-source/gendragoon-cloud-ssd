@@ -1,7 +1,7 @@
 {
   "schemaVersion": 3,
   "currency": "USD",
-  "status": "proposed-prelaunch",
+  "status": "approved-prelaunch",
   "annualBillingMonthsCharged": 10,
   "free": {
     "storageGb": 2,
@@ -139,5 +139,109 @@
     "The first workspace is free: 2 GB storage and the free performance plan (1 transfer worker).",
     "No separate workspace fee. It is included in every storage plan. Workspaces that already pay the retired $5 fee keep it until they change plans."
   ],
-  "disclaimer": "Prices are proposed until fulfillment, refunds, regional taxes, compliance, and margins are validated. Performance tiers change concurrent transfer workers, not guaranteed Mbps."
+  "approvedAt": "2026-10-19",
+  "teams": {
+    "tiers": [
+      {
+        "id": "team",
+        "name": "Team",
+        "members": 5,
+        "monthlyCents": 999,
+        "yearlyCents": 9990
+      },
+      {
+        "id": "team_plus",
+        "name": "Team Plus",
+        "members": 15,
+        "monthlyCents": 2499,
+        "yearlyCents": 24990
+      },
+      {
+        "id": "business",
+        "name": "Business",
+        "members": 50,
+        "monthlyCents": 6999,
+        "yearlyCents": 69990
+      }
+    ],
+    "enterprise": {
+      "id": "enterprise",
+      "name": "Enterprise",
+      "contact": true
+    },
+    "perWorkspace": {
+      "required": [
+        "storage",
+        "performance"
+      ],
+      "customStorage": [
+        "performance"
+      ],
+      "freeWorkspace": false,
+      "onTopOfTeamSubscription": true
+    }
+  },
+  "redxStorage": {
+    "tiers": [
+      {
+        "id": "free",
+        "gb": 1,
+        "downloadGbPerMonth": 1,
+        "monthlyCents": 0,
+        "yearlyCents": 0,
+        "onePerVerifiedAccount": true
+      },
+      {
+        "id": "lite",
+        "gb": 50,
+        "downloadGbPerMonth": 10,
+        "monthlyCents": 299,
+        "yearlyCents": 2990
+      },
+      {
+        "id": "plus",
+        "gb": 250,
+        "downloadGbPerMonth": 25,
+        "monthlyCents": 1199,
+        "yearlyCents": 11990
+      },
+      {
+        "id": "pro",
+        "gb": 1000,
+        "downloadGbPerMonth": 50,
+        "monthlyCents": 3999,
+        "yearlyCents": 39990
+      }
+    ],
+    "downloadPack": {
+      "id": "download_pack_100",
+      "downloadGb": 100,
+      "oneTimeCents": 1299
+    },
+    "overAllowance": "downloads pause until next month or a download pack is bought"
+  },
+  "masterTiers": [
+    {
+      "id": "everything",
+      "name": "Everything",
+      "people": 1,
+      "monthlyCents": 1999,
+      "yearlyCents": 19990
+    },
+    {
+      "id": "everything_family",
+      "name": "Everything Family",
+      "people": 6,
+      "monthlyCents": 2999,
+      "yearlyCents": 29990
+    },
+    {
+      "id": "everything_developer",
+      "name": "Everything Developer",
+      "people": 1,
+      "monthlyCents": 4999,
+      "yearlyCents": 49990
+    }
+  ],
+  "disclaimer": "Prices approved by Josh on 2026-10-19. Stripe prices for teams, RedX Storage and the master tiers are not created yet; checkout for them stays off until they are. Performance tiers change concurrent transfer workers, not guaranteed Mbps."
 }

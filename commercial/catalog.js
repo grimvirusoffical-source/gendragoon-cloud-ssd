@@ -1,6 +1,6 @@
 "use strict";
 
-// Source prices are proposals, not proof of Stripe or service availability.
+// Approved prices (2026-10-19). They are not proof of Stripe or service availability.
 const pricing = require("./pricing.json");
 const CURRENCY = pricing.currency;
 const STATUS = pricing.status;
@@ -102,8 +102,21 @@ function workspaceQuote(interval = "month") {
   });
 }
 
+// Teams, the RedX Storage add-on and the master tiers (approved 2026-10-19).
+// Each is validated with the same 10x yearly rule.
+const TEAMS = indexPlans(pricing.teams.tiers, plan => ({ name: plan.name, members: plan.members }));
+const TEAMS_ENTERPRISE = Object.freeze({ ...pricing.teams.enterprise });
+const REDX_STORAGE = indexPlans(pricing.redxStorage.tiers, plan => ({ gb: plan.gb, downloadGbPerMonth: plan.downloadGbPerMonth }));
+const REDX_DOWNLOAD_PACK = Object.freeze({ ...pricing.redxStorage.downloadPack,
+  oneTimeCents: requireCents(pricing.redxStorage.downloadPack.oneTimeCents, "download_pack.oneTimeCents") });
+const MASTER = indexPlans(pricing.masterTiers, plan => ({ name: plan.name, people: plan.people }));
+
+function teamQuote(tier, interval = "month") {
+  return planQuote(TEAMS, tier, interval, "team");
+}
+
 module.exports = Object.freeze({
   CURRENCY, STATUS, ANNUAL_BILLING_MONTHS_CHARGED, CATALOG_READY,
-  WORKSPACE, STORAGE, PERFORMANCE,
-  storageQuote, performanceQuote, workspaceQuote,
+  WORKSPACE, STORAGE, PERFORMANCE, TEAMS, TEAMS_ENTERPRISE, REDX_STORAGE, REDX_DOWNLOAD_PACK, MASTER,
+  storageQuote, performanceQuote, workspaceQuote, teamQuote,
 });

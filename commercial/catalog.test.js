@@ -9,7 +9,7 @@ const pricing = require("./pricing.json");
 const catalog = require("./catalog");
 const { GPU, GPU_READY, gpuQuote, tripleBundleQuote, requireGpuProvisioned } = require("./gpu_catalog");
 
-test("catalog derives every proposed price and capability from the manifest", () => {
+test("catalog derives every approved price and capability from the manifest", () => {
   assert.equal(catalog.CURRENCY, pricing.currency);
   assert.equal(catalog.STATUS, pricing.status);
   assert.equal(catalog.ANNUAL_BILLING_MONTHS_CHARGED, pricing.annualBillingMonthsCharged);
@@ -165,4 +165,20 @@ test("GPU entitlement requires active hardware and metering, not a purchased tie
   for (const gpuTier of ["missing", "__proto__", "constructor", {}, null]) {
     assert.throws(() => requireGpuProvisioned({ ...valid, gpuTier }), /Invalid GPU entitlement/);
   }
+});
+
+test("approved team, RedX Storage and master prices: yearly is 10x, no pending flags", () => {
+  assert.equal(pricing.status, "approved-prelaunch");
+  assert.doesNotMatch(JSON.stringify(pricing), /pending approval|proposed/i);
+  assert.deepEqual(Object.values(catalog.TEAMS).map(t => [t.id, t.members, t.monthlyCents, t.yearlyCents]),
+    [["team", 5, 999, 9990], ["team_plus", 15, 2499, 24990], ["business", 50, 6999, 69990]]);
+  assert.equal(catalog.TEAMS_ENTERPRISE.contact, true);
+  assert.equal(catalog.teamQuote("team_plus", "year").priceCents, 24990);
+  assert.throws(() => catalog.teamQuote("enterprise"), /Invalid team tier/);
+  assert.deepEqual(Object.values(catalog.REDX_STORAGE).map(t => [t.id, t.gb, t.downloadGbPerMonth, t.monthlyCents, t.yearlyCents]),
+    [["free", 1, 1, 0, 0], ["lite", 50, 10, 299, 2990], ["plus", 250, 25, 1199, 11990], ["pro", 1000, 50, 3999, 39990]]);
+  assert.equal(catalog.REDX_DOWNLOAD_PACK.oneTimeCents, 1299);
+  assert.equal(catalog.REDX_DOWNLOAD_PACK.downloadGb, 100);
+  assert.deepEqual(Object.values(catalog.MASTER).map(t => [t.id, t.people, t.monthlyCents, t.yearlyCents]),
+    [["everything", 1, 1999, 19990], ["everything_family", 6, 2999, 29990], ["everything_developer", 1, 4999, 49990]]);
 });
