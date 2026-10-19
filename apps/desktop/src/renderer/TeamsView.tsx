@@ -3,6 +3,7 @@ import {
   TEAM_MESSAGES,
   latestSeq,
   mergeMessages,
+  uploadPlainFile,
   type ChatMessage,
   type CreateWorkspaceRequest,
   type GenDragoonClient,
@@ -13,7 +14,7 @@ import {
   type TeamColorChoices,
   type TeamWorkspace,
 } from "@gendragoon/core";
-import { CreateTeam, JoinTeam, NewWorkspace, TeamChat, TeamMembers, TeamWorkspaces, TeamsHome, type ChatPickable } from "@gendragoon/ui";
+import { CreateTeam, JoinTeam, NewWorkspace, TeamChat, TeamFiles, TeamMembers, TeamWorkspaces, TeamsHome, type ChatPickable, type TeamFile } from "@gendragoon/ui";
 import { useEffect, useRef, useState } from "react";
 
 type Mode = "home" | "create" | "join" | "team";
@@ -46,6 +47,9 @@ export function TeamsView(props: {
   const [signedIn, setSignedIn] = useState(true);
   const [intentId, setIntentId] = useState(() => crypto.randomUUID());
   const [newWorkspace, setNewWorkspace] = useState(false);
+  const [filesOf, setFilesOf] = useState<TeamWorkspace | null>(null);
+  const [files, setFiles] = useState<{ files: TeamFile[]; quotaBytes?: number; usedBytes?: number }>({ files: [] });
+  const [progress, setProgress] = useState<number | null>(null);
   const stop = useRef<AbortController | null>(null);
 
   useEffect(() => { void window.gendragoon?.getDeviceName?.().then((name) => setDeviceName(name ?? undefined)); }, []);
@@ -109,6 +113,22 @@ export function TeamsView(props: {
     if (view) { setTeam(view.team); setColors(view.colors); }
     const ws = await run((client) => client.teamWorkspaces(team.id));
     if (ws) setSpaces(ws);
+  }
+
+  async function openFiles(w: TeamWorkspace) {
+    const list = await run((client) => client.listFiles(w.id));
+    if (!list) return;
+    setFilesOf(w);
+    setFiles({ files: list.files, quotaBytes: list.quotaBytes, usedBytes: list.usedBytes });
+  }
+  async function download(w: TeamWorkspace, file: TeamFile) {
+    await run(async (client) => {
+      const response = await client.download(w.id, file);
+      const url = URL.createObjectURL(await response.blob());
+      const a = document.createElement("a");
+      a.href = url; a.download = file.name; a.click();
+      setTimeout(() => URL.revokeObjectURL(url), 30_000);
+    });
   }
 
   if (!signedIn) {
@@ -203,13 +223,31 @@ export function TeamsView(props: {
                   await refreshTeam();
                 })} />
             ) : null}
+            {filesOf ? (
+              <TeamFiles workspace={filesOf} files={files.files} quotaBytes={files.quotaBytes} usedBytes={files.usedBytes} busy={busy} progress={progress}
+                onBack={() => setFilesOf(null)}
+                onDownload={(file) => void download(filesOf, file)}
+                onDelete={(file) => void run(async (client) => { await client.deleteFile(filesOf.id, file.id); await openFiles(filesOf); })}
+                onUpload={(file) => void run(async (client) => {
+                  setProgress(0);
+                  try {
+                    await uploadPlainFile(client, filesOf.id, { name: file.name, bytes: new Uint8Array(await file.arrayBuffer()) },
+                      { onProgress: (sent, total) => setProgress(total ? sent / total : 1) });
+                  } finally { setProgress(null); }
+                  await openFiles(filesOf);
+                })} />
+            ) : null}
             <TeamWorkspaces teamWorkspaces={spaces.teamWorkspaces} sharedWorkspaces={spaces.sharedWorkspaces} isOwner={isOwner}
+              onOpenFiles={(id) => { const w = spaces.teamWorkspaces.find((x) => x.id === id); if (w) void openFiles(w); }}
               onNew={team.subscriptionActive && !newWorkspace ? () => setNewWorkspace(true) : undefined}
               onCheckout={(id) => void run(async (client) => props.openBilling((await client.checkoutTeamWorkspace(team.id, id)).url))}
               onUnshare={(id) => void run(async (client) => { await client.unshareWorkspace(team.id, id); await refreshTeam(); })} />
           </>
         ) : (
-          <TeamMembers members={team.members ?? []} me={team.me} isOwner={isOwner} colors={colors}
+          <TeamMembers members={team.members ?? []} me={team.me} isOwner={isOwner} colors={colors} teamName={team.name}
+            onSetRole={isOwner ? (memberId, role) => void run(async (client) => { await client.setTeamMemberRole(team.id, memberId, role); await refreshTeam(); }) : undefined}
+            onTransfer={isOwner ? (memberId, color) => void run(async (client) => { await client.transferTeam(team.id, { memberId, color }); await refreshTeam(); setError("Ownership transferred."); }) : undefined}
+            onDeleteTeam={isOwner ? (confirmName) => void run(async (client) => { await client.deleteTeam(team.id, confirmName); stop.current?.abort(); setMode("home"); setTeam(null); await loadHome(); }) : undefined}
             onUpdateMe={(patch) => void run(async (client) => { await client.updateTeamMe(team.id, patch); await refreshTeam(); })}
             onModerate={(memberId, action, reason, until) => void run(async (client) => { await client.moderateTeamMember(team.id, memberId, action, { reason, until }); await refreshTeam(); })} />
         )}

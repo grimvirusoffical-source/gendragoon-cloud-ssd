@@ -294,3 +294,4 @@ export type {
   JoinTeamRequest,
   ModerationAction,
 } from "./teams.js";
+export { uploadPlainFile } from "./plain-upload.js";

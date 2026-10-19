@@ -282,7 +282,15 @@ export function TeamChat(props: {
 
 export function TeamMembers(props: { members: TeamMember[]; me: TeamMember; isOwner: boolean; colors: TeamColorChoices | null;
   onUpdateMe: (patch: { displayName?: string; color?: string }) => void;
-  onModerate?: (memberId: string, action: ModerationAction, reason: string, until: number | null) => void; nowMs?: number }) {
+  onModerate?: (memberId: string, action: ModerationAction, reason: string, until: number | null) => void; nowMs?: number;
+  teamName?: string;
+  onSetRole?: (memberId: string, role: "member" | "viewer") => void;
+  onTransfer?: (memberId: string, myColor: string) => void;
+  onDeleteTeam?: (confirmName: string) => void }) {
+  const [transferTo, setTransferTo] = useState<TeamMember | null>(null);
+  const [myColor, setMyColor] = useState<string | undefined>();
+  const [deleting, setDeleting] = useState(false);
+  const [confirmName, setConfirmName] = useState("");
   const [name, setName] = useState(props.me.displayName);
   const [target, setTarget] = useState<{ member: TeamMember; action: ModerationAction } | null>(null);
   const [reason, setReason] = useState("");
@@ -301,14 +309,14 @@ export function TeamMembers(props: { members: TeamMember[]; me: TeamMember; isOw
         <label className="field">Name in chat
           <input data-testid="me-display-name" value={name} maxLength={40} onChange={(e) => setName(e.target.value)} onBlur={() => name.trim() && name.trim() !== props.me.displayName && props.onUpdateMe({ displayName: name.trim() })} />
         </label>
-        <ColorPicker role={props.me.role} choices={props.colors} value={props.me.color} onChange={(color) => props.onUpdateMe({ color })} />
+        <ColorPicker role={props.me.role === "owner" ? "owner" : "member"} choices={props.colors} value={props.me.color} onChange={(color) => props.onUpdateMe({ color })} />
       </div>
       <ul className="member-list">
         {props.members.map((m) => (
           <li key={m.memberId} className="member-row" data-testid={`member-${m.memberId}`}>
             <span className="member-dot" style={{ background: m.colorHex ?? undefined }} aria-hidden="true" />
             <strong>{m.displayName}</strong>
-            <span className="kind">{m.role === "owner" ? "Owner" : m.muted ? "Muted" : "Member"}</span>
+            <span className="kind">{m.role === "owner" ? "Owner" : m.muted ? "Muted" : m.role === "viewer" ? "Viewer" : "Member"}</span>
             {props.isOwner && m.role !== "owner" && props.onModerate ? (
               <span className="actions">
                 {m.muted
@@ -316,6 +324,13 @@ export function TeamMembers(props: { members: TeamMember[]; me: TeamMember; isOw
                   : <button type="button" className="btn-ghost btn-sm" data-testid={`mute-${m.memberId}`} onClick={() => { setTarget({ member: m, action: "mute" }); setReason(""); }}>Mute</button>}
                 <button type="button" className="btn-ghost btn-sm" data-testid={`kick-${m.memberId}`} onClick={() => { setTarget({ member: m, action: "kick" }); setReason(""); }}>Remove</button>
                 <button type="button" className="btn-danger btn-sm" data-testid={`ban-${m.memberId}`} onClick={() => { setTarget({ member: m, action: "ban" }); setReason(""); }}>Ban</button>
+                {props.onSetRole ? (
+                  <button type="button" className="btn-ghost btn-sm" data-testid={`role-${m.memberId}`} title={m.role === "viewer" ? "Can upload and delete team files" : "Can only open and download team files"}
+                    onClick={() => props.onSetRole?.(m.memberId, m.role === "viewer" ? "member" : "viewer")}>{m.role === "viewer" ? "Allow editing" : "Make viewer"}</button>
+                ) : null}
+                {props.onTransfer ? (
+                  <button type="button" className="btn-ghost btn-sm" data-testid={`transfer-${m.memberId}`} onClick={() => { setTransferTo(m); setMyColor(undefined); }}>Make owner</button>
+                ) : null}
               </span>
             ) : null}
           </li>
@@ -347,12 +362,43 @@ export function TeamMembers(props: { members: TeamMember[]; me: TeamMember; isOw
           </div>
         </div>
       ) : null}
+      {transferTo ? (
+        <div className="panel stack inline-dialog" role="dialog" aria-label={`Make ${transferTo.displayName} the owner`} data-testid="transfer-dialog">
+          <h3>Make {transferTo.displayName} the owner</h3>
+          <p className="help">They get owner controls and a purple color. You stay in the team as a member. The team's billing stays on your card until it ends; then the new owner pays.</p>
+          <ColorPicker role="member" choices={props.colors ? { ...props.colors, memberColors: props.colors.memberColors.map((c) => c.id === transferTo.color ? { ...c, taken: false } : c) } : null}
+            value={myColor} onChange={setMyColor} />
+          <div className="actions">
+            <button type="button" className="btn btn-ghost" onClick={() => setTransferTo(null)}>Cancel</button>
+            <button type="button" className="btn-danger" data-testid="transfer-confirm" disabled={!myColor}
+              onClick={() => { if (myColor) props.onTransfer?.(transferTo.memberId, myColor); setTransferTo(null); }}>Transfer ownership</button>
+          </div>
+        </div>
+      ) : null}
+      {props.isOwner && props.onDeleteTeam ? (
+        <div className="panel stack" data-testid="danger-zone">
+          <h3>Delete team</h3>
+          <p className="help">Deletes the chat, invites, team workspaces and their files, and cancels the team's billing. Members' personal workspaces aren't touched.</p>
+          {deleting ? (
+            <>
+              <label className="field">Type <strong>{props.teamName}</strong> to confirm
+                <input data-testid="delete-team-name" value={confirmName} onChange={(e) => setConfirmName(e.target.value)} />
+              </label>
+              <div className="actions">
+                <button type="button" className="btn btn-ghost" onClick={() => { setDeleting(false); setConfirmName(""); }}>Cancel</button>
+                <button type="button" className="btn-danger" data-testid="delete-team-confirm" disabled={confirmName.trim() !== props.teamName}
+                  onClick={() => props.onDeleteTeam?.(confirmName.trim())}>Delete team</button>
+              </div>
+            </>
+          ) : <button type="button" className="btn-danger" data-testid="delete-team" onClick={() => setDeleting(true)}>Delete team…</button>}
+        </div>
+      ) : null}
     </section>
   );
 }
 
 export function TeamWorkspaces(props: { teamWorkspaces: TeamWorkspace[]; sharedWorkspaces: SharedWorkspace[]; isOwner: boolean;
-  onNew?: () => void; onCheckout?: (id: string) => void; onUnshare?: (id: string) => void }) {
+  onNew?: () => void; onCheckout?: (id: string) => void; onUnshare?: (id: string) => void; onOpenFiles?: (id: string) => void }) {
   return (
     <section className="stack" data-testid="team-workspaces">
       <div className="topbar">
@@ -368,6 +414,9 @@ export function TeamWorkspaces(props: { teamWorkspaces: TeamWorkspace[]; sharedW
               {w.projectStatus === "pending_payment" && props.isOwner && props.onCheckout
                 ? <button type="button" className="btn btn-sm" data-testid={`team-ws-pay-${w.id}`} onClick={() => props.onCheckout?.(w.id)}>Continue to checkout</button>
                 : <span className="kind">{w.projectStatus === "active" ? "Active" : w.projectStatus === "team_subscription_required" ? "Team subscription needed" : "Payment needed"}</span>}
+              {w.access === "read" ? <span className="tag" data-testid={`team-ws-readonly-${w.id}`}>View only</span> : null}
+              {w.storageRoutes && w.projectStatus !== "pending_payment" && props.onOpenFiles
+                ? <button type="button" className="btn-ghost btn-sm" data-testid={`team-ws-files-${w.id}`} onClick={() => props.onOpenFiles?.(w.id)}>Files</button> : null}
             </li>
           ))}
         </ul>
@@ -384,6 +433,58 @@ export function TeamWorkspaces(props: { teamWorkspaces: TeamWorkspace[]; sharedW
           ))}
         </ul>
       )}
+    </section>
+  );
+}
+
+export type TeamFile = { id: string; name: string; sizeBytes: number };
+function formatBytes(n: number): string {
+  if (n < 1024) return `${n} B`;
+  const units = ["KB", "MB", "GB", "TB"];
+  let v = n / 1024, i = 0;
+  while (v >= 1024 && i < units.length - 1) { v /= 1024; i++; }
+  return `${v.toFixed(v < 10 ? 1 : 0)} ${units[i]}`;
+}
+/** Files of one team workspace (same storage routes as personal workspaces). Viewers get no upload or delete. */
+export function TeamFiles(props: { workspace: TeamWorkspace; files: TeamFile[]; quotaBytes?: number; usedBytes?: number;
+  busy?: boolean; progress?: number | null; onBack: () => void; onUpload?: (file: File) => void;
+  onDownload: (file: TeamFile) => void; onDelete?: (file: TeamFile) => void }) {
+  const writable = props.workspace.access !== "read";
+  const [confirm, setConfirm] = useState<TeamFile | null>(null);
+  return (
+    <section className="stack" data-testid="team-files">
+      <div className="topbar">
+        <button type="button" className="btn-ghost btn-sm" onClick={props.onBack}>Back</button>
+        <h3>{props.workspace.name}</h3>
+        {writable && props.onUpload ? (
+          <label className="btn" data-testid="team-files-upload">Upload
+            <input type="file" hidden disabled={props.busy} onChange={(e) => { const f = e.target.files?.[0]; if (f) props.onUpload?.(f); e.target.value = ""; }} />
+          </label>
+        ) : <span className="tag">View only</span>}
+      </div>
+      {props.quotaBytes ? <p className="help" data-testid="team-files-usage">{formatBytes(props.usedBytes ?? 0)} of {formatBytes(props.quotaBytes)} used</p> : null}
+      {props.progress !== null && props.progress !== undefined ? <progress max={1} value={props.progress} aria-label="Upload progress" /> : null}
+      {props.files.length === 0 ? <p className="help">No files yet.{writable ? " Upload one to share it with the team." : ""}</p> : (
+        <ul className="workspace-list">
+          {props.files.map((f) => (
+            <li key={f.id} className="workspace-row" data-testid={`team-file-${f.id}`}>
+              <strong>{f.name}</strong>
+              <span className="kind">{formatBytes(f.sizeBytes)}</span>
+              <button type="button" className="btn-ghost btn-sm" onClick={() => props.onDownload(f)}>Download</button>
+              {writable && props.onDelete ? <button type="button" className="btn-ghost btn-sm" data-testid={`team-file-delete-${f.id}`} onClick={() => setConfirm(f)}>Delete</button> : null}
+            </li>
+          ))}
+        </ul>
+      )}
+      {confirm ? (
+        <div className="panel stack inline-dialog" role="dialog" aria-label={`Delete ${confirm.name}`}>
+          <p>Delete {confirm.name} for everyone in the team?</p>
+          <div className="actions">
+            <button type="button" className="btn btn-ghost" onClick={() => setConfirm(null)}>Cancel</button>
+            <button type="button" className="btn-danger" onClick={() => { props.onDelete?.(confirm); setConfirm(null); }}>Delete</button>
+          </div>
+        </div>
+      ) : null}
     </section>
   );
 }

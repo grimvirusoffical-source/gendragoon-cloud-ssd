@@ -11,6 +11,7 @@ import {
   DeletionNotRetryableError,
   SUPPORT_CONTACT,
   deleteAccountAndWipe,
+  TeamOwnerMustTransferError,
   deletionAuthFailure,
   establishWorkspaceKey,
   dismissDeletion,
@@ -407,6 +408,11 @@ export function App() {
     } catch (error) {
       if (error instanceof DeletionNotRetryableError) {
         setDeletionNotice({ message: error.message, retryable: false, support: SUPPORT_CONTACT.value });
+        return;
+      }
+      if (error instanceof TeamOwnerMustTransferError) {
+        // Nothing was deleted: the user owns teams with other members.
+        setDeletionNotice({ message: error.message, retryable: false });
         return;
       }
       if (error instanceof DeletionNotFoundError) {

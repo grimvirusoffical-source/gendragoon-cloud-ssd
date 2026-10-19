@@ -17,5 +17,5 @@ export { Skeleton, EmptyState, ErrorState, TransferStatus } from "./Feedback.js"
 export type { TransferPhase } from "./Feedback.js";
 export { THEME_STORAGE_KEY, applyThemePreference, loadThemePreference, saveThemePreference, isThemePreference, currentTheme } from "./theme-runtime.js";
 export type { ThemeName, ThemePreference } from "./theme.js";
-export { ColorPicker, TeamsHome, CreateTeam, JoinTeam, TeamChat, TeamMembers, TeamWorkspaces } from "./Teams.js";
-export type { ChatPickable } from "./Teams.js";
+export { ColorPicker, TeamsHome, CreateTeam, JoinTeam, TeamChat, TeamMembers, TeamWorkspaces, TeamFiles } from "./Teams.js";
+export type { ChatPickable, TeamFile } from "./Teams.js";

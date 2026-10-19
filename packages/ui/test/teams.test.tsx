@@ -2,7 +2,8 @@ import { describe, expect, it } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 import type { ChatMessage, TeamColorChoices, TeamMember } from "@gendragoon/core";
 import { AppShell } from "../src/AppShell.js";
-import { ColorPicker, CreateTeam, JoinTeam, TeamChat, TeamMembers, TeamWorkspaces, TeamsHome } from "../src/Teams.js";
+import { ColorPicker, CreateTeam, JoinTeam, TeamChat, TeamFiles, TeamMembers, TeamWorkspaces, TeamsHome } from "../src/Teams.js";
+import type { TeamWorkspace } from "@gendragoon/core";
 
 const noop = () => {};
 const shades = [{ id: "purple-500", hue: "purple", hex: "#a855f7" }, { id: "purple-700", hue: "purple", hex: "#7e22ce" }];
@@ -95,5 +96,39 @@ describe("Teams UI", () => {
     expect(html.match(/data-testid="create-team"/g)).toHaveLength(1);
     expect(html.match(/data-testid="join-team"/g)).toHaveLength(1);
     expect(html).toContain('data-testid="teams-empty"');
+  });
+  const activeWs: TeamWorkspace = { id: "w2", teamId: "t", name: "Shared drive", scope: "team", billingModel: "plans", customStorage: false,
+    requiredPlans: { storage: "managed", storageTier: "100GB", performanceTier: "boost", interval: "month" }, plansStatus: "active", projectStatus: "active",
+    quotaGB: 100, needsCustomSetup: false, usedBytes: 2048, storageRoutes: { v3: "/v3/cloud/w2", v2: "/v2/workspaces/w2/cloud" }, access: "write" };
+  it("owner member controls: role toggle, make owner, delete team behind a typed name", () => {
+    const viewer: TeamMember = { ...member, memberId: "v", role: "viewer" };
+    const html = renderToStaticMarkup(<TeamMembers members={[owner, member, viewer]} me={owner} isOwner colors={choices} teamName="Studio"
+      onUpdateMe={noop} onModerate={noop} onSetRole={noop} onTransfer={noop} onDeleteTeam={noop} />);
+    expect(html).toMatch(/data-testid="role-m"[^>]*>Make viewer</);
+    expect(html).toMatch(/data-testid="role-v"[^>]*>Allow editing</);
+    expect(html).toContain("Viewer");
+    expect(html).toContain('data-testid="transfer-m"');
+    expect(html).not.toContain('data-testid="transfer-o"');
+    expect(html).toContain('data-testid="delete-team"');
+    const asMember = renderToStaticMarkup(<TeamMembers members={[owner, member]} me={member} isOwner={false} colors={choices} onUpdateMe={noop} />);
+    expect(asMember).not.toMatch(/role-|transfer-|delete-team/);
+  });
+  it("team workspaces: Files opens storage for active ones; viewers see View only", () => {
+    const html = renderToStaticMarkup(<TeamWorkspaces isOwner={false} onOpenFiles={noop} sharedWorkspaces={[]} teamWorkspaces={[activeWs, { ...activeWs, id: "w3", access: "read" }]} />);
+    expect(html).toContain('data-testid="team-ws-files-w2"');
+    expect(html).toContain('data-testid="team-ws-readonly-w3"');
+    expect(html).not.toContain('data-testid="team-ws-readonly-w2"');
+  });
+  it("team files: writers upload and delete; viewers only download", () => {
+    const files = [{ id: "f1", name: "plan.pdf", sizeBytes: 1536 }];
+    const w = renderToStaticMarkup(<TeamFiles workspace={activeWs} files={files} quotaBytes={100e9} usedBytes={1536} onBack={noop} onUpload={noop} onDownload={noop} onDelete={noop} />);
+    expect(w).toContain('data-testid="team-files-upload"');
+    expect(w).toContain('data-testid="team-file-delete-f1"');
+    expect(w).toContain("1.5 KB of 93 GB used");
+    const r = renderToStaticMarkup(<TeamFiles workspace={{ ...activeWs, access: "read" }} files={files} onBack={noop} onUpload={noop} onDownload={noop} onDelete={noop} />);
+    expect(r).not.toContain("team-files-upload");
+    expect(r).not.toContain("team-file-delete-f1");
+    expect(r).toContain("View only");
+    expect(r).toContain(">Download<");
   });
 });

@@ -15,6 +15,7 @@ import {
   type JoinTeamRequest,
   type PlanInterval,
   type Team,
+  type TeamMember,
   type TeamColor,
   type TeamColorChoices,
   type TeamTierId,
@@ -217,9 +218,12 @@ export function TeamChatScreen(props: { team: Team; messages: ChatMessage[]; pic
 }
 
 export function TeamMembersScreen(props: { team: Team; colors: TeamColorChoices | null; onUpdateMe: (p: { displayName?: string; color?: string }) => void;
-  onModerate: (memberId: string, action: "mute" | "unmute" | "kick" | "ban", reason: string, until: number | null) => void; onBack: () => void; nowMs?: number }) {
+  onModerate: (memberId: string, action: "mute" | "unmute" | "kick" | "ban", reason: string, until: number | null) => void; onBack: () => void; nowMs?: number;
+  onSetRole?: (memberId: string, role: "member" | "viewer") => void; onTransfer?: (memberId: string, myColor: string) => void }) {
   const styles = useStyles(makeStyles);
   const [name, setName] = useState(props.team.me.displayName);
+  const [transferTo, setTransferTo] = useState<TeamMember | null>(null);
+  const [myColor, setMyColor] = useState<string | undefined>();
   const [reason, setReason] = useState("");
   const owner = props.team.role === "owner";
   const now = props.nowMs ?? Date.now();
@@ -228,13 +232,13 @@ export function TeamMembersScreen(props: { team: Team; colors: TeamColorChoices 
       <Title kicker="Team">Members</Title>
       <Field label="Name in chat" value={name} onChangeText={setName} testID="me-display-name" />
       <Button label="Save name" compact tone="secondary" testID="me-save-name" disabled={!name.trim() || name.trim() === props.team.me.displayName} onPress={() => props.onUpdateMe({ displayName: name.trim() })} />
-      <Swatches role={props.team.me.role} choices={props.colors} value={props.team.me.color} onChange={(color) => props.onUpdateMe({ color })} />
+      <Swatches role={props.team.me.role === "owner" ? "owner" : "member"} choices={props.colors} value={props.team.me.color} onChange={(color) => props.onUpdateMe({ color })} />
       {owner ? <Field label="Reason (shown to the member)" value={reason} onChangeText={setReason} testID="moderate-reason" helper="Required for mute, remove and ban." /> : null}
       {(props.team.members ?? []).map((m) => (
         <View key={m.memberId} testID={`member-${m.memberId}`} style={styles.row}>
           <View style={[styles.dot, { backgroundColor: m.colorHex ?? undefined }]} />
           <Text style={styles.name}>{m.displayName}</Text>
-          <Text style={styles.help}>{m.role === "owner" ? "Owner" : m.muted ? "Muted" : "Member"}</Text>
+          <Text style={styles.help}>{m.role === "owner" ? "Owner" : m.muted ? "Muted" : m.role === "viewer" ? "Viewer" : "Member"}</Text>
           {owner && m.role !== "owner" ? (
             <View style={styles.choices}>
               {m.muted
@@ -242,10 +246,23 @@ export function TeamMembersScreen(props: { team: Team; colors: TeamColorChoices 
                 : <Button label="Mute 1 h" compact tone="ghost" testID={`mute-${m.memberId}`} disabled={!reason.trim()} onPress={() => props.onModerate(m.memberId, "mute", reason.trim(), now + 3_600_000)} />}
               <Button label="Remove" compact tone="ghost" testID={`kick-${m.memberId}`} disabled={!reason.trim()} onPress={() => props.onModerate(m.memberId, "kick", reason.trim(), null)} />
               <Button label="Ban" compact destructive tone="ghost" testID={`ban-${m.memberId}`} disabled={!reason.trim()} onPress={() => props.onModerate(m.memberId, "ban", reason.trim(), null)} />
+              {props.onSetRole ? <Button label={m.role === "viewer" ? "Allow editing" : "Make viewer"} compact tone="ghost" testID={`role-${m.memberId}`}
+                onPress={() => props.onSetRole?.(m.memberId, m.role === "viewer" ? "member" : "viewer")} /> : null}
+              {props.onTransfer ? <Button label="Make owner" compact tone="ghost" testID={`transfer-${m.memberId}`} onPress={() => { setTransferTo(m); setMyColor(undefined); }} /> : null}
             </View>
           ) : null}
         </View>
       ))}
+      {transferTo ? (
+        <View testID="transfer-panel">
+          <SectionLabel>{`Make ${transferTo.displayName} the owner`}</SectionLabel>
+          <Text style={styles.help}>You stay as a member with the color you pick. Billing stays on your card until it ends.</Text>
+          <Swatches role="member" value={myColor} onChange={setMyColor}
+            choices={props.colors ? { ...props.colors, memberColors: props.colors.memberColors.map((c) => c.id === transferTo.color ? { ...c, taken: false } : c) } : null} />
+          <Button label="Transfer ownership" destructive testID="transfer-confirm" disabled={!myColor} onPress={() => { if (myColor) props.onTransfer?.(transferTo.memberId, myColor); setTransferTo(null); }} />
+          <Button label="Cancel" tone="ghost" onPress={() => setTransferTo(null)} />
+        </View>
+      ) : null}
       <Button label="Back to chat" tone="ghost" onPress={props.onBack} />
     </Screen>
   );
@@ -312,7 +329,9 @@ export function TeamsTab(props: { client: GenDragoonClient | null; personalWorks
   if (page === "members" && team) {
     return <TeamMembersScreen team={team} colors={colors} onBack={() => setPage("chat")}
       onUpdateMe={(p) => void run(async (c) => { await c.updateTeamMe(team.id, p); await openTeam(team.id); setPage("members"); })}
-      onModerate={(memberId, action, reason, until) => void run(async (c) => { await c.moderateTeamMember(team.id, memberId, action, { reason, until }); await openTeam(team.id); setPage("members"); })} />;
+      onModerate={(memberId, action, reason, until) => void run(async (c) => { await c.moderateTeamMember(team.id, memberId, action, { reason, until }); await openTeam(team.id); setPage("members"); })}
+      onSetRole={team.role === "owner" ? (memberId, role) => void run(async (c) => { await c.setTeamMemberRole(team.id, memberId, role); await openTeam(team.id); setPage("members"); }) : undefined}
+      onTransfer={team.role === "owner" ? (memberId, color) => void run(async (c) => { await c.transferTeam(team.id, { memberId, color }); await openTeam(team.id); setPage("members"); }) : undefined} />;
   }
   if (page === "chat" && team) {
     const pickable: MobilePickable[] = [

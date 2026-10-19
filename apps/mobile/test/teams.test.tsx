@@ -78,6 +78,22 @@ describe("mobile Teams", () => {
     expect(asMember.queryByTestId("mute-o")).toBeNull();
     expect(asMember.queryByTestId("moderate-reason")).toBeNull();
   });
+  it("members: owner can make a member a viewer and transfer ownership after picking a member color", async () => {
+    const onSetRole = jest.fn(), onTransfer = jest.fn();
+    const s = await render(<TeamMembersScreen team={team({ role: "owner", me: owner })} colors={choices} onUpdateMe={() => undefined} onModerate={() => undefined}
+      onBack={() => undefined} onSetRole={onSetRole} onTransfer={onTransfer} />);
+    await fireEvent.press(s.getByTestId("role-m"));
+    expect(onSetRole).toHaveBeenCalledWith("m", "viewer");
+    await fireEvent.press(s.getByTestId("transfer-m"));
+    expect(s.getByTestId("transfer-confirm").props.accessibilityState.disabled).toBe(true);
+    await fireEvent.press(s.getAllByTestId("color-sky-500").at(-1)!);
+    await fireEvent.press(s.getByTestId("transfer-confirm"));
+    expect(onTransfer).toHaveBeenCalledWith("m", "sky-500");
+    const viewerTeam = team({ members: [owner, { ...me, role: "viewer" }] });
+    const v = await render(<TeamMembersScreen team={viewerTeam} colors={choices} onUpdateMe={() => undefined} onModerate={() => undefined} onBack={() => undefined} />);
+    expect(v.getAllByText("Viewer").length).toBe(1);
+    expect(v.queryByTestId("transfer-o")).toBeNull();
+  });
   it("Teams tab polls the chat with after=seq", async () => {
     jest.useFakeTimers();
     const calls: number[] = [];
