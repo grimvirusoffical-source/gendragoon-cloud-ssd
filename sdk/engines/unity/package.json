@@ -1,0 +1,12 @@
+{
+  "name": "com.gendragoon.sdk",
+  "version": "0.1.0",
+  "displayName": "GenDragoon Cloud SSD",
+  "description": "Encrypted cloud saves, files and folders, sync and sharing on GenDragoon Cloud SSD. Wraps the GenDragoon .NET SDK.",
+  "unity": "2021.3",
+  "author": { "name": "Infected Nation" },
+  "keywords": ["cloud save", "storage", "encryption"],
+  "samples": [
+    { "displayName": "Cloud save", "description": "Connect with a connect code and save or load a slot.", "path": "Samples~/CloudSave" }
+  ]
+}

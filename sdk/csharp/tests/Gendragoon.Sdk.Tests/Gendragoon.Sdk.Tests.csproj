@@ -6,7 +6,12 @@
     <LangVersion>9</LangVersion>
     <IsPackable>false</IsPackable>
   </PropertyGroup>
-  <ItemGroup>
+  <!-- dotnet run -p:SdkTfm=netstandard2.1 runs the suite against the .NET Standard build (managed AES-GCM and
+       P-256, as used under Unity) instead of the .NET 8 build. -->
+  <ItemGroup Condition="'$(SdkTfm)' == ''">
     <ProjectReference Include="../../src/Gendragoon.Sdk/Gendragoon.Sdk.csproj" />
+  </ItemGroup>
+  <ItemGroup Condition="'$(SdkTfm)' != ''">
+    <ProjectReference Include="../../src/Gendragoon.Sdk/Gendragoon.Sdk.csproj" SetTargetFramework="TargetFramework=$(SdkTfm)" />
   </ItemGroup>
 </Project>
