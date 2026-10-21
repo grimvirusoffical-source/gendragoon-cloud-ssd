@@ -1,11 +1,17 @@
-name: CI
+name: Clients CI
 
 on:
   push:
+    paths: ['clients/gendragoon-apps/**', '.github/workflows/clients-ci.yml']
   pull_request:
+    paths: ['clients/gendragoon-apps/**', '.github/workflows/clients-ci.yml']
 
 permissions:
   contents: read
+
+defaults:
+  run:
+    working-directory: clients/gendragoon-apps
 
 jobs:
   check:
@@ -16,10 +22,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
+        with:
+          package_json_file: clients/gendragoon-apps/package.json
       - uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: pnpm
+          cache-dependency-path: clients/gendragoon-apps/pnpm-lock.yaml
       - run: pnpm install --frozen-lockfile
       - run: pnpm typecheck
       - run: pnpm lint
@@ -31,20 +40,23 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
+        with:
+          package_json_file: clients/gendragoon-apps/package.json
       - uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: pnpm
+          cache-dependency-path: clients/gendragoon-apps/pnpm-lock.yaml
       - run: pnpm install --frozen-lockfile
       - name: Build unsigned NSIS installer
-        working-directory: apps/desktop
+        working-directory: clients/gendragoon-apps/apps/desktop
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: "false"
         run: pnpm dist:win
       - uses: actions/upload-artifact@v4
         with:
           name: gendragoon-cloud-ssd-windows-nsis
-          path: apps/desktop/release/*.exe
+          path: clients/gendragoon-apps/apps/desktop/release/*.exe
           if-no-files-found: error
 
   mobile-prebuild:
@@ -53,13 +65,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
+        with:
+          package_json_file: clients/gendragoon-apps/package.json
       - uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: pnpm
+          cache-dependency-path: clients/gendragoon-apps/pnpm-lock.yaml
       - run: pnpm install --frozen-lockfile
       - name: Generate the Android project without compiling it
-        working-directory: apps/mobile
+        working-directory: clients/gendragoon-apps/apps/mobile
         env:
           EXPO_NO_TELEMETRY: "1"
           CI: "1"
@@ -71,25 +86,28 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
+        with:
+          package_json_file: clients/gendragoon-apps/package.json
       - uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: pnpm
+          cache-dependency-path: clients/gendragoon-apps/pnpm-lock.yaml
       - run: pnpm install --frozen-lockfile
       - name: Export the Expo web bundle
-        working-directory: apps/mobile
+        working-directory: clients/gendragoon-apps/apps/mobile
         env:
           EXPO_NO_TELEMETRY: "1"
           CI: "1"
         run: pnpm exec expo export --platform web
       - name: Install Playwright Chromium
-        working-directory: apps/mobile
+        working-directory: clients/gendragoon-apps/apps/mobile
         run: pnpm exec playwright install --with-deps chromium
       - name: Capture fixture screens
-        working-directory: apps/mobile
+        working-directory: clients/gendragoon-apps/apps/mobile
         run: node scripts/capture-screens.mjs
       - uses: actions/upload-artifact@v4
         with:
           name: mobile-screenshots
-          path: apps/mobile/docs/screenshots/*.png
+          path: clients/gendragoon-apps/apps/mobile/docs/screenshots/*.png
           if-no-files-found: error

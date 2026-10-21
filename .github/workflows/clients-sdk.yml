@@ -1,4 +1,4 @@
-name: SDK
+name: Clients SDK
 
 # Builds and tests sdk/ (Go, C ABI, JS/TS, Python, C#, Swift, Godot) and checks the generated operation tables.
 # Started by hand only (Actions > SDK > Run workflow). The contract suites need the local backends from
@@ -13,7 +13,7 @@ permissions:
 
 defaults:
   run:
-    working-directory: sdk
+    working-directory: clients/gendragoon-apps/sdk
 
 jobs:
   operations:
@@ -33,13 +33,13 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version-file: sdk/go/go.mod
-          cache-dependency-path: sdk/go/go.sum
-      - working-directory: sdk/go
+          go-version-file: clients/gendragoon-apps/sdk/go/go.mod
+          cache-dependency-path: clients/gendragoon-apps/sdk/go/go.sum
+      - working-directory: clients/gendragoon-apps/sdk/go
         run: |
           go vet ./...
           go test ./...
-      - working-directory: sdk/engines/unreal
+      - working-directory: clients/gendragoon-apps/sdk/engines/unreal
         run: test/build.sh && test/build/cabi_test
 
   js:
@@ -51,8 +51,8 @@ jobs:
         with:
           node-version: 22
           cache: npm
-          cache-dependency-path: sdk/js/package-lock.json
-      - working-directory: sdk/js
+          cache-dependency-path: clients/gendragoon-apps/sdk/js/package-lock.json
+      - working-directory: clients/gendragoon-apps/sdk/js
         run: |
           npm ci
           npm test
@@ -65,7 +65,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - working-directory: sdk/python
+      - working-directory: clients/gendragoon-apps/sdk/python
         run: |
           python -m pip install -e ".[test]"
           python -m pytest -q
@@ -78,11 +78,11 @@ jobs:
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: "8.0.x"
-      - working-directory: sdk/csharp/tests/Gendragoon.Sdk.Tests
+      - working-directory: clients/gendragoon-apps/sdk/csharp/tests/Gendragoon.Sdk.Tests
         run: |
           dotnet run -c Release
           dotnet run -c Release -p:SdkTfm=netstandard2.1
-      - working-directory: sdk/engines/unity
+      - working-directory: clients/gendragoon-apps/sdk/engines/unity
         run: Tools~/build.sh
 
   swift:
@@ -91,7 +91,7 @@ jobs:
     container: swift:6.0.3
     steps:
       - uses: actions/checkout@v4
-      - working-directory: sdk/swift
+      - working-directory: clients/gendragoon-apps/sdk/swift
         run: |
           swift package resolve --force-resolved-versions
           swift build
@@ -107,7 +107,7 @@ jobs:
           curl -fsSL -o /tmp/godot.zip https://github.com/godotengine/godot/releases/download/4.3-stable/Godot_v4.3-stable_linux.x86_64.zip
           unzip -q /tmp/godot.zip -d /tmp/godot
           echo "GODOT=/tmp/godot/Godot_v4.3-stable_linux.x86_64" >> "$GITHUB_ENV"
-      - working-directory: sdk/engines/godot
+      - working-directory: clients/gendragoon-apps/sdk/engines/godot
         run: |
           "$GODOT" --headless --editor --quit --path . || true
           "$GODOT" --headless --path . --script res://tests/run_tests.gd
