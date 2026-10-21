@@ -1,0 +1,30 @@
+{
+  "local": {
+    "version": 6,
+    "prunedThroughVersion": 0,
+    "files": [
+      { "fileId": "new-id", "path": "notes.txt", "writtenAtVersion": 6 }
+    ],
+    "tombstones": []
+  },
+  "remote": {
+    "version": 5,
+    "prunedThroughVersion": 0,
+    "files": [],
+    "tombstones": [
+      { "fileId": "old-id", "deletedAtVersion": 5, "deletedAtMs": 1700000000000 }
+    ]
+  },
+  "lastSyncedVersion": 5,
+  "nowMs": 1700000000000,
+  "expected": {
+    "version": 7,
+    "prunedThroughVersion": 0,
+    "files": [
+      { "fileId": "new-id", "path": "notes.txt", "writtenAtVersion": 6 }
+    ],
+    "tombstones": [
+      { "fileId": "old-id", "deletedAtVersion": 5, "deletedAtMs": 1700000000000 }
+    ]
+  }
+}

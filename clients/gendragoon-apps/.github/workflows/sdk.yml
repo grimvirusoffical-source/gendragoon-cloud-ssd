@@ -1,0 +1,113 @@
+name: SDK
+
+# Builds and tests sdk/ (Go, C ABI, JS/TS, Python, C#, Swift, Godot) and checks the generated operation tables.
+# Started by hand only (Actions > SDK > Run workflow). The contract suites need the local backends from
+# gendragoon-cloud-ssd and skip without them, so this runs the unit tests and builds; run sdk/contract/run.sh
+# with the backends for the full contract and interop round.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    working-directory: sdk
+
+jobs:
+  operations:
+    name: operation tables
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python3 tools/gen_ops.py --check
+
+  go:
+    name: Go and C ABI
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: sdk/go/go.mod
+          cache-dependency-path: sdk/go/go.sum
+      - working-directory: sdk/go
+        run: |
+          go vet ./...
+          go test ./...
+      - working-directory: sdk/engines/unreal
+        run: test/build.sh && test/build/cabi_test
+
+  js:
+    name: JavaScript and TypeScript
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: sdk/js/package-lock.json
+      - working-directory: sdk/js
+        run: |
+          npm ci
+          npm test
+
+  python:
+    name: Python
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - working-directory: sdk/python
+        run: |
+          python -m pip install -e ".[test]"
+          python -m pytest -q
+
+  csharp:
+    name: C# (net8.0 and netstandard2.1) and Unity package
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+      - working-directory: sdk/csharp/tests/Gendragoon.Sdk.Tests
+        run: |
+          dotnet run -c Release
+          dotnet run -c Release -p:SdkTfm=netstandard2.1
+      - working-directory: sdk/engines/unity
+        run: Tools~/build.sh
+
+  swift:
+    name: Swift
+    runs-on: ubuntu-latest
+    container: swift:6.0.3
+    steps:
+      - uses: actions/checkout@v4
+      - working-directory: sdk/swift
+        run: |
+          swift package resolve --force-resolved-versions
+          swift build
+          swift test
+
+  godot:
+    name: Godot addon
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Godot 4.3
+        run: |
+          curl -fsSL -o /tmp/godot.zip https://github.com/godotengine/godot/releases/download/4.3-stable/Godot_v4.3-stable_linux.x86_64.zip
+          unzip -q /tmp/godot.zip -d /tmp/godot
+          echo "GODOT=/tmp/godot/Godot_v4.3-stable_linux.x86_64" >> "$GITHUB_ENV"
+      - working-directory: sdk/engines/godot
+        run: |
+          "$GODOT" --headless --editor --quit --path . || true
+          "$GODOT" --headless --path . --script res://tests/run_tests.gd

@@ -1,0 +1,21 @@
+Source-SHA: d33970cbf0175a74898c37a8a624a92b1c1a5a94
+Source-Path: fixtures/account-deletion/status-done.json
+
+{
+  "request": {
+    "body": null,
+    "headers": {
+      "authorization": "<redacted>"
+    },
+    "method": "GET",
+    "path": "/v2/account/deletions/00000000-0000-4000-8000-000000000005"
+  },
+  "response": {
+    "body": {
+      "jobId": "00000000-0000-4000-8000-000000000005",
+      "retryable": false,
+      "status": "done"
+    },
+    "status": 200
+  }
+}

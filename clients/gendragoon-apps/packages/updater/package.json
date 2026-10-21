@@ -1,0 +1,19 @@
+{
+  "name": "@gendragoon/updater",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "App-agnostic GitHub release updater: channel selection, sha256, install, relaunch, health, rollback.",
+  "author": "Red-XAI LLC",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "typescript": "5.8.3",
+    "vitest": "3.1.4"
+  }
+}

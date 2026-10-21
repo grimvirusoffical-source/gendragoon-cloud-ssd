@@ -1,0 +1,40 @@
+{
+  "local": {
+    "version": 7,
+    "prunedThroughVersion": 1,
+    "files": [
+      { "fileId": "fresh-file", "path": "fresh.txt", "writtenAtVersion": 3 },
+      { "fileId": "live", "path": "live.txt", "writtenAtVersion": 7 },
+      { "fileId": "old-file", "path": "old.txt", "writtenAtVersion": 2 }
+    ],
+    "tombstones": [
+      { "fileId": "fresh-file", "deletedAtVersion": 6, "deletedAtMs": 1697408000001 },
+      { "fileId": "old-file", "deletedAtVersion": 4, "deletedAtMs": 1697407999999 }
+    ]
+  },
+  "remote": {
+    "version": 7,
+    "prunedThroughVersion": 1,
+    "files": [
+      { "fileId": "fresh-file", "path": "fresh.txt", "writtenAtVersion": 3 },
+      { "fileId": "live", "path": "live.txt", "writtenAtVersion": 7 },
+      { "fileId": "old-file", "path": "old.txt", "writtenAtVersion": 2 }
+    ],
+    "tombstones": [
+      { "fileId": "fresh-file", "deletedAtVersion": 6, "deletedAtMs": 1697408000001 },
+      { "fileId": "old-file", "deletedAtVersion": 4, "deletedAtMs": 1697407999999 }
+    ]
+  },
+  "lastSyncedVersion": 7,
+  "nowMs": 1700000000000,
+  "expected": {
+    "version": 8,
+    "prunedThroughVersion": 4,
+    "files": [
+      { "fileId": "live", "path": "live.txt", "writtenAtVersion": 7 }
+    ],
+    "tombstones": [
+      { "fileId": "fresh-file", "deletedAtVersion": 6, "deletedAtMs": 1697408000001 }
+    ]
+  }
+}

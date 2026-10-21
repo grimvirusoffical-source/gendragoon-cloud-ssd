@@ -1,0 +1,95 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: typecheck, lint, test
+    runs-on: ubuntu-latest
+    env:
+      ELECTRON_SKIP_BINARY_DOWNLOAD: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm typecheck
+      - run: pnpm lint
+      - run: pnpm test
+
+  windows-installer:
+    name: Windows NSIS installer
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Build unsigned NSIS installer
+        working-directory: apps/desktop
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: "false"
+        run: pnpm dist:win
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gendragoon-cloud-ssd-windows-nsis
+          path: apps/desktop/release/*.exe
+          if-no-files-found: error
+
+  mobile-prebuild:
+    name: Android expo prebuild
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Generate the Android project without compiling it
+        working-directory: apps/mobile
+        env:
+          EXPO_NO_TELEMETRY: "1"
+          CI: "1"
+        run: pnpm exec expo prebuild --no-install --platform android
+
+  mobile-screenshots:
+    name: Mobile web screenshots
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Export the Expo web bundle
+        working-directory: apps/mobile
+        env:
+          EXPO_NO_TELEMETRY: "1"
+          CI: "1"
+        run: pnpm exec expo export --platform web
+      - name: Install Playwright Chromium
+        working-directory: apps/mobile
+        run: pnpm exec playwright install --with-deps chromium
+      - name: Capture fixture screens
+        working-directory: apps/mobile
+        run: node scripts/capture-screens.mjs
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mobile-screenshots
+          path: apps/mobile/docs/screenshots/*.png
+          if-no-files-found: error

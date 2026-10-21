@@ -1,0 +1,17 @@
+Source-SHA: d33970cbf0175a74898c37a8a624a92b1c1a5a94
+Source-Path: fixtures/account-deletion/singular-path.json
+
+{
+  "request": {
+    "body": null,
+    "headers": {},
+    "method": "GET",
+    "path": "/v2/account/deletion/00000000-0000-4000-8000-000000000099"
+  },
+  "response": {
+    "body": {
+      "error": "not_found"
+    },
+    "status": 404
+  }
+}

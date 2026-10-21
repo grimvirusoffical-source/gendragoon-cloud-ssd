@@ -1,0 +1,22 @@
+{
+  "request": {
+    "body": {
+      "objects": [
+        "notes.txt"
+      ],
+      "op": "get"
+    },
+    "headers": {
+      "authorization": "<redacted>",
+      "content-type": "application/json"
+    },
+    "method": "POST",
+    "path": "/v2/workspaces/11111111-1111-4111-8111-000000000001/storage-urls"
+  },
+  "response": {
+    "body": {
+      "error": "invalid_object_id"
+    },
+    "status": 400
+  }
+}

@@ -1,0 +1,22 @@
+{
+  "name": "@gendragoon/sdk",
+  "version": "0.1.0",
+  "description": "GenDragoon Cloud SSD SDK for JavaScript and TypeScript: storage provider API, encrypted files and folders, sync, sharing and change events.",
+  "license": "UNLICENSED",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=20" },
+  "exports": {
+    ".": { "types": "./dist/src/index.d.ts", "default": "./dist/src/index.js" },
+    "./node": { "types": "./dist/src/node.d.ts", "default": "./dist/src/node.js" }
+  },
+  "files": ["dist/src"],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "tsc -p tsconfig.json && node --test dist/test/*.test.js"
+  },
+  "devDependencies": {
+    "@types/node": "22.15.21",
+    "typescript": "5.8.3"
+  }
+}
