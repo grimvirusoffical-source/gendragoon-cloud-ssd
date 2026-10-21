@@ -1,0 +1,38 @@
+Source-SHA: 8267784a790bbe8418b3cbe36e8a4b91849b0e81
+Source-Path: fixtures/storage-urls/manifest-put-generation-string.json
+
+{
+  "request": {
+    "body": {
+      "ifGeneration": "9223372036854775807",
+      "objects": [
+        "manifest"
+      ],
+      "op": "put"
+    },
+    "headers": {
+      "authorization": "<redacted>",
+      "content-type": "application/json"
+    },
+    "method": "POST",
+    "path": "/v2/workspaces/11111111-1111-4111-8111-000000000001/storage-urls"
+  },
+  "response": {
+    "body": {
+      "bucket": "gendragoon-managed-test",
+      "expiresAt": "2023-11-14T22:28:20.000Z",
+      "mode": "write",
+      "op": "put",
+      "prefix": "customer/18b7287bf3a94528c5224e4316b9c0cabf333213ea663ed8d04a1b62b2e57d09/managed/11111111-1111-4111-8111-000000000001/objects/",
+      "urls": [
+        {
+          "expiresAt": "2023-11-14T22:28:20.000Z",
+          "method": "PUT",
+          "object": "manifest",
+          "url": "https://storage.googleapis.com/gendragoon-managed-test/customer/18b7287bf3a94528c5224e4316b9c0cabf333213ea663ed8d04a1b62b2e57d09/managed/11111111-1111-4111-8111-000000000001/objects/manifest?X-Goog-Algorithm=GOOG4-RSA-SHA256&X-Goog-Expires=900"
+        }
+      ]
+    },
+    "status": 200
+  }
+}

@@ -1,0 +1,24 @@
+{
+  "local": {
+    "version": 4,
+    "prunedThroughVersion": 0,
+    "files": [
+      { "fileId": "a", "path": "a.txt", "writtenAtVersion": 3 }
+    ],
+    "tombstones": []
+  },
+  "remote": {
+    "version": 10,
+    "prunedThroughVersion": 0,
+    "files": [],
+    "tombstones": []
+  },
+  "lastSyncedVersion": 4,
+  "nowMs": 1700000000000,
+  "expected": {
+    "version": 11,
+    "prunedThroughVersion": 0,
+    "files": [],
+    "tombstones": []
+  }
+}

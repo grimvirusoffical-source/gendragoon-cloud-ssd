@@ -1,0 +1,23 @@
+{
+  "request": {
+    "body": {
+      "name": "blocked.txt",
+      "sizeBytes": 4
+    },
+    "headers": {
+      "authorization": "<redacted>",
+      "content-type": "application/json"
+    },
+    "method": "POST",
+    "path": "/v2/workspaces/11111111-1111-4111-8111-000000000001/cloud/uploads"
+  },
+  "response": {
+    "body": {
+      "error": "workspace_lock",
+      "overBy": 1,
+      "reason": "over_cap",
+      "unpaidWorkspaceIds": []
+    },
+    "status": 423
+  }
+}

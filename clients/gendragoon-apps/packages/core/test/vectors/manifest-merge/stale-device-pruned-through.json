@@ -1,0 +1,37 @@
+{
+  "local": {
+    "version": 9,
+    "prunedThroughVersion": 0,
+    "files": [
+      { "fileId": "fresh", "path": "fresh.txt", "writtenAtVersion": 9 },
+      { "fileId": "old", "path": "old.txt", "writtenAtVersion": 3 }
+    ],
+    "tombstones": [
+      { "fileId": "dropped", "deletedAtVersion": 9, "deletedAtMs": 1700000000000 }
+    ]
+  },
+  "remote": {
+    "version": 20,
+    "prunedThroughVersion": 12,
+    "files": [
+      { "fileId": "live", "path": "live.txt", "writtenAtVersion": 15 }
+    ],
+    "tombstones": [
+      { "fileId": "recent", "deletedAtVersion": 18, "deletedAtMs": 1700000000000 }
+    ]
+  },
+  "lastSyncedVersion": 8,
+  "nowMs": 1700000000000,
+  "expected": {
+    "version": 21,
+    "prunedThroughVersion": 12,
+    "files": [
+      { "fileId": "fresh", "path": "fresh.txt", "writtenAtVersion": 21 },
+      { "fileId": "live", "path": "live.txt", "writtenAtVersion": 15 }
+    ],
+    "tombstones": [
+      { "fileId": "dropped", "deletedAtVersion": 9, "deletedAtMs": 1700000000000 },
+      { "fileId": "recent", "deletedAtVersion": 18, "deletedAtMs": 1700000000000 }
+    ]
+  }
+}

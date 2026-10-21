@@ -1,0 +1,52 @@
+{
+  "repository": "grimvirusoffical-source/gendragoon-cloud-ssd",
+  "url": "https://github.com/grimvirusoffical-source/gendragoon-cloud-ssd",
+  "branch": "fix/backend-workspace-policy",
+  "commit": "0715b1a933a3ee3bb489e28a6122475403bb341d",
+  "sources": [
+    {
+      "branch": "fix/backend-workspace-policy",
+      "commit": "0715b1a933a3ee3bb489e28a6122475403bb341d",
+      "areas": [
+        "workspace-lock",
+        "workspaces",
+        "merge",
+        "byo",
+        "ownership"
+      ]
+    },
+    {
+      "branch": "fix/account-deletion",
+      "pullRequest": 6,
+      "commit": "d33970cbf0175a74898c37a8a624a92b1c1a5a94",
+      "areas": [
+        "account-deletion",
+        "errors"
+      ]
+    },
+    {
+      "branch": "feat/workspace-key-envelope",
+      "pullRequest": 9,
+      "commit": "ee4f76f07bc798635002ae2c272fb47d83db7698",
+      "areas": [
+        "key-envelope"
+      ]
+    },
+    {
+      "branch": "feat/scoped-bucket-auth",
+      "pullRequest": 7,
+      "commit": "8267784a790bbe8418b3cbe36e8a4b91849b0e81",
+      "areas": [
+        "storage-urls"
+      ]
+    }
+  ],
+  "files": [
+    {
+      "file": "fixtures/account-deletion/support-unauthorized.json",
+      "branch": "fix/account-deletion",
+      "pullRequest": 6,
+      "commit": "048641275e717e00b4031cf76ccca57cc2e1dc35"
+    }
+  ]
+}

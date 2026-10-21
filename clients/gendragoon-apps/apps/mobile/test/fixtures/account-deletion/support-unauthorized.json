@@ -1,0 +1,17 @@
+Source-SHA: 048641275e717e00b4031cf76ccca57cc2e1dc35
+Source-Path: fixtures/account-deletion/support-unauthorized.json
+
+{
+  "request": {
+    "body": null,
+    "headers": {},
+    "method": "POST",
+    "path": "/v2/account/deletions/00000000-0000-4000-8000-00000000000a/support-request"
+  },
+  "response": {
+    "body": {
+      "error": "unauthorized"
+    },
+    "status": 401
+  }
+}

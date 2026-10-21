@@ -21,6 +21,8 @@ GenDragoon Cloud SSD turns your own Google Cloud storage into a drive you can up
 | `macos/` | Reference macOS components and the installer |
 | `sdk/` | Python and JavaScript storage SDKs |
 | `fixtures/` | Shared cross-platform test fixtures |
+| `clients/gendragoon-apps/` | TypeScript core, Windows Electron app, Expo mobile app, browser extensions and Red-XAI Updater (merged from the former `gendragoon-apps` repo; `pnpm install` there) |
+| `releases/` | Notes for the pre-release builds published in Gendragoon-Releases |
 
 ## Install
 

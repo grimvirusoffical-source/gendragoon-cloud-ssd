@@ -1,0 +1,6 @@
+{
+  "extName": { "message": "GenDragoon Cloud SSD", "description": "Extension name (store listing and toolbar)" },
+  "extShortName": { "message": "GenDragoon", "description": "Short name" },
+  "extDescription": { "message": "Check GenDragoon service status and preview where your files will be sorted. Dark, light or system theme.", "description": "Extension description, max 132 characters" },
+  "actionTitle": { "message": "GenDragoon Cloud SSD", "description": "Toolbar button tooltip" }
+}

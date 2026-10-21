@@ -1,0 +1,28 @@
+{
+  "name": "@gendragoon/core",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Shared GenDragoon client core: API types, policy, sorting, merge, and BYO.",
+  "author": "Red-XAI LLC",
+  "exports": {
+    ".": "./src/index.ts",
+    "./about": "./src/about.ts",
+    "./sort-map.json": "./data/sort-map.json"
+  },
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "sync-fixtures": "node scripts/sync-server-fixtures.mjs"
+  },
+  "devDependencies": {
+    "typescript": "5.8.3",
+    "vitest": "3.1.4"
+  },
+  "dependencies": {
+    "@aws-sdk/client-s3": "3.1152.0",
+    "@aws-sdk/s3-request-presigner": "3.1152.0",
+    "libsodium-wrappers-sumo": "0.7.15",
+    "qrcode-generator": "2.0.4"
+  }
+}

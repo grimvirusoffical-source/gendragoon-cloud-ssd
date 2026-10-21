@@ -1,0 +1,979 @@
+{
+  "version": 1,
+  "levels": [
+    "L0",
+    "L1",
+    "L2",
+    "L3",
+    "L4"
+  ],
+  "risks": {
+    "read": "Reads data",
+    "write": "Creates or changes data",
+    "credential": "Obtains or replaces an API key",
+    "destructive": "Deletes one item",
+    "bulk-destructive": "Deletes many items or everything",
+    "key": "Creates, unlocks or re-wraps encryption keys",
+    "key-export": "Releases raw key material to the caller",
+    "sharing": "Grants or revokes access for someone else",
+    "billing": "Starts or changes a paid subscription (opens a checkout)"
+  },
+  "defaultMaxLevel": "L3",
+  "levelSource": {
+    "document": "rotten-apple docs/SDK_LEVELS.md (branch audit-fill), section 2 and section 8",
+    "catalog": "rotten-apple services/services.go",
+    "services": {
+      "data.storage": {
+        "level": "L2",
+        "risk": "medium",
+        "summary": "Storage binding (Gendragoon or custom storage behind the app's workspace)"
+      },
+      "gendragoon": {
+        "level": "L2",
+        "risk": "medium",
+        "summary": "Gendragoon status and connect"
+      }
+    },
+    "methodLevels": "Each call is at least its service's level (L2). Calls marked L3 (Trusted) or L4 (By approval) are GenDragoon's method list under SDK_LEVELS.md section 8, for ra-core to register. Placements decided on 2026-10-19 (QA findings B1 and B2): keyEnvelope.create (first envelope only) and files.deleteSlot are L2; keyEnvelope.replace, blobs.delete, manifests.delete and files.delete are L3."
+  },
+  "operations": [
+    {
+      "id": "capabilities",
+      "level": "L2",
+      "service": "data.storage",
+      "risk": "read",
+      "context": "app",
+      "http": {
+        "method": "GET",
+        "path": "/capabilities"
+      },
+      "scope": null,
+      "summary": "Server limits and features"
+    },
+    {
+      "id": "health",
+      "level": "L2",
+      "service": "data.storage",
+      "risk": "read",
+      "context": "app",
+      "http": {
+        "method": "GET",
+        "path": "/health"
+      },
+      "scope": null,
+      "summary": "Checks that the key works"
+    },
+    {
+      "id": "usage",
+      "level": "L2",
+      "service": "data.storage",
+      "risk": "read",
+      "context": "app",
+      "http": {
+        "method": "GET",
+        "path": "/usage"
+      },
+      "scope": "blobs:r",
+      "summary": "Bytes used, quota, object count and change sequence"
+    },
+    {
+      "id": "blobs.put",
+      "level": "L2",
+      "service": "data.storage",
+      "risk": "write",
+      "context": "app",
+      "http": {
+        "method": "PUT",
+        "path": "/blobs/{id}"
+      },
+      "scope": "blobs:rw",
+      "summary": "Store one blob"
+    },
+    {
+      "id": "blobs.get",
+      "level": "L2",
+      "service": "data.storage",
+      "risk": "read",
+      "context": "app",
+      "http": {
+        "method": "GET",
+        "path": "/blobs/{id}"
+      },
+      "scope": "blobs:r",
+      "summary": "Read one blob"
+    },
+    {
+      "id": "blobs.head",
+      "level": "L2",
+      "service": "data.storage",
+      "risk": "read",
+      "context": "app",
+      "http": {
+        "method": "HEAD",
+        "path": "/blobs/{id}"
+      },
+      "scope": "blobs:r",
+      "summary": "Size and checksum of one blob"
+    },
+    {
+      "id": "blobs.list",
+      "level": "L2",
+      "service": "data.storage",
+      "risk": "read",
+      "context": "app",
+      "http": {
+        "method": "GET",
+        "path": "/blobs"
+      },
+      "scope": "blobs:r",
+      "summary": "List blob ids"
+    },
+    {
+      "id": "blobs.batchHas",
+      "level": "L2",
+      "service": "data.storage",
+      "risk": "read",
+      "context": "app",
+      "http": {
+        "method": "POST",
+        "path": "/blobs/batch-has"
+      },
+      "scope": "blobs:r",
+      "summary": "Which of these blobs exist"
+    },
+    {
+      "id": "blobs.delete",
+      "level": "L3",
+      "service": "data.storage",
+      "risk": "destructive",
+      "context": "app",
+      "http": {
+        "method": "DELETE",
+        "path": "/blobs/{id}"
+      },
+      "scope": "blobs:rw",
+      "summary": "Delete one blob"
+    },
+    {
+      "id": "manifests.get",
+      "level": "L2",
+      "service": "data.storage",
+      "risk": "read",
+      "context": "app",
+      "http": {
+        "method": "GET",
+        "path": "/manifests/{key}"
+      },
+      "scope": "blobs:r",
+      "summary": "Read one manifest"
+    },
+    {
+      "id": "manifests.put",
+      "level": "L2",
+      "service": "data.storage",
+      "risk": "write",
+      "context": "app",
+      "http": {
+        "method": "PUT",
+        "path": "/manifests/{key}"
+      },
+      "scope": "blobs:rw",
+      "summary": "Write one manifest (create-only or compare-and-swap)"
+    },
+    {
+      "id": "manifests.list",
+      "level": "L2",
+      "service": "data.storage",
+      "risk": "read",
+      "context": "app",
+      "http": {
+        "method": "GET",
+        "path": "/manifests"
+      },
+      "scope": "blobs:r",
+      "summary": "List manifest keys and generations"
+    },
+    {
+      "id": "manifests.delete",
+      "level": "L3",
+      "service": "data.storage",
+      "risk": "destructive",
+      "context": "app",
+      "http": {
+        "method": "DELETE",
+        "path": "/manifests/{key}"
+      },
+      "scope": "blobs:rw",
+      "summary": "Delete one manifest"
+    },
+    {
+      "id": "keyEnvelope.get",
+      "level": "L2",
+      "service": "data.storage",
+      "risk": "read",
+      "context": "app",
+      "http": {
+        "method": "GET",
+        "path": "/key-envelope"
+      },
+      "scope": "blobs:r",
+      "summary": "Read the wrapped master key"
+    },
+    {
+      "id": "keyEnvelope.create",
+      "level": "L2",
+      "service": "data.storage",
+      "risk": "key",
+      "context": "app",
+      "http": {
+        "method": "PUT",
+        "path": "/key-envelope"
+      },
+      "scope": "blobs:rw",
+      "summary": "Create the master key and its recovery envelope (only when none exists)"
+    },
+    {
+      "id": "keyEnvelope.replace",
+      "level": "L3",
+      "service": "data.storage",
+      "risk": "key",
+      "context": "app",
+      "http": {
+        "method": "PUT",
+        "path": "/key-envelope"
+      },
+      "scope": "blobs:rw",
+      "summary": "Replace the recovery envelope of an existing master key (passphrase change or re-wrap)"
+    },
+    {
+      "id": "crypto.unlock",
+      "level": "L2",
+      "service": "data.storage",
+      "risk": "key",
+      "context": "local",
+      "http": null,
+      "scope": null,
+      "summary": "Unwrap the master key with the recovery passphrase, in memory"
+    },
+    {
+      "id": "crypto.importMasterKey",
+      "level": "L2",
+      "service": "data.storage",
+      "risk": "key",
+      "context": "local",
+      "http": null,
+      "scope": null,
+      "summary": "Use a master key handed over by the host (for example the Rotten Apple launcher)"
+    },
+    {
+      "id": "crypto.exportMasterKey",
+      "level": "L4",
+      "service": "data.storage",
+      "risk": "key-export",
+      "context": "local",
+      "http": null,
+      "scope": null,
+      "summary": "Return the raw master key to the caller"
+    },
+    {
+      "id": "apiKey.rotate",
+      "level": "L2",
+      "service": "data.storage",
+      "risk": "credential",
+      "context": "app",
+      "http": {
+        "method": "POST",
+        "path": "/connect/rotate"
+      },
+      "scope": null,
+      "summary": "Replace this binding's API key"
+    },
+    {
+      "id": "files.list",
+      "level": "L2",
+      "service": "data.storage",
+      "risk": "read",
+      "context": "app",
+      "http": null,
+      "scope": null,
+      "summary": "List a folder"
+    },
+    {
+      "id": "files.stat",
+      "level": "L2",
+      "service": "data.storage",
+      "risk": "read",
+      "context": "app",
+      "http": null,
+      "scope": null,
+      "summary": "Metadata of one file"
+    },
+    {
+      "id": "files.read",
+      "level": "L2",
+      "service": "data.storage",
+      "risk": "read",
+      "context": "app",
+      "http": null,
+      "scope": null,
+      "summary": "Read a file"
+    },
+    {
+      "id": "files.write",
+      "level": "L2",
+      "service": "data.storage",
+      "risk": "write",
+      "context": "app",
+      "http": null,
+      "scope": null,
+      "summary": "Create or replace a file"
+    },
+    {
+      "id": "files.mkdir",
+      "level": "L2",
+      "service": "data.storage",
+      "risk": "write",
+      "context": "app",
+      "http": null,
+      "scope": null,
+      "summary": "Create a folder"
+    },
+    {
+      "id": "files.move",
+      "level": "L2",
+      "service": "data.storage",
+      "risk": "write",
+      "context": "app",
+      "http": null,
+      "scope": null,
+      "summary": "Rename or move a file or folder"
+    },
+    {
+      "id": "files.delete",
+      "level": "L3",
+      "service": "data.storage",
+      "risk": "destructive",
+      "context": "app",
+      "http": null,
+      "scope": null,
+      "summary": "Delete one file or an empty folder"
+    },
+    {
+      "id": "files.deleteSlot",
+      "level": "L2",
+      "service": "data.storage",
+      "risk": "destructive",
+      "context": "app",
+      "http": null,
+      "scope": null,
+      "summary": "Delete one save slot: a single file directly inside the app's save folder"
+    },
+    {
+      "id": "files.deleteFolder",
+      "level": "L3",
+      "service": "data.storage",
+      "risk": "bulk-destructive",
+      "context": "app",
+      "http": null,
+      "scope": null,
+      "summary": "Delete a folder and everything in it"
+    },
+    {
+      "id": "files.collectGarbage",
+      "level": "L3",
+      "service": "data.storage",
+      "risk": "bulk-destructive",
+      "context": "app",
+      "http": null,
+      "scope": null,
+      "summary": "Delete blobs no file references"
+    },
+    {
+      "id": "sync.push",
+      "level": "L2",
+      "service": "data.storage",
+      "risk": "write",
+      "context": "app",
+      "http": null,
+      "scope": null,
+      "summary": "Upload new and changed local files"
+    },
+    {
+      "id": "sync.pull",
+      "level": "L2",
+      "service": "data.storage",
+      "risk": "write",
+      "context": "app",
+      "http": null,
+      "scope": null,
+      "summary": "Download new and changed remote files to the local folder"
+    },
+    {
+      "id": "sync.mirror",
+      "level": "L3",
+      "service": "data.storage",
+      "risk": "bulk-destructive",
+      "context": "app",
+      "http": null,
+      "scope": null,
+      "summary": "Make one side identical to the other, deleting extras"
+    },
+    {
+      "id": "share.createIdentity",
+      "level": "L2",
+      "service": "data.storage",
+      "risk": "key",
+      "context": "local",
+      "http": null,
+      "scope": null,
+      "summary": "Create a recipient key pair for receiving shares"
+    },
+    {
+      "id": "share.export",
+      "level": "L3",
+      "service": "data.storage",
+      "risk": "sharing",
+      "context": "app",
+      "http": null,
+      "scope": null,
+      "summary": "Encrypt one file's key to a recipient"
+    },
+    {
+      "id": "share.open",
+      "level": "L2",
+      "service": "data.storage",
+      "risk": "read",
+      "context": "app",
+      "http": null,
+      "scope": null,
+      "summary": "Open a share addressed to this recipient"
+    },
+    {
+      "id": "share.createReadKey",
+      "level": "L3",
+      "service": "data.storage",
+      "risk": "sharing",
+      "context": "app",
+      "http": {
+        "method": "POST",
+        "path": "/keys"
+      },
+      "scope": "blobs:rw",
+      "summary": "Mint a read-only key for this binding"
+    },
+    {
+      "id": "share.listReadKeys",
+      "level": "L2",
+      "service": "data.storage",
+      "risk": "read",
+      "context": "app",
+      "http": {
+        "method": "GET",
+        "path": "/keys"
+      },
+      "scope": "blobs:rw",
+      "summary": "List this binding's read-only keys"
+    },
+    {
+      "id": "share.revokeReadKey",
+      "level": "L3",
+      "service": "data.storage",
+      "risk": "sharing",
+      "context": "app",
+      "http": {
+        "method": "DELETE",
+        "path": "/keys/{keyId}"
+      },
+      "scope": "blobs:rw",
+      "summary": "Revoke a read-only key"
+    },
+    {
+      "id": "events.watch",
+      "level": "L2",
+      "service": "data.storage",
+      "risk": "read",
+      "context": "app",
+      "http": null,
+      "scope": null,
+      "summary": "Poll for manifest changes, usage changes and revocation"
+    },
+    {
+      "id": "storage.wipe",
+      "level": "L4",
+      "service": "data.storage",
+      "risk": "bulk-destructive",
+      "context": "app",
+      "http": null,
+      "scope": null,
+      "summary": "Delete every object stored through this binding"
+    },
+    {
+      "id": "connect.redeemGrant",
+      "level": "L2",
+      "service": "gendragoon",
+      "risk": "credential",
+      "context": "app",
+      "http": {
+        "method": "POST",
+        "path": "/connect/redeem"
+      },
+      "scope": null,
+      "summary": "Exchange a one-time connect code for an API key"
+    },
+    {
+      "id": "connect.exchangeCode",
+      "level": "L2",
+      "service": "gendragoon",
+      "risk": "credential",
+      "context": "app",
+      "http": {
+        "method": "POST",
+        "path": "/connect/token"
+      },
+      "scope": null,
+      "summary": "Exchange a PKCE authorization code for an API key"
+    },
+    {
+      "id": "account.createGrant",
+      "level": "L3",
+      "service": "gendragoon",
+      "risk": "sharing",
+      "context": "user",
+      "http": {
+        "method": "POST",
+        "path": "/connect/grants"
+      },
+      "scope": null,
+      "summary": "Issue a one-time connect code for a workspace"
+    },
+    {
+      "id": "account.authorize",
+      "level": "L3",
+      "service": "gendragoon",
+      "risk": "sharing",
+      "context": "user",
+      "http": {
+        "method": "POST",
+        "path": "/connect/authorize"
+      },
+      "scope": null,
+      "summary": "Approve a PKCE connect request"
+    },
+    {
+      "id": "account.listBindings",
+      "level": "L2",
+      "service": "gendragoon",
+      "risk": "read",
+      "context": "user",
+      "http": {
+        "method": "GET",
+        "path": "/bindings"
+      },
+      "scope": null,
+      "summary": "List connected apps"
+    },
+    {
+      "id": "account.revokeBinding",
+      "level": "L3",
+      "service": "gendragoon",
+      "risk": "sharing",
+      "context": "user",
+      "http": {
+        "method": "DELETE",
+        "path": "/bindings/{id}"
+      },
+      "scope": null,
+      "summary": "Disconnect an app, keeping its data"
+    },
+    {
+      "id": "account.revokeAndDelete",
+      "level": "L4",
+      "service": "gendragoon",
+      "risk": "bulk-destructive",
+      "context": "user",
+      "http": {
+        "method": "DELETE",
+        "path": "/bindings/{id}?deleteData=true"
+      },
+      "scope": null,
+      "summary": "Disconnect an app and delete its data"
+    },
+    {
+      "id": "teams.catalog",
+      "level": "L2",
+      "service": "gendragoon",
+      "risk": "read",
+      "context": "user",
+      "http": {
+        "method": "GET",
+        "path": "/v2/teams/catalog"
+      },
+      "scope": null,
+      "summary": "Team tiers, Enterprise contact and the color palette"
+    },
+    {
+      "id": "teams.list",
+      "level": "L2",
+      "service": "gendragoon",
+      "risk": "read",
+      "context": "user",
+      "http": {
+        "method": "GET",
+        "path": "/v2/teams"
+      },
+      "scope": null,
+      "summary": "Teams the account belongs to"
+    },
+    {
+      "id": "teams.create",
+      "level": "L3",
+      "service": "gendragoon",
+      "risk": "billing",
+      "context": "user",
+      "http": {
+        "method": "POST",
+        "path": "/v2/teams"
+      },
+      "scope": null,
+      "summary": "Create a team and open its subscription checkout"
+    },
+    {
+      "id": "teams.get",
+      "level": "L2",
+      "service": "gendragoon",
+      "risk": "read",
+      "context": "user",
+      "http": {
+        "method": "GET",
+        "path": "/v2/teams/{id}"
+      },
+      "scope": null,
+      "summary": "A team, its members and the color choices"
+    },
+    {
+      "id": "teams.checkout",
+      "level": "L3",
+      "service": "gendragoon",
+      "risk": "billing",
+      "context": "user",
+      "http": {
+        "method": "POST",
+        "path": "/v2/teams/{id}/checkout"
+      },
+      "scope": null,
+      "summary": "Resume or replace the team subscription checkout"
+    },
+    {
+      "id": "teams.createInvite",
+      "level": "L3",
+      "service": "gendragoon",
+      "risk": "sharing",
+      "context": "user",
+      "http": {
+        "method": "POST",
+        "path": "/v2/teams/{id}/invites"
+      },
+      "scope": null,
+      "summary": "Create an invite code"
+    },
+    {
+      "id": "teams.revokeInvite",
+      "level": "L3",
+      "service": "gendragoon",
+      "risk": "sharing",
+      "context": "user",
+      "http": {
+        "method": "POST",
+        "path": "/v2/teams/{id}/invites/{inviteId}/revoke"
+      },
+      "scope": null,
+      "summary": "Revoke an invite code"
+    },
+    {
+      "id": "teams.previewInvite",
+      "level": "L2",
+      "service": "gendragoon",
+      "risk": "read",
+      "context": "user",
+      "http": {
+        "method": "POST",
+        "path": "/v2/teams/join/preview"
+      },
+      "scope": null,
+      "summary": "Team name, size and free colors for an invite code"
+    },
+    {
+      "id": "teams.join",
+      "level": "L3",
+      "service": "gendragoon",
+      "risk": "sharing",
+      "context": "user",
+      "http": {
+        "method": "POST",
+        "path": "/v2/teams/join"
+      },
+      "scope": null,
+      "summary": "Join a team with an invite code"
+    },
+    {
+      "id": "teams.updateMe",
+      "level": "L2",
+      "service": "gendragoon",
+      "risk": "write",
+      "context": "user",
+      "http": {
+        "method": "PATCH",
+        "path": "/v2/teams/{id}/me"
+      },
+      "scope": null,
+      "summary": "Change your display name or color in a team"
+    },
+    {
+      "id": "teams.leave",
+      "level": "L3",
+      "service": "gendragoon",
+      "risk": "destructive",
+      "context": "user",
+      "http": {
+        "method": "POST",
+        "path": "/v2/teams/{id}/leave"
+      },
+      "scope": null,
+      "summary": "Leave a team; your shares are removed"
+    },
+    {
+      "id": "teams.workspaces",
+      "level": "L2",
+      "service": "gendragoon",
+      "risk": "read",
+      "context": "user",
+      "http": {
+        "method": "GET",
+        "path": "/v2/teams/{id}/workspaces"
+      },
+      "scope": null,
+      "summary": "Team workspaces and shared personal workspaces"
+    },
+    {
+      "id": "teams.createWorkspace",
+      "level": "L3",
+      "service": "gendragoon",
+      "risk": "billing",
+      "context": "user",
+      "http": {
+        "method": "POST",
+        "path": "/v2/teams/{id}/workspaces"
+      },
+      "scope": null,
+      "summary": "Create a team workspace and open its plans checkout"
+    },
+    {
+      "id": "teams.checkoutWorkspace",
+      "level": "L3",
+      "service": "gendragoon",
+      "risk": "billing",
+      "context": "user",
+      "http": {
+        "method": "POST",
+        "path": "/v2/teams/{id}/workspaces/{wid}/checkout"
+      },
+      "scope": null,
+      "summary": "Resume a team workspace's plans checkout"
+    },
+    {
+      "id": "teams.share",
+      "level": "L3",
+      "service": "gendragoon",
+      "risk": "sharing",
+      "context": "user",
+      "http": {
+        "method": "POST",
+        "path": "/v2/teams/{id}/shares"
+      },
+      "scope": null,
+      "summary": "Show one of your personal workspaces to the team (view only)"
+    },
+    {
+      "id": "teams.unshare",
+      "level": "L3",
+      "service": "gendragoon",
+      "risk": "sharing",
+      "context": "user",
+      "http": {
+        "method": "DELETE",
+        "path": "/v2/teams/{id}/shares/{wid}"
+      },
+      "scope": null,
+      "summary": "Stop showing a personal workspace to the team"
+    },
+    {
+      "id": "teams.chat.list",
+      "level": "L2",
+      "service": "gendragoon",
+      "risk": "read",
+      "context": "user",
+      "http": {
+        "method": "GET",
+        "path": "/v2/teams/{id}/chat"
+      },
+      "scope": null,
+      "summary": "Chat messages after a sequence number"
+    },
+    {
+      "id": "teams.chat.watch",
+      "level": "L2",
+      "service": "gendragoon",
+      "risk": "read",
+      "context": "user",
+      "http": {
+        "method": "GET",
+        "path": "/v2/teams/{id}/chat"
+      },
+      "scope": null,
+      "summary": "Poll for new chat messages"
+    },
+    {
+      "id": "teams.chat.post",
+      "level": "L2",
+      "service": "gendragoon",
+      "risk": "write",
+      "context": "user",
+      "http": {
+        "method": "POST",
+        "path": "/v2/teams/{id}/chat"
+      },
+      "scope": null,
+      "summary": "Post a text message or a workspace card"
+    },
+    {
+      "id": "teams.chat.report",
+      "level": "L2",
+      "service": "gendragoon",
+      "risk": "write",
+      "context": "user",
+      "http": {
+        "method": "POST",
+        "path": "/v2/teams/{id}/chat/{seq}/report"
+      },
+      "scope": null,
+      "summary": "Report a message to the platform"
+    },
+    {
+      "id": "teams.chat.delete",
+      "level": "L3",
+      "service": "gendragoon",
+      "risk": "destructive",
+      "context": "user",
+      "http": {
+        "method": "POST",
+        "path": "/v2/teams/{id}/chat/{seq}/delete"
+      },
+      "scope": null,
+      "summary": "Remove a message (owner, reason required)"
+    },
+    {
+      "id": "teams.members.mute",
+      "level": "L3",
+      "service": "gendragoon",
+      "risk": "destructive",
+      "context": "user",
+      "http": {
+        "method": "POST",
+        "path": "/v2/teams/{id}/members/{memberId}/mute"
+      },
+      "scope": null,
+      "summary": "Mute a member (owner, reason required)"
+    },
+    {
+      "id": "teams.members.unmute",
+      "level": "L3",
+      "service": "gendragoon",
+      "risk": "write",
+      "context": "user",
+      "http": {
+        "method": "POST",
+        "path": "/v2/teams/{id}/members/{memberId}/unmute"
+      },
+      "scope": null,
+      "summary": "Unmute a member (owner)"
+    },
+    {
+      "id": "teams.members.kick",
+      "level": "L3",
+      "service": "gendragoon",
+      "risk": "destructive",
+      "context": "user",
+      "http": {
+        "method": "POST",
+        "path": "/v2/teams/{id}/members/{memberId}/kick"
+      },
+      "scope": null,
+      "summary": "Remove a member (owner, reason required)"
+    },
+    {
+      "id": "teams.members.ban",
+      "level": "L3",
+      "service": "gendragoon",
+      "risk": "destructive",
+      "context": "user",
+      "http": {
+        "method": "POST",
+        "path": "/v2/teams/{id}/members/{memberId}/ban"
+      },
+      "scope": null,
+      "summary": "Remove a member and block rejoining (owner, reason required)"
+    },
+    {
+      "id": "teams.members.setRole",
+      "level": "L3",
+      "service": "gendragoon",
+      "risk": "sharing",
+      "context": "user",
+      "http": {
+        "method": "POST",
+        "path": "/v2/teams/{id}/members/{memberId}/role"
+      },
+      "scope": null,
+      "summary": "Make a member a viewer or a full member (owner)"
+    },
+    {
+      "id": "teams.audit",
+      "level": "L2",
+      "service": "gendragoon",
+      "risk": "read",
+      "context": "user",
+      "http": {
+        "method": "GET",
+        "path": "/v2/teams/{id}/audit"
+      },
+      "scope": null,
+      "summary": "The team's hash-chained audit log (owner)"
+    },
+    {
+      "id": "teams.transfer",
+      "level": "L4",
+      "service": "gendragoon",
+      "risk": "sharing",
+      "context": "user",
+      "http": {
+        "method": "POST",
+        "path": "/v2/teams/{id}/transfer"
+      },
+      "scope": null,
+      "summary": "Hand the team to another member (owner)"
+    },
+    {
+      "id": "teams.delete",
+      "level": "L4",
+      "service": "gendragoon",
+      "risk": "bulk-destructive",
+      "context": "user",
+      "http": {
+        "method": "POST",
+        "path": "/v2/teams/{id}/delete"
+      },
+      "scope": null,
+      "summary": "Delete the team, its chat and its team workspaces with their files (owner)"
+    }
+  ]
+}
