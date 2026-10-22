@@ -97,6 +97,7 @@ final class RedXCloudPreviewModel: ObservableObject {
 struct RedXCloudPreview: View {
     let close: () -> Void
     @StateObject private var model = RedXCloudPreviewModel()
+    @State private var previewConfigPath = ""
     @State private var workspaceName = ""
     @State private var workspaceID = ""
     @State private var objectID = ""
@@ -143,11 +144,22 @@ struct RedXCloudPreview: View {
                         Text("Register on the shared Red-XAI website. Connect through browser OAuth; no Red-XAI password is captured by this app.")
                             .font(.system(size: 12)).foregroundStyle(.secondary)
                         HStack {
+                            TextField("Optional local preview-config.json", text: $previewConfigPath)
+                                .textFieldStyle(.roundedBorder)
+                            Button("Choose Test Config") { selectFile { previewConfigPath = $0 } }
+                        }
+                        Text("Leave this empty for production. For the private Vultr test, select a trusted local loopback connection config while an SSH tunnel is active.")
+                            .font(.system(size: 11)).foregroundStyle(.secondary)
+                        HStack {
                             Button("Register Red-XAI Account") {
-                                model.run(["INSTALL-GSSD-CLI", "--register"], label: "Opening registration")
+                                var args = ["INSTALL-GSSD-CLI", "--register"]
+                                if !previewConfigPath.isEmpty { args += ["--preview-config", previewConfigPath] }
+                                model.run(args, label: "Opening registration")
                             }
                             Button("Connect Existing Account") {
-                                model.run(["INSTALL-GSSD-CLI", "--existing-account"], label: "Linking account and Receiver")
+                                var args = ["INSTALL-GSSD-CLI", "--existing-account"]
+                                if !previewConfigPath.isEmpty { args += ["--preview-config", previewConfigPath] }
+                                model.run(args, label: "Linking account and Receiver")
                             }
                             .buttonStyle(.borderedProminent).tint(.purple)
                         }.disabled(model.busy)
