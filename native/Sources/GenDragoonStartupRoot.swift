@@ -266,8 +266,17 @@ import Foundation
 
 struct GenDragoonStartupRoot:View {
     @StateObject private var session=GDLoginSession()
+    @State private var redXPreviewOpen = false
+    // A separately staged, explicit preview must not start the normal
+    // Google-cloud updater or affect an existing GenDragoon installation.
+    private var redXStandalonePreview: Bool {
+        Bundle.main.object(forInfoDictionaryKey: "GDRXPreviewMode") as? Bool == true
+    }
     var body:some View {
         Group {
+            if redXPreviewOpen {
+                RedXCloudPreview(close: { redXPreviewOpen = false })
+            } else {
             switch session.stage {
             case .ready:
                 MainView().environmentObject(session)
@@ -292,14 +301,27 @@ struct GenDragoonStartupRoot:View {
                         Button("Continue with Google") {session.login()}
                             .disabled(session.stage == .waiting || session.stage == .verifying)
                             .buttonStyle(.borderedProminent).tint(.purple).controlSize(.large)
+                        Button("Open Red-XAI Encrypted Cloud Preview") { redXPreviewOpen = true }
+                            .buttonStyle(.bordered)
+                            .controlSize(.large)
+                        Text("Red-XAI preview uses its own account and does not grant access to Google cloud features.")
+                            .font(.system(size:11)).foregroundStyle(.orange)
+                            .multilineTextAlignment(.center)
                         Text("A secure Google login window opens in your browser. No password is requested by GenDragoon.")
                             .font(.system(size:10)).foregroundStyle(.gray).multilineTextAlignment(.center)
                     }.frame(maxWidth:440).padding(40)
                 }
             }
+            }
         }
         .frame(minWidth:780,minHeight:660)
         .preferredColorScheme(.dark)
-        .onAppear { GDUpdateCoordinator.shared.start() }
+        .onAppear {
+            if redXStandalonePreview {
+                redXPreviewOpen = true
+            } else {
+                GDUpdateCoordinator.shared.start()
+            }
+        }
     }
 }
