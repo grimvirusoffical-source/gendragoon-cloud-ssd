@@ -40,7 +40,7 @@ test('Real RedX + Red-XAI Accounts + Red-SecretsXAI PNG Receiver roundtrip', {ti
  const password=crypto.randomBytes(24).toString('hex'),keymap=path.join(s.dir,'client-keymap/session.kxai');
  function codec(operation,source,output,extra={}) {
   return new Promise(resolve=>{
-   const child=spawn(options.python,[path.join(__dirname,'../client-codec.py')],{env:{...process.env,RSX_LIB:path.join(s.base,'tools/rsx-build/librsx.dylib'),OPENBLAS_NUM_THREADS:'1'},stdio:['pipe','pipe','pipe']});
+   const child=spawn(options.python,[path.join(__dirname,'../client-codec.py')],{env:{...process.env,RSX_LIB:path.join(s.base,'tools/rsx-build',process.platform==='darwin'?'librsx.dylib':'librsx.so'),OPENBLAS_NUM_THREADS:'1'},stdio:['pipe','pipe','pipe']});
    let out='';child.stdout.on('data',x=>out+=x);child.stderr.on('data',()=>{});
    child.once('close',code=>resolve({code,out}));child.stdin.end(JSON.stringify({operation,source,output,password,keymap,receiver:ra.id,workspace,object_id:object,...extra}));
   });
