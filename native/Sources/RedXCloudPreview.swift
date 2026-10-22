@@ -6,7 +6,9 @@ import Foundation
 // REDXAI's verified CLI owns the OAuth, Receiver authorization and PNG codec.
 @MainActor
 final class RedXCloudPreviewModel: ObservableObject {
-    @Published var busy = false
+    @Published var busy = false {
+        didSet { GDUpdateActivity.shared.set(self, key: "redXCloudBusy", active: busy) }
+    }
     @Published var status = "Connect your Red-XAI account to begin."
     @Published var output = ""
     @Published var cliVersion = "Not checked"
@@ -122,7 +124,9 @@ struct RedXCloudPreview: View {
                             .font(.system(size: 12)).foregroundStyle(.secondary)
                     }
                     Spacer()
-                    Button("Back to Google Sign In", action: close)
+                    if Bundle.main.object(forInfoDictionaryKey: "GDRXPreviewMode") as? Bool != true {
+                        Button("Back to Google Sign In", action: close)
+                    }
                 }
                 HStack {
                     Label(model.cliVersion, systemImage: "terminal").foregroundStyle(.secondary)

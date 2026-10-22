@@ -267,6 +267,11 @@ import Foundation
 struct GenDragoonStartupRoot:View {
     @StateObject private var session=GDLoginSession()
     @State private var redXPreviewOpen = false
+    // A separately staged, explicit preview must not start the normal
+    // Google-cloud updater or affect an existing GenDragoon installation.
+    private var redXStandalonePreview: Bool {
+        Bundle.main.object(forInfoDictionaryKey: "GDRXPreviewMode") as? Bool == true
+    }
     var body:some View {
         Group {
             if redXPreviewOpen {
@@ -311,6 +316,12 @@ struct GenDragoonStartupRoot:View {
         }
         .frame(minWidth:780,minHeight:660)
         .preferredColorScheme(.dark)
-        .onAppear { GDUpdateCoordinator.shared.start() }
+        .onAppear {
+            if redXStandalonePreview {
+                redXPreviewOpen = true
+            } else {
+                GDUpdateCoordinator.shared.start()
+            }
+        }
     }
 }

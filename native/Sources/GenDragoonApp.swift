@@ -912,6 +912,7 @@ private struct WelcomePanel: View {
         return .terminateCancel
     }
     func applicationWillTerminate(_ notification: Notification) {
+        guard Bundle.main.object(forInfoDictionaryKey: "GDRXPreviewMode") as? Bool != true else { return }
         GDUpdateCoordinator.shared.prepareForTermination()
     }
 }
