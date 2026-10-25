@@ -41,24 +41,50 @@ async function createCloud(config) {
     if (new URL(url).origin !== issuer) throw new CloudError('issuer_endpoint_invalid', 503);
     return fetch(url, {...opts, redirect: 'error'});
   };
-  const verifier = createOidcVerifier({issuer, audience: 'gendragoon', typ: 'at+jwt', fetchImpl: secureFetch});
+  const authProvider = config.authProvider || 'red-xai-accounts';
+  if (!['red-xai-accounts','redx-site-session'].includes(authProvider)) throw new Error('Unsupported authentication provider');
+  const verifier = authProvider === 'red-xai-accounts'
+    ? createOidcVerifier({issuer, audience: 'gendragoon', typ: 'at+jwt', fetchImpl: secureFetch})
+    : null;
   const busy = new Set(); let requests = 0; let decoderBusy = false;
+  async function responseJSON(response, max = 65536) {
+    const chunks = []; let size = 0;
+    for await (const chunk of response.body) {
+      size += chunk.length;
+      if (size > max) throw new CloudError('identity_response_too_large', 503);
+      chunks.push(Buffer.from(chunk));
+    }
+    try { return JSON.parse(Buffer.concat(chunks).toString('utf8')); }
+    catch { throw new CloudError('identity_response_invalid', 503); }
+  }
   async function identify(req) {
     const header = req.headers.authorization || '';
     if (!/^Bearer [A-Za-z0-9_.-]{1,16000}$/.test(header)) throw new CloudError('login_required', 401);
-    const token = header.slice(7);
-    let claims;
+    let subject;
     try {
-      claims = await verifier.verify(token);
-      const info = await secureFetch(issuer + '/oauth2/userinfo', {headers: {authorization: header}, signal: AbortSignal.timeout(8000)});
-      if (!info.ok) throw new Error('inactive');
-      const user = await info.json();
-      if (user.sub !== claims.sub) throw new Error('subject');
-      if (!user.email_verified || !['13to17', '18plus'].includes(user.age_band) ||
-          (config.requiredTos && user.app_tos_version !== config.requiredTos) ||
-          user.twofactor_state === 'pending') throw new CloudError('account_setup_required', 403);
+      if (authProvider === 'redx-site-session') {
+        if (!/^Bearer rxca_[A-Za-z0-9_-]{43}$/.test(header)) throw new CloudError('invalid_or_inactive_session', 401);
+        const info = await secureFetch(issuer + '/redxai-connect/userinfo', {headers: {authorization: header}, signal: AbortSignal.timeout(8000)});
+        if (!info.ok) throw new CloudError('invalid_or_inactive_session', 401);
+        const user = await responseJSON(info);
+        if (user.protocol !== 'redx-site-session-v1' || user.client_id !== 'gendragoon' ||
+            user.scope !== 'gendragoon.receiver' || typeof user.sub !== 'string' || !user.sub ||
+            user.email_verified !== true) throw new CloudError('account_setup_required', 403);
+        subject = user.sub;
+      } else {
+        const token = header.slice(7);
+        const claims = await verifier.verify(token);
+        const info = await secureFetch(issuer + '/oauth2/userinfo', {headers: {authorization: header}, signal: AbortSignal.timeout(8000)});
+        if (!info.ok) throw new Error('inactive');
+        const user = await responseJSON(info);
+        if (user.sub !== claims.sub) throw new Error('subject');
+        if (!user.email_verified || !['13to17', '18plus'].includes(user.age_band) ||
+            (config.requiredTos && user.app_tos_version !== config.requiredTos) ||
+            user.twofactor_state === 'pending') throw new CloudError('account_setup_required', 403);
+        subject = claims.sub;
+      }
     } catch(e) { if (e instanceof CloudError) throw e; throw new CloudError('invalid_or_inactive_session', 401); }
-    return digest(JSON.stringify(['red-xai-receiver/v1', issuer, claims.sub]));
+    return digest(JSON.stringify(['red-xai-receiver/v1', issuer, subject]));
   }
   async function validatePNG(file) {
     if (decoderBusy) throw new CloudError('decoder_busy_retry', 503);
@@ -93,7 +119,7 @@ async function createCloud(config) {
       if (host !== '127.0.0.1:' + server.address().port || req.headers.origin) throw new CloudError('invalid_origin', 403);
       const u = new URL(req.url, 'http://' + host);
       if (u.search || /%|\\|\.\./.test(req.url)) throw new CloudError('invalid_path', 400);
-      if (req.method === 'GET' && u.pathname === '/healthz') return json(res, 200, {service: 'Red-XAI-Reiceivers', developmentOnly: true, productionReady: false});
+      if (req.method === 'GET' && ['/healthz','/v1/receivers/healthz'].includes(u.pathname)) return json(res, 200, {service: 'Red-XAI-Reiceivers', developmentOnly: true, productionReady: false, authProvider});
       const owner = await identify(req);
       const base = '/v1/receivers/me';
       if (u.pathname === base && req.method === 'PUT') {
@@ -190,7 +216,7 @@ async function createCloud(config) {
 }
 if (require.main === module) {
   if (process.env.REDXAI_CLOUD_PREVIEW !== '1') { console.error('This is a private integration preview, not the production GenDragoon backend. Set REDXAI_CLOUD_PREVIEW=1 explicitly.'); process.exit(2); }
-  createCloud({issuer: process.env.REDXAI_ISSUER, dev: process.env.REDXAI_LOOPBACK_DEV === '1', redxURL: process.env.REDX_URL,
+  createCloud({issuer: process.env.REDXAI_ISSUER, dev: process.env.REDXAI_LOOPBACK_DEV === '1', authProvider: process.env.REDXAI_AUTH_PROVIDER || 'red-xai-accounts', redxURL: process.env.REDX_URL,
     redxKey: process.env.REDX_RECEIVERS_KEY, redxDB: process.env.REDX_RECEIVERS_DB || 'gendragoon_receivers', root: process.env.REDX_RECEIVERS_ROOT,
     python: process.env.REDX_PYTHON || 'python3', requiredTos: process.env.REDXAI_REQUIRED_TOS}).then(async cloud => {
       console.log('Red-XAI-Reiceivers PRIVATE PREVIEW: ' + await cloud.listen(Number(process.env.REDX_CLOUD_PORT || 17779)));
