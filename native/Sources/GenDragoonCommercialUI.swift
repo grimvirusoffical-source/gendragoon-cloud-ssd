@@ -44,7 +44,7 @@ private let gdTiers: [GDTier] = [
     .init(id:"6TB",capacity:"6 TB",gigabytes:6000,monthly:249.99,workers:24,category:"Ultimate")
 ]
 private func gdMoney(_ value: Double) -> String { String(format:"$%.2f", value) }
-private let gdPurple = Color(red:0.61,green:0.42,blue:0.98)
+let gdPurple = Color(red:0.61,green:0.42,blue:0.98)
 private let gdSecondary = Color.white.opacity(0.62)
 private let gdSurface = Color.white.opacity(0.055)
 
@@ -63,7 +63,7 @@ private struct GDHeading: View {
         }.frame(maxWidth:.infinity,alignment:.leading)
     }
 }
-private struct GDPanel<Content:View>: View {
+struct GDPanel<Content:View>: View {
     let content:Content
     init(@ViewBuilder content:()->Content) {self.content=content()}
     var body:some View {

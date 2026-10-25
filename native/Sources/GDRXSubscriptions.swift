@@ -10,7 +10,7 @@ private struct GDRXControlConfig: Decodable {
     let endpoint: String
     let version: Int
 }
-private struct GDRXPricing: Decodable {
+struct GDRXPricing: Decodable {
     struct Projects: Decodable {
         let firstFree: Bool
         let additionalOneTimeCents: Int
@@ -41,7 +41,7 @@ private struct GDRXPricing: Decodable {
     let removeAds: RemoveAds
     let owner: Owner
 }
-private struct GDRXProject: Decodable, Identifiable, Equatable {
+struct GDRXProject: Decodable, Identifiable, Equatable {
     let id: String
     let name: String
     let status: String
