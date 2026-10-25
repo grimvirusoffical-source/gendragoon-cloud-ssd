@@ -21,12 +21,14 @@ public struct UploadCloudBucket: Identifiable, Hashable, Sendable {
     public let displayName: String
     public let remote: String
     public let prefix: String
+    public let workers: Int
     /// remote is the configured rclone section name, without a colon or path.
-    public init(id: String, displayName: String, remote: String, prefix: String) {
+    public init(id: String, displayName: String, remote: String, prefix: String, workers: Int = 1) {
         self.id = id
         self.displayName = displayName
         self.remote = remote
         self.prefix = prefix
+        self.workers = max(1, min(24, workers))
     }
 }
 

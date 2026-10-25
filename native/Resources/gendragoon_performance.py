@@ -90,17 +90,18 @@ def configure_from_stdin(stream=None):
         value = json.loads(raw)
         if value.get("provider") == "redxai":
             workspace=value.get("workspaceId");token=value.get("bearerToken")
-            constrained=value.get("constrained",False);receiver=value.get("receiverId")
+            constrained=value.get("constrained",False);receiver=value.get("receiverId");workers=value.get("workers")
             secret=value.get("storageSecret");keymap=value.get("keymapPath");api=value.get("cloudApi")
             if (not isinstance(workspace,str) or not REDX_WORKSPACE.fullmatch(workspace)
                     or not isinstance(token,str) or not REDX_ACCESS.fullmatch(token)
                     or not isinstance(receiver,str) or not REDX_RECEIVER.fullmatch(receiver)
                     or not isinstance(secret,str) or not REDX_SECRET.fullmatch(secret)
                     or not isinstance(keymap,str) or not Path(keymap).is_absolute() or "\x00" in keymap
-                    or api != "https://api.red-xai.com" or type(constrained) is not bool):
+                    or api != "https://api.red-xai.com" or type(constrained) is not bool
+                    or type(workers) is not int or not 1 <= workers <= 24):
                 raise ValueError("Invalid Red-XAI private worker input")
             _input=json.dumps(value,separators=(",", ":")).encode()
-            _active=for_workers(1,constrained)
+            _active=for_workers(workers,constrained)
             _active.update(verified=True,workspaceId=workspace,source="redxai-receiver")
             return current()
         workspace = value.get("workspaceId")

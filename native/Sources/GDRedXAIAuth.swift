@@ -389,8 +389,9 @@ private struct GDRXTokenSet {
                   id.range(of: "^[a-f0-9]{32}$", options: .regularExpression) != nil,
                   let rawName = workspace["name"] as? String else { continue }
             let name = rawName.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !name.isEmpty, name.count <= 80 else { continue }
-            buckets.append(UploadCloudBucket(id: id, displayName: name, remote: "redxai", prefix: "Library"))
+            let workers = (workspace["workers"] as? NSNumber)?.intValue ?? 1
+            guard !name.isEmpty, name.count <= 80, (1...24).contains(max(1, workers)) else { continue }
+            buckets.append(UploadCloudBucket(id: id, displayName: name, remote: "redxai", prefix: "Library", workers: workers))
         }
         buckets.sort { $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending }
         uploadProjects = buckets.isEmpty ? [] : [
@@ -450,9 +451,11 @@ private struct GDRXTokenSet {
         let token = try await accessToken()
         let secret = try storageCredential()
         guard let keymapURL else { throw GDTransferError(message: "Red-XAI keymap path is unavailable.", status: 0) }
+        let workers = uploadProjects.first?.buckets.first(where: { $0.id == workspaceID })?.workers ?? 1
         let payload: [String: Any] = [
             "provider": "redxai",
             "workspaceId": workspaceID,
+            "workers": workers,
             "bearerToken": token,
             "receiverId": receiverID,
             "storageSecret": secret,

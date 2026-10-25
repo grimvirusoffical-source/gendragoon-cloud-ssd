@@ -259,21 +259,27 @@ private struct GDPrimary: View {
     private var plansPage:some View {
         VStack(alignment:.leading,spacing:20) {
             GDHeading(kicker:"WORKSPACE PLANS",title:"Storage that matches how you work.",subtitle:"Red-XAI managed storage and Google/custom-provider plans can coexist on the same Mac.")
-            if redXSession.linked { redXStoragePanel }
+            if redXSession.linked {
+                redXStoragePanel
+                GDRXSubscriptionsPanel(focus:.plans)
+            }
             if loginSession.stage == .ready {
                 GDPanel {
                     Label("Google / custom-provider plans",systemImage:"square.stack.3d.up.fill").font(.headline)
-                    Text("Choose storage and performance plans for Google or your own provider. Provider storage/network billing remains separate where applicable.")
+                    Text("Legacy Google/Firebase projects stay available separately. Red-XAI hosted storage is billed and enforced by the Kamatera control plane.")
                         .font(.caption).foregroundStyle(gdSecondary)
                 }
-                GenDragoonStripePurchases(focus:"custom")
+                GenDragoonStripePurchases(focus:"standard")
             }
         }
     }
     private var storagePage: some View {
         VStack(alignment:.leading,spacing:20) {
             GDHeading(kicker:"STORAGE",title:"Your cloud space.",subtitle:"Manage encrypted Red-XAI Receiver workspaces or review Google/custom-provider storage plans.")
-            if redXSession.linked { redXStoragePanel }
+            if redXSession.linked {
+                redXStoragePanel
+                GDRXSubscriptionsPanel(focus:.storage)
+            }
             if loginSession.stage == .ready { GenDragoonStripePurchases(focus:"standard") }
         }
     }
@@ -288,6 +294,7 @@ private struct GDPrimary: View {
                     Text(redXSession.usageSummary).font(.caption.monospaced()).foregroundStyle(.secondary)
                 }
             }
+            if redXSession.linked { GDRXSubscriptionsPanel(focus:.performance) }
             if loginSession.stage == .ready { GenDragoonStripePurchases(focus:"performance") }
         }
     }
@@ -321,13 +328,12 @@ private struct GDPrimary: View {
             Text(redXSession.email.isEmpty ? redXSession.subject : redXSession.email)
                 .font(.system(size:12,weight:.semibold)).textSelection(.enabled)
             HStack {
-                TextField("New workspace name",text:$redXWorkspaceName).textFieldStyle(.roundedBorder)
-                Button("Create Workspace") {
-                    let name=redXWorkspaceName
-                    Task { try? await redXSession.createWorkspace(name:name); await native.refreshCloudChoices() }
-                }.disabled(redXSession.busy || redXWorkspaceName.trimmingCharacters(in:.whitespacesAndNewlines).isEmpty)
+                Button("Create Workspace / Choose Plans") { page = .plans }
+                    .buttonStyle(.borderedProminent).tint(gdPurple)
                 Button("Refresh") { Task { await redXSession.refreshWorkspaces(); await native.refreshCloudChoices() } }
             }
+            Text("Workspace creation is billing-controlled: first project free, then $5 one-time activation plus the selected storage and performance plans.")
+                .font(.caption).foregroundStyle(.secondary)
             Text("\(redXSession.uploadProjects.first?.buckets.count ?? 0) Red-XAI workspace(s) available in the Files / Applications destination picker.")
                 .font(.caption).foregroundStyle(.secondary)
         }
@@ -387,6 +393,9 @@ private struct GDPrimary: View {
                         .font(.system(size:12)).foregroundStyle(gdSecondary)
                     Button("Connect Google") { loginSession.login() }.buttonStyle(.bordered)
                 }
+            }
+            if redXSession.linked {
+                GDRXSubscriptionsPanel(focus:.ads)
             }
             GenDragoonAutomaticUpdateStatus()
             GDPanel {
