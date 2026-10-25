@@ -24,7 +24,7 @@ async function approve(origin,url){
  const a=await fetch(origin+'/redxai-connect/approve',{method:'POST',headers:{origin,'content-type':'application/json',cookie:'redx_session='+native+'; '+browser},body:JSON.stringify({request,csrf:c.csrf})});
  assert.equal(a.status,200);
 }
-test('existing red-xai.com account app token owns exactly one Receiver and revokes live',{timeout:20000},async t=>{
+test('existing red-xai.com app grant owns one Receiver, survives browser sign-out, and revokes on app logout',{timeout:20000},async t=>{
  const port=await freePort(),origin='http://127.0.0.1:'+port,sub='existing-site-account-id';
  let active=true;
  const bridge=createBridge({publicOrigin:origin,testMode:true,fetchImpl:async()=>new Response(JSON.stringify(active?{account:{id:sub,email_verified:true,username:'same-user'}}:{error:'signed_out'}),{status:active?200:401,headers:{'content-type':'application/json'}})});
@@ -41,7 +41,11 @@ test('existing red-xai.com account app token owns exactly one Receiver and revok
  const expected=crypto.createHash('sha256').update(JSON.stringify(['red-xai-receiver/v1',origin,sub])).digest('hex');
  assert.equal(receiver.id,expected);assert.equal(receiver.storageFormat,'redsecretsxai-png-v1');
  active=false;
- const revoked=await fetch(api+'/v1/receivers/me',{headers:{authorization:'Bearer '+token}});assert.equal(revoked.status,401);
+ const afterBrowserSignout=await fetch(api+'/v1/receivers/me',{headers:{authorization:'Bearer '+token}});
+ assert.equal(afterBrowserSignout.status,200);
+ await auth.logout();
+ const revoked=await fetch(api+'/v1/receivers/me',{headers:{authorization:'Bearer '+token}});
+ assert.equal(revoked.status,401);
 });
 
 test('production health is explicit and uses the dedicated Receiver route',{timeout:5000},async t=>{

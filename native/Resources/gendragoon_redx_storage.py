@@ -25,8 +25,22 @@ if DEV_VENDOR.is_dir():
     import sys
     sys.path.insert(0, str(DEV_VENDOR))
 
-from redxai import _librsx as rsx
-from redsecretsxai import encode_storage_image, decode_storage_image, StorageImageError
+rsx = encode_storage_image = decode_storage_image = StorageImageError = None
+
+def _crypto_runtime():
+    global rsx, encode_storage_image, decode_storage_image, StorageImageError
+    if rsx is None:
+        from redxai import _librsx as _rsx
+        from redsecretsxai import (
+            encode_storage_image as _encode_storage_image,
+            decode_storage_image as _decode_storage_image,
+            StorageImageError as _StorageImageError,
+        )
+        rsx = _rsx
+        encode_storage_image = _encode_storage_image
+        decode_storage_image = _decode_storage_image
+        StorageImageError = _StorageImageError
+    return rsx, encode_storage_image, decode_storage_image, StorageImageError
 
 API = "https://api.red-xai.com"
 CHUNK = 4 * 1024 * 1024
@@ -224,6 +238,7 @@ class Codec:
         self._session = None
 
     def __enter__(self):
+        _crypto_runtime()
         self._manager = rsx.session_open(self.client.secret, str(self.client.keymap))
         self._session = self._manager.__enter__()
         return self
@@ -470,3 +485,10 @@ def find_item(config, key):
         if item.get("key") == key:
             return item
     raise RedXStorageError("Red-XAI cloud item was not found")
+
+
+if __name__ == "__main__":
+    import argparse
+    parser = argparse.ArgumentParser(description="GenDragoon encrypted Red-XAI Receiver transport; invoked by the native library worker.")
+    parser.parse_args()
+    parser.print_help()

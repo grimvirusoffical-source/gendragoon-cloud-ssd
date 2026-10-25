@@ -227,6 +227,13 @@ class RestartWorkerTests(unittest.TestCase):
         spec=importlib.util.spec_from_file_location("fixture_package",RESOURCE.parent/"package_macos.py")
         package=importlib.util.module_from_spec(spec);spec.loader.exec_module(package)
         (self.resources/"gendragoon_project_files.py").write_text("fixture required project browser")
+        # The production build stages the pinned Red-SecretsXAI Python/native runtime.
+        # This disposable packaging fixture must model those required resources too.
+        for name in ("redxai/__init__.py","redxai/_librsx.py","redxai/_native/librsx.dylib",
+                     "redsecretsxai/__init__.py","redsecretsxai/storage_image.py","Red-SecretsXAI-LICENSE.txt"):
+            target=self.resources/name
+            target.parent.mkdir(parents=True,exist_ok=True)
+            target.write_bytes(b"fixture runtime resource")
         package.require_runtime_resources(self.app)
         (self.resources/"gendragoon_update_restart.py").unlink()
         with self.assertRaisesRegex(RuntimeError,"gendragoon_update_restart.py"):
