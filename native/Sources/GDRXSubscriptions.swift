@@ -102,7 +102,7 @@ final class GDRXSubscriptionModel: ObservableObject {
               let url = URL(string: cfg.endpoint),
               url.scheme == "https", url.host == "api.red-xai.com",
               url.user == nil, url.password == nil,
-              url.path == "/gendragoon/" else { return nil }
+              ["/gendragoon", "/gendragoon/"].contains(url.path) else { return nil }
         return url
     }
 
