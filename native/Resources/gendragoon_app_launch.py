@@ -355,6 +355,49 @@ def prepare_stream(data, record):
     return path
 
 
+def local_cache_preflight(data, destination):
+    """Bound complete-bundle fallback; never clear caches to make room silently."""
+    budget_gib = lib.performance.current().get("cacheGiB")
+    if type(budget_gib) is not int or not 1 <= budget_gib <= 64:
+        raise RuntimeError("Invalid application cache budget")
+    limit = budget_gib * 1024 ** 3
+    used = 0
+    entries = 0
+    def inventory_error(error):
+        raise RuntimeError("Application cache could not be measured safely; nothing downloaded") from error
+    for directory, folders, files in os.walk(lib.CACHE, followlinks=False, onerror=inventory_error):
+        for name in list(folders):
+            child = Path(directory) / name
+            if child.is_symlink():
+                folders.remove(name)
+            elif os.path.ismount(child):
+                raise RuntimeError("Unexpected mounted application cache; retained for review")
+        for name in files:
+            entries += 1
+            if entries > 250000:
+                raise RuntimeError("Application cache inventory exceeds its safety limit")
+            info = (Path(directory) / name).lstat()
+            if stat.S_ISREG(info.st_mode):
+                used += info.st_size
+    extra = 0
+    if not destination.exists():
+        manifest = data.get("manifest")
+        if not isinstance(manifest, list) or not manifest:
+            raise RuntimeError("This legacy app has no verified size manifest. "
+                               "A bounded cloud launch cannot download it automatically.")
+        for entry in manifest:
+            size = entry.get("size", 0) if isinstance(entry, dict) else None
+            if type(size) is not int or size < 0:
+                raise RuntimeError("Invalid application size manifest")
+            extra += size
+    if used + extra > limit:
+        raise RuntimeError("This complete-bundle fallback would exceed the " + str(budget_gib) +
+                           " GiB app cache budget. Use a compatible streamed app or "
+                           "explicitly clear an unused cache. Existing files were retained.")
+    lib.require_space(extra * 2 + 64 * 1024 ** 2)
+    return {"cacheLimitBytes": limit, "existingCacheBytes": used, "additionalBytes": extra}
+
+
 def launch(key, project, bucket, remote, keep_cache=False):
     if sys.platform != "darwin":
         raise RuntimeError("macOS application launching requires macOS")
@@ -364,8 +407,16 @@ def launch(key, project, bucket, remote, keep_cache=False):
     data = lib.selected_entry(key, project, bucket, remote)
     if data.get("kind", "app") != "app":
         raise ValueError("Use Restore for files and folders")
-    if any(x["key"] == key and x["active"] for x in sessions(project, bucket, remote)["sessions"]):
-        raise RuntimeError("This application already has an active managed session")
+    # The cloud SSD has one active application slot across ALL workspaces.
+    # The caller holds the shared maintenance lock while inspecting sessions
+    # and writing the preparing receipt, so two launchers cannot both pass.
+    active = [item for item in sessions()["sessions"] if item["active"]]
+    if active:
+        if any(item["key"] == key for item in active):
+            raise RuntimeError("This application already has an active managed session")
+        raise RuntimeError("Another cloud application is still running or cleaning up. "
+                           "Quit it and wait for its helpers before launching the next app. "
+                           "No application was stopped and no cache was deleted.")
     record = {"id": uuid.uuid4().hex, "key": key, "name": data["name"], "project": project,
               "bucket": bucket, "remote": remote, "state": "preparing", "mode": "managed-local",
               "keepCache": bool(keep_cache), "createdAt": time.time(),
@@ -379,6 +430,8 @@ def launch(key, project, bucket, remote, keep_cache=False):
     try:
         path = prepare_stream(data, record)
         if path is None:
+            record["cachePreflight"] = local_cache_preflight(data, Path(record["cachePath"]))
+            save(record)
             with contextlib.redirect_stdout(io.StringIO()):
                 lib.stage_item(key, False, project, bucket, remote)
             path = Path(record["cachePath"])
