@@ -1,8 +1,9 @@
-"""Small-file preview adapter for the actual Red-SecretsXAI core + PNG layer.
+"""GenDragoon chunk codec using the actual Red-SecretsXAI core + PNG layer.
 
 No new cipher, no AES substitute, and no binary-only upload fallback. The
 keymap/password remain on the client. Passwords come from stdin when invoked
-as a subprocess, not command arguments. This is NOT the large-file SDK yet.
+as a subprocess, not command arguments. Cloud chunks use the compact
+Red-SecretsXAI storage-PNG profile; legacy artistic carriers remain readable.
 """
 import json
 import os
@@ -11,7 +12,8 @@ import sys
 import tempfile
 from pathlib import Path
 
-MAX_PLAIN = 64 * 1024
+MAX_PLAIN = 4 * 1024 * 1024
+MAX_CARRIER = 8 * 1024 * 1024
 
 def context_for(receiver, workspace, object_id):
     if not re.fullmatch(r'[a-f0-9]{64}', receiver) or any(not re.fullmatch(r'[a-f0-9]{32}', s) for s in [workspace, object_id]):
@@ -40,10 +42,10 @@ def publish(source, destination):
 
 def seal(source, output, password, keymap, receiver, workspace, object_id):
     from redxai import _librsx as rsx
-    from redsecretsxai import encode_image, decode_image
+    from redsecretsxai import encode_storage_image, decode_storage_image
     src = Path(source)
     if src.is_symlink() or not src.is_file() or src.stat().st_size > MAX_PLAIN:
-        raise ValueError('Preview accepts regular files up to 64 KiB')
+        raise ValueError('Cloud chunk must be a regular file of at most 4 MiB')
     aad = context_for(receiver, workspace, object_id)
     km = keymap_file(keymap)
     out = Path(output).absolute()
@@ -53,8 +55,9 @@ def seal(source, output, password, keymap, receiver, workspace, object_id):
             rsx.encrypt_file(session, str(src), out_path=str(sealed), aad=aad)
         os.chmod(km, 0o600)
         blob = sealed.read_bytes()
-        png = encode_image(blob, verify=True)
-        if not png.startswith(b'\x89PNG\r\n\x1a\n') or decode_image(png) != blob:
+        png = encode_storage_image(blob)
+        if (len(png) > MAX_CARRIER or not png.startswith(b'\x89PNG\r\n\x1a\n')
+                or decode_storage_image(png) != blob):
             raise ValueError('PNG verification failed')
         carrier = Path(td)/'carrier.png'
         with open(carrier, 'xb') as f:
@@ -63,9 +66,9 @@ def seal(source, output, password, keymap, receiver, workspace, object_id):
 
 def restore(source, output, password, keymap, receiver, workspace, object_id):
     from redxai import _librsx as rsx
-    from redsecretsxai import decode_image
+    from redsecretsxai import decode_image, decode_storage_image, StorageImageError
     src = Path(source)
-    if src.is_symlink() or not src.is_file() or src.stat().st_size > 8 * 1024 * 1024:
+    if src.is_symlink() or not src.is_file() or src.stat().st_size > MAX_CARRIER:
         raise ValueError('Invalid carrier')
     raw = src.read_bytes()
     if not raw.startswith(b'\x89PNG\r\n\x1a\n'):
@@ -75,7 +78,11 @@ def restore(source, output, password, keymap, receiver, workspace, object_id):
     out = Path(output).absolute()
     with tempfile.TemporaryDirectory(prefix='.redxai-decode-', dir=out.parent) as td:
         sealed = Path(td)/'payload.Red_SecretXAI'
-        sealed.write_bytes(decode_image(raw)); os.chmod(sealed, 0o600)
+        try:
+            blob = decode_storage_image(raw)
+        except StorageImageError:
+            blob = decode_image(raw)
+        sealed.write_bytes(blob); os.chmod(sealed, 0o600)
         verified = Path(td)/'verified'
         with rsx.session_open(password, str(km)) as session:
             rsx.decrypt_file(session, str(sealed), out_path=str(verified), aad=aad)

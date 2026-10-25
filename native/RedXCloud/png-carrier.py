@@ -13,7 +13,7 @@ from pathlib import Path
 
 def validate(path):
     from PIL import Image
-    from redsecretsxai import decode_image
+    from redsecretsxai import decode_image, decode_storage_image, StorageImageError
     Image.MAX_IMAGE_PIXELS = 4_000_000
     warnings.simplefilter('error', Image.DecompressionBombWarning)
     p = Path(path)
@@ -26,7 +26,12 @@ def validate(path):
         if image.format != 'PNG' or image.width * image.height > 4_000_000:
             raise ValueError('carrier_dimensions')
         image.verify()
-    blob = decode_image(raw)
+    profile = 'visual-v3'
+    try:
+        blob = decode_storage_image(raw)
+        profile = 'compact-storage-v1'
+    except StorageImageError:
+        blob = decode_image(raw)
     if blob[:4] == b'RXAI':
         if len(blob) < 10:
             raise ValueError('invalid_envelope')
@@ -36,7 +41,7 @@ def validate(path):
             raise ValueError('invalid_envelope')
     elif blob[:4] != b'RSX3' or len(blob) < 32:
         raise ValueError('encrypted_envelope_required')
-    return {'format': 'redsecretsxai-png-v1', 'cipherBytes': len(blob), 'aeadVerified': False}
+    return {'format': 'redsecretsxai-png-v1', 'profile': profile, 'cipherBytes': len(blob), 'aeadVerified': False}
 
 if __name__ == '__main__':
     try:

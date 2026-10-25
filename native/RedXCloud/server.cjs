@@ -12,7 +12,10 @@ const {createOidcVerifier} = require('../Backend/accounts/oidc');
 const {RedXState, CloudError, digest, origin} = require('./redx-state.cjs');
 const exec = promisify(execFile);
 const MAX_BYTES = 8 * 1024 * 1024;
+const MAX_QUOTA = 8 * 1024**4;
 const ID = /^[a-f0-9]{32}$/;
+const LIBRARY_KEY = /^[a-f0-9]{18}$/;
+const SHA256 = /^[a-f0-9]{64}$/;
 const json = (res, status, data) => { res.writeHead(status, {'content-type': 'application/json', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff'}); res.end(JSON.stringify(data)); };
 async function read(req, max) {
   const chunks = []; let n = 0;
@@ -32,7 +35,7 @@ async function createCloud(config) {
   const issuer = origin(config.issuer, config.dev);
   const root = path.resolve(config.root);
   const quota = config.quota ?? 64 * 1024 * 1024;
-  if (!Number.isSafeInteger(quota) || quota < 1 || quota > 1024**3) throw new Error('Invalid development quota');
+  if (!Number.isSafeInteger(quota) || quota < 1 || quota > MAX_QUOTA) throw new Error('Invalid Receiver quota');
   await directory(root);
   const lock = path.join(root, '.writer-lock');
   await fs.mkdir(lock, {mode: 0o700}); // refuse two writers or an unreconciled crash
@@ -88,6 +91,36 @@ async function createCloud(config) {
     } catch(e) { if (e instanceof CloudError) throw e; throw new CloudError('invalid_or_inactive_session', 401); }
     return digest(JSON.stringify(['red-xai-receiver/v1', issuer, subject]));
   }
+  async function readJSONFile(file, max = 64 * 1024) {
+    const stat = await fs.lstat(file);
+    if (!stat.isFile() || stat.isSymbolicLink() || stat.size < 2 || stat.size > max) throw new CloudError('stored_object_corrupt', 503);
+    const raw = await fs.readFile(file, 'utf8');
+    try { return JSON.parse(raw); } catch { throw new CloudError('stored_object_corrupt', 503); }
+  }
+  async function writeJSONExclusive(file, value) {
+    const temporary = file + '.' + crypto.randomBytes(8).toString('hex') + '.partial';
+    const out = await fs.open(temporary, 'wx', 0o600);
+    try { await out.writeFile(JSON.stringify(value)); await out.sync(); } finally { await out.close(); }
+    try { await fs.link(temporary, file); } finally { await fs.unlink(temporary).catch(() => {}); }
+  }
+  async function blobDirectory(owner, workspace) {
+    const dir = path.join(root, owner, workspace);
+    await directory(dir);
+    return dir;
+  }
+  async function blobRecord(owner, workspace, id) {
+    const dir = await blobDirectory(owner, workspace);
+    const file = path.join(dir, id + '.png'), meta = path.join(dir, id + '.json');
+    let record;
+    try { record = await readJSONFile(meta, 4096); }
+    catch (e) { if (e.code === 'ENOENT') return null; throw e; }
+    if (!record || record.schema !== 1 || record.id !== id || record.workspace !== workspace
+        || !Number.isSafeInteger(record.bytes) || record.bytes < 8 || record.bytes > MAX_BYTES
+        || !SHA256.test(record.sha256 || '')) throw new CloudError('stored_object_corrupt', 503);
+    const bytes = await existing(file, record);
+    if (!bytes) throw new CloudError('stored_object_missing', 503);
+    return {record, bytes, file, meta, dir};
+  }
   async function validatePNG(file) {
     if (decoderBusy) throw new CloudError('decoder_busy_retry', 503);
     decoderBusy = true;
@@ -102,7 +135,8 @@ async function createCloud(config) {
   }
   function publicState(s) {
     return {id: s.id, state: 'ready', developmentOnly, storageFormat: 'redsecretsxai-png-v1', quotaBytes: s.quota,
-      usedBytes: s.used, workspaces: Object.values(s.workspaces), objects: Object.values(s.objects).filter(o => o.status === 'ready')};
+      usedBytes: s.used, workspaces: Object.values(s.workspaces || {}), objects: Object.values(s.objects || {}).filter(o => o.status === 'ready'),
+      libraryItems: Object.keys(s.library || {}).length};
   }
   async function existing(file, entry) {
     try {
@@ -143,6 +177,133 @@ async function createCloud(config) {
           s.workspaces[id] = {id, name: body.name};
         });
         return json(res, 200, state.workspaces[id]);
+      }
+      const libraryBase = base + '/library';
+      if (u.pathname === libraryBase && req.method === 'GET') {
+        return json(res, 200, {items: Object.values(state.library || {}).sort((a,b) => String(a.name).localeCompare(String(b.name)))});
+      }
+      const libraryMatch = /^\/v1\/receivers\/me\/library\/([a-f0-9]{18})$/.exec(u.pathname);
+      if (libraryMatch && req.method === 'PUT') {
+        const key = libraryMatch[1];
+        let body; try { body = JSON.parse((await read(req, 64 * 1024)).toString()); } catch { throw new CloudError('bad_json'); }
+        const name = body.name, kind = body.kind, workspace = body.workspace, manifestId = body.manifestId;
+        if (!LIBRARY_KEY.test(key) || typeof name !== 'string' || !name || name.length > 255 || /[\x00-\x1f\/\\]/.test(name)
+            || !['app','folder','file'].includes(kind) || !ID.test(workspace || '') || !ID.test(manifestId || '')
+            || !Number.isSafeInteger(body.archiveBytes) || body.archiveBytes < 0 || body.archiveBytes > MAX_QUOTA
+            || !SHA256.test(body.archiveSha256 || '')) throw new CloudError('library_metadata_invalid', 400);
+        if (!state.workspaces[workspace]) throw new CloudError('not_found', 404);
+        const manifest = await blobRecord(owner, workspace, manifestId);
+        if (!manifest) throw new CloudError('manifest_not_found', 409);
+        const now = Date.now();
+        state = await store.change(owner, s => {
+          s.library ||= {};
+          const previous = s.library[key];
+          const generation = previous ? previous.generation + 1 : 1;
+          const history = previous ? [...(previous.previous || []), {
+            generation: previous.generation, manifestId: previous.manifestId, archiveBytes: previous.archiveBytes,
+            archiveSha256: previous.archiveSha256, updatedMs: previous.updatedMs
+          }].slice(-20) : [];
+          s.library[key] = {key, name, kind, workspace, manifestId, archiveBytes: body.archiveBytes,
+            archiveSha256: body.archiveSha256, generation, updatedMs: now, previous: history};
+        });
+        return json(res, 200, state.library[key]);
+      }
+      if (libraryMatch && req.method === 'DELETE') {
+        const key = libraryMatch[1];
+        state = await store.change(owner, s => {s.library ||= {}; if (!s.library[key]) throw new CloudError('not_found', 404); delete s.library[key];});
+        return json(res, 200, {ok: true, key});
+      }
+      const blobMatch = /^\/v1\/receivers\/me\/workspaces\/([a-f0-9]{32})\/blobs\/([a-f0-9]{32})$/.exec(u.pathname);
+      if (blobMatch) {
+        const [, workspace, id] = blobMatch;
+        if (!state.workspaces[workspace]) throw new CloudError('not_found', 404);
+        if (req.method === 'GET') {
+          const found = await blobRecord(owner, workspace, id);
+          if (!found) throw new CloudError('not_found', 404);
+          res.writeHead(200, {'content-type': 'image/png', 'content-length': found.bytes.length,
+            'content-disposition': 'attachment; filename="' + id + '.png"', 'cache-control': 'no-store',
+            'x-content-sha256': found.record.sha256, 'x-content-type-options': 'nosniff'});
+          return res.end(found.bytes);
+        }
+        if (req.method !== 'PUT') throw new CloudError('method_not_allowed', 405);
+        const bytes = Number(req.headers['content-length']), sha256 = req.headers['x-content-sha256'];
+        if (req.headers['content-type'] !== 'image/png') throw new CloudError('png_required', 415);
+        if (!Number.isSafeInteger(bytes) || bytes < 8 || bytes > MAX_BYTES || !SHA256.test(sha256 || '')) throw new CloudError('invalid_size_or_hash', 400);
+        const busyKey = owner + '/' + workspace + '/' + id;
+        if (busy.has(busyKey)) throw new CloudError('upload_busy', 409);
+        busy.add(busyKey);
+        let reserved = false, installed = false, blobLinked = false, metaLinked = false;
+        let temporary, metaTemporary, file, meta;
+        try {
+          const dir = await blobDirectory(owner, workspace);
+          file = path.join(dir, id + '.png'); meta = path.join(dir, id + '.json');
+          let prior = null;
+          try { prior = await readJSONFile(meta, 4096); } catch (e) { if (e.code !== 'ENOENT') throw e; }
+          if (prior) {
+            if (prior.id !== id || prior.workspace !== workspace || prior.bytes !== bytes || prior.sha256 !== sha256) throw new CloudError('immutable_object_conflict', 409);
+            const existingBlob = await existing(file, prior);
+            if (!existingBlob) throw new CloudError('stored_object_missing', 503);
+            const stale = state.reservations?.[id];
+            if (stale && stale.workspace === workspace && stale.bytes === bytes && stale.sha256 === sha256) {
+              state = await store.change(owner, s => {s.reservations ||= {}; const r=s.reservations[id]; if(r&&r.workspace===workspace&&r.bytes===bytes&&r.sha256===sha256)delete s.reservations[id];});
+            }
+            req.resume(); return json(res, 200, {id, status: 'ready', reused: true, bytes, sha256});
+          }
+          // A final PNG without its sidecar is not a committed object. Only
+          // remove it when the durable reservation proves it belongs to this
+          // exact interrupted immutable upload; otherwise retain for review.
+          try {
+            const orphan = await fs.lstat(file);
+            if (orphan.isSymbolicLink() || !orphan.isFile()) throw new CloudError('stored_object_corrupt', 503);
+            const r = state.reservations?.[id];
+            if (!r || r.workspace !== workspace || r.bytes !== bytes || r.sha256 !== sha256) throw new CloudError('orphan_object_requires_review', 503);
+            await fs.unlink(file); await fsyncDirectory(dir);
+          } catch (e) { if (e.code !== 'ENOENT') throw e; }
+          state = await store.change(owner, s => {
+            s.reservations ||= {};
+            const old = s.reservations[id];
+            if (old) {
+              if (old.workspace !== workspace || old.bytes !== bytes || old.sha256 !== sha256) throw new CloudError('upload_busy', 409);
+              // Interrupted prior writer; this reservation already counts quota.
+            } else {
+              if (s.used + bytes > s.quota) throw new CloudError('quota_exceeded', 507);
+              s.used += bytes;
+              s.reservations[id] = {workspace, bytes, sha256};
+            }
+          });
+          reserved = true;
+          const stats = await fs.statfs(root);
+          if (Number(stats.bavail) * Number(stats.bsize) < bytes * 2 + 2 * 1024**3) throw new CloudError('disk_reserve', 507);
+          const body = await read(req, bytes);
+          if (body.length !== bytes || digest(body) !== sha256) throw new CloudError('upload_hash_mismatch', 422);
+          temporary = path.join(dir, '.' + id + '.' + crypto.randomBytes(8).toString('hex') + '.partial');
+          const output = await fs.open(temporary, 'wx', 0o600);
+          try { await output.writeFile(body); await output.sync(); } finally { await output.close(); }
+          await validatePNG(temporary);
+          await fs.link(temporary, file); blobLinked = true;
+          const record = {schema: 1, id, workspace, bytes, sha256, encoding: 'redsecretsxai-png-v1'};
+          metaTemporary = path.join(dir, '.' + id + '.' + crypto.randomBytes(8).toString('hex') + '.json.partial');
+          const mf = await fs.open(metaTemporary, 'wx', 0o600);
+          try { await mf.writeFile(JSON.stringify(record)); await mf.sync(); } finally { await mf.close(); }
+          await fs.link(metaTemporary, meta); metaLinked = true;
+          await fsyncDirectory(dir);
+          installed = true;
+          await store.change(owner, s => {s.reservations ||= {}; delete s.reservations[id];});
+          return json(res, 201, {id, status: 'ready', bytes, sha256});
+        } finally {
+          if (temporary) await fs.unlink(temporary).catch(() => {});
+          if (metaTemporary) await fs.unlink(metaTemporary).catch(() => {});
+          if (!installed) {
+            if (metaLinked && meta) await fs.unlink(meta).catch(() => {});
+            if (blobLinked && file) await fs.unlink(file).catch(() => {});
+          }
+          if (reserved && !installed) await store.change(owner, s => {
+            s.reservations ||= {};
+            const r = s.reservations[id];
+            if (r && r.workspace === workspace && r.bytes === bytes && r.sha256 === sha256) {s.used -= bytes; delete s.reservations[id];}
+          }).catch(() => {});
+          busy.delete(busyKey);
+        }
       }
       const match = /^\/v1\/receivers\/me\/workspaces\/([a-f0-9]{32})\/objects\/([a-f0-9]{32})$/.exec(u.pathname);
       if (!match) throw new CloudError('not_found', 404);
