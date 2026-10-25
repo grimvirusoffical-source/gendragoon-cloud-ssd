@@ -225,6 +225,48 @@ async function createCloud(config) {
             'x-content-sha256': found.record.sha256, 'x-content-type-options': 'nosniff'});
           return res.end(found.bytes);
         }
+        if (req.method === 'DELETE') {
+          const deleteKey = owner + '/' + workspace + '/' + id;
+          if (busy.has(deleteKey)) throw new CloudError('upload_busy', 409);
+          busy.add(deleteKey);
+          try {
+            const dir = await blobDirectory(owner, workspace);
+            const file = path.join(dir, id + '.png'), meta = path.join(dir, id + '.json');
+            let deletion = state.deletions?.[id];
+            if (!deletion) {
+              let record;
+              try { record = await readJSONFile(meta, 4096); }
+              catch (e) { if (e.code === 'ENOENT') throw new CloudError('not_found', 404); throw e; }
+              if (!record || record.schema !== 1 || record.id !== id || record.workspace !== workspace
+                  || !Number.isSafeInteger(record.bytes) || record.bytes < 8 || record.bytes > MAX_BYTES
+                  || !SHA256.test(record.sha256 || '')) throw new CloudError('stored_object_corrupt', 503);
+              const existingBlob = await existing(file, record);
+              if (!existingBlob) throw new CloudError('stored_object_missing', 503);
+              deletion = {workspace, bytes: record.bytes, sha256: record.sha256};
+              state = await store.change(owner, s => {
+                s.deletions ||= {};
+                if (s.deletions[id]) throw new CloudError('busy_retry', 409);
+                s.deletions[id] = deletion;
+              });
+            } else if (deletion.workspace !== workspace || !Number.isSafeInteger(deletion.bytes)
+                       || deletion.bytes < 8 || deletion.bytes > MAX_BYTES || !SHA256.test(deletion.sha256 || '')) {
+              throw new CloudError('quota_state_corrupt', 503);
+            }
+            await fs.unlink(meta).catch(e => {if (e.code !== 'ENOENT') throw e;});
+            await fs.unlink(file).catch(e => {if (e.code !== 'ENOENT') throw e;});
+            await fsyncDirectory(dir);
+            state = await store.change(owner, s => {
+              s.deletions ||= {}; s.reservations ||= {};
+              const d = s.deletions[id];
+              if (!d || d.workspace !== workspace || d.bytes !== deletion.bytes || d.sha256 !== deletion.sha256) throw new CloudError('quota_state_corrupt', 503);
+              if (s.used < deletion.bytes) throw new CloudError('quota_state_corrupt', 503);
+              s.used -= deletion.bytes;
+              delete s.deletions[id];
+              delete s.reservations[id];
+            });
+            return json(res, 200, {ok: true, id, freedBytes: deletion.bytes, usedBytes: state.used});
+          } finally { busy.delete(deleteKey); }
+        }
         if (req.method !== 'PUT') throw new CloudError('method_not_allowed', 405);
         const bytes = Number(req.headers['content-length']), sha256 = req.headers['x-content-sha256'];
         if (req.headers['content-type'] !== 'image/png') throw new CloudError('png_required', 415);

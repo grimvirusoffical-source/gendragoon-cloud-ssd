@@ -46,7 +46,7 @@ class RedXState {
   async ensure(owner, quota) {
     const current = await this.get(owner);
     if (current) return current;
-    const state = {schema: 2, owner, id: owner, revision: 0, quota, used: 0, workspaces: {}, objects: {}, reservations: {}, library: {}};
+    const state = {schema: 2, owner, id: owner, revision: 0, quota, used: 0, workspaces: {}, objects: {}, reservations: {}, deletions: {}, library: {}};
     try {
       await this.call('POST', 'bx', {q: '{Add[]} = "receivers.red-xai.db":Receiver[ID=$id] = [ {Owner[]} = $owner, {Revision[]} = 0, {State[]} = $state ]',
         params: {id: this.address(owner), owner, state: JSON.stringify(state)}});

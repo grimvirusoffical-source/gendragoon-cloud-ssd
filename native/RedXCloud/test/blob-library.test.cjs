@@ -9,6 +9,9 @@ const digest=b=>crypto.createHash('sha256').update(b).digest('hex');
 
 test('scalable compact-PNG blobs and library index use real RedX + account isolation',{timeout:180000,skip:!process.env.REDX_INTEGRATION_ROOT},async t=>{
  const root=process.env.REDX_INTEGRATION_ROOT;
+ const previousPythonPath=process.env.PYTHONPATH;
+ process.env.PYTHONPATH=path.join(root,'Red-SecretsXAI')+(previousPythonPath?path.delimiter+previousPythonPath:'');
+ t.after(()=>{if(previousPythonPath===undefined)delete process.env.PYTHONPATH;else process.env.PYTHONPATH=previousPythonPath;});
  const {startStack}=require(path.join(root,'gendragoon-cloud-ssd/native/RedXCloud/test/stack.cjs'));
  const {createCloud}=require(path.join(root,'gendragoon-cloud-ssd/native/RedXCloud/server.cjs'));
  const s=await startStack();
@@ -96,4 +99,14 @@ test('scalable compact-PNG blobs and library index use real RedX + account isola
  assert.ok(smallPNG.length<8*1024*1024);
  assert.equal((await call(a.access_token,'PUT',legacyRoute,smallPNG,{'content-type':'image/png','content-length':String(smallPNG.length),'x-content-sha256':digest(smallPNG)})).status,201);
  assert.equal((await call(a.access_token,'GET',legacyRoute)).status,200);
+
+ // Explicit scalable-blob deletion frees exactly its reserved carrier bytes.
+ const beforeDelete=(await call(a.access_token,'GET','/v1/receivers/me')).json.usedBytes;
+ const deleted=await call(a.access_token,'DELETE',route);
+ assert.equal(deleted.status,200);assert.equal(deleted.json.freedBytes,carrier.length);
+ const afterDelete=(await call(a.access_token,'GET','/v1/receivers/me')).json.usedBytes;
+ assert.equal(afterDelete,beforeDelete-carrier.length);
+ assert.equal((await call(a.access_token,'GET',route)).status,404);
+ assert.equal((await call(a.access_token,'DELETE',route)).status,404);
+ assert.equal((await call(a.access_token,'GET','/v1/receivers/me')).json.usedBytes,afterDelete);
 });
