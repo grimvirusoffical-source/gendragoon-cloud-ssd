@@ -174,7 +174,7 @@ private struct GDRXTokenSet {
     }
 
     private func receiverID(for subject: String) throws -> String {
-        let data = try JSONSerialization.data(withJSONObject: ["red-xai-receiver/v1", issuer.absoluteString, subject])
+        let data = try JSONSerialization.data(withJSONObject: ["red-xai-receiver/v1", issuer.absoluteString, subject], options: [.withoutEscapingSlashes])
         return Self.hex(SHA256.hash(data: data))
     }
 
@@ -306,7 +306,8 @@ private struct GDRXTokenSet {
                 guard let device = job["device_code"] as? String, device.count == 43,
                       let code = job["user_code"] as? String, code.count == 8,
                       let rawURL = job["verification_uri"] as? String, let url = URL(string: rawURL),
-                      url.scheme == "https", url.host == issuer.host, url.path == "/redxai-connect/" else {
+                      url.scheme == "https", url.host == issuer.host,
+                      ["/redxai-connect", "/redxai-connect/","/redxai-connectx"].contains(url.path) else {
                     throw GDTransferError(message: "Red-XAI returned an invalid approval request.", status: 0)
                 }
                 approvalCode = code
