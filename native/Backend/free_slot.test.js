@@ -16,7 +16,7 @@ function fixture(){
  const price={id:"price_month",active:true,type:"recurring",recurring:{interval:"month"},currency:"usd",unit_amount:500,billing_scheme:"per_unit",livemode:false,product:{active:true}};
  const stripe={prices:{retrieve:async()=>({...price})},checkout:{sessions:{create:async()=>({id:"cs_month",url:"https://checkout.stripe.com/c/pay/cs_month",status:"open"}),retrieve:async()=>{throw Error("missing");}}}};
  const env={STRIPE_CHECKOUT_ENABLED:"true",STRIPE_WORKSPACE_MONTHLY_READY:"true",STRIPE_WORKSPACE_MONTHLY_PRICE_ID:"price_month",STRIPE_ENVIRONMENT:"test",PUBLIC_URL:"https://billing.example"};
- const prices={"storage|standard|100GB|month":"price_s100","performance|boost|month":"price_boost"};
+ const prices={"storage|standard|100GB|month":"price_s100","performance|boost|month":"price_boost","one_time|project_creation":"price_project"};
  const service=createProjectService({db,stamp:()=>1_700_000_000_000,hash:()=>owner,stripe,env,prices,ensureCustomer:async()=>"cus_own"});
  const req={user:{uid:"owner"}};
  const path=id=>"gd_accounts/"+owner+"/workspaces/"+id;
@@ -58,7 +58,7 @@ test("the second hosted workspace needs a storage and a performance plan and pay
  const second=await f.create(2,"Second");
  assert.equal(second.isFree,false);assert.equal(second.monthlyPriceCents,0);
  assert.equal(second.project.data.workspaceFeeModel,undefined);
- assert.equal(second.project.data.projectFeeStatus,"included");
+ assert.equal(second.project.data.projectFeeStatus,"pending");
  assert.equal(second.project.data.projectStatus,"pending_payment");
  assert.equal(effectiveStorageQuota(f.record(idFor(2))),0);
  const state=await f.service.inventory(f.req);
@@ -74,7 +74,7 @@ test("deleting the free workspace makes the oldest remaining hosted one free, or
  assert.equal(f.record(idFor(2)).projectFeeStatus,"free");
  assert.equal(f.record(idFor(1)),undefined);
  const third=await f.create(3,"Paid after promotion");
- assert.equal(third.isFree,false);assert.equal(third.project.data.projectFeeStatus,"included");
+ assert.equal(third.isFree,false);assert.equal(third.project.data.projectFeeStatus,"pending");
  const alone=fixture();
  await alone.create(1);
  await alone.service.remove(alone.req,idFor(1));
@@ -107,7 +107,7 @@ test("two simultaneous creates produce exactly one free workspace",async()=>{
  const f=fixture();
  const created=await Promise.all([f.create(1,"Concurrent A"),f.create(2,"Concurrent B")]);
  assert.equal(created.filter(item=>item.isFree===true&&item.monthlyPriceCents===0).length,1);
- assert.equal(created.filter(item=>item.isFree===false&&item.project.data.projectFeeStatus==="included").length,1);
+ assert.equal(created.filter(item=>item.isFree===false&&item.project.data.projectFeeStatus==="pending").length,1);
  const state=await f.service.inventory(f.req);
  assert.equal(state.records.filter(w=>w.id===state.policy.freeWorkspaceId).length,1);
  assert.equal(state.records.filter(w=>w.data.projectFeeStatus==="free").length,1);
@@ -118,7 +118,7 @@ test("merge keeps the survivor's fee status",async()=>{
  await f.create(1,"Source");await f.create(2,"Survivor");await f.create(3,"Other");
  await f.service.merge(f.req,idFor(1),{targetId:idFor(2),confirmName:"Source"});
  assert.equal(f.record(idFor(1)),undefined);
- assert.equal(f.record(idFor(2)).projectFeeStatus,"included");
+ assert.equal(f.record(idFor(2)).projectFeeStatus,"pending");
  assert.equal(f.account().freeWorkspaceId,idFor(3));
  assert.equal(f.record(idFor(3)).projectFeeStatus,"free");
  const kept=fixture();

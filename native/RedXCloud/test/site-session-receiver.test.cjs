@@ -61,3 +61,45 @@ test('RedX metadata may use plain HTTP only on explicit IPv4 loopback',()=>{
  assert.doesNotThrow(()=>new RedXState({url:'http://127.0.0.1:7790',key:'fixture',db:'gendragoon_receivers',local:true,fetchImpl:async()=>{}}));
  assert.throws(()=>new RedXState({url:'http://10.0.0.2:7790',key:'fixture',db:'gendragoon_receivers',local:true,fetchImpl:async()=>{}}));
 });
+
+test('billing entitlements control Receiver workspace quota, workers, creation and lapse state',{timeout:10000},async t=>{
+ const root=await fs.mkdtemp(path.join(await fs.realpath(os.tmpdir()),'entitled-receiver-'));
+ const workspace='1'.repeat(32),inactive='2'.repeat(32),subject='billing-account';
+ let active=true,limit=10;
+ const entitlementURL='https://gendragoon-free-10068843866.us-central1.run.app/v2/receiver-entitlements';
+ const fetchImpl=async(url,opts)=>{
+  if(url==='https://red-xai.com/redxai-connect/userinfo'){
+   assert.match(opts.headers.authorization,/^Bearer rxca_/);
+   return new Response(JSON.stringify({protocol:'redx-site-session-v1',client_id:'gendragoon',scope:'gendragoon.receiver',
+    sub:subject,email_verified:true}),{status:200,headers:{'content-type':'application/json'}});
+  }
+  if(url===entitlementURL){
+   assert.match(opts.headers.authorization,/^Bearer rxca_/);
+   return new Response(JSON.stringify({schema:1,ownerBenefits:false,projectLimit:limit,usedProjectSlots:2,workspaces:[
+    {projectId:'project-a',id:workspace,name:'Paid 100GB',active,readOnly:!active,quotaBytes:active?80:0,workers:active?4:0,status:active?'active':'payment_revoked',storageTier:'100GB',performanceTier:'boost',entitlementSource:'subscription'},
+    {projectId:'project-b',id:inactive,name:'Lapsed',active:false,readOnly:true,quotaBytes:0,workers:0,status:'payment_revoked',storageTier:'2TB',performanceTier:'turbo',entitlementSource:'subscription'}
+   ]}),{status:200,headers:{'content-type':'application/json'}});
+  }
+  throw new Error('unexpected external URL '+url);
+ };
+ const cloud=await createCloud({issuer:'https://red-xai.com',dev:false,productionReady:true,authProvider:'redx-site-session',
+  entitlementURL,fetchImpl,store:new Store(),root});
+ const api=await cloud.listen();
+ t.after(async()=>{await cloud.close();await fs.rm(root,{recursive:true,force:true});});
+ const headers={authorization:'Bearer rxca_'+'Z'.repeat(43)};
+ let response=await fetch(api+'/v1/receivers/me',{method:'PUT',headers});
+ assert.equal(response.status,200);let state=await response.json();
+ assert.equal(state.projectLimit,10);assert.equal(state.workspaces.length,2);
+ const paid=state.workspaces.find(w=>w.id===workspace);assert.equal(paid.quotaBytes,80);assert.equal(paid.workers,4);assert.equal(paid.active,true);
+ const lapsed=state.workspaces.find(w=>w.id===inactive);assert.equal(lapsed.readOnly,true);assert.equal(lapsed.quotaBytes,0);
+ response=await fetch(api+'/v1/receivers/me/workspaces',{method:'POST',headers:{...headers,'idempotency-key':'a'.repeat(32),'content-type':'application/json'},body:JSON.stringify({name:'Bypass'})});
+ assert.equal(response.status,409);assert.equal((await response.json()).error,'create_project_through_billing');
+ const payload=Buffer.alloc(90);const digest=crypto.createHash('sha256').update(payload).digest('hex');
+ response=await fetch(api+'/v1/receivers/me/workspaces/'+workspace+'/blobs/'+'a'.repeat(32),{method:'PUT',headers:{...headers,'content-type':'image/png','x-content-sha256':digest,'content-length':'90'},body:payload});
+ assert.equal(response.status,507);assert.equal((await response.json()).error,'quota_exceeded');
+ response=await fetch(api+'/v1/receivers/me/workspaces/'+inactive+'/blobs/'+'b'.repeat(32),{method:'PUT',headers:{...headers,'content-type':'image/png','x-content-sha256':digest,'content-length':'90'},body:payload});
+ assert.equal(response.status,402);assert.equal((await response.json()).error,'workspace_subscription_required');
+ active=false;limit=20;
+ response=await fetch(api+'/v1/receivers/me',{headers});assert.equal(response.status,200);state=await response.json();
+ assert.equal(state.projectLimit,20);assert.equal(state.workspaces.find(w=>w.id===workspace).readOnly,true);assert.equal(state.workspaces.find(w=>w.id===workspace).workers,0);
+});

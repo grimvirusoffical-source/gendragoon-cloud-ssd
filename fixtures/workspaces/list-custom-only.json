@@ -22,7 +22,7 @@
           "performance"
         ],
         "defaultLimit": 10,
-        "feeIsOneTime": false,
+        "feeIsOneTime": true,
         "firstProjectFree": true,
         "firstWorkspaceIncludes": {
           "performanceTier": "free",
@@ -35,7 +35,7 @@
         "freeWorkspaces": 1,
         "grandfatheredProjects": 0,
         "locked": false,
-        "newProjectOneTimeCents": 0,
+        "newProjectOneTimeCents": 500,
         "overBy": 0,
         "ownerFeeWaived": false,
         "paymentAvailable": true,
@@ -52,7 +52,7 @@
         "unpaidWorkspaceIds": [],
         "uploadsBlocked": false,
         "usedProjectSlots": 1,
-        "workspaceFeeIncluded": true,
+        "workspaceFeeIncluded": false,
         "workspaceMonthlyCents": 0
       },
       "workspaces": [
@@ -77,8 +77,8 @@
           "performanceTier": null,
           "plansStatus": "pending",
           "projectBillingVersion": 3,
-          "projectFeeCents": 0,
-          "projectFeeStatus": "included",
+          "projectFeeCents": 500,
+          "projectFeeStatus": "pending",
           "projectStatus": "pending_payment",
           "provisioned": false,
           "quotaGB": 0,

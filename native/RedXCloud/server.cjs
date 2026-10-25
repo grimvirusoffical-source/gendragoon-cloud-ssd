@@ -40,12 +40,20 @@ async function createCloud(config) {
   const lock = path.join(root, '.writer-lock');
   await fs.mkdir(lock, {mode: 0o700}); // refuse two writers or an unreconciled crash
   const store = config.store || new RedXState({url: config.redxURL, key: config.redxKey, db: config.redxDB, dev: config.dev, local: config.redxLocal === true});
+  const fetchImpl = config.fetchImpl || fetch;
   const secureFetch = async (url, opts = {}) => {
     if (new URL(url).origin !== issuer) throw new CloudError('issuer_endpoint_invalid', 503);
-    return fetch(url, {...opts, redirect: 'error'});
+    return fetchImpl(url, {...opts, redirect: 'error'});
   };
   const authProvider = config.authProvider || 'red-xai-accounts';
   if (!['red-xai-accounts','redx-site-session'].includes(authProvider)) throw new Error('Unsupported authentication provider');
+  const entitlementURL = config.entitlementURL || null;
+  if (entitlementURL) {
+    const eu = new URL(entitlementURL);
+    if (eu.protocol !== 'https:' || eu.username || eu.password || eu.search || eu.hash ||
+        !['/v2/receiver-entitlements','/gendragoon/v2/receiver-entitlements'].includes(eu.pathname))
+      throw new Error('Invalid entitlement endpoint');
+  }
   const verifier = authProvider === 'red-xai-accounts'
     ? createOidcVerifier({issuer, audience: 'gendragoon', typ: 'at+jwt', fetchImpl: secureFetch})
     : null;
@@ -89,7 +97,7 @@ async function createCloud(config) {
         subject = claims.sub;
       }
     } catch(e) { if (e instanceof CloudError) throw e; throw new CloudError('invalid_or_inactive_session', 401); }
-    return digest(JSON.stringify(['red-xai-receiver/v1', issuer, subject]));
+    return {owner: digest(JSON.stringify(['red-xai-receiver/v1', issuer, subject])), bearer: header};
   }
   async function readJSONFile(file, max = 64 * 1024) {
     const stat = await fs.lstat(file);
@@ -133,10 +141,58 @@ async function createCloud(config) {
     } catch(e) { throw new CloudError('invalid_redx_png_carrier', 422); }
     finally { decoderBusy = false; }
   }
+  async function entitlementState(identity) {
+    if (!entitlementURL) return null;
+    let response;
+    try {
+      response = await fetchImpl(entitlementURL, {headers: {authorization: identity.bearer, accept: 'application/json'},
+        redirect: 'error', signal: AbortSignal.timeout(10000)});
+    } catch { throw new CloudError('entitlement_service_unavailable', 503); }
+    if (response.status === 401 || response.status === 403) throw new CloudError('entitlement_login_required', 401);
+    if (!response.ok) throw new CloudError('entitlement_service_unavailable', 503);
+    const body = await responseJSON(response, 256 * 1024);
+    if (body.schema !== 1 || !Number.isInteger(body.projectLimit) || body.projectLimit < 1 || body.projectLimit > 20 ||
+        !Array.isArray(body.workspaces) || body.workspaces.length > 20) throw new CloudError('entitlement_response_invalid', 503);
+    const ids = new Set();
+    for (const w of body.workspaces) {
+      if (!w || !ID.test(w.id || '') || ids.has(w.id) || typeof w.projectId !== 'string' ||
+          typeof w.name !== 'string' || !w.name || w.name.length > 80 || /[\x00-]/.test(w.name) ||
+          typeof w.active !== 'boolean' || typeof w.readOnly !== 'boolean' ||
+          !Number.isSafeInteger(w.quotaBytes) || w.quotaBytes < 0 || w.quotaBytes > MAX_QUOTA ||
+          !Number.isInteger(w.workers) || w.workers < 0 || w.workers > 24) throw new CloudError('entitlement_response_invalid', 503);
+      ids.add(w.id);
+    }
+    return body;
+  }
+  async function syncEntitlements(owner, state, entitlement) {
+    if (!entitlement) return state;
+    const byId = new Map(entitlement.workspaces.map(w => [w.id, w]));
+    state = await store.change(owner, s => {
+      s.projectLimit = entitlement.projectLimit;
+      s.ownerBenefits = entitlement.ownerBenefits === true;
+      for (const [id, existing] of Object.entries(s.workspaces || {})) {
+        if (existing.billingManaged === true && !byId.has(id)) Object.assign(existing, {active:false, readOnly:true, quotaBytes:0, workers:0});
+      }
+      for (const w of entitlement.workspaces) {
+        const existing = s.workspaces[w.id] || {id:w.id, usedBytes:0};
+        const used = Number.isSafeInteger(existing.usedBytes) && existing.usedBytes >= 0 ? existing.usedBytes : 0;
+        s.workspaces[w.id] = {...existing, id:w.id, name:w.name, projectId:w.projectId, billingManaged:true,
+          active:w.active, readOnly:w.readOnly, quotaBytes:w.quotaBytes, workers:w.workers,
+          status:w.status || null, storageTier:w.storageTier || null, performanceTier:w.performanceTier || null,
+          entitlementSource:w.entitlementSource || 'subscription', usedBytes:used};
+      }
+      const entitled = Object.values(s.workspaces).filter(w => w.billingManaged === true)
+        .reduce((n,w) => n + (Number.isSafeInteger(w.quotaBytes) ? w.quotaBytes : 0), 0);
+      s.quota = Math.max(s.used, entitled, 1);
+    });
+    return state;
+  }
   function publicState(s) {
-    return {id: s.id, state: 'ready', developmentOnly, storageFormat: 'redsecretsxai-png-v1', quotaBytes: s.quota,
-      usedBytes: s.used, workspaces: Object.values(s.workspaces || {}), objects: Object.values(s.objects || {}).filter(o => o.status === 'ready'),
-      libraryItems: Object.keys(s.library || {}).length};
+    const workspaces = Object.values(s.workspaces || {}).filter(w => !entitlementURL || w.billingManaged === true);
+    const entitledQuota = entitlementURL ? workspaces.reduce((n,w) => n + (Number.isSafeInteger(w.quotaBytes) ? w.quotaBytes : 0), 0) : s.quota;
+    return {id: s.id, state: 'ready', developmentOnly, storageFormat: 'redsecretsxai-png-v1', quotaBytes: entitledQuota,
+      usedBytes: s.used, projectLimit:s.projectLimit || 10, ownerBenefits:s.ownerBenefits === true, workspaces,
+      objects: Object.values(s.objects || {}).filter(o => o.status === 'ready'), libraryItems: Object.keys(s.library || {}).length};
   }
   async function existing(file, entry) {
     try {
@@ -156,17 +212,21 @@ async function createCloud(config) {
       const u = new URL(req.url, 'http://' + host);
       if (u.search || /%|\\|\.\./.test(req.url)) throw new CloudError('invalid_path', 400);
       if (req.method === 'GET' && ['/healthz','/v1/receivers/healthz'].includes(u.pathname)) return json(res, 200, {service: 'Red-XAI-Reiceivers', developmentOnly, productionReady, authProvider});
-      const owner = await identify(req);
+      const identity = await identify(req), owner = identity.owner;
+      const entitlement = await entitlementState(identity);
       const base = '/v1/receivers/me';
       if (u.pathname === base && req.method === 'PUT') {
-        const state = await store.ensure(owner, quota);
+        let state = await store.ensure(owner, quota);
+        state = await syncEntitlements(owner, state, entitlement);
         await directory(path.join(root, owner));
         return json(res, 200, publicState(state));
       }
       let state = await store.get(owner);
       if (!state) throw new CloudError('receiver_not_found', 404);
+      state = await syncEntitlements(owner, state, entitlement);
       if (u.pathname === base && req.method === 'GET') return json(res, 200, publicState(state));
       if (u.pathname === base + '/workspaces' && req.method === 'POST') {
+        if (entitlementURL) throw new CloudError('create_project_through_billing', 409);
         const id = req.headers['idempotency-key'];
         if (!ID.test(id || '')) throw new CloudError('idempotency_key_required');
         let body; try { body = JSON.parse((await read(req, 4096)).toString()); } catch(e) { throw new CloudError('bad_json'); }
@@ -216,7 +276,8 @@ async function createCloud(config) {
       const blobMatch = /^\/v1\/receivers\/me\/workspaces\/([a-f0-9]{32})\/blobs\/([a-f0-9]{32})$/.exec(u.pathname);
       if (blobMatch) {
         const [, workspace, id] = blobMatch;
-        if (!state.workspaces[workspace]) throw new CloudError('not_found', 404);
+        const workspaceState = state.workspaces[workspace];
+        if (!workspaceState) throw new CloudError('not_found', 404);
         if (req.method === 'GET') {
           const found = await blobRecord(owner, workspace, id);
           if (!found) throw new CloudError('not_found', 404);
@@ -261,6 +322,7 @@ async function createCloud(config) {
               if (!d || d.workspace !== workspace || d.bytes !== deletion.bytes || d.sha256 !== deletion.sha256) throw new CloudError('quota_state_corrupt', 503);
               if (s.used < deletion.bytes) throw new CloudError('quota_state_corrupt', 503);
               s.used -= deletion.bytes;
+              if(s.workspaces[workspace])s.workspaces[workspace].usedBytes=Math.max(0,(s.workspaces[workspace].usedBytes||0)-deletion.bytes);
               delete s.deletions[id];
               delete s.reservations[id];
             });
@@ -268,6 +330,8 @@ async function createCloud(config) {
           } finally { busy.delete(deleteKey); }
         }
         if (req.method !== 'PUT') throw new CloudError('method_not_allowed', 405);
+        if (entitlementURL && (workspaceState.active !== true || workspaceState.readOnly === true || workspaceState.quotaBytes <= 0))
+          throw new CloudError('workspace_subscription_required', 402);
         const bytes = Number(req.headers['content-length']), sha256 = req.headers['x-content-sha256'];
         if (req.headers['content-type'] !== 'image/png') throw new CloudError('png_required', 415);
         if (!Number.isSafeInteger(bytes) || bytes < 8 || bytes > MAX_BYTES || !SHA256.test(sha256 || '')) throw new CloudError('invalid_size_or_hash', 400);
@@ -308,8 +372,12 @@ async function createCloud(config) {
               if (old.workspace !== workspace || old.bytes !== bytes || old.sha256 !== sha256) throw new CloudError('upload_busy', 409);
               // Interrupted prior writer; this reservation already counts quota.
             } else {
+              const ws=s.workspaces[workspace];
+              if (!ws) throw new CloudError('not_found',404);
+              const wsUsed=Number.isSafeInteger(ws.usedBytes)?ws.usedBytes:0;
+              if (entitlementURL && wsUsed + bytes > ws.quotaBytes) throw new CloudError('quota_exceeded', 507);
               if (s.used + bytes > s.quota) throw new CloudError('quota_exceeded', 507);
-              s.used += bytes;
+              s.used += bytes; ws.usedBytes = wsUsed + bytes;
               s.reservations[id] = {workspace, bytes, sha256};
             }
           });
@@ -342,7 +410,10 @@ async function createCloud(config) {
           if (reserved && !installed) await store.change(owner, s => {
             s.reservations ||= {};
             const r = s.reservations[id];
-            if (r && r.workspace === workspace && r.bytes === bytes && r.sha256 === sha256) {s.used -= bytes; delete s.reservations[id];}
+            if (r && r.workspace === workspace && r.bytes === bytes && r.sha256 === sha256) {
+              s.used -= bytes; if(s.workspaces[workspace])s.workspaces[workspace].usedBytes=Math.max(0,(s.workspaces[workspace].usedBytes||0)-bytes);
+              delete s.reservations[id];
+            }
           }).catch(() => {});
           busy.delete(busyKey);
         }
@@ -350,7 +421,8 @@ async function createCloud(config) {
       const match = /^\/v1\/receivers\/me\/workspaces\/([a-f0-9]{32})\/objects\/([a-f0-9]{32})$/.exec(u.pathname);
       if (!match) throw new CloudError('not_found', 404);
       const [, workspace, id] = match;
-      if (!state.workspaces[workspace]) throw new CloudError('not_found', 404);
+      const objectWorkspace = state.workspaces[workspace];
+      if (!objectWorkspace) throw new CloudError('not_found', 404);
       const dir = path.join(root, owner); await directory(dir);
       const file = path.join(dir, id + '.png');
       if (req.method === 'GET') {
@@ -362,6 +434,8 @@ async function createCloud(config) {
         return res.end(bytes);
       }
       if (req.method !== 'PUT') throw new CloudError('method_not_allowed', 405);
+      if (entitlementURL && (objectWorkspace.active !== true || objectWorkspace.readOnly === true || objectWorkspace.quotaBytes <= 0))
+        throw new CloudError('workspace_subscription_required', 402);
       const bytes = Number(req.headers['content-length']), sha256 = req.headers['x-content-sha256'];
       if (req.headers['content-type'] !== 'image/png') throw new CloudError('png_required', 415);
       if (!Number.isSafeInteger(bytes) || bytes < 8 || bytes > MAX_BYTES || !/^[a-f0-9]{64}$/.test(sha256 || '')) throw new CloudError('invalid_size_or_hash', 400);
@@ -403,7 +477,9 @@ async function createCloud(config) {
         if (temporary) await fs.unlink(temporary).catch(() => {});
         // Never release the quota after an uncertain final metadata commit: the
         // durable object can be reconciled by retrying its immutable ID + hash.
-        if (reserved && !installed) await store.change(owner, s => {if (s.objects[id]?.status === 'uploading') {s.used -= s.objects[id].bytes; delete s.objects[id];}}).catch(() => {});
+        if (reserved && !installed) await store.change(owner, s => {if (s.objects[id]?.status === 'uploading') {
+          const b=s.objects[id].bytes;s.used-=b;if(s.workspaces[workspace])s.workspaces[workspace].usedBytes=Math.max(0,(s.workspaces[workspace].usedBytes||0)-b);delete s.objects[id];
+        }}).catch(() => {});
         busy.delete(key);
       }
     } catch(e) {
@@ -425,7 +501,8 @@ if (require.main === module) {
   if (!productionReady && process.env.REDXAI_CLOUD_PREVIEW !== '1') { console.error('Set REDXAI_CLOUD_PREVIEW=1 for private testing or REDXAI_RECEIVER_PRODUCTION_READY=1 for reviewed production startup.'); process.exit(2); }
   if (productionReady && dev) { console.error('Production readiness cannot be combined with loopback development mode.'); process.exit(2); }
   createCloud({issuer: process.env.REDXAI_ISSUER, dev, productionReady, authProvider: process.env.REDXAI_AUTH_PROVIDER || 'red-xai-accounts', redxURL: process.env.REDX_URL,
-    redxLocal: process.env.REDX_LOCAL_LOOPBACK === '1', redxKey: process.env.REDX_RECEIVERS_KEY, redxDB: process.env.REDX_RECEIVERS_DB || 'gendragoon_receivers', root: process.env.REDX_RECEIVERS_ROOT,
+    redxLocal: process.env.REDX_LOCAL_LOOPBACK === '1', entitlementURL: process.env.REDX_ENTITLEMENT_URL || null,
+    redxKey: process.env.REDX_RECEIVERS_KEY, redxDB: process.env.REDX_RECEIVERS_DB || 'gendragoon_receivers', root: process.env.REDX_RECEIVERS_ROOT,
     quota: Number(process.env.REDX_RECEIVER_QUOTA_BYTES || 64 * 1024 * 1024), python: process.env.REDX_PYTHON || 'python3', requiredTos: process.env.REDXAI_REQUIRED_TOS}).then(async cloud => {
       console.log('Red-XAI-Reiceivers ' + (productionReady ? 'PRODUCTION' : 'PRIVATE PREVIEW') + ': ' + await cloud.listen(Number(process.env.REDX_CLOUD_PORT || 17779)));
       for (const sig of ['SIGINT','SIGTERM']) process.once(sig, () => cloud.close().then(() => process.exit(0)));
