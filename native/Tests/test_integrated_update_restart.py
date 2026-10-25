@@ -229,8 +229,7 @@ class RestartWorkerTests(unittest.TestCase):
         (self.resources/"gendragoon_project_files.py").write_text("fixture required project browser")
         # The production build stages the pinned Red-SecretsXAI Python/native runtime.
         # This disposable packaging fixture must model those required resources too.
-        for name in ("redxai/__init__.py","redxai/_librsx.py","redxai/_native/librsx.dylib",
-                     "redsecretsxai/__init__.py","redsecretsxai/storage_image.py","Red-SecretsXAI-LICENSE.txt"):
+        for name in package.RED_SECRETS_RESOURCES:
             target=self.resources/name
             target.parent.mkdir(parents=True,exist_ok=True)
             target.write_bytes(b"fixture runtime resource")

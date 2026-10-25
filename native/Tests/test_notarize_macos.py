@@ -376,8 +376,10 @@ class PackagingFailClosedTests(unittest.TestCase):
             resources.mkdir(parents=True)
             # Reach the ticket gate with the complete required runtime fixture.
             # The fake code-signing command does not execute these resources.
-            for name in package.REQUIRED_RESOURCES:
-                (resources / name).write_bytes(b"bundled runtime fixture\n")
+            for name in (*package.REQUIRED_RESOURCES, *package.RED_SECRETS_RESOURCES):
+                target = resources / name
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(b"bundled runtime fixture\n")
             with self.assertRaisesRegex(RuntimeError, "stapled Apple notarization ticket"):
                 package.package(app, Path(folder) / "unused-release", candidate=False)
         self.assertTrue(any("-R" in args for args in commands))
