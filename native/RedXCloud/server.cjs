@@ -36,7 +36,7 @@ async function createCloud(config) {
   await directory(root);
   const lock = path.join(root, '.writer-lock');
   await fs.mkdir(lock, {mode: 0o700}); // refuse two writers or an unreconciled crash
-  const store = config.store || new RedXState({url: config.redxURL, key: config.redxKey, db: config.redxDB, dev: config.dev});
+  const store = config.store || new RedXState({url: config.redxURL, key: config.redxKey, db: config.redxDB, dev: config.dev, local: config.redxLocal === true});
   const secureFetch = async (url, opts = {}) => {
     if (new URL(url).origin !== issuer) throw new CloudError('issuer_endpoint_invalid', 503);
     return fetch(url, {...opts, redirect: 'error'});
@@ -46,6 +46,8 @@ async function createCloud(config) {
   const verifier = authProvider === 'red-xai-accounts'
     ? createOidcVerifier({issuer, audience: 'gendragoon', typ: 'at+jwt', fetchImpl: secureFetch})
     : null;
+  const developmentOnly = config.dev === true;
+  const productionReady = config.productionReady === true && !developmentOnly && authProvider === 'redx-site-session';
   const busy = new Set(); let requests = 0; let decoderBusy = false;
   async function responseJSON(response, max = 65536) {
     const chunks = []; let size = 0;
@@ -99,7 +101,7 @@ async function createCloud(config) {
     finally { decoderBusy = false; }
   }
   function publicState(s) {
-    return {id: s.id, state: 'ready', developmentOnly: true, storageFormat: 'redsecretsxai-png-v1', quotaBytes: s.quota,
+    return {id: s.id, state: 'ready', developmentOnly, storageFormat: 'redsecretsxai-png-v1', quotaBytes: s.quota,
       usedBytes: s.used, workspaces: Object.values(s.workspaces), objects: Object.values(s.objects).filter(o => o.status === 'ready')};
   }
   async function existing(file, entry) {
@@ -119,7 +121,7 @@ async function createCloud(config) {
       if (host !== '127.0.0.1:' + server.address().port || req.headers.origin) throw new CloudError('invalid_origin', 403);
       const u = new URL(req.url, 'http://' + host);
       if (u.search || /%|\\|\.\./.test(req.url)) throw new CloudError('invalid_path', 400);
-      if (req.method === 'GET' && ['/healthz','/v1/receivers/healthz'].includes(u.pathname)) return json(res, 200, {service: 'Red-XAI-Reiceivers', developmentOnly: true, productionReady: false, authProvider});
+      if (req.method === 'GET' && ['/healthz','/v1/receivers/healthz'].includes(u.pathname)) return json(res, 200, {service: 'Red-XAI-Reiceivers', developmentOnly, productionReady, authProvider});
       const owner = await identify(req);
       const base = '/v1/receivers/me';
       if (u.pathname === base && req.method === 'PUT') {
@@ -215,11 +217,14 @@ async function createCloud(config) {
   };
 }
 if (require.main === module) {
-  if (process.env.REDXAI_CLOUD_PREVIEW !== '1') { console.error('This is a private integration preview, not the production GenDragoon backend. Set REDXAI_CLOUD_PREVIEW=1 explicitly.'); process.exit(2); }
-  createCloud({issuer: process.env.REDXAI_ISSUER, dev: process.env.REDXAI_LOOPBACK_DEV === '1', authProvider: process.env.REDXAI_AUTH_PROVIDER || 'red-xai-accounts', redxURL: process.env.REDX_URL,
-    redxKey: process.env.REDX_RECEIVERS_KEY, redxDB: process.env.REDX_RECEIVERS_DB || 'gendragoon_receivers', root: process.env.REDX_RECEIVERS_ROOT,
-    python: process.env.REDX_PYTHON || 'python3', requiredTos: process.env.REDXAI_REQUIRED_TOS}).then(async cloud => {
-      console.log('Red-XAI-Reiceivers PRIVATE PREVIEW: ' + await cloud.listen(Number(process.env.REDX_CLOUD_PORT || 17779)));
+  const dev = process.env.REDXAI_LOOPBACK_DEV === '1';
+  const productionReady = process.env.REDXAI_RECEIVER_PRODUCTION_READY === '1';
+  if (!productionReady && process.env.REDXAI_CLOUD_PREVIEW !== '1') { console.error('Set REDXAI_CLOUD_PREVIEW=1 for private testing or REDXAI_RECEIVER_PRODUCTION_READY=1 for reviewed production startup.'); process.exit(2); }
+  if (productionReady && dev) { console.error('Production readiness cannot be combined with loopback development mode.'); process.exit(2); }
+  createCloud({issuer: process.env.REDXAI_ISSUER, dev, productionReady, authProvider: process.env.REDXAI_AUTH_PROVIDER || 'red-xai-accounts', redxURL: process.env.REDX_URL,
+    redxLocal: process.env.REDX_LOCAL_LOOPBACK === '1', redxKey: process.env.REDX_RECEIVERS_KEY, redxDB: process.env.REDX_RECEIVERS_DB || 'gendragoon_receivers', root: process.env.REDX_RECEIVERS_ROOT,
+    quota: Number(process.env.REDX_RECEIVER_QUOTA_BYTES || 64 * 1024 * 1024), python: process.env.REDX_PYTHON || 'python3', requiredTos: process.env.REDXAI_REQUIRED_TOS}).then(async cloud => {
+      console.log('Red-XAI-Reiceivers ' + (productionReady ? 'PRODUCTION' : 'PRIVATE PREVIEW') + ': ' + await cloud.listen(Number(process.env.REDX_CLOUD_PORT || 17779)));
       for (const sig of ['SIGINT','SIGTERM']) process.once(sig, () => cloud.close().then(() => process.exit(0)));
   }).catch(() => {console.error('Cloud preview startup failed; verify configuration and storage lock. No secrets logged.'); process.exitCode=1;});
 }

@@ -14,8 +14,9 @@ function origin(value, dev = false) {
 }
 class RedXState {
   #key;
-  constructor({url, key, db, dev = false, fetchImpl = fetch}) {
-    this.url = origin(url, dev);
+  constructor({url, key, db, dev = false, local = false, fetchImpl = fetch}) {
+    this.url = origin(url, dev || local);
+    if (local && new URL(this.url).hostname !== '127.0.0.1') throw new Error('Local RedX service must use IPv4 loopback');
     if (!key || !/^[a-z][a-z0-9_]{1,50}$/.test(db) || db === 'redxai_accounts') throw new Error('Separate Receiver metadata database and scoped service key required');
     this.#key = key; this.db = db; this.fetch = fetchImpl;
   }

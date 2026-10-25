@@ -43,3 +43,17 @@ test('existing red-xai.com account app token owns exactly one Receiver and revok
  active=false;
  const revoked=await fetch(api+'/v1/receivers/me',{headers:{authorization:'Bearer '+token}});assert.equal(revoked.status,401);
 });
+
+test('production health is explicit and uses the dedicated Receiver route',{timeout:5000},async t=>{
+ const root=await fs.mkdtemp(path.join(await fs.realpath(os.tmpdir()),'prod-health-'));
+ const cloud=await createCloud({issuer:'https://red-xai.com',dev:false,productionReady:true,authProvider:'redx-site-session',store:new Store(),root});
+ const api=await cloud.listen();
+ t.after(async()=>{await cloud.close();await fs.rm(root,{recursive:true,force:true});});
+ const r=await fetch(api+'/v1/receivers/healthz');assert.equal(r.status,200);
+ const h=await r.json();assert.equal(h.service,'Red-XAI-Reiceivers');assert.equal(h.productionReady,true);assert.equal(h.developmentOnly,false);assert.equal(h.authProvider,'redx-site-session');
+});
+test('RedX metadata may use plain HTTP only on explicit IPv4 loopback',()=>{
+ const {RedXState}=require('../redx-state.cjs');
+ assert.doesNotThrow(()=>new RedXState({url:'http://127.0.0.1:7790',key:'fixture',db:'gendragoon_receivers',local:true,fetchImpl:async()=>{}}));
+ assert.throws(()=>new RedXState({url:'http://10.0.0.2:7790',key:'fixture',db:'gendragoon_receivers',local:true,fetchImpl:async()=>{}}));
+});
