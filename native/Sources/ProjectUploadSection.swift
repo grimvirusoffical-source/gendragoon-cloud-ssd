@@ -610,7 +610,15 @@ final class UploadWorkspaceModel: ObservableObject {
         }
         let isMutation = ["select-destination", "add-sources", "remove-source", "clear-sources", "enqueue"]
             .contains(arguments.first ?? "")
-        let privateInput = arguments.first == "run-next" ? await GDNativePerformance.shared.helperInput() : nil
+        let privateInput: Data?
+        if arguments.first == "run-next", let destination = snapshot?.destination, destination.remote == "redxai" {
+            privateInput = try? await GDRedXAIAuthSession.shared.privateWorkerInput(
+                workspaceID: destination.bucket, constrained: false)
+        } else if arguments.first == "run-next" {
+            privateInput = await GDNativePerformance.shared.helperInput()
+        } else {
+            privateInput = nil
+        }
         let helperArguments = arguments + (privateInput == nil ? [] : ["--performance-stdin"])
         let response = try await Task.detached(priority: worker ? .utility : .userInitiated) {
             // Await mutation completion: killing its parent can leave a bounded

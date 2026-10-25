@@ -266,61 +266,67 @@ import Foundation
 
 struct GenDragoonStartupRoot:View {
     @StateObject private var session=GDLoginSession()
-    @State private var redXPreviewOpen = false
-    // A separately staged, explicit preview must not start the normal
-    // Google-cloud updater or affect an existing GenDragoon installation.
+    @StateObject private var redX=GDRedXAIAuthSession.shared
     private var redXStandalonePreview: Bool {
         Bundle.main.object(forInfoDictionaryKey: "GDRXPreviewMode") as? Bool == true
     }
+    private var googleReady: Bool { session.stage == .ready }
+    private var eitherReady: Bool { googleReady || redX.linked }
+
     var body:some View {
         Group {
-            if redXPreviewOpen {
-                RedXCloudPreview(close: { redXPreviewOpen = false })
-            } else {
-            switch session.stage {
-            case .ready:
-                MainView().environmentObject(session)
-            case .terms:
+            if redXStandalonePreview {
+                RedXCloudPreview(close: {})
+            } else if eitherReady {
+                MainView().environmentObject(session).environmentObject(redX)
+            } else if session.stage == .terms {
                 GenDragoonTermsGate(authenticatedEmail:session.email,
                     termsVersion:GDLoginSession.termsVersion,
                     status:session.status,isBusy:session.busy,
                     completion:{session.acceptTerms()},logout:{session.logout()})
-            case .login,.waiting,.verifying,.error:
+            } else {
                 ZStack {
                     Color(red:0.055,green:0.048,blue:0.092).ignoresSafeArea()
                     VStack(spacing:19) {
-                        Image(systemName:"lock.shield.fill").font(.system(size:53))
+                        Image(systemName:"externaldrive.fill.badge.wifi").font(.system(size:53))
                             .foregroundStyle(.purple)
                         Text("GenDragoonSSD").font(.system(size:34,weight:.heavy,design:.rounded))
-                        Text("Google sign-in required").font(.system(size:20,weight:.semibold))
-                        Text("Sign in with Google to open your cloud drive, app library, plans and project workspaces.")
+                        Text("Choose how you want to connect").font(.system(size:20,weight:.semibold))
+                        Text("Use your existing Red-XAI account for encrypted managed cloud storage, or keep using Google/Firebase and your existing cloud providers. Both can be connected on the same Mac.")
                             .font(.system(size:13)).foregroundStyle(.gray).multilineTextAlignment(.center)
-                        if session.stage == .waiting || session.stage == .verifying {ProgressView().controlSize(.large)}
-                        Text(session.status).font(.system(size:12)).foregroundStyle(.orange)
+                        if session.stage == .waiting || session.stage == .verifying || redX.busy {
+                            ProgressView().controlSize(.large)
+                        }
+                        VStack(spacing:8) {
+                            Text(redX.status).font(.system(size:12)).foregroundStyle(redX.state == .error ? .orange : .secondary)
+                                .multilineTextAlignment(.center)
+                            if !redX.approvalCode.isEmpty {
+                                Text("Approval code: " + redX.approvalCode)
+                                    .font(.system(size:14,weight:.bold,design:.monospaced)).textSelection(.enabled)
+                            }
+                        }
+                        HStack(spacing:12) {
+                            Button("Continue with Red-XAI") { redX.connect() }
+                                .disabled(redX.busy)
+                                .buttonStyle(.borderedProminent).tint(.purple).controlSize(.large)
+                            Button("Continue with Google") {session.login()}
+                                .disabled(session.stage == .waiting || session.stage == .verifying)
+                                .buttonStyle(.bordered).controlSize(.large)
+                        }
+                        Text(session.status).font(.system(size:11)).foregroundStyle(.orange)
                             .multilineTextAlignment(.center)
-                        Button("Continue with Google") {session.login()}
-                            .disabled(session.stage == .waiting || session.stage == .verifying)
-                            .buttonStyle(.borderedProminent).tint(.purple).controlSize(.large)
-                        Button("Open Red-XAI Encrypted Cloud Preview") { redXPreviewOpen = true }
-                            .buttonStyle(.bordered)
-                            .controlSize(.large)
-                        Text("Red-XAI preview uses its own account and does not grant access to Google cloud features.")
-                            .font(.system(size:11)).foregroundStyle(.orange)
-                            .multilineTextAlignment(.center)
-                        Text("A secure Google login window opens in your browser. No password is requested by GenDragoon.")
+                        Text("Red-XAI uses the same approval as REDXAI Auth-CLI and remembers it in macOS Keychain. GenDragoon never asks for your website password.")
                             .font(.system(size:10)).foregroundStyle(.gray).multilineTextAlignment(.center)
-                    }.frame(maxWidth:440).padding(40)
+                    }.frame(maxWidth:520).padding(40)
                 }
-            }
             }
         }
         .frame(minWidth:780,minHeight:660)
         .preferredColorScheme(.dark)
         .onAppear {
-            if redXStandalonePreview {
-                redXPreviewOpen = true
-            } else {
+            if !redXStandalonePreview {
                 GDUpdateCoordinator.shared.start()
+                Task { await redX.restore() }
             }
         }
     }

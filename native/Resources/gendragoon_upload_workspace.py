@@ -482,6 +482,10 @@ def select_destination_cli(project, bucket, remote, prefix, expected_revision, h
     snapshot = read_state(home)
     require_revision(snapshot, expected_revision)
     require_idle(snapshot)
+    if remote == "redxai":
+        if project != "redxai" or not re.fullmatch(r"[a-f0-9]{32}", bucket):
+            raise WorkspaceError("invalid_destination", "Choose a verified Red-XAI Receiver workspace")
+        return select_destination(project, bucket, remote, prefix, expected_revision, home)
     command = [sys.executable, "-B", str(helper_path("gendragoon_connect.py")), "configure",
                "--project", project, "--bucket", bucket, "--remote", remote,
                "--prefix", prefix, "--expected-revision", str(expected_revision)]
@@ -584,6 +588,8 @@ def run_next(home=None):
                            "--source", source["path"], "--remote", destination["remote"], "--folder", folder,
                            "--project", destination["project"], "--bucket", destination["bucket"],
                            "--maintenance-fd", str(maintenance_fd)]
+                if destination["remote"] == "redxai" and _performance_input is None:
+                    raise WorkspaceError("redxai_auth_required", "Connect Red-XAI in the app or with REDXAI Auth-CLI before uploading")
                 if job["offload"]:
                     command.append("--offload")
                 outcome = child_result(command, maintenance_fd)

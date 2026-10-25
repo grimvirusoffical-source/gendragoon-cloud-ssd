@@ -536,8 +536,16 @@ struct GDManagedAppSession: Identifiable {
         busy = true
         Task {
             do {
-                let usesPerformance = ["upload", "restore", "launch"].contains(args.first ?? "")
-                let input = usesPerformance ? await GDNativePerformance.shared.helperInput() : nil
+                let action = args.first ?? ""
+                let input: Data?
+                if remote == "redxai", ["list", "upload", "restore", "launch"].contains(action) {
+                    guard let bucket else { throw GDTransferError(message: "Choose a Red-XAI workspace first.", status: 400) }
+                    input = try await GDRedXAIAuthSession.shared.privateWorkerInput(workspaceID: bucket, constrained: false)
+                } else if ["upload", "restore", "launch"].contains(action) {
+                    input = await GDNativePerformance.shared.helperInput()
+                } else {
+                    input = nil
+                }
                 let result = try await GDNativeHelper.invoke(helper,
                     arguments: args + (input == nil ? [] : ["--performance-stdin"]), standardInput: input)
                 if let detail = result["message"] as? String { message = GDNativeMessage.safe(detail) }
@@ -551,6 +559,11 @@ struct GDManagedAppSession: Identifiable {
         }
     }
     func refresh() {
+        if remote == "redxai" {
+            remotes = ["redxai"]
+            loadApps()
+            return
+        }
         invoke(["remotes"]) { [weak self] ok, value in
             guard let self, ok else { return }
             self.remotes = value["remotes"] as? [String] ?? []
@@ -588,7 +601,13 @@ struct GDManagedAppSession: Identifiable {
                         self.message = "Uploading and verifying \(source.lastPathComponent)…"
                         var args = ["upload", "--source", source.path, "--folder", destination] + context
                         if offload { args.append("--offload") }
-                        let input = await GDNativePerformance.shared.helperInput()
+                        let input: Data?
+                        if self.remote == "redxai" {
+                            guard let bucket = self.bucket else { throw GDTransferError(message: "Choose a Red-XAI workspace first.", status: 400) }
+                            input = try await GDRedXAIAuthSession.shared.privateWorkerInput(workspaceID: bucket, constrained: false)
+                        } else {
+                            input = await GDNativePerformance.shared.helperInput()
+                        }
                         let result = try await GDNativeHelper.invoke("gendragoon_library",
                             arguments: args + (input == nil ? [] : ["--performance-stdin"]), standardInput: input)
                         self.message = result["message"] as? String ?? "Cloud copy and restore verified."
@@ -600,6 +619,10 @@ struct GDManagedAppSession: Identifiable {
     }
     func scanCloud() {
         guard !remote.isEmpty, !folder.isEmpty else { return }
+        if remote == "redxai" {
+            loadApps()
+            return
+        }
         let root = bucket ?? folder.components(separatedBy: "/").first ?? ""
         invoke(["scan", "--root", root] + context) { [weak self] ok, _ in if ok { self?.loadApps() } }
     }

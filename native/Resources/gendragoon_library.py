@@ -133,6 +133,7 @@ def maintenance_lock(inherited=None):
             os.close(descriptor)
 def check_remote(s):
     if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]{0,49}",s or ""):raise ValueError("Invalid cloud remote")
+    if s=="redxai":return s
     safe_path(CONFIG)
     if not CONFIG.exists():raise ValueError("No GenDragoon cloud configuration")
     if any(path.is_symlink() for path in (RCLONE,*RCLONE.parents)):raise ValueError("Unsafe linked bundled cloud tool")
@@ -220,8 +221,43 @@ def scan(remote,root,project=None,bucket=None):
     reply(message=f"Found {discovered} new cloud items",discovered=discovered,items=present(entries,context))
 def present(entries,context):
     return [dict(key=k,kind=v.get("kind","app"),format=v.get("format","archive"),previousVersionCount=len(v.get("previousVersions",[])),**{a:b for a,b in v.items() if a not in ("kind","format","manifest","previousVersions","previousVersionCount")}) for k,v in sorted(entries.items()) if in_context(v,context)]
+def redx_module():
+    import gendragoon_redx_storage
+    return gendragoon_redx_storage
+
+def redx_config():
+    value=performance.private_payload()
+    return redx_module().validate_config(value)
+
+def sync_redx_library(project,bucket,remote):
+    if remote!="redxai":return
+    context=selected_context(project,bucket,remote)
+    config=redx_config()
+    if config["workspaceId"]!=bucket:raise ValueError("Red-XAI workspace changed; refresh the destination")
+    cloud_items=redx_module().list_items(config)
+    with library_lock():
+        entries=_load();changed=False;seen=set()
+        for item in cloud_items:
+            if item.get("workspace")!=bucket:continue
+            key=item["key"];seen.add(key);existing=entries.get(key,{})
+            same=existing.get("redxManifestId")==item["manifestId"]
+            base={"name":item["name"],"kind":item["kind"],"format":"redxai","archiveLayout":existing.get("archiveLayout",""),
+                  "remote":"redxai","folder":bucket+"/Library","file":item["manifestId"]+".png","sha256":item["archiveSha256"],
+                  "source":existing.get("source",""),"offloaded":existing.get("offloaded",True),
+                  "verified":existing.get("verified",False) if same else False,"verifiedAt":existing.get("verifiedAt",0) if same else 0,
+                  "manifest":existing.get("manifest",[]) if same else [],"sizeBytes":item["archiveBytes"],
+                  "redxManifestId":item["manifestId"],"redxGeneration":item.get("generation",1),**context}
+            if existing!=base:
+                if existing.get("previousVersions"):base["previousVersions"]=existing["previousVersions"]
+                entries[key]=base;changed=True
+        for key,entry in entries.items():
+            if in_context(entry,context) and entry.get("format")=="redxai" and key not in seen and not entry.get("cloudMissing"):
+                entry["cloudMissing"]=True;changed=True
+        if changed:_save(entries)
+
 def listing(project=None,bucket=None,remote="gendragoon"):
     context=selected_context(project,bucket,remote);adopt_legacy_context(context)
+    if remote=="redxai":sync_redx_library(project,bucket,remote)
     reply(items=present(load(),context))
 def remotes():remote_list()
 def is_running(app):
@@ -510,6 +546,8 @@ def _upload(source,remote,folder,offload=False,project=None,bucket=None):
     if offload and is_running(src):raise ValueError("Quit this application before offloading it")
     folder=pathpart(folder);check_remote(remote)
     context=selected_context(project,bucket,remote,folder)
+    redx=redx_config() if remote=="redxai" else None
+    if redx and redx["workspaceId"]!=bucket:raise ValueError("Red-XAI workspace changed; refresh the destination")
     key=keyfor(remote,folder,src.name,project,bucket)
     previous=load().get(key)
     if previous and previous.get("source")!=str(src):raise RuntimeError("A different same-name source already owns this library item. Choose a different cloud folder or source name; existing backups were retained.")
@@ -531,11 +569,22 @@ def _upload(source,remote,folder,offload=False,project=None,bucket=None):
         # Each verified revision has an immutable cloud object. A failed new
         # upload cannot overwrite the only backup of an offloaded original.
         fname=key+"-"+original_hash+"-"+uuid.uuid4().hex+extension
-        dest=cloud(remote,folder,fname)
-        run([RCLONE,"--config",CONFIG,"copyto",archive,dest,"--retries","3"],timeout=2400)
-        # Re-download and compare full bytes before offering an offload.
         verified=Path(tmp)/("verified-"+fname)
-        run([RCLONE,"--config",CONFIG,"copyto",dest,verified,"--retries","3"],timeout=2400)
+        redx_result=None
+        if remote=="redxai":
+            redx_result=redx_module().upload_archive(redx,archive,key,src.name,typ,
+                "zip-root" if zipped else "flat",original_hash,baseline["manifest"])
+            cloud_item={"key":key,"name":src.name,"kind":typ,"workspace":bucket,
+                "manifestId":redx_result["manifestId"],"archiveBytes":archive.stat().st_size,
+                "archiveSha256":original_hash}
+            restored=redx_module().download_archive(redx,cloud_item,verified)
+            if restored["manifest"]!=baseline["manifest"]:
+                raise RuntimeError("Encrypted cloud metadata read-back differs from the source; original retained")
+        else:
+            dest=cloud(remote,folder,fname)
+            run([RCLONE,"--config",CONFIG,"copyto",archive,dest,"--retries","3"],timeout=2400)
+            # Re-download and compare full bytes before offering an offload.
+            run([RCLONE,"--config",CONFIG,"copyto",dest,verified,"--retries","3"],timeout=2400)
         if sha(verified)!=original_hash:raise RuntimeError("Cloud read-back did not match uploaded archive; original retained")
         if zipped:
             testdir=Path(tmp)/"restorecheck";testdir.mkdir()
@@ -546,11 +595,11 @@ def _upload(source,remote,folder,offload=False,project=None,bucket=None):
             os.chmod(verified,0o600|baseline["manifest"][0]["executable"])
             verify_restored(verified,baseline["manifest"])
         unchanged(src,baseline)
-    entry={"name":src.name,"kind":typ,"format":"archive","archiveLayout":"zip-root" if zipped else "flat","remote":remote,"folder":folder,"file":fname,"sha256":original_hash,"source":str(src),"offloaded":False,"verified":True,"verifiedAt":time.time(),"manifest":baseline["manifest"],"sizeBytes":total_bytes,**(context or {})}
+    entry={"name":src.name,"kind":typ,"format":"redxai" if remote=="redxai" else "archive","archiveLayout":"zip-root" if zipped else "flat","remote":remote,"folder":folder,"file":(redx_result["manifestId"]+".png") if remote=="redxai" else fname,"sha256":original_hash,"source":str(src),"offloaded":False,"verified":True,"verifiedAt":time.time(),"manifest":baseline["manifest"],"sizeBytes":total_bytes,**({"redxManifestId":redx_result["manifestId"],"redxGeneration":1} if remote=="redxai" else {}),**(context or {})}
     # Raw copy/check validates data bytes, not Darwin resource forks or xattrs.
     # Only metadata-compatible apps receive this optional streaming layout;
     # every app retains its fully verified metadata-preserving archive.
-    if typ=="app" and context and total_bytes>=STREAM_MIN_BYTES:
+    if typ=="app" and context and total_bytes>=STREAM_MIN_BYTES and remote!="redxai":
         reason=stream_metadata_reason(baseline["manifest"])
         if reason:entry["streamIneligibleReason"]=reason
         else:
@@ -623,8 +672,18 @@ def stage_item(key,open_after=False,project=None,bucket=None,remote="gendragoon"
                     run([RCLONE,"--config",CONFIG,"copy",item_path(data),p,"--links","--create-empty-src-dirs"],timeout=2400)
             else:
                 check_name(data["file"])
-                archive=temp/data["file"]
-                run([RCLONE,"--config",CONFIG,"copyto",item_path(data),archive],timeout=2400)
+                if data.get("format")=="redxai":
+                    config=redx_config()
+                    if config["workspaceId"]!=bucket:raise RuntimeError("Red-XAI workspace changed; refresh before restoring")
+                    item=redx_module().find_item(config,key)
+                    archive=temp/(key+".archive")
+                    restored=redx_module().download_archive(config,item,archive)
+                    root=restored["root"];data["archiveLayout"]=root["archiveLayout"]
+                    data["manifest"]=restored["manifest"];data["sha256"]=root["archiveSha256"]
+                    data["redxManifestId"]=item["manifestId"];data["redxGeneration"]=item.get("generation",1)
+                else:
+                    archive=temp/data["file"]
+                    run([RCLONE,"--config",CONFIG,"copyto",item_path(data),archive],timeout=2400)
                 if sha(archive)!=data.get("sha256"):raise RuntimeError("Downloaded cloud archive failed SHA-256 verification")
                 if kind=="file" and data.get("archiveLayout")!="zip-root":
                     p=archive
@@ -640,6 +699,10 @@ def stage_item(key,open_after=False,project=None,bucket=None,remote="gendragoon"
             safe_path(dest.parent,directory=True);dest.parent.mkdir(parents=True,exist_ok=True,mode=0o700)
             os.replace(p,dest)
             cache_record(dest.parent,actual)
+            if data.get("format")=="redxai":
+                data["verified"]=True;data["verifiedAt"]=time.time();data["cloudMissing"]=False
+                with library_lock():
+                    entries=_load();entries[key]=data;_save(entries)
     snapshot(dest)  # Refuse an escaping symlink even for a previously retained cache.
     record=dest.parent/"cache-manifest.json"
     if record.exists():

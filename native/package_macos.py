@@ -19,16 +19,19 @@ ROOT=Path(__file__).resolve().parent
 
 REQUIRED_RESOURCES=("gendragoon_update_restart.py", "gendragoon_auto_update.py",
     "gendragoon_app_control.py", "gendragoon_app_launch.py", "gendragoon_library.py",
-    "gendragoon_upload_workspace.py", "gendragoon_performance.py",
+    "gendragoon_upload_workspace.py", "gendragoon_performance.py", "gendragoon_redx_storage.py",
     "gendragoon_performance_profiles.json", "gendragoon_project_files.py")
 
 def require_runtime_resources(app):
     resources=app/"Contents/Resources"
-    for name in REQUIRED_RESOURCES:
+    required=list(REQUIRED_RESOURCES)+[
+        "redxai/__init__.py","redxai/_librsx.py","redxai/_native/librsx.dylib",
+        "redsecretsxai/__init__.py","redsecretsxai/storage_image.py","Red-SecretsXAI-LICENSE.txt"]
+    for name in required:
         path=resources/name
         if path.is_symlink() or not path.is_file() or path.stat().st_size==0:
             raise RuntimeError("Required bundled runtime resource missing: "+name)
-    return list(REQUIRED_RESOURCES)
+    return required
 
 def reject_python_caches(app):
     """Signed caches are mutable on import; a release must not contain them."""

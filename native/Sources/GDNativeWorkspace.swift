@@ -116,6 +116,7 @@ enum GDNativeHelper {
     let library: LibraryModel
     let manualLibrary: LibraryModel
     let upload: UploadWorkspaceModel
+    private let redX = GDRedXAIAuthSession.shared
     let cleanupOwner = NSObject()
     let resetOwner = NSObject()
     @Published private(set) var started = false
@@ -137,7 +138,8 @@ enum GDNativeHelper {
         library.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() }.store(in: &subscriptions)
         upload.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() }.store(in: &subscriptions)
         upload.$snapshot.compactMap { $0 }.sink { [weak self] snapshot in self?.accept(snapshot) }.store(in: &subscriptions)
-        cloud.$uploadProjects.sink { [weak self] choices in self?.upload.replaceProjects(choices) }.store(in: &subscriptions)
+        cloud.$uploadProjects.sink { [weak self] _ in self?.mergeUploadProjects() }.store(in: &subscriptions)
+        redX.$uploadProjects.sink { [weak self] _ in self?.mergeUploadProjects() }.store(in: &subscriptions)
         GDUpdateActivity.shared.$revision.sink { [weak self] _ in
             guard let self, self.refreshRequested, !self.cloud.cloudBusy,
                   GDUpdateActivity.shared.canStart(excluding: self.cloud) else { return }
@@ -148,6 +150,14 @@ enum GDNativeHelper {
             guard let self, !busy else { return }
             self.library.loadApps()
         }.store(in: &subscriptions)
+    }
+    private func mergeUploadProjects() {
+        var merged = cloud.uploadProjects
+        for project in redX.uploadProjects {
+            if let index = merged.firstIndex(where: { $0.id == project.id }) { merged[index] = project }
+            else { merged.append(project) }
+        }
+        upload.replaceProjects(merged)
     }
     private static var isSandboxed: Bool {
         ProcessInfo.processInfo.environment["APP_SANDBOX_CONTAINER_ID"] != nil
@@ -164,6 +174,7 @@ enum GDNativeHelper {
         upload.startPolling()
         await library.establishSessionStatus()
         library.startSessionMonitoring()
+        await redX.restore()
         await refreshCloudChoices()
         if let destination = upload.snapshot?.destination { cloud.adopt(destination); library.adopt(destination) }
         bootstrapping = false
@@ -173,7 +184,9 @@ enum GDNativeHelper {
         guard !cloud.cloudBusy, GDUpdateActivity.shared.canStart(excluding: cloud) else {
             refreshRequested = true; return
         }
+        await redX.refreshWorkspaces()
         await cloud.reloadAuthorizedChoices()
+        mergeUploadProjects()
         if upload.snapshot?.destination == nil, !cloud.projectID.isEmpty, !cloud.bucket.isEmpty,
            !externalUploadBusy {
             verify(project: cloud.projectID, bucket: cloud.bucket, remote: cloud.remote, prefix: "GenDragoon-App-Library")
@@ -185,7 +198,7 @@ enum GDNativeHelper {
         acceptedRevision = snapshot.revision
         acceptedDestination = snapshot.destination
         guard let destination = snapshot.destination else { return }
-        cloud.adopt(destination)
+        if destination.remote != "redxai" { cloud.adopt(destination) }
         library.adopt(destination)
         if changed && !bootstrapping { library.loadApps() }
     }
@@ -211,6 +224,7 @@ enum GDNativeHelper {
     @ObservedObject var native: GDNativeWorkspace
     var content: GDProjectContent = .applications
     @ObservedObject private var activity = GDUpdateActivity.shared
+    @ObservedObject private var redX = GDRedXAIAuthSession.shared
     @State private var candidateProject = ""
     @State private var candidateBucket = ""
     @State private var candidateRemote = "gendragoon"
@@ -222,12 +236,13 @@ enum GDNativeHelper {
     private var cloud: CloudModel { native.cloud }
     private var library: LibraryModel { native.library }
     private var locked: Bool { native.externalUploadBusy || native.upload.isMutationPending || native.upload.workerPending }
+    private var isRedXDestination: Bool { native.selectedDestination?.remote == "redxai" }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 20) {
             HStack(alignment: .top) {
                 VStack(alignment: .leading, spacing: 6) {
-                    Text("CONNECTED GOOGLE CLOUD").font(.system(size: 9, weight: .bold, design: .monospaced)).tracking(2).foregroundStyle(.purple)
+                    Text(isRedXDestination ? "RED-XAI ENCRYPTED CLOUD" : "CONNECTED CLOUD STORAGE").font(.system(size: 9, weight: .bold, design: .monospaced)).tracking(2).foregroundStyle(.purple)
                     Label(content == .applications ? "Managed Mac applications" : "Connected files & folders", systemImage: content == .applications ? "app.badge.fill" : "folder.fill")
                         .font(.system(size: 24, weight: .bold, design: .rounded))
                     Text(native.destinationLabel).font(.caption.monospaced()).foregroundStyle(.secondary).textSelection(.enabled)
@@ -238,10 +253,18 @@ enum GDNativeHelper {
                 Button { showCleanup.toggle() } label: { Label("Cleanup Drive", systemImage: "folder.badge.gearshape") }
                     .disabled(native.maintenanceBusy)
             }
-            Text("This library uses the verified Google Cloud destination shown above. Its objects remain separate from your product project's private Files index.")
+            Text(isRedXDestination ? "This library uses your account-isolated Red-XAI Receiver. Archives are encrypted locally into compact red-X PNG chunks before upload." : "This library uses the verified cloud destination shown above. Its objects remain separate from your product project's private Files index.")
                 .font(.system(size: 11)).foregroundStyle(.secondary)
-            DisclosureGroup("Connection and Google Cloud destination", isExpanded: $showConnection) {
+            DisclosureGroup("Cloud connections and destination", isExpanded: $showConnection) {
                 VStack(alignment: .leading, spacing: 12) {
+                    if redX.linked {
+                        HStack {
+                            Label("Red-XAI connected",systemImage:"checkmark.shield.fill").foregroundStyle(.green)
+                            Text(redX.usageSummary).font(.caption.monospaced()).foregroundStyle(.secondary)
+                            Spacer()
+                            Button("Refresh Red-XAI Workspaces") { Task { await redX.refreshWorkspaces(); await native.refreshCloudChoices() } }.disabled(locked)
+                        }
+                    }
                     HStack {
                         Button("Connect Google Cloud") { native.connectGoogle() }
                             .buttonStyle(.borderedProminent).tint(.purple).disabled(locked)
@@ -283,26 +306,34 @@ enum GDNativeHelper {
             }
             DisclosureGroup("Finder drive and local cache settings") {
                 VStack(alignment: .leading, spacing: 12) {
-                    HStack {
-                        Label(cloud.mounted ? "Mounted in Finder" : "Drive disconnected", systemImage: "externaldrive.fill")
-                        Spacer()
-                        Button("Mount SSD") { cloud.mountDrive() }
-                            .disabled(cloud.mounted || cloud.busy || native.selectedDestination == nil || !GDUpdateActivity.shared.canStart(excluding: cloud))
-                        Button("Open Finder") { cloud.openMount() }.disabled(!cloud.mounted)
-                        Button("Unmount") { cloud.unmountDrive() }.disabled(!cloud.mounted || cloud.busy || !GDUpdateActivity.shared.canStart(excluding: cloud))
+                    if isRedXDestination {
+                        Label("Red-XAI encrypted workspace selected", systemImage: "lock.shield.fill").foregroundStyle(.green)
+                        Text("Files and applications are restored through the verified managed cache. The Google/rclone Finder mount is intentionally not reused for encrypted Receiver objects.")
+                            .font(.caption).foregroundStyle(.secondary)
+                        Text("GenDragoon preserves at least 10 GiB of local free space before staging cloud content, and it keeps ambiguous/running application caches instead of deleting them.")
+                            .font(.caption).foregroundStyle(.secondary)
+                    } else {
+                        HStack {
+                            Label(cloud.mounted ? "Mounted in Finder" : "Drive disconnected", systemImage: "externaldrive.fill")
+                            Spacer()
+                            Button("Mount SSD") { cloud.mountDrive() }
+                                .disabled(cloud.mounted || cloud.busy || native.selectedDestination == nil || !GDUpdateActivity.shared.canStart(excluding: cloud))
+                            Button("Open Finder") { cloud.openMount() }.disabled(!cloud.mounted)
+                            Button("Unmount") { cloud.unmountDrive() }.disabled(!cloud.mounted || cloud.busy || !GDUpdateActivity.shared.canStart(excluding: cloud))
+                        }
+                        HStack {
+                            Text("Local drive cache")
+                            Picker("Cache allowance", selection: Binding(get: { cloud.cacheGB }, set: { cloud.cacheGB = $0 })) {
+                                ForEach([10, 30, 60, 100], id: \.self) { Text("\($0) GB").tag($0) }
+                            }.frame(width: 240).disabled(cloud.mounted || native.maintenanceBusy)
+                            Button("Open Cache") { cloud.openCache() }
+                            Button("View Mount Log") { cloud.openLog() }
+                        }
+                        Text(cloud.status).font(.caption).foregroundStyle(.secondary)
+                        if !cloud.lastError.isEmpty { Text(GDNativeMessage.safe(cloud.lastError)).font(.caption).foregroundStyle(.orange) }
+                        Text("Cache limits take effect on the next mount. Active files and pending writes are retained. Application launch below uses a verified managed local copy when streaming is unavailable.")
+                            .font(.caption).foregroundStyle(.secondary)
                     }
-                    HStack {
-                        Text("Local drive cache")
-                        Picker("Cache allowance", selection: Binding(get: { cloud.cacheGB }, set: { cloud.cacheGB = $0 })) {
-                            ForEach([10, 30, 60, 100], id: \.self) { Text("\($0) GB").tag($0) }
-                        }.frame(width: 240).disabled(cloud.mounted || native.maintenanceBusy)
-                        Button("Open Cache") { cloud.openCache() }
-                        Button("View Mount Log") { cloud.openLog() }
-                    }
-                    Text(cloud.status).font(.caption).foregroundStyle(.secondary)
-                    if !cloud.lastError.isEmpty { Text(GDNativeMessage.safe(cloud.lastError)).font(.caption).foregroundStyle(.orange) }
-                    Text("Cache limits take effect on the next mount. Active files and pending writes are retained. Application launch below uses a verified managed local copy when streaming is unavailable.")
-                        .font(.caption).foregroundStyle(.secondary)
                 }.frame(maxWidth: .infinity, alignment: .leading).padding(8)
             }
             if content == .applications { GDManualProviderSection(library: native.manualLibrary) }

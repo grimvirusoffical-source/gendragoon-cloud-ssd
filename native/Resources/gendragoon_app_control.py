@@ -434,7 +434,7 @@ def ensure_idle(app, ui_busy=False):
         if any(name in value.casefold() for value in volume
                for name in ("gendragoon", "gen-dragoon", "cloudssd", "rclone")):
             raise ControlError("active_mount")
-    known = ("gendragoon_stream.py", "gendragoon_library.py", "gendragoon_preload.py", "gendragoon_connect.py", "gendragoon_app_launch.py")
+    known = ("gendragoon_stream.py", "gendragoon_library.py", "gendragoon_preload.py", "gendragoon_connect.py", "gendragoon_app_launch.py", "gendragoon_redx_storage.py")
     for pid, _, uid, arguments in processes():
         if uid != os.getuid() or pid == os.getpid():
             continue

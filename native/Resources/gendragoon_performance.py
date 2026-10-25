@@ -21,6 +21,10 @@ RESOURCE = Path(__file__).resolve().parent
 INPUT_LIMIT = 32 * 1024
 RESPONSE_LIMIT = 64 * 1024
 WORKSPACE = re.compile(r"(?:free|[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})\Z")
+REDX_WORKSPACE = re.compile(r"[a-f0-9]{32}\Z")
+REDX_RECEIVER = re.compile(r"[a-f0-9]{64}\Z")
+REDX_ACCESS = re.compile(r"rxca_[A-Za-z0-9_-]{43}\Z")
+REDX_SECRET = re.compile(r"[A-Za-z0-9_-]{32,128}\Z")
 _input = None
 _active = None
 
@@ -84,6 +88,21 @@ def configure_from_stdin(stream=None):
         if len(raw) > INPUT_LIMIT:
             raise ValueError("Performance request too large")
         value = json.loads(raw)
+        if value.get("provider") == "redxai":
+            workspace=value.get("workspaceId");token=value.get("bearerToken")
+            constrained=value.get("constrained",False);receiver=value.get("receiverId")
+            secret=value.get("storageSecret");keymap=value.get("keymapPath");api=value.get("cloudApi")
+            if (not isinstance(workspace,str) or not REDX_WORKSPACE.fullmatch(workspace)
+                    or not isinstance(token,str) or not REDX_ACCESS.fullmatch(token)
+                    or not isinstance(receiver,str) or not REDX_RECEIVER.fullmatch(receiver)
+                    or not isinstance(secret,str) or not REDX_SECRET.fullmatch(secret)
+                    or not isinstance(keymap,str) or not Path(keymap).is_absolute() or "\x00" in keymap
+                    or api != "https://api.red-xai.com" or type(constrained) is not bool):
+                raise ValueError("Invalid Red-XAI private worker input")
+            _input=json.dumps(value,separators=(",", ":")).encode()
+            _active=for_workers(1,constrained)
+            _active.update(verified=True,workspaceId=workspace,source="redxai-receiver")
+            return current()
         workspace = value.get("workspaceId")
         token = value.get("bearerToken")
         constrained = value.get("constrained", False)
@@ -114,6 +133,10 @@ def configure_from_stdin(stream=None):
 
 def forwarded_input():
     return _input
+
+
+def private_payload():
+    return json.loads(_input) if _input is not None else None
 
 
 def rclone_arguments(profile=None):

@@ -1,3 +1,5 @@
+[Reading 89 lines from start (total: 89 lines, 0 remaining)]
+
 # MANUAL ONLY. Never runs on push, pull request or schedule. Nothing here uploads to the App Store or publishes a release.
 name: Mac build (manual)
 
@@ -23,6 +25,8 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
       - name: Python helper tests (updater channels, MAS config)
         run: |
           cd native && PYTHONPATH=Resources python3 -B -m unittest Tests.test_distribution_channels Tests.test_mas_config
@@ -42,6 +46,8 @@ jobs:
     environment: mac-release   # create this environment with required reviewers so signing needs a human click
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
       - name: Import signing certificates into a temporary keychain
         env:
           CERTS_P12_BASE64: ${{ secrets.MAC_CERTS_P12_BASE64 }}
@@ -87,3 +93,5 @@ jobs:
             ${{ runner.temp }}/mas-out/*.pkg
           if-no-files-found: warn
           retention-days: 7
+
+[executed on device: XLR1-Mac.local (bff18bc4-2575-4bdc-abbb-cd3c9fda10a0)]
