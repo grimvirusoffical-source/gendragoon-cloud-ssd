@@ -389,7 +389,7 @@ class WorkspaceMountManager:
             live=self.live.get(key)
             if not live:
                 if platform_api.mounted(record) is False and platform_api.process_matches(record.get("process")) is False:
-                    record["state"]="unmounted";self._save(record);return
+                    record["state"]="unmounted";record["process"]=None;self._save(record);return
                 raise MountError("This retained drive belongs to a previous process. Unmount it normally in the operating system; no process was stopped.")
             tree,server,thread,process=live
             with tree.lock:
@@ -401,7 +401,10 @@ class WorkspaceMountManager:
                 if platform_api.mounted(record) is not False or process.poll() is None:
                     raise MountError("The drive or its filesystem process is still active; the session was retained.")
                 server.shutdown();server.server_close();thread.join(timeout=2)
-                self.live.pop(key);record["state"]="unmounted";self._save(record)
+                # We hold the actual owned Popen and have confirmed both exit
+                # and volume absence. A later lookup of this dead/reused PID
+                # must not convert a completed session back into an orphan.
+                self.live.pop(key);record["state"]="unmounted";record["process"]=None;self._save(record)
             except Exception:
                 with tree.lock:tree.closing=False
                 raise

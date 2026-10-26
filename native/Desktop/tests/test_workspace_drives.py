@@ -73,7 +73,10 @@ def fake_model(root):
 
 def fake_tree(model,note,cache):
     payload=("owned note "+note).encode();target=private.private_directory(cache)/"verified-fixture"
-    private.write_private(target,payload)
+    if target.exists():
+        private.verify(target)
+        if target.read_bytes()!=payload:raise ValueError("The retained fixture cache changed.")
+    else:private.write_private(target,payload)
     record=dict(path=".",type="file",size=len(payload),sha256=hashlib.sha256(payload).hexdigest(),executable=0)
     return REAL_TREE(model,note,cache,manifest_loader=lambda *_:{".":record},restorer=lambda _:target)
 
@@ -182,6 +185,21 @@ class ManagerTests(unittest.TestCase):
                 while tree.active and time.monotonic()<deadline:time.sleep(.005)
                 self.manager.unmount(key)
         self.addCleanup(close)
+
+    def test_confirmed_unmount_clears_dead_pid_before_uncertain_windows_relookup(self):
+        record=self.manager.mount(self.model,NOTE);process=self.manager.live[record["id"]][3]
+        def lookup(value):
+            if value is None:return False
+            return None if value["pid"]==process.pid and process.poll() is not None else True
+        with patch.object(platform,"process_matches",side_effect=lookup):
+            self.manager.unmount(record["id"])
+            self.assertEqual(process.poll(),0)
+            self.assertIsNone(self.manager.saved[record["id"]]["process"])
+            self.assertFalse(self.manager.has_mounts)
+            replacement=self.manager.mount(self.model,NOTE)
+            self.assertNotEqual(replacement["process"]["pid"],record["process"]["pid"])
+            self.assertEqual(replacement["state"],"mounted")
+            self.assertTrue(self.manager.has_mounts)
     def test_multiple_mount_identities_and_private_registry_have_no_credentials(self):
         first=self.manager.mount(self.model,NOTE);second=self.manager.mount(self.model,OTHER)
         self.assertNotEqual(first["mountPath"],second["mountPath"]);self.assertEqual(len(self.manager.records),2);self.assertTrue(self.manager.has_mounts)
