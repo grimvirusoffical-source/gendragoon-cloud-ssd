@@ -360,11 +360,11 @@ class GenDragoonGUI:
     def can_switch(self):
         from tkinter import messagebox
         if self.busy:return False
+        if self.mounts.has_mounts:
+            messagebox.showwarning("Unmount workspace drives","Unmount all drives before disconnecting, changing accounts, or quitting. Retained or uncertain drives also need review; the current session was preserved.",parent=self.root);return False
         try:self.model.portable_apps.assert_safe("disconnect or change accounts")
         except PortableAppError as error:
             messagebox.showwarning("Portable app lease active",str(error),parent=self.root);return False
-        if self.mounts.has_mounts:
-            messagebox.showwarning("Unmount workspace drives","Unmount all drives before disconnecting, changing accounts, or quitting. Retained or uncertain drives also need review; the current session was preserved.",parent=self.root);return False
         if self.model.keys and not self.model.vault_exported:
             messagebox.showwarning("Export your vault","Export your new vault before changing accounts, so its storage key is not lost.",parent=self.root);return False
         return True
