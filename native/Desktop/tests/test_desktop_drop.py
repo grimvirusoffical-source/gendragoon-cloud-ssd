@@ -17,6 +17,7 @@ from unittest.mock import Mock, patch
 
 DESKTOP = Path(__file__).resolve().parents[1]
 RUNTIME = Path(os.environ.get("GD_DESKTOP_RUNTIME", DESKTOP))
+sys.path.insert(0, str(DESKTOP))
 sys.path.insert(0, str(RUNTIME))
 import desktop_drop as drop
 import desktop_transfer_ui as transfer

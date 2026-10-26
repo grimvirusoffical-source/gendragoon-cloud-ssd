@@ -60,7 +60,7 @@ class OriginTests(unittest.TestCase):
         self.assertEqual(origin.ensure_restore_compatible({"name":"App.exe","kind":"file"},platform_name="windows"),"windows")
         self.assertIsNone(origin.ensure_restore_compatible({"name":"report.pdf","kind":"file"},platform_name="macos"))
     def test_origin_only_changes_catalog_and_reuses_identical_encrypted_manifest_objects(self):
-        import test_redx_transfer_performance as fixture
+        from native.Tests import test_redx_transfer_performance as fixture
         storage=fixture.storage
         fixture.FixtureReceiver.blobs={};fixture.FixtureReceiver.items={};fixture.FixtureReceiver.writes=0
         with tempfile.TemporaryDirectory() as temporary:
@@ -75,7 +75,7 @@ class OriginTests(unittest.TestCase):
             catalog=fixture.FixtureReceiver.items[key];self.assertEqual(catalog["origin"],device);self.assertEqual(catalog["applicationPlatform"],"windows");self.assertEqual(catalog["kind"],"file")
             root=json.loads(objects[first["manifestId"]][24:]);self.assertNotIn("origin",root);self.assertNotIn("applicationPlatform",root)
     def test_upload_returns_retained_legacy_metadata_instead_of_claiming_the_new_device(self):
-        import test_redx_transfer_performance as fixture
+        from native.Tests import test_redx_transfer_performance as fixture
         storage=fixture.storage
         class LegacyCatalog(fixture.FixtureReceiver):
             def register(self,key,item):return dict(item,key=key,origin=None,applicationPlatform="windows")
