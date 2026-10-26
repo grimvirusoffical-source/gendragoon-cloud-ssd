@@ -35,6 +35,7 @@ public final class TransferAcceptanceApplication extends Application implements 
         private final Context context;
         private PyObject fixture;
         final AtomicInteger uploads=new AtomicInteger(),downloads=new AtomicInteger();
+        final AtomicInteger configurationEntries=new AtomicInteger(),configurationReturns=new AtomicInteger(),receiverEntries=new AtomicInteger(),uploadEntries=new AtomicInteger(),downloadEntries=new AtomicInteger();
         final AtomicReference<Hold> nextHold=new AtomicReference<>();
         final AtomicReference<File> lastPrepared=new AtomicReference<>();
         FixtureBackend(Context context){this.context=context;}
@@ -49,22 +50,23 @@ public final class TransferAcceptanceApplication extends Application implements 
         private void identity(String subject,String workspace)throws IOException{
             if(!SUBJECT.equals(subject)||!WORKSPACE.equals(workspace))throw new IOException("Fixture account changed.");
         }
-        public JSONObject configuration(String subject,String workspace)throws Exception{identity(subject,workspace);return new JSONObject(fixture().callAttr("configuration").toString());}
-        public JSONObject receiverState(String subject)throws Exception{identity(subject,WORKSPACE);return new JSONObject().put("workspaces",new JSONArray().put(new JSONObject().put("id",WORKSPACE).put("active",true).put("readOnly",false)));}
+        public JSONObject configuration(String subject,String workspace)throws Exception{configurationEntries.incrementAndGet();identity(subject,workspace);JSONObject result=new JSONObject(fixture().callAttr("configuration").toString());configurationReturns.incrementAndGet();return result;}
+        public JSONObject receiverState(String subject)throws Exception{receiverEntries.incrementAndGet();identity(subject,WORKSPACE);return new JSONObject().put("workspaces",new JSONArray().put(new JSONObject().put("id",WORKSPACE).put("active",true).put("readOnly",false)));}
         public String upload(JSONObject config,File source,File stage,String subject,CryptoRuntime.Reporter reporter)throws Exception{
-            identity(subject,config.getString("workspaceId"));uploads.incrementAndGet();lastPrepared.set(source);
+            uploadEntries.incrementAndGet();identity(subject,config.getString("workspaceId"));uploads.incrementAndGet();lastPrepared.set(source);
             Hold hold=nextHold.getAndSet(null);
             if(hold!=null){hold.entered.countDown();if(!hold.release.await(45,TimeUnit.SECONDS))throw new IOException("Owned fixture hold was not released.");if(hold.fail)throw new IOException("Owned fixture network failure after admission.");}
             return fixture().callAttr("upload",source.getCanonicalPath(),stage.getCanonicalPath(),reporter).toString();
         }
         public String download(JSONObject config,JSONObject item,File stage,String subject,CryptoRuntime.Reporter reporter)throws Exception{
-            identity(subject,config.getString("workspaceId"));downloads.incrementAndGet();
+            downloadEntries.incrementAndGet();identity(subject,config.getString("workspaceId"));downloads.incrementAndGet();
             return fixture().callAttr("download",item.toString(),stage.getCanonicalPath(),reporter).toString();
         }
         synchronized void reset()throws Exception{
             if(TransferLease.active())throw new IOException("An actual fixture Worker body remains active.");
             if(nextHold.get()!=null)throw new IOException("An owned fixture hold remains installed.");
             fixture=null;uploads.set(0);downloads.set(0);lastPrepared.set(null);
+            configurationEntries.set(0);configurationReturns.set(0);receiverEntries.set(0);uploadEntries.set(0);downloadEntries.set(0);
         }
         JSONObject item()throws Exception{return new JSONObject(fixture().callAttr("item").toString());}
         void corrupt()throws Exception{fixture().callAttr("corrupt");}

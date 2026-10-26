@@ -46,10 +46,11 @@ public final class TransferAcceptanceTest {
     }
     @After public void finishOwnedActivityOnly()throws Exception{
         if(application!=null){TransferAcceptanceApplication.Hold hold=application.backend.nextHold.getAndSet(null);if(hold!=null)hold.close();}
-        if(manager!=null)await("Owned Worker body did not finish; private fixtures retained",()->{
-            for(UUID id:owned){WorkInfo info=manager.getWorkInfoById(id).get(10,TimeUnit.SECONDS);if(info==null||!info.getState().isFinished())return false;}
-            return !TransferLease.active();
-        },75);
+        if(manager!=null)try{await("Owned Worker body did not finish; private fixtures retained",()->{
+                for(UUID id:owned){WorkInfo info=manager.getWorkInfoById(id).get(10,TimeUnit.SECONDS);if(info==null||!info.getState().isFinished())return false;}
+                return !TransferLease.active();
+            },75);
+        }catch(AssertionError failure){StringBuilder report=new StringBuilder("Owned Worker body did not finish; private fixtures retained");for(int n=0;n<Math.min(owned.size(),8);n++)report.append("; ownedIndex=").append(n).append(' ').append(workerDiagnostic(owned.get(n)));throw new AssertionError(report.toString());}
         if(scenario!=null)scenario.close();
         // No recursive fixture deletion: failed jobs remain attributable until their real body exits.
     }
@@ -68,16 +69,45 @@ public final class TransferAcceptanceTest {
     private OneTimeWorkRequest request(Data data){OneTimeWorkRequest request=new OneTimeWorkRequest.Builder(TransferWorker.class).setInputData(data).addTag(TAG).build();owned.add(request.getId());return request;}
     private UUID start(Data data)throws Exception{OneTimeWorkRequest work=request(data);manager.enqueue(work).getResult().get(10,TimeUnit.SECONDS);return work.getId();}
     private WorkInfo finished(UUID id)throws Exception{
-        AtomicReference<WorkInfo> result=new AtomicReference<>();await("Owned transfer did not reach a terminal result",()->{WorkInfo info=manager.getWorkInfoById(id).get(10,TimeUnit.SECONDS);if(info!=null&&info.getState().isFinished())result.set(info);return result.get()!=null;},180);return result.get();
+        AtomicReference<WorkInfo> result=new AtomicReference<>();try{await("Owned transfer did not reach a terminal result",()->{WorkInfo info=manager.getWorkInfoById(id).get(10,TimeUnit.SECONDS);if(info!=null&&info.getState().isFinished())result.set(info);return result.get()!=null;},180);}catch(AssertionError failure){throw new AssertionError("Owned transfer did not reach a terminal result; "+workerDiagnostic(id));}return result.get();
     }
     private WorkInfo download(JSONObject item)throws Exception{
         return finished(start(new Data.Builder().putString("subject",TransferAcceptanceApplication.SUBJECT).putString("workspace",TransferAcceptanceApplication.WORKSPACE).putString("action","download").putString("item",item.toString()).build()));
     }
     private File job(UUID id){return new File(context.getFilesDir(),"redx-jobs/"+id);}
+    /** Only fixed classifications, bounded counters and filesystem booleans enter reports. */
+    private String workerDiagnostic(UUID id){
+        WorkInfo info=null;try{info=manager.getWorkInfoById(id).get(5,TimeUnit.SECONDS);}catch(Exception ignored){/* Report a fixed unavailable state only. */}
+        return workerDiagnostic(id,info);
+    }
+    private static String messageClassification(String value){
+        if(value==null||value.isEmpty())return "ABSENT";
+        return switch(value){
+            case "This device needs the compatible private vault to unlock this backup. Sign-in alone cannot recover lost encryption keys. Originals and cloud data were retained."->"VAULT_KEYS";
+            case "This operation needs more local preparation and verified readback space. Original retained."->"LOCAL_SPACE";
+            case "The MachineNote is read only or its storage quota is full. Check its plan in GenDragoon. Original retained."->"READ_ONLY_OR_QUOTA";
+            case "Reconnect the intended Red-XAI account before resuming. Original retained."->"ACCOUNT";
+            case "A same-name item or another operation conflicts with this upload. Existing backups and the original were retained."->"COLLISION";
+            case "The connection was interrupted. Verified cloud chunks remain available for a retry; original retained."->"CONNECTION";
+            case "The encrypted transfer did not finish verification. The original and retained job data were kept. Review storage, connection and device keys before retrying."->"GENERIC_TRANSFER_FAILURE";
+            case "Succeeded · fully verified; original retained"->"VERIFIED_SUCCESS";
+            default->"OTHER";
+        };
+    }
+    private String workerDiagnostic(UUID id,WorkInfo info){
+        String state=info==null?"UNAVAILABLE":info.getState().name(),code="ABSENT",message="ABSENT",phase="ABSENT";
+        if(info!=null){String observedCode=info.getOutputData().getString("code");if(observedCode!=null)code="encrypted_transfer_failed".equals(observedCode)?"ENCRYPTED_TRANSFER_FAILED":"OTHER";message=messageClassification(info.getOutputData().getString("message"));String observedPhase=info.getProgress().getString("phase");if(observedPhase!=null)phase=switch(observedPhase){case "preparing","archiving","encoding","uploading","publishing","readback","decoding","verifying","complete"->observedPhase;default->"OTHER";};}
+        String paths;
+        try{File root=context.getFilesDir(),directory=job(id),marker=new File(directory,"account.receiver");paths="rootCanonicalEqualsAbsolute="+root.getCanonicalFile().equals(root.getAbsoluteFile())+",jobCanonicalEqualsAbsolute="+directory.getCanonicalFile().equals(directory.getAbsoluteFile())+",jobRootPresent="+directory.getParentFile().isDirectory()+",jobDirectory="+directory.isDirectory()+",jobSymbolicLink="+Files.isSymbolicLink(directory.toPath())+",markerPresent="+Files.exists(marker.toPath(),java.nio.file.LinkOption.NOFOLLOW_LINKS)+",markerRegular="+Files.isRegularFile(marker.toPath(),java.nio.file.LinkOption.NOFOLLOW_LINKS);}
+        catch(Exception ignored){paths="PATH_CHECK_UNAVAILABLE";}
+        TransferAcceptanceApplication.FixtureBackend backend=application.backend;
+        return "state="+state+",code="+code+",messageClass="+message+",phase="+phase+",leaseActive="+TransferLease.active()+",configurationEntries="+Math.min(100000,backend.configurationEntries.get())+",configurationReturns="+Math.min(100000,backend.configurationReturns.get())+",receiverEntries="+Math.min(100000,backend.receiverEntries.get())+",uploadEntries="+Math.min(100000,backend.uploadEntries.get())+",downloadEntries="+Math.min(100000,backend.downloadEntries.get())+",preparedSourceObserved="+(backend.lastPrepared.get()!=null)+","+paths;
+    }
     private Uri failedBeforeBackend(String mode)throws Exception{
         Uri source=fixture(mode);int before=application.backend.uploads.get();UUID id=start(uploadData(source,true));WorkInfo result=finished(id);
-        assertEquals(mode,WorkInfo.State.FAILED,result.getState());assertEquals(mode,before,application.backend.uploads.get());assertTrue("Failed private job retained",job(id).isDirectory());assertFalse(new File(job(id),"verified.archive").exists());
-        assertEquals(RedXSession.receiver(TransferAcceptanceApplication.SUBJECT),new String(Files.readAllBytes(new File(job(id),"account.receiver").toPath()),java.nio.charset.StandardCharsets.US_ASCII));
+        assertEquals(mode+"; "+workerDiagnostic(id,result),WorkInfo.State.FAILED,result.getState());assertEquals(mode,before,application.backend.uploads.get());assertTrue("Failed private job retained; "+workerDiagnostic(id,result),job(id).isDirectory());assertFalse(new File(job(id),"verified.archive").exists());
+        byte[] marker;try{marker=Files.readAllBytes(new File(job(id),"account.receiver").toPath());}catch(IOException error){throw new AssertionError("OWNERSHIP_MARKER_UNAVAILABLE; "+workerDiagnostic(id,result));}
+        assertEquals(RedXSession.receiver(TransferAcceptanceApplication.SUBJECT),new String(marker,java.nio.charset.StandardCharsets.US_ASCII));
         return source;
     }
     private int[] diagnostics(Uri source)throws Exception{
@@ -105,7 +135,7 @@ public final class TransferAcceptanceTest {
     }
     @Test public void completeNestedAndEmptyFoldersRoundtripThroughActualWorker()throws Exception{
         for(String mode:new String[]{"folder","empty"}){
-            application.backend.reset();Uri uri=fixture(mode);UUID upload=start(uploadData(uri,true));assertEquals(WorkInfo.State.SUCCEEDED,finished(upload).getState());assertFalse("Only verified upload cache may be cleared",job(upload).exists());
+            application.backend.reset();Uri uri=fixture(mode);UUID upload=start(uploadData(uri,true));WorkInfo uploaded=finished(upload);assertEquals("Initial nested upload; "+workerDiagnostic(upload,uploaded),WorkInfo.State.SUCCEEDED,uploaded.getState());assertFalse("Only verified upload cache may be cleared",job(upload).exists());
             WorkInfo result=download(application.backend.item());assertEquals(WorkInfo.State.SUCCEEDED,result.getState());assertTrue(result.getOutputData().getBoolean("archiveExport",false));
             try(ZipFile archive=new ZipFile(result.getOutputData().getString("path"))){
                 assertNotNull(archive.getEntry("Selected folder/"));
@@ -127,7 +157,7 @@ public final class TransferAcceptanceTest {
         assertTrue(context.getContentResolver().getPersistedUriPermissions().stream().anyMatch(permission->permission.getUri().equals(source)&&permission.isReadPermission()));
         UUID upload;
         try(TransferAcceptanceApplication.Hold hold=application.backend.holdNext()){
-            upload=start(uploadData(source,false));assertTrue("Actual Worker must reach the owned transfer barrier",hold.entered.await(25,TimeUnit.SECONDS));
+            upload=start(uploadData(source,false));boolean entered=hold.entered.await(25,TimeUnit.SECONDS);assertTrue("Actual Worker must reach the owned transfer barrier; "+workerDiagnostic(upload),entered);
             assertTrue(TransferLease.active());await("Actual WorkManager foreground service not observed",this::foregroundService,10);
             File prepared=application.backend.lastPrepared.get();assertNotNull(prepared);assertArrayEquals(original,Files.readAllBytes(prepared.toPath()));
             assertEquals(0600,android.system.Os.stat(prepared.getPath()).st_mode&0777);assertEquals(0700,android.system.Os.stat(job(upload).getPath()).st_mode&0777);assertEquals(0600,android.system.Os.stat(new File(job(upload),"account.receiver").getPath()).st_mode&0777);
@@ -156,14 +186,14 @@ public final class TransferAcceptanceTest {
         WorkInfo foreign=download(new JSONObject().put("workspace","bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"));assertEquals(WorkInfo.State.FAILED,foreign.getState());assertEquals(0,application.backend.downloads.get());assertEquals(150*1024,original.length);
     }
     @Test public void damagedCarrierDownloadFailsAndRetainsItsPrivateJob()throws Exception{
-        UUID uploaded=start(uploadData(fixture("empty"),true));assertEquals(WorkInfo.State.SUCCEEDED,finished(uploaded).getState());JSONObject item=application.backend.item();application.backend.corrupt();
+        UUID uploaded=start(uploadData(fixture("empty"),true));WorkInfo uploadResult=finished(uploaded);assertEquals("Initial carrier upload; "+workerDiagnostic(uploaded,uploadResult),WorkInfo.State.SUCCEEDED,uploadResult.getState());JSONObject item=application.backend.item();application.backend.corrupt();
         OneTimeWorkRequest work=request(new Data.Builder().putString("subject",TransferAcceptanceApplication.SUBJECT).putString("workspace",TransferAcceptanceApplication.WORKSPACE).putString("action","download").putString("item",item.toString()).build());manager.enqueue(work).getResult().get(10,TimeUnit.SECONDS);assertEquals(WorkInfo.State.FAILED,finished(work.getId()).getState());assertTrue(job(work.getId()).isDirectory());assertFalse(new File(job(work.getId()),"verified.archive").exists());
     }
     @Test public void failedPredecessorPropagatesToAlreadyQueuedSelections()throws Exception{
         Uri source=fixture("single");byte[] original=bytes(context,source);String chain="owned-chain-"+UUID.randomUUID();
         OneTimeWorkRequest first=request(uploadData(source,false)),second=request(uploadData(source,false)),third=request(uploadData(source,false));
         try(TransferAcceptanceApplication.Hold hold=application.backend.holdNext(true)){
-            manager.enqueueUniqueWork(chain,ExistingWorkPolicy.APPEND_OR_REPLACE,first).getResult().get(10,TimeUnit.SECONDS);assertTrue(hold.entered.await(25,TimeUnit.SECONDS));
+            manager.enqueueUniqueWork(chain,ExistingWorkPolicy.APPEND_OR_REPLACE,first).getResult().get(10,TimeUnit.SECONDS);boolean entered=hold.entered.await(25,TimeUnit.SECONDS);assertTrue("Failed-chain predecessor must enter its owned barrier; "+workerDiagnostic(first.getId()),entered);
             manager.enqueueUniqueWork(chain,ExistingWorkPolicy.APPEND_OR_REPLACE,second).getResult().get(10,TimeUnit.SECONDS);manager.enqueueUniqueWork(chain,ExistingWorkPolicy.APPEND_OR_REPLACE,third).getResult().get(10,TimeUnit.SECONDS);
             assertEquals(WorkInfo.State.BLOCKED,manager.getWorkInfoById(second.getId()).get(10,TimeUnit.SECONDS).getState());
         }
