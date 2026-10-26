@@ -59,6 +59,10 @@ async function discoverExtensionOrigin(runner,{timeout=15000}={}){
  const runners=runner.extensionRunners;assert.ok(Array.isArray(runners)&&runners.length===1);const desktop=runners[0];assert.equal(desktop.getName(),'Firefox Desktop');assert.equal(typeof desktop.remoteFirefox?.client?.request,'function');
  let timer;try{return installedExtensionOrigin(await Promise.race([desktop.remoteFirefox.client.request('listAddons'),new Promise((_,reject)=>{timer=setTimeout(()=>reject(new Error('Firefox registered extension discovery timed out')),timeout);})]));}finally{clearTimeout(timer);}
 }
+async function firefoxScreenshot(bidi,context){
+ try{const result=await bidi.command('browsingContext.captureScreenshot',{context,origin:'document'});assert.equal(typeof result.data,'string');return result.data;}
+ catch(error){if(error.message==='unsupported operation: The command does not support browsing contexts in privileged scope')return null;throw error;}
+}
 async function ownedDirectory(directory,{create=false,created=[]}={}){let stat;try{stat=await fs.lstat(directory);}catch(error){if(error.code!=='ENOENT'||!create)throw error;await fs.mkdir(directory,{mode:0o700});created.push(directory);stat=await fs.lstat(directory);}assert.ok(stat.isDirectory()&&!stat.isSymbolicLink()&&stat.uid===process.getuid()&&(stat.mode&0o022)===0,'Firefox fixture registration requires owned non-writable directories');}
 async function registerFirefoxHost(root,binary,{environment=process.env,platform=process.platform,writeManifest=(handle,data)=>handle.writeFile(data)}={}){
  assert.equal(platform,'linux');assert.equal(environment.GITHUB_ACTIONS,'true');
@@ -124,7 +128,7 @@ async function firefoxNativeTest({root,directory,archive,firefoxBinary,webExt,we
   assert.equal(await bidi.evaluate(teams,'document.title'),'GenDragoon Teams');assert.equal(await bidi.evaluate(teams,"document.querySelector('h1').textContent"),'Build together.');
   assert.equal(await bidi.evaluate(teams,"document.querySelector('#join-team').disabled&&document.querySelector('#send-message').disabled"),true,'Participation stays disabled without current fixture rules acceptance');
   await bidi.command('browsingContext.navigate',{context,url:origin+'dashboard.html',wait:'complete'});await bidi.wait(context,"document.querySelector('#status').textContent.includes('Connected as Disposable CI fixture.')",'return to the packaged dashboard');
-  const screenshot=await bidi.command('browsingContext.captureScreenshot',{context,origin:'document'});await fs.writeFile(path.join(root,'reports/firefox-dashboard.png'),Buffer.from(screenshot.data,'base64'),{mode:0o600});
+  const screenshot=await firefoxScreenshot(bidi,context);if(screenshot!==null)await fs.writeFile(path.join(root,'reports/firefox-dashboard.png'),Buffer.from(screenshot,'base64'),{mode:0o600});
   await atomicJSON(path.join(root,'consent.json'),{approved:false});
   assert.equal(await bidi.evaluate(context,"(async()=>{try{await GDCompanion.call('status');return null;}catch(error){return error.code;}})()"),'approval_required','Revoked consent must deny the already open native connection');
   const beforeManifestDenial=await events(root);await registration.setAllowedExtensions([NEGATIVE_ID]);
@@ -142,7 +146,7 @@ async function firefoxNativeTest({root,directory,archive,firefoxBinary,webExt,we
   const errors=bidi.events.filter(event=>event.method==='log.entryAdded'&&event.params?.level==='error'&&event.params?.type==='javascript');assert.deepEqual(errors,[],'Unexpected extension JavaScript errors');
   result={passed:true,webExtVersion,nodeVersion:process.version,browserVersion:session.capabilities.browserVersion,firefoxExecutableSHA256:checksum(await fs.readFile(firefoxBinary)),extensionVersion:manifest.version,extensionId:FIREFOX_ID,
    extensionArchiveSHA256:checksum(await fs.readFile(archive)),nativeHostSHA256:checksum(await fs.readFile(binary)),runnerImage:process.env.ImageVersion||null,
-   realFirefoxTemporaryLoadAndReload:true,lintErrors:0,nativeMessagingTested:true,actualNativeMessaging:true,actualProductionPrivateIPC:true,
+   realFirefoxTemporaryLoadAndReload:true,lintErrors:0,nativeMessagingTested:true,actualNativeMessaging:true,actualProductionPrivateIPC:true,extensionScreenshotCaptured:screenshot!==null,extensionScreenshotLimitation:screenshot===null?'Firefox157 BiDi explicitly rejects screenshots of privileged extension pages':null,
    approvalDeniedThenFixtureApproved:true,fixtureApprovalRevokedOnExistingConnection:true,exactFirefoxIDRemovalDeniesNewConnection:true,browserManifestRejectsDifferentExtensionID:true,
    readOnlyControls:true,metadataRenderedAsText:true,disallowedRoutesRejected:true,teamsPageLoaded:true,teamsCommunityPolicyRendered:true,
    syntheticAccountFreeDispatch:true,realNativeConsentUITested:false,liveAccountOrUploadTest:false,signedStoreInstallationTested:false,normalUserApprovalTested:false,otherOperatingSystemsTested:false,
@@ -157,4 +161,4 @@ async function firefoxNativeTest({root,directory,archive,firefoxBinary,webExt,we
  }
  await report(root,'firefox',{...result,createdHostManifestRemoved:true});
 }
-module.exports={BidiClient,connectBidi,registerFirefoxHost,firefoxNativeTest,withFirefoxLaunchEnvironment,installedExtensionOrigin,discoverExtensionOrigin,FIREFOX_ID};
+module.exports={BidiClient,connectBidi,registerFirefoxHost,firefoxNativeTest,withFirefoxLaunchEnvironment,installedExtensionOrigin,discoverExtensionOrigin,firefoxScreenshot,FIREFOX_ID};

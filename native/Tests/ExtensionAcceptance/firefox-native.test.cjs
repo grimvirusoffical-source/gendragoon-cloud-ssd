@@ -1,6 +1,6 @@
 'use strict';
 const test=require('node:test'),assert=require('node:assert/strict'),fs=require('node:fs/promises'),os=require('node:os'),path=require('node:path');
-const {BidiClient,connectBidi,registerFirefoxHost,withFirefoxLaunchEnvironment,installedExtensionOrigin,discoverExtensionOrigin,FIREFOX_ID}=require('./firefox-native.cjs');
+const {BidiClient,connectBidi,registerFirefoxHost,withFirefoxLaunchEnvironment,installedExtensionOrigin,discoverExtensionOrigin,firefoxScreenshot,FIREFOX_ID}=require('./firefox-native.cjs');
 class Socket extends EventTarget{constructor(){super();this.sent=[];}send(value){this.sent.push(JSON.parse(value));}close(){this.closed=true;}reply(value){this.dispatchEvent(new MessageEvent('message',{data:JSON.stringify(value)}));}}
 test('BiDi correlates concurrent responses, rejects protocol errors and fails outstanding requests on close',async()=>{
  const socket=new Socket(),client=new BidiClient(socket),a=client.command('first'),b=client.command('second');socket.reply({type:'success',id:2,result:{second:true}});socket.reply({type:'success',id:1,result:{first:true}});assert.deepEqual(await a,{first:true});assert.deepEqual(await b,{second:true});
@@ -52,4 +52,9 @@ test('origin discovery uses only the pinned web-ext Firefox runner existing RDP 
  const addon={id:FIREFOX_ID,debuggable:true,temporarilyInstalled:true,isWebExtension:true,isSystem:false,manifestURL:'moz-extension://58f6682e-47a9-4a72-8587-0c805f002a74/manifest.json'},calls=[];
  const runner={extensionRunners:[{getName:()=> 'Firefox Desktop',remoteFirefox:{client:{request:async command=>{calls.push(command);return {addons:[addon]};}}}}]};assert.equal(await discoverExtensionOrigin(runner),addon.manifestURL.slice(0,-13));assert.deepEqual(calls,['listAddons']);
  await assert.rejects(discoverExtensionOrigin({extensionRunners:[] }));runner.extensionRunners[0].remoteFirefox.client.request=()=>new Promise(()=>{});await assert.rejects(discoverExtensionOrigin(runner,{timeout:10}),/discovery timed out/);
+});
+test('Firefox screenshot limitation is explicit and never masks other protocol or malformed-result failures',async()=>{
+ const calls=[],client={command:async(method,params)=>{calls.push({method,params});return {data:'synthetic-image-data'};}};assert.equal(await firefoxScreenshot(client,'fixture-context'),'synthetic-image-data');assert.deepEqual(calls,[{method:'browsingContext.captureScreenshot',params:{context:'fixture-context',origin:'document'}}]);
+ client.command=async()=>{throw new Error('unsupported operation: The command does not support browsing contexts in privileged scope');};assert.equal(await firefoxScreenshot(client,'fixture-context'),null);
+ client.command=async()=>{throw new Error('unexpected browser failure');};await assert.rejects(firefoxScreenshot(client,'fixture-context'),/unexpected browser failure/);client.command=async()=>({});await assert.rejects(firefoxScreenshot(client,'fixture-context'));
 });
