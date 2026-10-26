@@ -23,8 +23,6 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
-        with:
-          submodules: recursive
       - name: Python helper tests (updater channels, MAS config)
         run: |
           cd native && PYTHONPATH=Resources python3 -B -m unittest Tests.test_distribution_channels Tests.test_mas_config
