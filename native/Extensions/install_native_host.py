@@ -10,6 +10,7 @@ import re
 import shutil
 import stat
 import uuid
+import uuid
 from pathlib import Path
 
 HOST = "com.redxai.gendragoon"
@@ -91,17 +92,39 @@ def install(*, platform, home, helper, python, browser_ids, firefox=False, vscod
         raise ValueError("Opera documents a system-wide Linux native-host path; user-level Opera installation is not verified. No root/system install is performed.")
     if platform=="win32":
         return install_windows(home=home,browser_ids=browser_ids,firefox=firefox,vscode=vscode,executable=host_executable)
-    helper, python = Path(helper), Path(python)
-    if not helper.is_absolute() or not python.is_absolute() or not helper.is_file() or not python.is_file() or any(c.isspace() for c in str(python)):
-        raise ValueError("Provide existing absolute helper and Python executable paths; the interpreter path cannot contain whitespace")
-    helper = helper.resolve()
+    binary=None
+    if host_executable is not None:
+        if not platform.startswith("linux"):raise ValueError("A standalone Unix host is supported on Linux only")
+        binary=Path(host_executable)
+        if not binary.is_absolute() or binary.is_symlink() or not binary.is_file() or binary.stat().st_size>128*1024*1024:
+            raise ValueError("Select the installed absolute GenDragoon Linux native host executable")
+        with binary.open("rb") as probe:
+            if probe.read(4)!=b"\x7fELF":raise ValueError("The Linux native host must be an ELF executable")
+    else:
+        helper, python = Path(helper), Path(python)
+        if not helper.is_absolute() or not python.is_absolute() or not helper.is_file() or not python.is_file() or any(c.isspace() for c in str(python)):
+            raise ValueError("Provide existing absolute helper and Python executable paths; the interpreter path cannot contain whitespace")
+        helper = helper.resolve()
     base = base_directory(platform, home)
     private_directory(base)
     directory = base / "NativeMessaging"
     private_directory(directory)
     wrapper = directory / "gendragoon-native-host"
-    script = "#!" + str(python) + "\nimport os,runpy,sys\nsys.dont_write_bytecode=True\nos.environ['PYTHONDONTWRITEBYTECODE']='1'\nhelper=" + repr(str(helper)) + "\nargs=sys.argv[1:]\nsys.argv=[helper]+(args if args and args[0]=='--vscode-bridge' else ['--native-messaging']+args)\nrunpy.run_path(helper,run_name='__main__')\n"
-    private_write(wrapper, script, executable=True)
+    if binary is not None:
+        if wrapper.exists() and (wrapper.is_symlink() or not wrapper.is_file() or wrapper.stat().st_nlink!=1 or wrapper.stat().st_uid!=os.getuid()):
+            raise ValueError("The existing native host is unsafe; inspect it before replacing it")
+        temporary=wrapper.with_name(".host-"+uuid.uuid4().hex)
+        fd=os.open(temporary,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o700)
+        try:
+            with os.fdopen(fd,"wb") as output,binary.open("rb") as source:
+                shutil.copyfileobj(source,output);output.flush();os.fsync(output.fileno())
+            # The compiled entry preserves browser argv and the fixed
+            # --vscode-bridge mode; no shell or Python interpreter is involved.
+            os.replace(temporary,wrapper)
+        finally:temporary.unlink(missing_ok=True)
+    else:
+        script = "#!" + str(python) + "\nimport os,runpy,sys\nsys.dont_write_bytecode=True\nos.environ['PYTHONDONTWRITEBYTECODE']='1'\nhelper=" + repr(str(helper)) + "\nargs=sys.argv[1:]\nsys.argv=[helper]+(args if args and args[0]=='--vscode-bridge' else ['--native-messaging']+args)\nrunpy.run_path(helper,run_name='__main__')\n"
+        private_write(wrapper, script, executable=True)
     origins = ["chrome-extension://" + value + "/" for value in browser_ids.values() if value]
     if firefox:
         origins.append(FIREFOX_ID)
@@ -171,10 +194,10 @@ def main():
     parser.add_argument("--vscode", action="store_true")
     parser.add_argument("--helper", type=Path, default=Path("/Applications/GenDragoon Cloud SSD.app/Contents/Resources/gendragoon_native_bridge.py") if sys.platform == "darwin" else None)
     parser.add_argument("--python", type=Path, default=Path(shutil.which("python3.13") or sys.executable))
-    parser.add_argument("--host-executable",type=Path,help="Verified self-contained GenDragoonNativeHost.exe on Windows")
+    parser.add_argument("--host-executable",type=Path,help="Installed self-contained Windows PE or Linux ELF GenDragoon native host")
     options = parser.parse_args()
     try:
-        if options.helper is None and sys.platform!="win32":
+        if options.helper is None and options.host_executable is None and sys.platform!="win32":
             raise ValueError("Linux requires --helper with the installed GenDragoon companion helper path")
         result = install(platform=sys.platform, home=Path.home(), helper=options.helper, python=options.python, browser_ids={"chrome": options.chrome_id, "edge": options.edge_id, "opera": options.opera_id}, firefox=options.firefox, vscode=options.vscode,host_executable=options.host_executable)
     except (ValueError, OSError) as exc:

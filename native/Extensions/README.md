@@ -2,7 +2,7 @@
 
 These clients use the **installed, running GenDragoon companion**. They do not contain account passwords, session tokens, Stripe keys, integration keys, or encryption keys. A companion-enabled build from the same source revision is required. Installing an extension by itself does not provide storage, connect an account, or start a working upload service.
 
-The four browser packages target Chrome, Edge, Firefox, and Opera. The desktop VS Code package runs in the local UI extension host. Windows named-pipe transport is not implemented. The Unix transport has automated macOS tests; Linux installation paths are provided for Chrome, Edge, Firefox, and VS Code, with Linux runtime validation still required. Opera's documented Linux host path is system-wide, so the installer refuses a user-level Opera installation there and does not write to `/etc`.
+The four browser packages target Chrome, Edge, Firefox, and Opera. The desktop VS Code package runs in the local UI extension host. Windows uses a real console PE native host, private named pipes, current-user SID checks and protected ACLs. Linux uses a private Unix socket and can install either the Python host or a standalone ELF host. macOS Unix transport tests pass; Windows/Linux runtime candidates are gated by their own CI, including the real native codec and private local IPC. Opera's documented Linux host path is system-wide, so the installer refuses a user-level Opera installation there and does not write to `/etc`.
 
 ## What the clients do
 
@@ -76,7 +76,7 @@ Use **Extensions: Install from VSIX…** and select `gendragoon-0.1.0.vsix`. Ena
 - **GenDragoon: Select Folder to Upload**.
 - **GenDragoon: Open Developer Teams**.
 
-Uploads require a trusted local workspace and an explicit picker selection. Remote/virtual file URIs are rejected. No upload command is registered for a peer message or a WebRTC packet. The extension spawns only the fixed installed native-host path with `['--vscode-bridge']` and `shell:false`; it does not run workspace scripts or concatenate shell commands. It runs in the local UI host, not an SSH/container extension host or browser-based VS Code. Windows returns a clear unsupported-platform error until its transport is implemented and tested.
+Uploads require a trusted local workspace and an explicit picker selection. Remote/virtual file URIs are rejected. No upload command is registered for a peer message or a WebRTC packet. The extension spawns only the fixed installed native-host path with `['--vscode-bridge']` and `shell:false`; it does not run workspace scripts or concatenate shell commands. It runs in the local UI host, not an SSH/container extension host or browser-based VS Code. Windows requires the packaged PE host and per-user allowlist; the native desktop app must be open and approve that editor for the current account.
 
 ## Companion protocol
 

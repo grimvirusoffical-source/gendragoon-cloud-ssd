@@ -1,10 +1,110 @@
-# GenDragoon Windows and Linux companion
+# GenDragoon MachineNotes desktop
 
-This is the command-line native companion for Windows and Linux. It talks to the
-same authenticated `/v3/cloud/{workspace}` transfer routes as the macOS and mobile
-clients. It does not create a separate storage account or alternative cloud API.
+`gendragoon_gui.py` is the current Windows/Linux desktop Files and Teams client.
+It uses the account's authenticated `/v1/receivers/*` MachineNotes API, the pinned
+Red-SecretsXAI C++ codec, and genuine visual PNG ciphertext carriers. Account
+sign-in, encryption keys, storage subscriptions, and Teams membership have separate
+roles; signing in or joining a team does not grant somebody else's file keys.
 
-## Implemented behavior
+The source is implemented and has local codec/model tests. Windows and Linux
+runtime candidates must pass their respective CI before being described as
+validated releases. CI builds executable GUI/native-host candidates; it does not
+sign, publish, install, or submit them to an app store.
+
+## Current desktop behavior
+
+- Browser approval uses Red-XAI's PKCE approval flow. Access and refresh credentials
+  stay in process memory, with serialized renewal during long transfers. Closing
+  the app discards them; there are no plaintext token files or credential arguments.
+- Files displays owned MachineNotes and their nested virtual folders. Create,
+  rename, move, copy, paste, drag items into folders, and remove library references
+  through the authenticated, revision-checked server operations. Folder backups
+  remain complete archive items. Removing references retains encrypted payload
+  bytes and does not reclaim quota.
+- Upload files/folders, retain originals, then download the full encrypted archive,
+  decrypt it, restore it, and verify every file against its authenticated SHA-256
+  manifest. Transfers use the server's worker allowance. Immutable chunks can be
+  reused after interrupted requests; bounded network retries cannot replay arbitrary
+  metadata mutations. The UI reports actual phase/archive and streamed carrier bytes.
+- Restore renamed/copied items without changing their crypto IDs or associated
+  data. Restore only into new destinations using an atomic no-replace operation.
+  Virtual-folder downloads compose their retained archive children.
+- Import/export the same account-bound portable vault used by the Mac and Android
+  clients. AES-256-GCM, PBKDF2-HMAC-SHA256 with exactly 600,000 iterations, a random
+  16-byte salt, and a random 12-byte nonce protect the storage secret and encrypted
+  private KXAI keymap. Passphrases require at least 12 Unicode code points. Auth
+  tokens and integration keys are excluded. Different existing keys are preserved.
+- Initialize keys only after a fresh full-account response proves storage empty.
+  Export the new vault before uploading; an API key cannot initialize account keys.
+  Existing encrypted storage requires the original vault. A vault cannot be
+  recovered from account sign-in or an integration key.
+- Teams supports username registration, note-team creation, invitations/join,
+  membership lists, and paginated server-relayed chat. Integration-key mode has
+  Files access to its bound note and no Teams rights. Peer calls/live media are
+  not provided in this Tk view, and Teams membership grants no storage access.
+- Browser/editor companion requests require an exact installed extension allowlist
+  and native approval for the current account. Browser uploads use the native file
+  picker. Explicit editor selections are confirmed, then saved to a private durable
+  queue before returning acceptance. Jobs retain their account/note/folder context,
+  resume only after the same account and vault are available, and retain originals.
+- A single desktop coordinator protects writers. Profile, Jobs, keymap, staging,
+  and restored files are private to the local user. Windows creates new paths with
+  explicit current-user owner SID/private ACLs, including elevated processes.
+
+Mac application bundles, extended attributes, and symbolic links must be restored
+with their original platform's client. Portable restores normalize local
+permissions to private owner access. The Mac NFS drive and managed app launcher
+are not presented as Windows/Linux features.
+
+## Current client installation
+
+Use Python **3.13** with Tkinter. The checked-out installer writes only GenDragoon's
+current-user program/runtime and a private virtual environment. It never elevates
+privileges or changes PowerShell execution policy. Account approval and vault
+import happen in the window, not on a command line.
+
+```sh
+sh native/Desktop/install-linux.sh
+```
+
+On Windows, run `native/Desktop/install-windows.ps1` through the machine's existing
+PowerShell policy. It builds an actual `GenDragoonNativeHost.exe`; a batch file is
+not substituted for a native-messaging executable. Source builds require CMake and
+a C++ compiler; compiled runtime inputs can instead be selected explicitly:
+
+```sh
+python -B native/Desktop/stage_runtime.py --destination /new/staging/path --prebuilt native/Desktop/runtimes/linux-x86_64.zip
+python -B /new/staging/path/gendragoon_gui.py --check
+```
+
+The public platform ZIPs contain Python3.13 bytecode, the matching native codec,
+and license notices. `runtime-index.json` pins archive digests; the internal
+manifest pins all sizes/hashes, platform, architecture, bytecode version, and
+library commit `9235941b431bc1c23c34286b82052f845121592f`. Unsafe paths, source
+files, links, incompatible versions, and changed archives fail closed. The
+GenDragoon-owned `codec_loader.py` adapts only the two verified codec package
+directories' frozen sibling imports; the vendor checkout and crypto API stay
+unchanged. Source builds place all output outside the vendor tree.
+
+Dependencies are pinned in `requirements.txt`; release tooling is separate in
+`requirements-build.txt`. Version metadata comes from the official package pages:
+[cryptography](https://pypi.org/project/cryptography/),
+[pywin32](https://pypi.org/project/pywin32/), and
+[PyInstaller](https://pypi.org/project/pyinstaller/).
+
+In **Storage keys → Configure browser/editor access**, enter exact installed
+Chromium extension IDs and explicitly enable Firefox/VS Code as needed. A
+standalone GUI candidate carries its own PE/ELF host; source/Python installs use
+their verified interpreter on Linux. Linux Opera requires a system host directory,
+so the current-user installer refuses that registration. Nothing writes to `/etc`.
+
+## Legacy v3 command-line companion
+
+The retained `gendragoon_desktop.py` CLI below targets the older
+`/v3/cloud/{workspace}` protocol and its legacy package/app lifecycle. It is not
+the current MachineNotes GUI and does not migrate encrypted account keys.
+
+### Legacy behavior
 
 - Upload a selected file or a complete directory tree. Empty files and directories
   are preserved in ZIP packages. Native portable applications use the same package
@@ -27,24 +127,11 @@ clients. It does not create a separate storage account or alternative cloud API.
   installers, privileged services and applications with external machine-specific
   installation requirements are not treated as portable apps.
 
-## Installation
+### Legacy commands
 
-Python 3.11 or newer must already be installed. From this checked-out folder:
-
-```sh
-sh install-linux.sh
-```
-
-On Windows, run `install-windows.ps1` through the PowerShell execution policy already
-configured on your machine. The installer does not disable that policy or elevate
-privileges. It reports the full `gendragoon.cmd` command path after installing.
-
-Both scripts install only the current-user companion. They do not uninstall old
-GenDragoon applications or alter application data. The macOS installer is separate.
-
-## Commands
-
-Run `gendragoon capabilities` to see the precise local platform support. Account
+Run the retained CLI explicitly with `python gendragoon_desktop.py`; current
+installers launch the MachineNotes GUI. Run
+`python gendragoon_desktop.py capabilities` to see the legacy platform support. Account
 operations prompt for a session token or scoped account API key using a hidden
 terminal prompt. A parent process can supply it through `--token-stdin`; it must
 never be placed in a command argument, committed to source or printed to logs.
@@ -52,14 +139,14 @@ Owner credentials are not embedded in this companion. Existing server authorizat
 and workspace scopes remain authoritative.
 
 ```sh
-gendragoon workspaces
-gendragoon list --workspace free
-gendragoon upload --source /path/to/Folder --workspace free
-gendragoon upload --source /path/to/PortableApp --application-entrypoint bin/app --workspace free
-gendragoon upload --source /path/to/Folder --workspace free --remove-original
-gendragoon restore --file-id CLOUD_FILE_UUID --workspace free
-gendragoon launch --file-id CLOUD_FILE_UUID
-gendragoon evict --file-id CLOUD_FILE_UUID
+python gendragoon_desktop.py workspaces
+python gendragoon_desktop.py list --workspace free
+python gendragoon_desktop.py upload --source /path/to/Folder --workspace free
+python gendragoon_desktop.py upload --source /path/to/PortableApp --application-entrypoint bin/app --workspace free
+python gendragoon_desktop.py upload --source /path/to/Folder --workspace free --remove-original
+python gendragoon_desktop.py restore --file-id CLOUD_FILE_UUID --workspace free
+python gendragoon_desktop.py launch --file-id CLOUD_FILE_UUID
+python gendragoon_desktop.py evict --file-id CLOUD_FILE_UUID
 ```
 
 Use `--destination /path/to/file` when restoring a plain file or another platform's

@@ -1,0 +1,5 @@
+# Installed only inside the GenDragoon desktop virtual environment.
+cryptography==50.0.2
+numpy==2.5.4
+Pillow==13.0.0
+pywin32==312; sys_platform == 'win32'

@@ -36,9 +36,6 @@
   ],
   "environmentFindings": [
     "Mac has less than 10 GB free; continue normal work where actual required space fits. No fixed 10 GiB reserve.",
-    "existing Windows/Linux client is CLI only",
-    "existing mobile clients target the older v3 API",
-    "browser and VS Code extensions are absent",
     "required RottenApple and Quick Launcher provider wire contract exists but is documented as proposed, not live"
   ],
   "storeStatus": "not submitted; implementation and validation pending",
@@ -58,10 +55,14 @@
     "backend": "67 passed,6 optional external/runtime tests skipped in broad local suite; exact RottenApple Go pairing and genuine RedX/C++ app restore verified separately",
     "portableVault": "MacCryptoKit/CommonCrypto, Pythoncryptography and actualJDK17JCE vectors agree; tamper/account/password/import-safety negatives pass",
     "desktopCompanion": "4 actualUnixRPC tests passed onMac; Windowsnamedpipe+ACL runtime tests pending CI",
-    "android": "Compiled-only runtime stripped and verified, arm64/x86_64 16 KiB LOAD alignment, 10 Python tests pass. First Gradle build exposed missing generated-source task dependency, now corrected. APK/device validation pending; exact official OpenBLAS/gfortran wheels still have 4 KiB alignment and block release.",
+    "android": "Real debug/release APKs and AAB compiled; lint and JVM tests passed. 12 Android source tests and ownership checks pass. Actual 4/16 KiB device tests pending. Official numerical and image dependencies with 4 KiB alignment block release; isolated replacement builds underway.",
     "androidRuntimeSha256": "47883fd5535bae569c7fe7bb9cfac2092fa8ab2ec83c4c39e4fd5e9c363ffa2f",
     "androidRuntimeBytes": 777660,
-    "firstCI": "Backend and Linux desktop jobs passed. Mac compiler expression timeout and packaging fixture omission corrected. Windows default elevated owner exposed; atomic current-user SID creation added. Android Gradle dependency corrected. Next CI pending."
+    "firstCI": "Backend and Linux desktop jobs passed. Mac compiler expression timeout and packaging fixture omission corrected. Windows default elevated owner exposed; atomic current-user SID creation added. Android Gradle dependency corrected. Next CI pending.",
+    "desktop": "Current MachineNotes Tk GUI, compiled-only codec adapters and native messaging hosts ready for actual Windows/Linux CI; 24 focused local tests pass, 1 Windows-only privacy test pending. Standalone packages and GUI startup pending CI.",
+    "macCI": "Full native compile, lifecycle, credential renewal, companion IPC and portable vault steps passed on 28de7e6. Fresh final source recheck pending.",
+    "installerSpace": "73 installer and updater tests passed with resolved local fixture paths, including successful staging below the advisory 10 GB and safe real-space-shortage refusal.",
+    "receiverIsolation": "CAS retry rechecks current library workspace; stalled Teams mutation JSON is read before locks. Focused 16 passed, 1 optional actual RedX fixture skipped."
   },
   "limitations": [
     "RottenApple current caller pairs successfully but its storageBind returns unavailable before network; complete file binding requires changes outside this authorized repository.",

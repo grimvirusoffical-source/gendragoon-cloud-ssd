@@ -92,8 +92,9 @@ function createDevTeams({store,records=new DevTeamRecords(store),now=()=>Date.no
   if(path==='/v1/receivers/me/dev-profile'){
    if(u.search)throw new CloudError('invalid_pagination',400);
    if(method==='GET'){const p=await profile(identity.owner);return {status:200,body:{profile:p,usernameRequired:!p?.username}};}
-   if(method==='PUT')return serial('profile:'+identity.owner,async()=>{
+   if(method==='PUT'){
     rate(identity,'profile',10);const b=fields(await body(req),['username']);
+    return serial('profile:'+identity.owner,async()=>{
     if(typeof b.username!=='string'||!/^[A-Za-z][A-Za-z0-9_.-]{2,31}$/.test(b.username))throw new CloudError('username_invalid',400);
     const normalized=b.username.toLowerCase(),claimKey='username:'+normalized;let claim=await records.get(claimKey);
     if(claim&&claim.value.account!==identity.owner)throw new CloudError('username_taken',409);
@@ -101,7 +102,8 @@ function createDevTeams({store,records=new DevTeamRecords(store),now=()=>Date.no
     const prior=await records.get(profileKey(identity.owner));const p={username:b.username,updatedMs:now()};
     await put(profileKey(identity.owner),p,identity.owner,'profile',prior);
     return {status:200,body:{profile:p,usernameRequired:false}};
-   });
+    });
+   }
    throw new CloudError('method_not_allowed',405);
   }
   if(path==='/v1/receivers/me/dev-teams'&&method==='GET'){
@@ -115,13 +117,17 @@ function createDevTeams({store,records=new DevTeamRecords(store),now=()=>Date.no
   m=/^\/v1\/receivers\/teams\/([a-f0-9]{32})(?:\/(members|invites|messages|presence|signals|membership)(?:\/([a-f0-9]{32}))?)?$/.exec(path);
   if(!m)throw new CloudError('team_not_found',404);
   const [,id,resource,target]=m;
+  // A peer controls how quickly its request body arrives. Read the bounded
+  // metadata before taking the team lock, then recheck membership and roles
+  // inside the serialized operation before applying any mutation.
+  const mutationBody=['POST','PUT','PATCH'].includes(method)?await body(req):null;
   return serial(id,async()=>{
    const auth=await membership(identity,id),{t}=auth;
    if(!resource){
     if(u.search)throw new CloudError('invalid_pagination',400);
     if(method==='GET')return {status:200,body:await teamResponse(t,auth.m)};
     if(method==='PATCH'||method==='DELETE'){
-     await membership(identity,id,'owner');const b=method==='PATCH'?fields(await body(req),['name']):{};
+     await membership(identity,id,'owner');const b=method==='PATCH'?fields(mutationBody,['name']):{};
      const changed=await put('team:'+id,{...t.value,...(method==='DELETE'?{status:'disabled'}:{name:text(b.name,80)})},id,'team',t);
      return {status:200,body:method==='DELETE'?{disabled:true}:await teamResponse(changed,auth.m)};
     }
@@ -137,7 +143,7 @@ function createDevTeams({store,records=new DevTeamRecords(store),now=()=>Date.no
      if(u.search)throw new CloudError('invalid_pagination',400);await membership(identity,id,method==='PATCH'?'owner':'admin');
      const row=await records.get(memberKey(id,target));if(!row||row.value.status!=='active')throw new CloudError('team_member_not_found',404);
      if(row.value.role==='owner'||auth.m.value.role==='admin'&&row.value.role==='admin')throw new CloudError('team_owner_required',403);
-     const b=method==='PATCH'?fields(await body(req),['role']):{};
+     const b=method==='PATCH'?fields(mutationBody,['role']):{};
      if(method==='PATCH'&&!['admin','peer'].includes(b.role))throw new CloudError('team_role_invalid',400);
      await put(memberKey(id,target),{...row.value,...(method==='DELETE'?{status:'removed',removedMs:now()}:{role:b.role})},id,'member',row);
      return {status:200,body:method==='DELETE'?{removed:true}:{updated:true}};
@@ -152,7 +158,7 @@ function createDevTeams({store,records=new DevTeamRecords(store),now=()=>Date.no
     const publicInvite=v=>({id:v.id,expiresAtMs:v.expiresAtMs,createdMs:v.createdMs,revoked:v.revoked,consumed:Boolean(v.claimedBy),maxUses:1});
     if(!target&&method==='GET'){const p=await page(u,id,'invite');return {status:200,body:{invites:p.rows.map(r=>publicInvite(r.value)),cursor:p.cursor,nextCursor:p.nextCursor,invitationLimit:null}};}
     if(!target&&method==='POST'){
-     if(u.search)throw new CloudError('invalid_pagination',400);rate(identity,'invite',30);const b=fields(await body(req),['expiresInHours']);const hours=b.expiresInHours??72;
+     if(u.search)throw new CloudError('invalid_pagination',400);rate(identity,'invite',30);const b=fields(mutationBody,['expiresInHours']);const hours=b.expiresInHours??72;
      if(!Number.isSafeInteger(hours)||hours<1||hours>720)throw new CloudError('team_invite_expiry_invalid',400);
      const iid=crypto.randomBytes(16).toString('hex'),token=`gdt1_${id}_${iid}_${crypto.randomBytes(32).toString('base64url')}`;
      const invite={id:iid,tokenHash:digest(token),createdMs:now(),expiresAtMs:now()+hours*3600000,revoked:false,claimedBy:null};
@@ -166,7 +172,7 @@ function createDevTeams({store,records=new DevTeamRecords(store),now=()=>Date.no
    if(resource==='presence'&&!target){
     await profile(identity.owner,true);
     if(method==='PUT'){
-     if(u.search)throw new CloudError('invalid_pagination',400);rate(identity,'presence',30);fields(await body(req),[]);const key=`presence:${id}:${auth.peer}`,prior=await records.get(key);
+     if(u.search)throw new CloudError('invalid_pagination',400);rate(identity,'presence',30);fields(mutationBody,[]);const key=`presence:${id}:${auth.peer}`,prior=await records.get(key);
      await put(key,{peerId:auth.peer,generation:auth.m.value.generation,seenMs:now(),expiresAtMs:now()+TTL.presence},id,'presence',prior);
      return {status:200,body:{expiresAtMs:now()+TTL.presence}};
     }
@@ -180,7 +186,7 @@ function createDevTeams({store,records=new DevTeamRecords(store),now=()=>Date.no
     await profile(identity.owner,true);
     if(!target&&method==='GET'){const p=await page(u,id,'message',v=>v.expiresAtMs>now());return {status:200,body:{transport:'server-relay',messages:p.rows.map(r=>({id:r.value.id,peerId:r.value.peerId,username:r.value.username,text:r.value.deleted?'':r.value.text,deleted:r.value.deleted===true,createdMs:r.value.createdMs})),cursor:p.cursor,nextCursor:p.nextCursor}};}
     if(!target&&method==='POST'){
-     if(u.search)throw new CloudError('invalid_pagination',400);const p=await profile(identity.owner,true);rate(identity,'message',20,10000);const b=fields(await body(req),['text','messageId']);
+     if(u.search)throw new CloudError('invalid_pagination',400);const p=await profile(identity.owner,true);rate(identity,'message',20,10000);const b=fields(mutationBody,['text','messageId']);
      if(!ID.test(b.messageId||''))throw new CloudError('team_message_id_required',400);const content=text(b.text,2000),key=`message:${id}:${auth.m.value.generation}:${b.messageId}`,prior=await records.get(key);
      if(prior){if(prior.value.text!==content)throw new CloudError('team_message_conflict',409);return {status:200,body:{id:prior.value.id,transport:'server-relay',resumed:true}};}
      const seq=await sequence(t,'messageSeq'),mid=digest(key).slice(0,32);
@@ -197,7 +203,7 @@ function createDevTeams({store,records=new DevTeamRecords(store),now=()=>Date.no
      return {status:200,body:{transport:'webrtc-signaling',signals,cursor:p.cursor,nextCursor:p.nextCursor}};
     }
     if(method==='POST'){
-     if(u.search)throw new CloudError('invalid_pagination',400);rate(identity,'signal',120);const b=fields(await body(req),['signalId','to','connectionId','kind','type','payload']);
+     if(u.search)throw new CloudError('invalid_pagination',400);rate(identity,'signal',120);const b=fields(mutationBody,['signalId','to','connectionId','kind','type','payload']);
      if(b.kind&&b.type&&b.kind!==b.type)throw new CloudError('team_signal_invalid',400);b.type=b.kind||b.type;
      if(!ID.test(b.signalId||'')||!ID.test(b.to||'')||!ID.test(b.connectionId||'')||!['offer','answer','ice'].includes(b.type))throw new CloudError('team_signal_invalid',400);
      const targetMember=await records.get(memberKey(id,b.to));if(!targetMember||targetMember.value.status!=='active'||b.to===auth.peer)throw new CloudError('team_peer_unavailable',404);

@@ -2,11 +2,12 @@
 const {test}=require('node:test');
 const assert=require('node:assert/strict');
 const crypto=require('node:crypto');
+const {PassThrough,Readable}=require('node:stream');
 const fs=require('node:fs/promises'),os=require('node:os'),path=require('node:path');
 const {createCloud}=require('../server.cjs');
 const {CloudError,digest}=require('../redx-state.cjs');
 const {DevTeamRecords}=require('../dev-team-store.cjs');
-const {TTL}=require('../dev-teams.cjs');
+const {TTL,createDevTeams}=require('../dev-teams.cjs');
 async function scopedRedXFixture(t){
  const {spawn}=require('node:child_process'),net=require('node:net');
  const dir=await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(),'gd-team-records-'))),listener=net.createServer();
@@ -132,6 +133,37 @@ test('rate limiting limits request bursts rather than team or invitation totals'
  for(let i=0;i<30;i++)assert.equal((await f.call('alice',`/v1/receivers/teams/${id}/invites`,'POST',{})).status,201);
  assert.equal((await f.call('alice',`/v1/receivers/teams/${id}/invites`,'POST',{})).status,429);
  f.clock.value+=60001;assert.equal((await f.call('alice',`/v1/receivers/teams/${id}/invites`,'POST',{})).status,201);
+});
+async function finishesBeforeBody(work){
+ let timer;
+ try{return await Promise.race([work.then(value=>({finished:true,value})),new Promise(resolve=>{timer=setTimeout(()=>resolve({finished:false}),1000);})]);}
+ finally{clearTimeout(timer);}
+}
+test('a stalled team mutation body does not lock reads and membership is rechecked after parsing',async t=>{
+ const f=await fixture(t),created=await f.create(),id=created.team.id;await f.profile('alice');const bob=await f.join('bob',id);
+ const api=createDevTeams({store:f.store,records:f.records,rateLimits:false}),slow=new PassThrough();slow.method='POST';slow.write('{"text":"held body');
+ const pending=api.handle(slow,new URL(`http://fixture/v1/receivers/teams/${id}/messages`),{owner:account('bob')}).then(value=>({value}),error=>({error}));
+ await new Promise(setImmediate);
+ const req=Readable.from([]);req.method='GET';const reading=api.handle(req,new URL(`http://fixture/v1/receivers/teams/${id}`),{owner:account('alice')});
+ const before=await finishesBeforeBody(reading);
+ try{
+  const removed=await f.call('alice',`/v1/receivers/teams/${id}/members/${bob.self.peerId}`,'DELETE');assert.equal(removed.status,200);
+ }finally{slow.end('","messageId":"'+'8'.repeat(32)+'"}');}
+ const posted=await pending;await reading;
+ assert.equal(before.finished,true,'request streaming must not hold the team lock');assert.equal(before.value.status,200);
+ assert.equal(posted.error?.status,404,'a member removed while sending JSON must not publish later');
+ assert.equal([...f.records.map.values()].filter(row=>row.kind==='message').length,0);
+});
+test('a stalled username body does not hold the account profile lock',async t=>{
+ const f=await fixture(t),api=createDevTeams({store:f.store,records:f.records,rateLimits:false}),identity={owner:account('alice')};
+ const slow=new PassThrough();slow.method='PUT';slow.write('{"username":"');
+ const pending=api.handle(slow,new URL('http://fixture/v1/receivers/me/dev-profile'),identity);
+ await new Promise(setImmediate);
+ const fast=Readable.from([Buffer.from(JSON.stringify({username:'fastfixture'}))]);fast.method='PUT';
+ const saving=api.handle(fast,new URL('http://fixture/v1/receivers/me/dev-profile'),identity);
+ const before=await finishesBeforeBody(saving);
+ slow.end('slowfixture"}');await pending;await saving;
+ assert.equal(before.finished,true,'a complete username request must not wait for another request body');assert.equal(before.value.status,200);
 });
 test('message and signal cursors resume at current end and fetch only later packets',async t=>{
  const f=await fixture(t),created=await f.create(),id=created.team.id;await f.profile('alice');const bob=await f.join('bob',id);

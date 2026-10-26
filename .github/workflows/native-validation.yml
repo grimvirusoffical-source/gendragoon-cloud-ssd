@@ -8,7 +8,7 @@ on:
       - feat/**
       - test/**
   pull_request:
-    paths: ['native/**', 'macos/**', 'fixtures/**', '.github/workflows/native-validation.yml']
+    paths: ['native/**', '!native/Mobile/Android/dependencies/**', 'macos/**', 'fixtures/**', '.github/workflows/native-validation.yml']
   workflow_dispatch:
     inputs:
       include_ios:
@@ -69,7 +69,7 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 10
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
@@ -87,11 +87,33 @@ jobs:
         run: node -e "require('./native/Backend/test_helpers/transfer_fixture')"
       - name: Test native lifecycle, archive security and the real v3 transfer router
         run: python -m unittest discover -s native/Desktop/tests -p test_desktop.py -v
-      - name: Install the Windows native pipe and ACL API
-        if: runner.os == 'Windows'
-        run: python -B -m pip install pywin32==312
+      - name: Install only the desktop test and packaging dependencies
+        run: python -B -m pip install --only-binary=:all: -r native/Desktop/requirements.txt -r native/Desktop/requirements-build.txt
       - name: Verify actual same-user companion IPC and access restrictions
         run: python -B -m unittest discover -s native/Desktop/tests -p test_companion_server.py -v
+      - name: Stage the hash-pinned compiled platform runtime without private source checkout
+        run: python -B native/Desktop/stage_runtime.py --destination "${{ runner.temp }}/gendragoon-desktop" --prebuilt "native/Desktop/runtimes/${{ runner.os == 'Windows' && 'windows' || 'linux' }}-x86_64.zip"
+      - name: Verify current MachineNotes, portable vault, genuine encrypted transfer, renewal and private filesystem
+        run: python -B -m unittest discover -s native/Desktop/tests -p test_machinenotes.py -v
+        env:
+          GD_DESKTOP_RUNTIME: ${{ runner.temp }}/gendragoon-desktop
+      - name: Construct the actual Linux Files and Teams GUI in an isolated profile
+        if: runner.os == 'Linux'
+        run: xvfb-run -a python -B -m unittest discover -s native/Desktop/tests -p test_gui_startup.py -v
+        env:
+          GD_DESKTOP_RUNTIME: ${{ runner.temp }}/gendragoon-desktop
+      - name: Construct the actual Windows Files and Teams GUI in an isolated profile
+        if: runner.os == 'Windows'
+        run: python -B -m unittest discover -s native/Desktop/tests -p test_gui_startup.py -v
+        env:
+          GD_DESKTOP_RUNTIME: ${{ runner.temp }}/gendragoon-desktop
+      - name: Build and smoke-check standalone GUI and native messaging candidates
+        run: python -B native/Desktop/package_desktop.py --runtime "${{ runner.temp }}/gendragoon-desktop" --output "${{ runner.temp }}/gendragoon-candidates"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: GenDragoon-desktop-${{ runner.os }}-candidate
+          path: ${{ runner.temp }}/gendragoon-candidates/*.zip
+          if-no-files-found: error
 
   backend:
     runs-on: ubuntu-latest

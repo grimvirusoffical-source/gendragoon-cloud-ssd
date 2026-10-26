@@ -9,6 +9,7 @@ import sys
 sys.dont_write_bytecode = True
 os.environ["PYTHONDONTWRITEBYTECODE"] = "1"
 import hashlib
+import time
 from pathlib import Path
 
 
@@ -133,15 +134,19 @@ class PipeStream:
             if result not in {0, 997}:
                 raise OSError("The native pipe operation failed.")
             if result == 997 and event.WaitForSingleObject(operation.hEvent, int(self.timeout * 1000)) != event.WAIT_OBJECT_0:
-                file.CancelIoEx(self.handle, operation)
+                # This thread issued the only pending operation on this
+                # handle. pywin32 exposes same-thread CancelIo, not CancelIoEx.
+                file.CancelIo(self.handle)
                 # Wait for cancellation before releasing the OVERLAPPED buffer.
                 try:
                     file.GetOverlappedResult(self.handle, operation, True)
-                except OSError:
+                except (OSError, types.error):
                     pass
                 raise TimeoutError("The native pipe request timed out.")
             count = file.GetOverlappedResult(self.handle, operation, False)
             return bytes(buffer[:count]) if reading else count
+        except types.error:
+            raise OSError("The native pipe operation could not complete.") from None
         finally:
             operation.hEvent.Close()
 
@@ -168,11 +173,24 @@ class PipeStream:
 
 
 def connect_pipe(name):
-    _, _, con, _, file, pipe, _ = modules()
+    types, _, con, _, file, pipe, _ = modules()
     if name != pipe_name():
         raise OSError("The companion named-pipe identity is invalid.")
-    pipe.WaitNamedPipe(name, 3000)
-    handle = file.CreateFile(name, con.GENERIC_READ | con.GENERIC_WRITE, 0, None, con.OPEN_EXISTING, file.FILE_FLAG_OVERLAPPED, None)
+    deadline = time.monotonic() + 3
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("The native companion stayed busy. Retry when its current requests finish.")
+        try:
+            pipe.WaitNamedPipe(name, max(1, int(remaining * 1000)))
+            handle = file.CreateFile(name, con.GENERIC_READ | con.GENERIC_WRITE, 0, None, con.OPEN_EXISTING, file.FILE_FLAG_OVERLAPPED, None)
+            break
+        except types.error as error:
+            # Availability can change between WaitNamedPipe and CreateFile.
+            # No request has been sent, so retrying connection cannot replay IO.
+            if error.args[0] not in {2, 121, 231}:
+                raise OSError("The private companion pipe could not be opened.") from None
+            time.sleep(min(0.01, max(0, deadline-time.monotonic())))
     try:
         verify_pipe_peer(handle, server=False)
         return PipeStream(handle)
@@ -181,9 +199,12 @@ def connect_pipe(name):
 
 
 def create_pipe(*, first=False):
-    _, _, _, _, file, pipe, _ = modules()
-    return pipe.CreateNamedPipe(pipe_name(), pipe.PIPE_ACCESS_DUPLEX | file.FILE_FLAG_OVERLAPPED | (0x00080000 if first else 0),
-        pipe.PIPE_TYPE_BYTE | pipe.PIPE_READMODE_BYTE | pipe.PIPE_WAIT | 0x8, 8, 256 * 1024, 256 * 1024, 35000, security_attributes())
+    types, _, _, _, file, pipe, _ = modules()
+    try:
+        return pipe.CreateNamedPipe(pipe_name(), pipe.PIPE_ACCESS_DUPLEX | file.FILE_FLAG_OVERLAPPED | (0x00080000 if first else 0),
+            pipe.PIPE_TYPE_BYTE | pipe.PIPE_READMODE_BYTE | pipe.PIPE_WAIT | 0x8, 8, 256 * 1024, 256 * 1024, 35000, security_attributes())
+    except types.error:
+        raise OSError("Another companion listener owns this pipe, or Windows denied its creation.") from None
 
 
 def accept_pipe(handle, stopped):
@@ -194,7 +215,7 @@ def accept_pipe(handle, stopped):
             result = pipe.ConnectNamedPipe(handle, operation)
             if result == 535:
                 verify_pipe_peer(handle, server=True); return PipeStream(handle)
-        except OSError as exc:
+        except (OSError, types.error) as exc:
             if getattr(exc, "winerror", exc.args[0] if exc.args else None) == 535:
                 verify_pipe_peer(handle, server=True); return PipeStream(handle)
             raise
@@ -203,10 +224,10 @@ def accept_pipe(handle, stopped):
             if state == event.WAIT_OBJECT_0:
                 file.GetOverlappedResult(handle, operation, False)
                 verify_pipe_peer(handle, server=True); return PipeStream(handle)
-        file.CancelIoEx(handle, operation)
+        file.CancelIo(handle)
         try:
             file.GetOverlappedResult(handle, operation, True)
-        except OSError:
+        except (OSError, types.error):
             pass
         raise InterruptedError("Companion listener stopped.")
     finally:
