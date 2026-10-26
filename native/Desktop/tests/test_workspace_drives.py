@@ -9,6 +9,7 @@ from pathlib import Path
 import sys
 import tempfile
 import threading
+import time
 from types import SimpleNamespace
 import unittest
 import urllib.error
@@ -171,13 +172,14 @@ class ManagerTests(unittest.TestCase):
             patch.object(platform,"mounted",side_effect=lambda r:r["id"] in self.active),patch.object(platform,"start",side_effect=start),
             patch.object(platform,"process_identity",side_effect=lambda pid:dict(pid=pid,start="fixed",exe="rclone",owner="fixture")),
             patch.object(platform,"process_matches",side_effect=lambda value:bool(value and any(p.pid==value["pid"] and p.poll() is None for p in self.processes.values()))),
-            patch.object(platform,"unmount",side_effect=stop),patch.object(platform,"capture_mount_identity",return_value={})]
+            patch.object(platform,"unmount",side_effect=stop),patch.object(platform,"capture_mount_identity",return_value={}),patch.object(platform,"unrecorded_mounts",return_value=False)]
         if sys.platform=="win32":self.patches.append(patch.object(platform,"choose_mount_path",side_effect=lambda _:Path(("Z" if not self.active else "Y")+":\\")))
         for value in self.patches:value.start();self.addCleanup(value.stop)
         self.manager=mounts.WorkspaceMountManager(self.model.root)
         def close():
             for key in list(self.manager.live):
-                tree=self.manager.live[key][0];tree.active=0
+                tree=self.manager.live[key][0];deadline=time.monotonic()+2
+                while tree.active and time.monotonic()<deadline:time.sleep(.005)
                 self.manager.unmount(key)
         self.addCleanup(close)
     def test_multiple_mount_identities_and_private_registry_have_no_credentials(self):
@@ -238,7 +240,9 @@ class ManagerTests(unittest.TestCase):
         def create_server(tree):
             created=real_server(tree);servers.append(created);return created
         def create_thread(*args,**kwargs):
-            created=real_thread(*args,**kwargs);threads.append(created);return created
+            created=real_thread(*args,**kwargs)
+            if getattr(kwargs.get("target"),"__self__",None) in servers:threads.append(created)
+            return created
         with patch.object(self.manager,"_save",side_effect=OSError("Fixture registry failure")),patch.object(mounts,"DAVServer",side_effect=create_server),patch.object(threading,"Thread",side_effect=create_thread),patch.object(platform,"start") as starter:
             with self.assertRaises(OSError):self.manager.mount(self.model,NOTE)
             starter.assert_not_called()
@@ -435,7 +439,7 @@ class PlatformTests(unittest.TestCase):
         process.send_signal.assert_not_called();process.terminate.assert_not_called();process.kill.assert_not_called()
     def test_windows_volume_identity_and_exclusive_lock_guard_every_dismount(self):
         events=[];kernel=MagicMock();kernel.CreateFileW.return_value=42
-        def query(handle,name,size,serial,*rest):name.value="Fixture";serial._obj.value=123;rest[-2].value="rclone";events.append("identity");return 1
+        def query(handle,name,size,serial,*rest):name.value="Fixture";serial._obj.value=123;rest[-2].value="FUSE-rclone";events.append("identity");return 1
         def control(handle,code,*_):events.append(code);return 1
         kernel.GetVolumeInformationByHandleW.side_effect=query;kernel.DeviceIoControl.side_effect=control;kernel.CloseHandle.side_effect=lambda _:events.append("close")
         record={"mountPath":"Z:\\","label":"Fixture","volumeSerial":123}
@@ -451,6 +455,21 @@ class PlatformTests(unittest.TestCase):
             with self.assertRaises(platform.PlatformMountError):
                 with platform._windows_dismount(record):self.fail("A busy volume must not be dismounted")
             self.assertEqual(events,["identity",0x90018,"close"])
+
+    def test_windows_actual_winfsp_type_is_required_for_identity_and_orphan_detection(self):
+        label="GenDragoon-12345678-abcdefgh";record={"mountPath":"Z:\\","label":label,"volumeSerial":123}
+        kernel=SimpleNamespace(GetLogicalDrives=lambda:1<<25)
+        with patch.object(platform,"sys",SimpleNamespace(platform="win32")),patch.object(platform.ctypes,"windll",SimpleNamespace(kernel32=kernel),create=True):
+            with patch.object(platform,"_windows_volume",return_value=(label,"FUSE-rclone",123)):
+                self.assertIs(platform.mounted(record),True);self.assertEqual(platform.capture_mount_identity(record),{"volumeSerial":123})
+                self.assertTrue(platform.unrecorded_mounts(Path("/fixture"),set()))
+                self.assertFalse(platform.unrecorded_mounts(Path("/fixture"),{"Z:\\"}))
+            for filesystem in ("rclone","FUSE-other","NTFS"):
+                with self.subTest(filesystem=filesystem),patch.object(platform,"_windows_volume",return_value=(label,filesystem,123)):
+                    self.assertIsNone(platform.mounted(record))
+                    with self.assertRaises(platform.PlatformMountError):platform.capture_mount_identity(record)
+            with patch.object(platform,"_windows_volume",return_value=(label,"FUSE-rclone",999)):
+                self.assertIsNone(platform.mounted(record))
 
 class GUIAccountGuards(unittest.TestCase):
     def test_mounted_or_uncertain_drive_blocks_switch_logout_and_quit(self):

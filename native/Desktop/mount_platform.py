@@ -16,6 +16,7 @@ import threading
 import urllib.request
 
 class PlatformMountError(RuntimeError):pass
+WINDOWS_FILESYSTEM_NAME="fuse-rclone"  # WinFsp prefixes rclone's FileSystemName with FUSE-.
 
 STARTUP_REASONS=(
     (rb"cannot find (?:winfsp|fuse)|cannot load (?:winfsp|fuse)|failed to load.{0,80}(?:winfsp|fuse)","fuse_library_unavailable"),
@@ -146,7 +147,7 @@ def _windows_volume(path):
 def capture_mount_identity(record):
     if sys.platform=="win32":
         actual=_windows_volume(record["mountPath"])
-        if not isinstance(actual,tuple) or actual[0]!=record["label"] or actual[1].casefold()!="rclone":raise PlatformMountError("The new Windows volume identity could not be confirmed.")
+        if not isinstance(actual,tuple) or actual[0]!=record["label"] or actual[1].casefold()!=WINDOWS_FILESYSTEM_NAME:raise PlatformMountError("The new Windows volume identity could not be confirmed.")
         return {"volumeSerial":actual[2]}
     for line in Path("/proc/self/mountinfo").read_text().splitlines():
         fields=line.split();position=fields.index("-")
@@ -160,7 +161,7 @@ def mounted(record):
         actual=_windows_volume(path)
         if actual is False:return False
         if actual is None:return None
-        return True if actual[0]==record["label"] and actual[1].casefold()=="rclone" and record.get("volumeSerial",actual[2])==actual[2] else None
+        return True if actual[0]==record["label"] and actual[1].casefold()==WINDOWS_FILESYSTEM_NAME and record.get("volumeSerial",actual[2])==actual[2] else None
     if not os.path.ismount(path):return False
     try:
         for line in Path("/proc/self/mountinfo").read_text().splitlines():
@@ -177,7 +178,7 @@ def unrecorded_mounts(root,known):
         for letter in "DEFGHIJKLMNOPQRSTUVWXYZ":
             if not drives&(1<<(ord(letter)-65)):continue
             path=letter+":\\";actual=_windows_volume(path)
-            if isinstance(actual,tuple) and actual[0].startswith("GenDragoon-") and actual[1].casefold()=="rclone" and path not in known:return True
+            if isinstance(actual,tuple) and actual[0].startswith("GenDragoon-") and actual[1].casefold()==WINDOWS_FILESYSTEM_NAME and path not in known:return True
         return False
     if not sys.platform.startswith("linux"):return False
     try:
@@ -301,7 +302,7 @@ def _windows_dismount(record):
         query.argtypes=[ctypes.c_void_p,ctypes.c_wchar_p,ctypes.c_uint32,ctypes.POINTER(ctypes.c_uint32),ctypes.c_void_p,ctypes.c_void_p,ctypes.c_wchar_p,ctypes.c_uint32]
         name=ctypes.create_unicode_buffer(256);filesystem=ctypes.create_unicode_buffer(256);serial=ctypes.c_uint32()
         if (not query(handle,name,256,ctypes.byref(serial),None,None,filesystem,256) or name.value!=record["label"]
-                or filesystem.value.casefold()!="rclone" or record.get("volumeSerial")!=serial.value):
+                or filesystem.value.casefold()!=WINDOWS_FILESYSTEM_NAME or record.get("volumeSerial")!=serial.value):
             raise PlatformMountError("The opened volume is not the recorded GenDragoon drive. No dismount was attempted.")
         if not kernel.DeviceIoControl(handle,0x90018,None,0,None,0,ctypes.byref(result),None):
             raise PlatformMountError("Windows could not lock this drive exclusively. Close open files and retry. Unsupported WinFsp controls require a normal OS unmount; the session remains protected.")
