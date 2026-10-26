@@ -257,7 +257,7 @@ async function vscodeTest(root, directory, archive, tools, python) {
   } finally { await stopChild(child); }
 }
 
-async function firefoxTest(root, directory, archive, tools) {
+async function firefoxTest(root, directory, archive, tools, python) {
   const packageRoot = path.join(process.env.GD_EXTENSION_TEST_TOOLS, 'node_modules/web-ext');
   const metadata = JSON.parse(await fs.readFile(path.join(packageRoot, 'package.json'), 'utf8'));
   const cli = path.resolve(packageRoot, typeof metadata.bin === 'string' ? metadata.bin : metadata.bin['web-ext']);
@@ -270,14 +270,8 @@ async function firefoxTest(root, directory, archive, tools) {
   const firefox = tools('playwright').firefox;
   const browserVersion = (await execute(firefox.executablePath(), ['--version'], {maxBuffer: 65536})).stdout.trim();
   assert.ok(browserVersion.length > 0, 'Record the actual isolated Firefox version');
-  let runner;
-  try {
-    runner = await webExt.cmd.run({sourceDir: directory, firefox: firefox.executablePath(), noReload: true, noInput: true, startUrl: ['about:blank'], args: ['-headless']}, {shouldExitProgram: false});
-    await runner.reloadAllExtensions();
-    await report(root, 'firefox', {passed: true, webExtVersion: metadata.version, browserVersion,
-      extensionArchiveSHA256: checksum(await fs.readFile(archive)), realFirefoxTemporaryLoadAndReload: true, lintErrors: 0,
-      nativeMessagingTested: false, liveAccountOrUploadTest: false, signedStoreInstallationTested: false});
-  } finally { if (runner) await runner.exit(); }
+  await require('./firefox-native.cjs').firefoxNativeTest({root,directory,archive,firefoxBinary:firefox.executablePath(),webExt,webExtVersion:metadata.version,python,
+    helpers:{startCompanion,stopChild,atomicJSON,events,report,checksum}});
 }
 
 async function main() {
@@ -303,7 +297,7 @@ async function main() {
   await extract(python, archive, directory);
   if (['chromium', 'chrome', 'edge', 'opera'].includes(client)) await chromiumTest(root, directory, archive, tools, python, client);
   else if (client === 'vscode') await vscodeTest(root, path.join(directory, 'extension'), archive, tools, python);
-  else await firefoxTest(root, directory, archive, tools);
+  else await firefoxTest(root, directory, archive, tools, python);
   console.log(JSON.stringify({client, passed: true, syntheticFixtureOnly: true}));
 }
 main().catch(error => { console.error(error.stack || error.message); process.exitCode = 1; });

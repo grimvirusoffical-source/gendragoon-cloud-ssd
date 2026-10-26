@@ -342,7 +342,7 @@ class PlatformTests(unittest.TestCase):
             binary=Path(temporary)/"rclone";binary.write_bytes(b"native fixture")
             process=SimpleNamespace(stderr=io.BytesIO(b"NOTICE: Serving remote control on http://127.0.0.1:43123/\n"))
             tools={"rclone":str(binary),"sha256":hashlib.sha256(binary.read_bytes()).hexdigest()}
-            with patch.object(platform,"trusted_binary",return_value=str(binary)),patch.object(platform.subprocess,"Popen",return_value=process) as start,patch.dict(os.environ,{"RX_ACCESS_TOKEN":"private-fixture","RCLONE_CONFIG_OLD":"private-fixture"}):
+            with patch.object(platform,"sys",SimpleNamespace(platform="linux")),patch.object(platform,"trusted_binary",return_value=str(binary)),patch.object(platform.subprocess,"Popen",return_value=process) as start,patch.dict(os.environ,{"RX_ACCESS_TOKEN":"private-fixture","RCLONE_CONFIG_OLD":"private-fixture"}):
                 platform.start(tools,{"mountPath":"/fixture/mount","label":"Fixture"},"http://127.0.0.1:43124/","local-dav-token",Path(temporary)/"cache")
             args=start.call_args.args[0];environment=start.call_args.kwargs["env"]
             self.assertIn("--read-only",args);self.assertIn("--vfs-cache-mode=off",args);self.assertNotIn("--allow-other",args)

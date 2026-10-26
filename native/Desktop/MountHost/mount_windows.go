@@ -64,7 +64,7 @@ func startMount(c configuration, gate *admissionGate, davURL, token string) (*mo
 	vfsOptions.PollInterval = 0
 	vfsOptions.HandleCaching = 0
 	vfsOptions.DirCacheTime = fs.Duration(time.Second)
-	virtual := vfs.New(remote, &vfsOptions)
+	virtual := vfs.New(ctx, remote, &vfsOptions)
 	mountOptions := mountlib.Opt
 	mountOptions.VolumeName, mountOptions.DirectIO = c.VolumeLabel, false
 	base := cmount.NewFS(virtual, &mountOptions)

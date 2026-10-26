@@ -273,7 +273,7 @@ Teams is collaboration metadata. A teammate can participate in the team but gain
 ### Set a username and create or join a team
 
 1. Choose the intended MachineNote in the native Files destination controls, then open **Teams**.
-2. Under **Your chat identity**, choose a Username and **Save username**. Use 3–32 characters, beginning with a letter, followed by letters, digits, underscore, dot, or hyphen. Names are checked case-insensitively for availability.
+2. Read and explicitly accept the displayed **Community rules**. Then under **Your chat identity**, choose a Username and **Save username**. Use 3–32 characters, beginning with a letter, followed by letters, digits, underscore, dot, or hyphen. Names are checked case-insensitively for availability.
 3. To start that note's team, choose **Create team for selected workspace**. Teams are separate for different MachineNotes.
 4. To join someone else's team, save your own username first, paste their token into **Join with an invitation**, and choose **Join**. Joining does not provision hosted storage or import file keys.
 5. Open the team from **Your teams**. Use **Load more teams** or **Load more teammates** when the view offers another page.
@@ -295,6 +295,20 @@ Presence expires after 45 seconds without renewal. Signaling packets expire afte
 On a client with WebRTC support, choose **Connect directly** beside a teammate, wait for an actual connected state, then select that Direct conversation. The shared UI permits up to eight simultaneous direct connections. This limit is separate from membership and paginated group chat, which have no configured total member cap. Service request rates and page sizes still apply.
 
 Direct chat is text in the current view. It is not a durable message archive, file transfer, remote command channel, screen sharing, camera call, or microphone call. Closing the view or app can end it. **No TURN relay is configured.** NAT, firewall, browser, WebView, device, and network conditions can prevent direct connections; group relay remains a separate feature. Test an actual cross-client connection before claiming direct chat works on that device/network.
+
+### Community rules, reporting and blocking
+
+Before setting a username, creating or joining a Team, sending text or starting a direct connection, read the displayed **Community rules**, select **I have read and agree to these community rules**, and choose **Accept current rules**. Acceptance records that account's current policy version and time. A later policy version requires fresh acceptance. Until then the participation controls stay disabled.
+
+To stop interacting with someone in the selected Team, choose **Block user** beside that teammate and confirm the intended username. This immediately closes your existing direct connection and removes their displayed text. The service restricts relay messages, presence, signaling and fresh peer leases in both directions for that Team. Supported clients revalidate before direct sends and incoming text, plus periodic checks; an offline client cannot learn a block instantly. **Unblock user** explicitly removes your block, after which a new direct connection can be requested. It does not restore the severed connection or erase independent copies.
+
+Choose **Report user** beside a teammate or **Report message** on a displayed message. The report panel shows the target and any chosen message. Select a reason, add optional context without secrets, and review the content before **Submit report**. Relay reports send a reference which the server checks against the actual Team message and author. For a direct conversation, the server does not already hold that text: the separate **Include this displayed direct text as my unverified report evidence** checkbox is off by default. Leave it off to send a user report without the excerpt. Submitted direct text is labeled reporter-provided and unverified. The optional service-owner review checkbox requests escalation; a report about a Team owner is escalated automatically. Keep the returned receipt identifier.
+
+A Team owner uses **Review team reports**, selects **Review**, reads the evidence and preserved history, then records a decision. **Take moderation action** requires a matching action such as removing the reported teammate or hiding the reported relay message, followed by confirmation. Ordinary Team administrators and peers cannot browse the report inventory. The verified service owner separately uses **Review service reports** and can disable an abusive Team. A Team-owner decision cannot erase the report or the service owner's independent review. These controls grant no file, key or billing permission.
+
+Reports and review records become eligible for physical cleanup 30 days after submission. Cleanup is bounded and happens during later report access; this is not an exact erasure deadline. Covered account deletion also removes the associated report and block records while preserving unrelated accounts. Recipients can retain their own independent copies.
+
+The isolated browser test delivered **400/400** ordered messages with zero duplicates and verified existing-connection block closure, explicit unblock reconnection and membership revocation. It establishes a same-device direct path; it does not establish internet NAT/TURN reachability.
 
 ## Create scoped integration keys
 

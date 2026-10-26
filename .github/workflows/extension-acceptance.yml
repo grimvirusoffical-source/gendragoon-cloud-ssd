@@ -97,10 +97,12 @@ jobs:
         if: matrix.client == 'opera'
         run: sudo apt-get install --yes --no-install-recommends gsettings-desktop-schemas
       - name: Build the actual first-party ELF native messaging host
-        if: matrix.client != 'firefox'
         run: |
           python -B -m pip install --only-binary=:all: -r native/Desktop/requirements-build.txt
           python -B native/Desktop/build_native_host.py --destination "$RUNNER_TEMP/gd-native-host"
+      - name: Verify Firefox BiDi and exact host-registration boundaries
+        if: matrix.client == 'firefox'
+        run: node --test native/Tests/ExtensionAcceptance/firefox-native.test.cjs
       - name: Load the real packaged client and verify its declared boundary
         env:
           GD_BROWSER_CLIENT: ${{ matrix.client }}
