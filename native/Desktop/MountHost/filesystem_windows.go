@@ -65,7 +65,7 @@ func (f *guardedFS) OpenEx(path string, fi *fuse.FileInfo_t) (result int) {
 	if fi.Flags&3 != 0 || fi.Flags&(fuse.O_CREAT|fuse.O_TRUNC|fuse.O_APPEND|fuse.O_EXCL) != 0 {
 		return -fuse.EROFS
 	}
-	finish := f.gate.beginOpen(fileHandle)
+	finish := f.gate.beginOpen(fileHandle, path)
 	if finish == nil {
 		return -fuse.EBUSY
 	}
@@ -121,7 +121,7 @@ func (f *guardedFS) Opendir(path string) (result int, fh uint64) {
 }
 
 func (f *guardedFS) Release(path string, fh uint64) (result int) {
-	finish := f.gate.beginClose(fileHandle, fh)
+	finish := f.gate.beginClose(fileHandle, fh, path)
 	if finish == nil {
 		return -fuse.EBADF
 	}

@@ -313,7 +313,7 @@ def ready(process):
 def host_request(process,route,method="GET"):
     """Only the exact owned process's ephemeral loopback control endpoint."""
     url=getattr(process,"_gd_host_url",None);token=getattr(process,"_gd_host_control",None)
-    if not url or not token or (method,route) not in (("GET","/v1/status"),("POST","/v1/unmount")):
+    if not url or not token or (method,route) not in (("GET","/v1/status"),("POST","/v1/unmount"),("POST","/v1/cache/trim")):
         raise PlatformMountError("The private filesystem control channel is unavailable; its process was retained.")
     class NoRedirect(urllib.request.HTTPRedirectHandler):
         def redirect_request(self,*_):return None

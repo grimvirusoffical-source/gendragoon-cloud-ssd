@@ -89,7 +89,8 @@ the caller must retain its process/context instead of killing it on a timeout.
 
 Control binds only `127.0.0.1:0`. Every request requires the control bearer,
 the exact listener Host header, an IPv4 loopback peer, no Origin header, and no
-query. Request headers and bodies are bounded. `POST /v1/unmount` requires
+query. Request headers and bodies are bounded. `POST /v1/unmount` and
+`POST /v1/cache/trim` require
 `Content-Type: application/json` and an empty object no larger than 1024 bytes.
 Bodies are parsed before admission/serialization locks, with a five second
 server read timeout. Control does not permit forwarding, remount, file access,
@@ -102,7 +103,28 @@ snapshot. A successful Open or OpenEx and Opendir stays reserved through native
 Close/Release/Releasedir. Duplicate handle lifetimes and mapped views must be
 validated by the driver acceptance tests described above.
 
-`POST /v1/unmount` atomically checks pending opens, descriptors and in-flight
+`POST /v1/cache/trim` requests native cache maintenance for at most 1024 current
+file paths, each at most 4096 UTF-8 bytes. Paths stay private and are removed
+only after the matching successful native Close. No caller-selected paths are
+accepted. The response contains only schema 1, `status: trim-requested`, and a
+bounded `requested` count. This acknowledges notification requests, not a purge
+or successful close. Missing/over-budget tracking returns busy; a failed native
+notification returns retained. No lifetime reservation is discarded.
+
+On Windows the unchanged cgofuse `Notify(path, 0)` calls WinFsp's native cache
+invalidation, without fabricating a file-change event. WinFsp acquires its native
+file lock and requests cache purge; Microsoft's cache API will not purge mapped
+files. This is an investigation candidate until all actual driver gates pass.
+See the pinned [cgofuse notification API](https://github.com/winfsp/cgofuse/blob/f2c4fccdb286/fuse/host.go),
+[WinFsp notification implementation](https://github.com/winfsp/winfsp/blob/v2.1/src/dll/fuse/fuse.c),
+[native cache invalidation](https://github.com/winfsp/winfsp/blob/v2.1/src/sys/file.c),
+and [Microsoft cache-purge contract](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntifs/nf-ntifs-ccpurgecachesection).
+The gate lock is released before Notify because native Close callbacks may run
+during invalidation. Admission remains open and existing reads remain available;
+GET status has no maintenance side effects.
+
+`POST /v1/unmount` first requests the same bounded native maintenance, then
+atomically checks pending opens, descriptors and in-flight
 operations under the same lock used by admission. A busy result is HTTP 409
 with schema 1 and `status: busy`; it does not call VFS shutdown or native unmount
 and leaves the mount serving. If idle, it switches to quiescing while rejecting

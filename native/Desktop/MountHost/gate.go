@@ -1,6 +1,12 @@
 package main
 
-import "sync"
+import (
+	"path"
+	"sort"
+	"strings"
+	"sync"
+	"unicode/utf8"
+)
 
 type handleKind uint8
 
@@ -14,6 +20,18 @@ type handleKey struct {
 	fh   uint64
 }
 
+type handlePath struct {
+	handleKey
+	path string
+}
+
+const maxCacheTrimPaths = 1024
+
+func cacheTrimPath(value string) bool {
+	return len(value) > 1 && len(value) <= 4096 && value[0] == '/' &&
+		utf8.ValidString(value) && !strings.ContainsAny(value, "\x00\\") && path.Clean(value) == value
+}
+
 // admissionGate owns the decision, rather than taking a snapshot of another
 // process's handles. A pending open is reserved before calling the filesystem.
 // A successful descriptor stays reserved until the native Close callback.
@@ -24,6 +42,7 @@ type admissionGate struct {
 	inflight      int
 	handles       map[handleKey]int
 	closing       map[handleKey]int
+	paths         map[handlePath]int
 	fault         bool
 	closeFailures int
 }
@@ -40,7 +59,7 @@ type gateStatus struct {
 }
 
 func newGate() *admissionGate {
-	return &admissionGate{state: "mounted", handles: map[handleKey]int{}, closing: map[handleKey]int{}}
+	return &admissionGate{state: "mounted", handles: map[handleKey]int{}, closing: map[handleKey]int{}, paths: map[handlePath]int{}}
 }
 
 func (g *admissionGate) status() gateStatus {
@@ -57,7 +76,11 @@ func (g *admissionGate) status() gateStatus {
 	return s
 }
 
-func (g *admissionGate) beginOpen(kind handleKind) func(bool, uint64) {
+func (g *admissionGate) beginOpen(kind handleKind, openedPath ...string) func(bool, uint64) {
+	name := ""
+	if kind == fileHandle && len(openedPath) == 1 && cacheTrimPath(openedPath[0]) {
+		name = openedPath[0]
+	}
 	g.mu.Lock()
 	if g.state != "mounted" || g.fault {
 		g.mu.Unlock()
@@ -76,7 +99,15 @@ func (g *admissionGate) beginOpen(kind handleKind) func(bool, uint64) {
 					g.fault = true
 					return
 				}
-				g.handles[handleKey{kind, fh}]++
+				key := handleKey{kind, fh}
+				g.handles[key]++
+				// Paths are private maintenance hints, never a second lifetime
+				// authority. An oversized/untracked path keeps trim unavailable
+				// while its native handle remains reserved.
+				p := handlePath{key, name}
+				if name != "" && (g.paths[p] != 0 || len(g.paths) < maxCacheTrimPaths) {
+					g.paths[p]++
+				}
 			}
 		})
 	}
@@ -102,8 +133,12 @@ func (g *admissionGate) beginOperation() func() {
 
 // Close errors keep the reservation and poison admission. Reporting idle after
 // an uncertain close would silently weaken the lifetime guarantee.
-func (g *admissionGate) beginClose(kind handleKind, fh uint64) func(bool) {
+func (g *admissionGate) beginClose(kind handleKind, fh uint64, closedPath ...string) func(bool) {
 	k := handleKey{kind, fh}
+	name := ""
+	if len(closedPath) == 1 {
+		name = closedPath[0]
+	}
 	g.mu.Lock()
 	if g.handles[k] <= g.closing[k] {
 		g.fault = true
@@ -125,9 +160,22 @@ func (g *admissionGate) beginClose(kind handleKind, fh uint64) func(bool) {
 			g.closing[k]--
 			if success {
 				g.handles[k]--
+				p := handlePath{k, name}
+				if g.paths[p] > 1 {
+					g.paths[p]--
+				} else {
+					delete(g.paths, p)
+				}
 				if g.handles[k] == 0 {
 					delete(g.handles, k)
 					delete(g.closing, k)
+					// Native Close proved the last reservation for this handle
+					// ended, including any path whose hint was not retained.
+					for p := range g.paths {
+						if p.handleKey == k {
+							delete(g.paths, p)
+						}
+					}
 				}
 			} else {
 				g.fault = true
@@ -137,6 +185,35 @@ func (g *admissionGate) beginClose(kind handleKind, fh uint64) func(bool) {
 			}
 		})
 	}
+}
+
+// cachePaths returns a bounded snapshot only when every current file lifetime
+// has a matching path hint. Callers MUST release the gate lock before Notify:
+// native cache invalidation can itself deliver Close callbacks into this gate.
+// The snapshot does not reserve, release, or close admission for any handle.
+func (g *admissionGate) cachePaths() ([]string, bool) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.state != "mounted" || g.fault {
+		return nil, false
+	}
+	tracked := map[handleKey]int{}
+	unique := map[string]bool{}
+	for p, count := range g.paths {
+		tracked[p.handleKey] += count
+		unique[p.path] = true
+	}
+	for key, count := range g.handles {
+		if key.kind == fileHandle && count != tracked[key] {
+			return nil, false
+		}
+	}
+	paths := make([]string, 0, len(unique))
+	for name := range unique {
+		paths = append(paths, name)
+	}
+	sort.Strings(paths)
+	return paths, true
 }
 
 func (g *admissionGate) prepareUnmount() bool {

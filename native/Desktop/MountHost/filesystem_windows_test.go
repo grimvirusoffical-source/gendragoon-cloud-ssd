@@ -81,8 +81,14 @@ func TestGuardedFSOpenAndOpenExAreTrackedExactlyOnce(t *testing.T) {
 	if result != 0 || fh != 1 || base.opens.Load() != 1 || g.status().OpenFiles != 1 || g.prepareUnmount() {
 		t.Fatal("Open did not reserve exactly one descriptor")
 	}
+	if paths, ok := g.cachePaths(); !ok || len(paths) != 1 || paths[0] != "/file" {
+		t.Fatal("native open did not retain its private cache path")
+	}
 	if f.Release("/file", fh) != 0 || base.closes.Load() != 1 || g.status().OpenFiles != 0 {
 		t.Fatal("native close not tracked")
+	}
+	if paths, ok := g.cachePaths(); !ok || len(paths) != 0 {
+		t.Fatal("native close did not remove its private path")
 	}
 	fi := &fuse.FileInfo_t{Flags: fuse.O_RDONLY}
 	if f.OpenEx("/file", fi) != 0 || base.opens.Load() != 2 || g.status().OpenFiles != 1 {

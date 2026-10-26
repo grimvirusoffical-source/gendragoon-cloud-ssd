@@ -48,16 +48,23 @@ try:
         mapping=None
         source.close()
         backend="win32-view-only";mapping_closed=True
-        value=ctypes.string_at(address,size)
+        def read_view():return ctypes.string_at(address,size)
     else:
         view=mmap.mmap(source.fileno(),0,access=mmap.ACCESS_READ)
         source.close()
         backend="python-mmap";mapping_closed=None
-        value=view[:]
-    print(json.dumps({"schema":1,"pid":os.getpid(),"originalClosed":source.closed,
-        "mappingHandleClosed":mapping_closed,"backend":backend,"size":len(value),
-        "sha256":hashlib.sha256(value).hexdigest()}),flush=True)
-    sys.stdin.buffer.read(1)
+        def read_view():return view[:]
+    def report_view():
+        value=read_view()
+        print(json.dumps({"schema":1,"pid":os.getpid(),"originalClosed":source.closed,
+            "mappingHandleClosed":mapping_closed,"backend":backend,"size":len(value),
+            "sha256":hashlib.sha256(value).hexdigest()}),flush=True)
+    report_view()
+    while True:
+        command=sys.stdin.buffer.readline(17)
+        if not command:break
+        if command!=b"read\n":raise ValueError("Invalid fixture command")
+        report_view()
 finally:
     if not source.closed:source.close()
     if mapping and not kernel.CloseHandle(mapping):raise ctypes.WinError(ctypes.get_last_error())
@@ -73,9 +80,10 @@ def mapped_reader(path):
         ("SystemRoot","SYSTEMROOT","WINDIR","PATH","TEMP","TMP","TMPDIR","LANG","LC_ALL")}
     process=subprocess.Popen([sys.executable,"-I","-B","-u","-c",MAPPED_READER,str(path)],
         stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,text=True,env=environment)
-    replies=queue.Queue(maxsize=1)
-    thread=threading.Thread(target=lambda:replies.put(process.stdout.readline(4097)),daemon=True);thread.start()
-    try:
+    threads=[]
+    def reply():
+        replies=queue.Queue(maxsize=1)
+        thread=threading.Thread(target=lambda:replies.put(process.stdout.readline(4097)),daemon=True);thread.start();threads.append(thread)
         try:raw=replies.get(timeout=20)
         except queue.Empty:raise AssertionError("The independent mapped-file reader did not become ready.")
         if not raw.endswith("\n") or len(raw)>4096:raise AssertionError("The mapped-file reader returned invalid metadata.")
@@ -85,29 +93,39 @@ def mapped_reader(path):
                 or value.get("backend")!=("win32-view-only" if sys.platform=="win32" else "python-mmap")
                 or value.get("mappingHandleClosed") is not (True if sys.platform=="win32" else None)):
             raise AssertionError("The mapped-file reader did not retain an independent mapped view.")
-        yield value,process
+        return value
+    def reread():
+        process.stdin.write("read\n");process.stdin.flush()
+        return reply()
+    try:
+        yield reply(),process,reread
     finally:
         # EOF is the reader's explicit normal-close request. Never terminate or
         # signal a held mapped view to manufacture a successful unmount.
         process.stdin.close()
         try:process.wait(timeout=20)
         except subprocess.TimeoutExpired:raise AssertionError("The mapped-file reader did not close normally.")
-        thread.join(timeout=1);process.stdout.close()
+        for thread in threads:thread.join(timeout=1)
+        process.stdout.close()
         if process.returncode!=0:raise AssertionError("The independent mapped-file reader failed.")
 
 class HostControlTests(unittest.TestCase):
     def test_mapped_reader_is_independent_preserves_bytes_and_closes_normally(self):
         with tempfile.TemporaryDirectory() as temporary:
             path=Path(temporary)/"mapped-fixture.bin";payload=b"Verified independent mapped bytes"*1024;path.write_bytes(payload)
-            with mapped_reader(path) as (value,process):
+            with mapped_reader(path) as (value,process,reread):
                 self.assertNotEqual(value["pid"],os.getpid());self.assertIsNone(process.poll())
                 self.assertEqual(value["size"],len(payload));self.assertEqual(value["sha256"],fixture.hashlib.sha256(payload).hexdigest())
+                self.assertEqual(reread(),value);self.assertIsNone(process.poll())
             self.assertEqual(process.returncode,0);self.assertEqual(path.read_bytes(),payload)
 
     def test_real_control_http_is_local_authenticated_bounded_and_never_redirected(self):
         observed=[];reply={"status":200,"body":b'{"schema":1,"state":"mounted"}'}
         class Handler(http.server.BaseHTTPRequestHandler):
             def log_message(self,*_):pass
+            def do_POST(self):
+                self.server.body=self.rfile.read(int(self.headers.get("Content-Length",0)))
+                self.do_GET()
             def do_GET(self):
                 observed.append((self.path,self.headers.get("Authorization"),self.headers.get("Host")))
                 self.send_response(reply["status"])
@@ -119,11 +137,16 @@ class HostControlTests(unittest.TestCase):
         try:
             self.assertEqual(platform.host_request(process,"/v1/status")["state"],"mounted")
             self.assertEqual(observed,[("/v1/status","Bearer ephemeral-local-only","127.0.0.1:"+str(server.server_port))])
+            reply.update(body=b'{"schema":1,"status":"trim-requested","requested":1}')
+            self.assertEqual(platform.host_request(process,"/v1/cache/trim","POST")["status"],"trim-requested")
+            self.assertEqual(server.body,b"{}");self.assertEqual(observed[-1][0],"/v1/cache/trim")
+            for method,route in (("GET","/v1/cache/trim"),("POST","/v1/cache/trim/"),("POST","/v1/cache/trim?force=true")):
+                with self.assertRaises(platform.PlatformMountError):platform.host_request(process,route,method)
             for status,body in ((409,b"private-error"),(503,b"private-error"),(302,b""),(200,b"x"*4097),(200,b'{"schema":2}')):
                 reply.update(status=status,body=body)
                 with self.subTest(status=status),self.assertRaises(platform.PlatformMountError) as failure:platform.host_request(process,"/v1/status")
                 self.assertNotIn("private-error",str(failure.exception));self.assertNotIn("ephemeral-local-only",str(failure.exception))
-            self.assertEqual(len(observed),6)
+            self.assertEqual(len(observed),7)
         finally:server.shutdown();server.server_close();thread.join(timeout=2)
 
     def test_old_windows_cli_mount_cannot_start_new_process(self):
@@ -226,6 +249,11 @@ class ActualOwnedHostTests(unittest.TestCase):
                 if type(count) is int and 0<=count<=1000000:native_status[key]=count
             return native_status
         def wait_closed(process):
+            # Explicit POST-only native maintenance. A queued invalidation is
+            # not a close proof; the unchanged lifetime counters must reach 0.
+            trim=platform.host_request(process,"/v1/cache/trim","POST")
+            self.assertEqual(trim.get("status"),"trim-requested")
+            self.assertIs(type(trim.get("requested")),int);self.assertTrue(0<=trim["requested"]<=1024)
             deadline=time.monotonic()+10
             while time.monotonic()<deadline:
                 state=capture_status(process)
@@ -252,12 +280,17 @@ class ActualOwnedHostTests(unittest.TestCase):
             finally:duplicate.Close()
             checks.append("duplicate-handle-refused");stage="duplicate-handle-close";wait_closed(process)
             stage="mapped-view"
-            with mapped_reader(path) as (mapped,reader):
+            with mapped_reader(path) as (mapped,reader,reread):
                 self.assertEqual(mapped["backend"],"win32-view-only")
                 self.assertIs(mapped["originalClosed"],True);self.assertIs(mapped["mappingHandleClosed"],True)
                 mapped_proof.update({key:mapped[key] for key in ("backend","originalClosed","mappingHandleClosed")})
                 self.assertEqual(mapped["size"],len(self.payload));self.assertEqual(mapped["sha256"],fixture.hashlib.sha256(self.payload).hexdigest())
                 self.assertIsNone(reader.poll());busy()
+                trim=platform.host_request(process,"/v1/cache/trim","POST")
+                self.assertEqual(trim.get("status"),"trim-requested")
+                self.assertIs(type(trim.get("requested")),int);self.assertTrue(1<=trim["requested"]<=1024)
+                self.assertEqual(reread(),mapped);self.assertIsNone(reader.poll());busy()
+                mapped_proof["readableAfterTrim"]=True
             self.assertEqual(reader.returncode,0)
             checks.append("mapped-view-refused");stage="mapped-view-close";wait_closed(process)
             stage="directory-handle"

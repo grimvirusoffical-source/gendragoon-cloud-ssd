@@ -1,9 +1,84 @@
 package main
 
 import (
+	"fmt"
+	"reflect"
+	"strings"
 	"sync"
 	"testing"
 )
+
+func TestGateCachePathsFollowEachSuccessfulNativeClose(t *testing.T) {
+	g := newGate()
+	g.beginOpen(fileHandle, "/first")(true, 7)
+	g.beginOpen(fileHandle, "/second")(true, 7) // A reused backend fh is not a unique lifetime.
+	g.beginOpen(fileHandle, "/first")(true, 8)
+	g.beginOpen(fileHandle, "/failed")(false, 9)
+	g.beginOpen(directoryHandle, "/directory")(true, 4)
+	paths, ok := g.cachePaths()
+	if !ok || !reflect.DeepEqual(paths, []string{"/first", "/second"}) {
+		t.Fatal("live paths were not a deduplicated snapshot")
+	}
+	paths[0] = "/changed-copy"
+	closing := g.beginClose(fileHandle, 7, "/second")
+	if paths, ok = g.cachePaths(); !ok || len(paths) != 2 {
+		t.Fatal("pending native close lost its path")
+	}
+	closing(true)
+	paths, ok = g.cachePaths()
+	if !ok || !reflect.DeepEqual(paths, []string{"/first"}) || g.status().OpenFiles != 2 {
+		t.Fatal("one close consumed a different lifetime")
+	}
+	g.beginClose(fileHandle, 7, "/first")(true)
+	g.beginClose(fileHandle, 8, "/first")(true)
+	if paths, ok = g.cachePaths(); !ok || len(paths) != 0 || g.prepareUnmount() {
+		t.Fatal("paths outlived files or trimming bypassed directory reservation")
+	}
+	closeHandleForTest(t, g, directoryHandle, 4)
+	if !g.prepareUnmount() {
+		t.Fatal("native closes did not end reservations")
+	}
+}
+
+func TestGateCachePathsAreBoundedWithoutDiscardingHandleReservations(t *testing.T) {
+	for _, name := range []string{"", "relative", "/", "/a/../b", "/bad\x00name", "/bad\\name", "/" + strings.Repeat("a", 4096), "/\xff"} {
+		g := newGate()
+		g.beginOpen(fileHandle, name)(true, 1)
+		if _, ok := g.cachePaths(); ok || g.prepareUnmount() || g.status().OpenFiles != 1 {
+			t.Fatal("an untracked path weakened lifetime tracking")
+		}
+		g.beginClose(fileHandle, 1, name)(true)
+		if _, ok := g.cachePaths(); !ok || !g.prepareUnmount() {
+			t.Fatal("a successful native close remained reserved")
+		}
+	}
+	g := newGate()
+	for i := 0; i <= maxCacheTrimPaths; i++ {
+		g.beginOpen(fileHandle, fmt.Sprintf("/file-%d", i))(true, uint64(i))
+	}
+	if len(g.paths) != maxCacheTrimPaths || g.status().OpenFiles != maxCacheTrimPaths+1 {
+		t.Fatal("path budget was not bounded independently of lifetime counts")
+	}
+	if _, ok := g.cachePaths(); ok || g.prepareUnmount() {
+		t.Fatal("partial path tracking authorized maintenance/unmount")
+	}
+	g.beginClose(fileHandle, maxCacheTrimPaths, fmt.Sprintf("/file-%d", maxCacheTrimPaths))(true)
+	if paths, ok := g.cachePaths(); !ok || len(paths) != maxCacheTrimPaths {
+		t.Fatal("closed untracked descriptor was not released by its native callback")
+	}
+}
+
+func TestGateFailedCloseRetainsPrivateCachePathAndFault(t *testing.T) {
+	g := newGate()
+	g.beginOpen(fileHandle, "/retained")(true, 1)
+	g.beginClose(fileHandle, 1, "/retained")(false)
+	if len(g.paths) != 1 || g.status().OpenFiles != 1 || !g.status().Fault {
+		t.Fatal("failed close discarded a private path or reservation")
+	}
+	if _, ok := g.cachePaths(); ok || g.prepareUnmount() {
+		t.Fatal("uncertain native close allowed trim/unmount")
+	}
+}
 
 func closeHandleForTest(t *testing.T, g *admissionGate, kind handleKind, fh uint64) {
 	t.Helper()

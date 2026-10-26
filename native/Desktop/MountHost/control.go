@@ -15,6 +15,7 @@ type mountSession struct {
 	Unmount  func() bool
 	Shutdown func()
 	Success  func() bool
+	Notify   func(string) bool
 }
 
 type controlHandler struct {
@@ -56,7 +57,7 @@ func (h *controlHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeResponse(w, http.StatusOK, h.gate.status())
 		return
 	}
-	if r.Method != http.MethodPost || r.URL.Path != "/v1/unmount" {
+	if r.Method != http.MethodPost || (r.URL.Path != "/v1/unmount" && r.URL.Path != "/v1/cache/trim") {
 		fixedResponse(w, http.StatusNotFound, "not_found")
 		return
 	}
@@ -74,8 +75,26 @@ func (h *controlHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	h.serial.Lock()
 	defer h.serial.Unlock()
-	if h.gate.status().State == "unmounted" {
+	if r.URL.Path == "/v1/unmount" && h.gate.status().State == "unmounted" {
 		writeResponse(w, http.StatusOK, map[string]any{"schema": 1, "status": "unmounted", "mountPoint": h.mountPoint})
+		return
+	}
+	paths, ok := h.gate.cachePaths()
+	if !ok {
+		fixedResponse(w, http.StatusConflict, "busy")
+		return
+	}
+	// WinFsp queues its documented cache invalidation through Notify(action=0).
+	// This requests maintenance only: native Close remains the sole authority
+	// that releases lifetime reservations. Never hold the gate across Notify.
+	for _, path := range paths {
+		if h.session.Notify == nil || !h.session.Notify(path) {
+			fixedResponse(w, http.StatusServiceUnavailable, "retained")
+			return
+		}
+	}
+	if r.URL.Path == "/v1/cache/trim" {
+		writeResponse(w, http.StatusOK, map[string]any{"schema": 1, "status": "trim-requested", "requested": len(paths)})
 		return
 	}
 	if !h.gate.prepareUnmount() {

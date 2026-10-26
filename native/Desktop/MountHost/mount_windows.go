@@ -92,7 +92,8 @@ func startMount(c configuration, gate *admissionGate, davURL, token string) (*mo
 			"-o", "volname=" + c.VolumeLabel, "--FileSystemName=GDHost", "-o", "FileSecurity=" + c.FileSecurity}))
 	}()
 	return &mountSession{Ready: ready, Done: done, Unmount: host.Unmount,
-		Shutdown: virtual.Shutdown, Success: success.Load}, nil
+		Shutdown: virtual.Shutdown, Success: success.Load,
+		Notify: func(path string) bool { return host.Notify(path, 0) }}, nil
 }
 
 func mountPresent(point string) bool {
