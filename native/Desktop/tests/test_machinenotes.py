@@ -319,12 +319,12 @@ class ActualCodecTests(unittest.TestCase):
             with patch.object(client,'DesktopReceiver',MemoryReceiver):
                 uploaded=model.upload(source);prepared=model.prepare_portable_app(uploaded['key'])
                 self.assertEqual(prepared.records,before['manifest']);self.assertEqual(prepared.candidates,(binary.name,))
-                receipt=launch_native_fixture(lambda:model.launch_portable_app(prepared,binary.name,approved=True))
             try:
+                receipt=launch_native_fixture(lambda:model.launch_portable_app(prepared,binary.name,approved=True))
                 wait_fixture(lambda:(prepared.payload/'child-started').exists())
                 with self.assertRaises(apps.PortableAppError):model.organize('delete',[uploaded['key']])
                 self.assertEqual(client.manifest(source),before)
-            finally:(prepared.payload/'release-child').write_text('release only this encrypted fixture')
+            finally:finish_native_fixture(model.portable_apps,prepared)
             wait_fixture(lambda:model.portable_apps.leases()[0]['state']=='complete')
             self.assertTrue((prepared.payload.parent/'verified-archive.zip').exists());self.assertTrue((prepared.payload/binary.name).exists());self.assertEqual(client.manifest(source),before)
 
@@ -440,6 +440,17 @@ class CompiledRuntimeTests(unittest.TestCase):
             self.assertTrue(all(str(root) in p for p in result["manifests"]))
 
 class PortableAppFormatTests(unittest.TestCase):
+    def test_record_identity_mismatch_retains_rejection_and_only_fixed_diagnostics(self):
+        with tempfile.TemporaryDirectory() as td:
+            root=private.private_directory(Path(td).resolve()/'control');record=root/'lease-fixture.json';apps._write(record,dict(generation='old fixture'))
+            original=apps._open_record
+            def changed(path,**options):
+                if Path(path)==record:apps._write(record,dict(generation='new fixture'))
+                return original(path,**options)
+            with patch.object(apps,'_open_record',changed):
+                with self.assertRaises(apps.PortableAppError) as caught:apps._read(record)
+            self.assertEqual(caught.exception.diagnostic,dict(stage='record-open-identity',errorCode='record_identity_changed',errorType='PortableAppError'))
+            self.assertNotIn(str(root),json.dumps(caught.exception.diagnostic));self.assertEqual(apps._read(record),dict(generation='new fixture'))
     @unittest.skipUnless(sys.platform=='win32','Actual Windows retained-record sharing behavior required')
     def test_windows_held_receipt_reader_allows_atomic_replace_and_preserves_old_and_new_bytes(self):
         with tempfile.TemporaryDirectory(prefix='gd-json-reader-') as td:
@@ -753,6 +764,17 @@ def launch_native_fixture(action):
     except apps.PortableAppError as error:
         raise AssertionError('Native broker fixed diagnostics: '+json.dumps(getattr(error,'diagnostic',{'stage':'unreported'}),sort_keys=True)) from None
 
+def finish_native_fixture(manager,prepared):
+    """Release only the generated child, even when launch confirmation fails."""
+    (prepared.payload/'release-child').write_text('release only this generated fixture')
+    def finished():
+        try:rows=[row for row in manager.leases() if Path(row['path']).parent==prepared.directory/'control']
+        except Exception:return False
+        if not rows or all(row['state'] in ('complete','failed-before-start') for row in rows):return True
+        return ((prepared.payload/'child-finished').exists() and all(row['state']=='uncertain' and row.get('brokerPid')
+            and apps.process_identity(row['brokerPid'])!=row.get('brokerIdentity') for row in rows))
+    wait_fixture(finished,seconds=20);time.sleep(.15)
+
 def prepare_native_fixture(manager,binary):
     binding=apps.identity(OWNER,NOTE,item())
     def restore(directory):
@@ -785,12 +807,12 @@ class PortableAppLifecycleTests(unittest.TestCase):
             new_units=len(str(prepared.payload).encode('utf-16-le'))//2
             print('Disposable Windows cwd UTF16 units: '+json.dumps(dict(legacy=old_units,compact=new_units),sort_keys=True),flush=True)
             self.assertGreaterEqual(old_units,260);self.assertLessEqual(new_units,258)
-            receipt=launch_native_fixture(lambda:manager.launch(prepared,self.binary.name,approved=True))
             try:
+                receipt=launch_native_fixture(lambda:manager.launch(prepared,self.binary.name,approved=True))
                 wait_fixture(lambda:(prepared.payload/'child-started').exists())
                 wait_fixture(lambda:any(row.get('id')==receipt['id'] and row.get('mainExitCode')==7 for row in manager.leases()))
                 with self.assertRaises(apps.PortableAppError):manager.assert_safe('change accounts')
-            finally:(prepared.payload/'release-child').write_text('release only this compact cwd fixture')
+            finally:finish_native_fixture(manager,prepared)
             wait_fixture(lambda:any(row.get('id')==receipt['id'] and row['state']=='complete' for row in manager.leases()))
             # Add an independent historical unknown process after proving the
             # new launch. No missing PID can erase the old account barrier.
@@ -803,15 +825,15 @@ class PortableAppLifecycleTests(unittest.TestCase):
     def test_detached_grandchild_keeps_lease_after_parent_exit_and_all_cache_is_retained(self):
         with tempfile.TemporaryDirectory(prefix='gd-app-lease-') as td:
             manager=apps.PortableApps(Path(td).resolve()/'cache');prepared=prepare_native_fixture(manager,self.binary)
-            receipt=launch_native_fixture(lambda:manager.launch(prepared,self.binary.name,approved=True))
             try:
+                receipt=launch_native_fixture(lambda:manager.launch(prepared,self.binary.name,approved=True))
                 wait_fixture(lambda:(prepared.payload/'child-started').exists())
                 wait_fixture(lambda:manager.leases()[0].get('mainExitCode')==7)
                 self.assertEqual(manager.leases()[0]['state'],'running')
                 self.assertEqual(manager.leases()[0]['mainExitCode'],7)
                 with self.assertRaises(apps.PortableAppError):manager.assert_safe('change accounts')
                 self.assertTrue(prepared.payload.exists())
-            finally:(prepared.payload/'release-child').write_text('release only this disposable fixture')
+            finally:finish_native_fixture(manager,prepared)
             wait_fixture(lambda:manager.leases()[0]['state']=='complete')
             self.assertEqual(manager.leases()[0]['mainExitCode'],7)
             manager.assert_safe('change accounts');self.assertTrue((prepared.payload/'child-finished').exists());self.assertTrue((prepared.payload/self.binary.name).exists());self.assertTrue(self.binary.exists())
@@ -819,8 +841,8 @@ class PortableAppLifecycleTests(unittest.TestCase):
     def test_broker_failure_does_not_kill_app_children_and_uncertainty_blocks_changes(self):
         with tempfile.TemporaryDirectory(prefix='gd-app-orphan-') as td:
             manager=apps.PortableApps(Path(td).resolve()/'cache');prepared=prepare_native_fixture(manager,self.binary)
-            receipt=launch_native_fixture(lambda:manager.launch(prepared,self.binary.name,approved=True))
             try:
+                receipt=launch_native_fixture(lambda:manager.launch(prepared,self.binary.name,approved=True))
                 wait_fixture(lambda:(prepared.payload/'child-heartbeat').exists())
                 # Only the broker created by this disposable fixture is stopped.
                 import signal
@@ -830,7 +852,7 @@ class PortableAppLifecycleTests(unittest.TestCase):
                 self.assertNotEqual((prepared.payload/'child-heartbeat').read_text(),before,'The broker failure must leave the native child running')
                 with self.assertRaises(apps.PortableAppError):manager.assert_safe('delete library items')
                 self.assertTrue(prepared.payload.exists())
-            finally:(prepared.payload/'release-child').write_text('release only this disposable fixture')
+            finally:finish_native_fixture(manager,prepared)
             wait_fixture(lambda:(prepared.payload/'child-finished').exists())
             time.sleep(.15)
             self.assertEqual(manager.leases()[0]['state'],'uncertain','Broker failure cannot be auto-cleared by a missing PID')

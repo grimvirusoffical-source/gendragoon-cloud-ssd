@@ -114,7 +114,10 @@ def _read(path):
     fd=_open_record(path)
     with os.fdopen(fd,"rb") as source:
         opened=os.fstat(source.fileno())
-        if (opened.st_dev,opened.st_ino)!=(info.st_dev,info.st_ino):raise PortableAppError("The portable app record changed while opening it.")
+        if (opened.st_dev,opened.st_ino)!=(info.st_dev,info.st_ino):
+            error=PortableAppError("The portable app record changed while opening it.")
+            error.diagnostic=dict(stage="record-open-identity",errorCode="record_identity_changed",errorType="PortableAppError")
+            raise error
         return json.load(source)
 
 def _write(path,value):
