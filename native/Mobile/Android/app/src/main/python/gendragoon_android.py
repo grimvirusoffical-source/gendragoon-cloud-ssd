@@ -107,6 +107,8 @@ def initialize(library, temporary, compiled=None):
         from redxai import _librsx
         if _librsx.abi_version() != 2:
             raise RuntimeError("The packaged encryption ABI is unsupported")
+        from gendragoon_android_codec import file_api
+        file_api()
     return json.dumps({"ok": True, "abi": 2})
 
 
@@ -377,7 +379,8 @@ def download(config_json, item_json, cache, java_auth, callback):
 
 def codec_selftest(directory, plain_bytes=2048):
     """Device-only fixture: no credentials, user files, or network."""
-    from redxai import _librsx
+    from gendragoon_android_codec import file_api
+    _librsx = file_api()
     from redsecretsxai import encode_image, decode_image
     import gendragoon_redx_storage as storage
     path = Path(directory)
@@ -398,4 +401,24 @@ def codec_selftest(directory, plain_bytes=2048):
         _librsx.decrypt_file(session, str(sealed), out_path=str(restored), aad=b"gendragoon-android-test")
     if restored.read_bytes() != plain:
         raise RuntimeError("Pinned Android codec roundtrip failed")
-    return json.dumps({"ok": True, "pngBytes": len(png), "plainBytes": len(plain)})
+    # A closed session must fail encryption before creating any output.
+    failed_encryption = path / 'failed-encryption'
+    try:
+        _librsx.encrypt_file(session, str(incoming), out_path=str(failed_encryption), aad=b'gendragoon-android-test')
+    except Exception:
+        pass
+    else:
+        raise RuntimeError('Closed-session encryption unexpectedly succeeded')
+    if failed_encryption.exists():
+        raise RuntimeError('Failed encryption published output')
+    wrong_key = path / 'wrong-key-output'
+    with _librsx.session_open('PUBLIC-wrong-Android-fixture-key-12345678', str(path / 'wrong.keymap')) as other:
+        try:
+            _librsx.decrypt_file(other, str(sealed), out_path=str(wrong_key), aad=b'gendragoon-android-test')
+        except Exception:
+            pass
+        else:
+            raise RuntimeError('Wrong-key restoration unexpectedly succeeded')
+    if wrong_key.exists():
+        raise RuntimeError('Failed authentication published plaintext')
+    return json.dumps({"ok": True, "pngBytes": len(png), "plainBytes": len(plain), "failedOperationsPublishNothing": True})

@@ -28,7 +28,8 @@ def dependencies():
 
 
 def cross_platform(directory, secret):
-    from redxai import _librsx
+    from gendragoon_android_codec import file_api
+    _librsx = file_api()
     from redsecretsxai import decode_image
     root = Path(directory)
     metadata = json.loads((root / 'mac-visual-v1.json').read_text())
@@ -47,4 +48,6 @@ def cross_platform(directory, secret):
     plain = (root / 'restored').read_bytes()
     if not rejected or len(plain) != metadata['plainBytes'] or hashlib.sha256(plain).hexdigest() != metadata['plainSHA256']:
         raise RuntimeError('Mac-to-Android visual decryption or AAD isolation failed')
+    if (root / 'wrong-aad').exists():
+        raise RuntimeError('Wrong AAD published plaintext')
     return json.dumps({'verified': True, 'crossPlatform': True, 'wrongAadRejected': rejected})

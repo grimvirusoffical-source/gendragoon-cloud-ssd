@@ -68,7 +68,7 @@ The native host checks the browser's launch argument against its installed priva
 
 ## Install the VS Code package
 
-Use **Extensions: Install from VSIX…** and select `gendragoon-0.1.0.vsix`. Enable this editor in the native host installer with `--vscode`. Open the local Command Palette and use:
+Use **Extensions: Install from VSIX…** and select `gendragoon-0.22.0.vsix`. Enable this editor in the native host installer with `--vscode`. Open the local Command Palette and use:
 
 - **GenDragoon: Check Local Companion**.
 - **GenDragoon: Browse My MachineNotes**.

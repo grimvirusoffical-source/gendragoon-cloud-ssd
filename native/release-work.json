@@ -56,12 +56,12 @@
     "extensionPackages": "4 ZIPs and VSIX built; native runtime and store verification pending",
     "backend": "67 passed,6 optional external/runtime tests skipped in broad local suite; exact RottenApple Go pairing and genuine RedX/C++ app restore verified separately",
     "portableVault": "MacCryptoKit/CommonCrypto, Pythoncryptography and actualJDK17JCE vectors agree; tamper/account/password/import-safety negatives pass",
-    "desktopCompanion": "ActualWindows named-pipe privacy/SID tests5/5 and localUnix4/4 passed; packaged host final validation pending repaired Windows CI.",
+    "desktopCompanion": "Actual Windows named-pipe privacy/SID tests passed 5/5. Built PE and ELF hosts exchanged an approved framed request and rejected an unlisted extension.",
     "android": "Compile/lint/JVM and actual16KiB portable vault passed at45de; full codec failed specifically missing old NumPy libopenblas.so. New notice-complete aligned NumPy and rebuilt Pillow dependencies remain candidate-only until4/16KiB devices pass.",
     "androidRuntimeSha256": "47883fd5535bae569c7fe7bb9cfac2092fa8ab2ec83c4c39e4fd5e9c363ffa2f",
     "androidRuntimeBytes": 777660,
     "firstCI": "Backend and Linux desktop jobs passed. Mac compiler expression timeout and packaging fixture omission corrected. Windows default elevated owner exposed; atomic current-user SID creation added. Android Gradle dependency corrected. Next CI pending.",
-    "desktop": "Linux45de actual standalone package, GUI construction, native-host frame and deny checks passed. Windows actual named-pipe/SID tests5/5 and legacy tests passed; new genuine transfer found Unicode paths and ACL-normalization race; 1c6a586 repair awaiting real Windows CI.",
+    "desktop": "Windows and Linux passed at 1c6a5861477329742c1fd604dab60b54e23fa495 in run 40280755735. Genuine 70 KB Unicode codec transfer/readback, private IPC/SID/ACL checks, actual Tk windows and standalone GUI/native host PE/ELF package gates passed. The new workspace-drive candidate is separate and under construction.",
     "macCI": "45de7e8 full native compile, lifecycle, credential renewal, companion IPC and portable vault passed in run40279244512.",
     "installerSpace": "73 installer and updater tests passed with resolved local fixture paths, including successful staging below the advisory 10 GB and safe real-space-shortage refusal.",
     "receiverIsolation": "CAS retry rechecks current library workspace; stalled Teams mutation JSON is read before locks. Focused 16 passed, 1 optional actual RedX fixture skipped.",
@@ -76,9 +76,13 @@
       "zipSha256": "85cb41453463046aaf08ff7e14ec4b0f0adbb6dc73f52b7dd7ee2754419dc858",
       "installationGate": "Native installed35 activity protection unresolved; normal Quit required."
     },
-    "androidDeviceCandidate": "Exact eight-wheel offline profile being prepared; shipping pins unchanged.",
+    "androidDeviceCandidate": "Both 1a02bfb actual 4/16 KiB jobs exposed unresolved CPython symbols despite complete ELF alignment passing. NumPy recipe 793603c preserves official target linker flags and explicitly links libpython3.13; both rebuilt ABIs passed. Updated exact eight-wheel lock and six device tests at a890d9a, including a 64 KiB visual chunk, are running. Shipping pins are unchanged.",
     "receiverActualRedX": "Isolated actual RedX seven-row CAS/query/revocation/expiry/cleanup probe passed; all seven fixtures removed and account-state fingerprint unchanged. Replacement Set preserves K/Scope/Kind/Position physical indexes.",
-    "backendDeployment": "Receiver and Control36-45de7e8 immutable releases and private env prepared, source hashes/syntax verified; NOT activated. Live Receiver35 and Control33 unchanged."
+    "backendDeployment": "Receiver and Control36-45de7e8 immutable releases and private env prepared, source hashes/syntax verified; NOT activated. Live Receiver35 and Control33 unchanged.",
+    "serverPreactivation": "Private logical metadata export and a full stored encrypted PNG checksum scan passed. Account metadata remained stable across the scan, with zero pending reservations. No records, source files, active writer locks or service links changed.",
+    "billingLiveReadOnly": "All 31 offered live prices match the configured account, active status, USD amounts and monthly/yearly recurrence. Live billing health reports ready. No charges, Checkout creation, customer retrieval or subscription mutation occurred. This is not a live payment test of every tier.",
+    "guide": "Detailed how-to Page updated and native block readback verified. The platform matrix distinguishes installed build 35, held Mac 36, staged backend 36, runtime candidates and no store publication.",
+    "extensionRuntime": "Actual isolated Linux browser/VS Code acceptance tests are being added. Node RPC and package tests pass. Brand-specific browser and marketplace verification remain open."
   },
   "limitations": [
     "RottenApple current caller pairs successfully but its storageBind returns unavailable before network; complete file binding requires changes outside this authorized repository.",
@@ -92,7 +96,9 @@
     "coreVerified": "45de7e8b9844e1cd0edf987961ff1c8509d85139",
     "windowsRepair": "1c6a5861477329742c1fd604dab60b54e23fa495",
     "committedAndPushed": true,
-    "uncommittedCandidates": "Android dependency/device profile; do not publish before actual device gates pass"
+    "uncommittedCandidates": "Desktop read-only multi-mount and extension acceptance tests. Android a890d9a test candidate is committed; wait for actual device gates before promotion.",
+    "androidDependencyRepair": "793603cfb0a2ffb39ed4aa5adf1a43f0ae02cf19",
+    "androidDeviceCandidate": "a890d9a"
   },
-  "updatedAt": "2026-10-26T06:38:00Z"
+  "updatedAt": "2026-10-26T07:04:00Z"
 }
