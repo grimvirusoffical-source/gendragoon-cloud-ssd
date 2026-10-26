@@ -10,6 +10,7 @@ from __future__ import annotations
 import sys
 sys.dont_write_bytecode=True
 import argparse,datetime,fcntl,hashlib,importlib.util,json,math,os,platform,pwd,re,select,shutil,signal,socket,stat,subprocess,time,uuid
+from dataclasses import dataclass
 from pathlib import Path
 
 HERE=Path(__file__).resolve().parent
@@ -116,6 +117,40 @@ class MacRPCGate:
   need(bool(select.select([sys.stdin],[],[],30)[0]),'mac_coordinator_unavailable')
   line=sys.stdin.readline(16385);need(0<len(line)<=16384,'mac_proof_unavailable');proof=json.loads(line);validate_mac_proof(proof,challenge);return proof
 
+RECEIVER_ORIGINAL_COUNTERS=('requests','decoders','busy','deletingWorkspaces','workspaceOperations','transfers','decoderWaiters')
+RECEIVER_GATE_COUNTERS=('queuedDependencies','activeContinuations','bodyChecks','authenticatingDependencies','activeDependencyWork','pendingResponses','pendingRejected')
+
+def receiver_status(value,pid,*,stage):
+ need(type(value) is dict and value.get('role')=='receiver' and type(value.get('pid')) is int and value['pid']==pid and type(pid) is int,'receiver_status_identity_invalid')
+ for key in ('sameGateVerified','ordinaryAdmissionFenced','workAdmissionFenced','installedFromSetImmediate','listenerStillFenced'):
+  need(value.get(key) is True,'receiver_gate_provenance_invalid')
+ need(value.get('installationCount')==1 and type(value.get('installationCount')) is int and value.get('closeError') is False,'receiver_gate_identity_changed')
+ need(value.get('stage')==stage and value.get('dependencyAdmissionOpen') is (stage=='dependency-open') and value.get('dependencyAdmissionSealed') is (stage=='sealed'),'receiver_gate_stage_invalid')
+ for key in (*RECEIVER_ORIGINAL_COUNTERS,*RECEIVER_GATE_COUNTERS,'originalRequestsBound'):
+  need(type(value.get(key)) is int and value[key]>=0,'receiver_counter_invalid')
+ need(value['requests']<=value['originalRequestsBound']<=128 and value['activeContinuations']+value['originalRequestsBound']<=128 and value['queuedDependencies']<=128,'receiver_capacity_invalid')
+ return value
+
+@dataclass(frozen=True)
+class ReceiverBarrierProof:
+ operation_nonce:str
+ pid:int
+ start_ticks:int
+ source_sha256:str
+ stage:str
+ observed_monotonic:float
+ original_counters:tuple
+ gate_counters:tuple
+
+def receiver_barrier(value,nonce,pid,start,*,final=False):
+ stage='sealed' if final else 'dependency-open';receiver_status(value,pid,stage=stage)
+ need(type(nonce) is str and re.fullmatch('[0-9a-f]{32}',nonce) is not None and type(start) is int and start>0,'receiver_barrier_identity_invalid')
+ need(value.get('ready' if final else 'earlyReady') is True,'receiver_barrier_incomplete')
+ need(all(value[key]==0 for key in RECEIVER_ORIGINAL_COUNTERS) and value['originalRequestsBound']==0,'receiver_original_work_active')
+ if final:need(value.get('closed') is True and all(value[key]==0 for key in RECEIVER_GATE_COUNTERS),'receiver_final_work_active')
+ else:need(value.get('closed') is False,'receiver_dependency_closed_early')
+ return ReceiverBarrierProof(nonce,pid,start,SOURCE_HASHES['receiver'],stage,time.monotonic(),tuple((key,value[key]) for key in RECEIVER_ORIGINAL_COUNTERS),tuple((key,value[key]) for key in RECEIVER_GATE_COUNTERS))
+
 class Controller:
  """Ordering is shared by live backend and disposable failure-injection tests."""
  def __init__(self,ops,mac_gate,journal=lambda value:None):
@@ -133,11 +168,17 @@ class Controller:
   try:
    self.step('preflight',self.ops.preflight)
    self.started=True;self.step('debugger-guard',self.ops.install_guard)
+   self.step('receiver-stage-one-enable',lambda:self.ops.enable('receiver'))
+   self.step('receiver-stage-one-fence',self.ops.install_receiver_stage_one)
+   self.step('receiver-stage-one-drain',self.ops.drain_receiver_stage_one)
+   self.step('receiver-stage-one-inspector-close',lambda:self.ops.close_inspector('receiver'))
    self.step('control-enable',lambda:self.ops.enable('control'));self.step('control-fence',lambda:self.ops.install('control'))
    control=self.step('control-drain',lambda:self.ops.drain('control'))
    self.step('control-inspector-close',lambda:self.ops.close_inspector('control'))
    self.step('service-syn-fence',lambda:self.ops.service_fence(control))
-   self.step('receiver-enable',lambda:self.ops.enable('receiver'));self.step('receiver-fence',lambda:self.ops.install('receiver'))
+   self.step('receiver-resume-enable',lambda:self.ops.enable('receiver'))
+   self.step('receiver-resume-same-gate',self.ops.resume_receiver_stage_one)
+   self.step('receiver-dependency-seal',self.ops.seal_receiver)
    self.step('receiver-drain',lambda:self.ops.drain('receiver'));self.step('receiver-inspector-close',lambda:self.ops.close_inspector('receiver'))
    before=self.step('drained-snapshot',lambda:self.ops.snapshot('drained'))
    self.step('full-payload-byte-backup',lambda:self.ops.backup_payload(before))
@@ -203,7 +244,7 @@ class Transport:
 class LiveOps:
  def __init__(self,plan,review,*,mac_gate):
   need(callable(mac_gate),'explicit_mac_gate_required');self.mac_gate=mac_gate
-  self.plan=plan;self.review=review;self.nonce=uuid.uuid4().hex;self.clients={};self.status={};self.old_env=None;self.token=None;self.preservation=set();self.old_environments={};self.candidates={};self.full_payload_backup=None
+  self.plan=plan;self.review=review;self.nonce=uuid.uuid4().hex;self.clients={};self.status={};self.old_env=None;self.token=None;self.preservation=set();self.old_environments={};self.candidates={};self.full_payload_backup=None;self.receiver_stage_one_proof=None;self.receiver_resume_verified=False;self.receiver_final_proof=None
   verify_bundle(review) # Verify every executable byte before importing a backend.
   self.net=module('gd36_network',HERE/'server-network-boundary-36.py')
   self.mutation_proof=None
@@ -351,12 +392,36 @@ class LiveOps:
  def verify_session(self,k):
   need(self.clients[k].process.poll() is None,'owned_transport_exited');return inspector_session_pair(self.identity(k)[0],self.clients[k].process.pid)
  def install(self,k):
+  need(k=='control','receiver_requires_staged_admission');self.verify_receiver_barrier_continuity()
   self.verify_session(k);self.require_fresh_mac(self.mutation_proof);value=self.clients[k].call('install');self.verify_session(k);return value
+ def verify_receiver_barrier_continuity(self):
+  proof=self.receiver_stage_one_proof;need(type(proof) is ReceiverBarrierProof and proof.operation_nonce==self.nonce and proof.stage=='dependency-open' and proof.source_sha256==SOURCE_HASHES['receiver'],'receiver_stage_one_proof_required')
+  pid,start,_=self.identity('receiver');need((pid,start)==(proof.pid,proof.start_ticks),'receiver_stage_one_process_changed');self.service_listeners('receiver',pid)
+  # The proof persists by causal invariant: no future original-handler call is
+  # possible after its immutable stage-one fence. It is not an idle sample TTL.
+  need(all(value==0 for _,value in proof.original_counters),'receiver_stage_one_proof_invalid');return True
+ def install_receiver_stage_one(self):
+  need(self.receiver_stage_one_proof is None,'receiver_stage_one_already_observed');self.verify_session('receiver');self.require_fresh_mac(self.mutation_proof);value=self.clients['receiver'].call('receiver-stage-one');self.verify_session('receiver');return receiver_status(value,self.plan['expectedPIDs']['receiver'],stage='dependency-open')
+ def drain_receiver_stage_one(self):
+  deadline=time.monotonic()+120
+  while time.monotonic()<deadline:
+   self.verify_session('receiver');value=self.clients['receiver'].call('status');self.verify_session('receiver');receiver_status(value,self.plan['expectedPIDs']['receiver'],stage='dependency-open')
+   if value.get('earlyReady') is True and not self.children('receiver'):
+    self.receiver_stage_one_proof=receiver_barrier(value,self.nonce,self.plan['expectedPIDs']['receiver'],self.plan['expectedStartTicks']['receiver']);return self.receiver_stage_one_proof
+   time.sleep(.25)
+  raise Hold('receiver_original_work_still_draining_no_force')
+ def resume_receiver_stage_one(self):
+  self.verify_receiver_barrier_continuity();self.verify_session('receiver');value=self.clients['receiver'].call('status');self.verify_session('receiver');receiver_status(value,self.plan['expectedPIDs']['receiver'],stage='dependency-open');need(value['requests']==0 and value['originalRequestsBound']==0,'receiver_original_work_reappeared');self.receiver_resume_verified=True;return value
+ def seal_receiver(self):
+  need(self.receiver_resume_verified and self.boundary.phase=='services' and self.status.get('control',{}).get('ready') is True,'control_dependencies_not_drained');self.verify_receiver_barrier_continuity();self.verify_session('receiver');self.require_fresh_mac(self.mutation_proof);value=self.clients['receiver'].call('receiver-seal');self.verify_session('receiver');return receiver_status(value,self.plan['expectedPIDs']['receiver'],stage='sealed')
  def drain(self,k):
   deadline=time.monotonic()+120
   while time.monotonic()<deadline:
    self.verify_session(k);s=self.clients[k].call('status');self.verify_session(k)
-   if s['ready'] and not self.children(k):self.status[k]=s;return s
+   if k=='receiver':receiver_status(s,self.plan['expectedPIDs'][k],stage='sealed')
+   if s['ready'] and not self.children(k):
+    if k=='receiver':self.receiver_final_proof=receiver_barrier(s,self.nonce,self.plan['expectedPIDs'][k],self.plan['expectedStartTicks'][k],final=True)
+    self.status[k]=s;return s
    time.sleep(.25)
   raise Hold('still_draining_no_force')
  def close_inspector(self,k):

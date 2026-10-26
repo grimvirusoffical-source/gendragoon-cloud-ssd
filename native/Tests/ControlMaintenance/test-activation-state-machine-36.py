@@ -23,6 +23,7 @@ from unittest.mock import patch
 ROOT = Path(__file__).resolve().parent
 SPEC = importlib.util.spec_from_file_location('gd36_controller_test', ROOT/'adapter/server-activation-controller-36.py')
 C = importlib.util.module_from_spec(SPEC)
+sys.modules[SPEC.name] = C
 SPEC.loader.exec_module(C)
 
 def approved_mac_proof():
@@ -42,6 +43,10 @@ class DisposableServices:
         self.candidate = set()
         self.writer_lock = True
         self.old_control_pending = ['active-account-A', 'queued-account-A']
+        self.receiver_original_pending = ['pre-identity-receiver']
+        self.receiver_stage_one = self.receiver_early_drained = self.receiver_sealed = False
+        self.receiver_gate_identity = object()
+        self.receiver_connections = 0
         self.decoder_children = 2
         self.originals_retained = False
         self.logical = 'all-three-tables-v1'
@@ -67,13 +72,42 @@ class DisposableServices:
         self.record('enable-' + kind)
         assert self.guard and self.inspector is None
         if kind == 'receiver':
-            assert 'control' in self.drained and self.service_gate
-            assert self.decoder_children == 2  # Existing children may finish.
+            if self.receiver_stage_one:
+                assert 'control' in self.drained and self.service_gate
+            else:
+                assert 'control' not in self.fenced and not self.service_gate
         self.inspector = kind
+
+    def install_receiver_stage_one(self):
+        self.record('receiver-stage-one')
+        assert self.inspector == 'receiver' and 'control' not in self.fenced
+        self.receiver_stage_one = True
+        self.fenced.add('receiver')
+
+    def drain_receiver_stage_one(self):
+        self.record('receiver-early-drain')
+        assert self.receiver_stage_one and 'control' not in self.fenced
+        while self.receiver_original_pending:
+            self.events.append('complete-' + self.receiver_original_pending.pop(0))
+        self.decoder_children = 0
+        self.receiver_early_drained = True
+
+    def resume_receiver_stage_one(self):
+        self.record('receiver-same-gate')
+        assert self.receiver_stage_one and self.receiver_early_drained
+        assert 'control' in self.drained and self.inspector == 'receiver'
+        return self.receiver_gate_identity
+
+    def seal_receiver(self):
+        self.record('receiver-seal')
+        assert self.receiver_early_drained and 'control' in self.drained
+        assert not self.old_control_pending and not self.receiver_connections
+        self.receiver_sealed = True
 
     def install(self, kind):
         self.record('fence-' + kind)
         assert self.inspector == kind
+        assert kind == 'control' and self.receiver_early_drained
         self.fenced.add(kind)
 
     def drain(self, kind):
@@ -82,17 +116,21 @@ class DisposableServices:
         if kind == 'control':
             # Already admitted Control work must be able to reach Receiver.
             assert not self.service_gate and 'receiver' in self.running
+            assert self.receiver_stage_one and not self.receiver_sealed
             while self.old_control_pending:
                 self.events.append('complete-' + self.old_control_pending.pop(0))
+                self.receiver_connections += 1
+                self.events.append('complete-restricted-receiver-dependency')
+                self.receiver_connections -= 1
         else:
-            assert self.service_gate and self.writer_lock
+            assert self.service_gate and self.writer_lock and self.receiver_sealed
             self.decoder_children = 0
         self.drained.add(kind)
         return {'kind': kind, 'ready': True}
 
     def close_inspector(self, kind):
         self.record('close-' + kind)
-        assert self.inspector == kind and kind in self.drained
+        assert self.inspector == kind and (kind in self.drained or kind=='receiver' and self.receiver_early_drained)
         self.inspector = None
 
     def service_fence(self, proof):
@@ -190,7 +228,10 @@ class ControllerTests(unittest.TestCase):
         self.assertEqual(ops.fenced, {'control', 'receiver'})  # Old admission stays fenced.
         self.assertTrue(ops.originals_retained)
         self.assertLess(ops.events.index('complete-queued-account-A'), ops.events.index('service-gate'))
-        self.assertLess(ops.events.index('close-control'), ops.events.index('enable-receiver'))
+        self.assertLess(ops.events.index('complete-pre-identity-receiver'), ops.events.index('fence-control'))
+        self.assertLess(ops.events.index('receiver-early-drain'), ops.events.index('close-receiver'))
+        self.assertLess(ops.events.index('close-control'), len(ops.events)-1-ops.events[::-1].index('enable-receiver'))
+        self.assertLess(ops.events.index('complete-restricted-receiver-dependency'), ops.events.index('receiver-seal'))
         self.assertEqual(journal[-1]['decision'], 'COMPLETE')
 
     def test_every_observed_backend_failure_stops_before_any_later_operation(self):
@@ -234,6 +275,31 @@ class ControllerTests(unittest.TestCase):
             self.assertEqual(len(calls), stop_at + 1)
             self.assertEqual(sum(v.get('state') == 'complete' for v in records), stop_at)
             self.assertNotIn('cleanup', ops.events)
+
+    def test_early_receiver_failure_never_fences_control_or_seals_dependencies(self):
+        for event in ('receiver-stage-one', 'receiver-early-drain', 'close-receiver'):
+            with self.subTest(event=event):
+                ops = DisposableServices(fail=event)
+                result, _ = self.run_model(ops)
+                self.assertEqual(result['decision'], 'HOLD')
+                self.assertNotIn('fence-control', ops.events)
+                self.assertNotIn('receiver-seal', ops.events)
+                self.assertNotIn('snapshot-drained', ops.events)
+                self.assertFalse(ops.receiver_sealed)
+
+    def test_resume_or_seal_failure_retains_old_gate_and_prevents_snapshot(self):
+        for event in ('receiver-same-gate', 'receiver-seal'):
+            with self.subTest(event=event):
+                ops = DisposableServices(fail=event)
+                gate = ops.receiver_gate_identity
+                result, _ = self.run_model(ops)
+                self.assertEqual(result['decision'], 'HOLD')
+                self.assertIs(ops.receiver_gate_identity, gate)
+                self.assertTrue(ops.receiver_stage_one and ops.receiver_early_drained)
+                self.assertIn('control', ops.drained)
+                self.assertTrue(ops.service_gate and ops.guard and ops.writer_lock)
+                self.assertNotIn('snapshot-drained', ops.events)
+                self.assertNotIn('config', ops.events)
 
     def test_changed_data_at_either_preservation_boundary_retains_admission(self):
         for label in ('stopped', 'after-start'):
@@ -323,6 +389,104 @@ class ControllerTests(unittest.TestCase):
         self.assertEqual(result.returncode, 3)
         self.assertEqual(json.loads(result.stdout)['decision'], 'NO_GO')
         self.assertEqual(result.stderr, '')
+
+class ReceiverBarrierTests(unittest.TestCase):
+    def status(self, *, final=False):
+        value = dict(role='receiver', pid=4242, stage='sealed' if final else 'dependency-open',
+                     sameGateVerified=True, installationCount=1, ordinaryAdmissionFenced=True,
+                     workAdmissionFenced=True, installedFromSetImmediate=True, listenerStillFenced=True,
+                     dependencyAdmissionOpen=not final, dependencyAdmissionSealed=final,
+                     closeError=False, closed=final, earlyReady=True, ready=final,
+                     originalRequestsBound=0)
+        value.update({key:0 for key in (*C.RECEIVER_ORIGINAL_COUNTERS, *C.RECEIVER_GATE_COUNTERS)})
+        return value
+
+    def proof(self):
+        return C.receiver_barrier(self.status(), 'a'*32, 4242, 91)
+
+    def ops(self):
+        ops = object.__new__(C.LiveOps)
+        ops.nonce = 'a'*32
+        ops.receiver_stage_one_proof = self.proof()
+        ops.receiver_resume_verified = False
+        ops.plan = {'expectedPIDs':{'receiver':4242}, 'expectedStartTicks':{'receiver':91}}
+        ops.identity = lambda role:(4242, 91, {})
+        ops.service_listeners = lambda role,pid:True
+        ops.verify_session = lambda role:True
+        ops.clients = {'receiver':SimpleNamespace(call=lambda op:self.status())}
+        return ops
+
+    def test_typed_early_barrier_proves_original_drain_without_cancelling_owned_dependencies(self):
+        value = self.status()
+        value.update(activeContinuations=1, authenticatingDependencies=1, pendingResponses=1, queuedDependencies=2)
+        proof = C.receiver_barrier(value, 'a'*32, 4242, 91)
+        self.assertIs(type(proof), C.ReceiverBarrierProof)
+        self.assertEqual(proof.operation_nonce, 'a'*32)
+        self.assertEqual(proof.source_sha256, C.SOURCE_HASHES['receiver'])
+        self.assertEqual(dict(proof.gate_counters)['queuedDependencies'], 2)
+        for field in C.RECEIVER_ORIGINAL_COUNTERS:
+            with self.subTest(field=field), self.assertRaises(C.Hold):
+                C.receiver_barrier(dict(value, **{field:1}), 'a'*32, 4242, 91)
+
+    def test_untyped_counters_capacity_wrong_stage_and_replaced_gate_are_refused(self):
+        bad = [dict(self.status(), sameGateVerified=False), dict(self.status(), installationCount=True),
+               dict(self.status(), pid=4242.0), dict(self.status(), requests=1, originalRequestsBound=0),
+               dict(self.status(), dependencyAdmissionOpen=False), dict(self.status(), stage='sealed'),
+               dict(self.status(), originalRequestsBound=1, activeContinuations=128),
+               dict(self.status(), queuedDependencies=129)]
+        for key in (*C.RECEIVER_ORIGINAL_COUNTERS, *C.RECEIVER_GATE_COUNTERS, 'originalRequestsBound'):
+            bad.extend(dict(self.status(), **{key:v}) for v in (True, -1, 0.0, None))
+        for value in bad:
+            with self.subTest(value=value), self.assertRaises(C.Hold):
+                C.receiver_status(value, 4242, stage='dependency-open')
+
+    def test_final_barrier_requires_real_close_and_every_owned_finally_counter_zero(self):
+        value = self.status(final=True)
+        self.assertEqual(C.receiver_barrier(value, 'a'*32, 4242, 91, final=True).stage, 'sealed')
+        bad = [dict(value, closed=False), dict(value, ready=False)]
+        bad.extend(dict(value, **{key:1}) for key in C.RECEIVER_GATE_COUNTERS)
+        for candidate in bad:
+            with self.subTest(candidate=candidate), self.assertRaises(C.Hold):
+                C.receiver_barrier(candidate, 'a'*32, 4242, 91, final=True)
+
+    def test_control_fence_requires_receiver_barrier_from_same_original_process(self):
+        ops = self.ops()
+        calls = []
+        ops.clients['control'] = SimpleNamespace(call=lambda op:calls.append(op))
+        ops.identity = lambda role:(4243, 92, {})
+        with self.assertRaisesRegex(C.Hold, 'receiver_stage_one_process_changed'):
+            ops.install('control')
+        self.assertEqual(calls, [])
+        ops.receiver_stage_one_proof = dict(stage='dependency-open')
+        with self.assertRaisesRegex(C.Hold, 'receiver_stage_one_proof_required'):
+            ops.install('control')
+        self.assertEqual(calls, [])
+
+    def test_reattach_accepts_pending_owned_auth_but_rejects_counter_or_gate_reset(self):
+        ops = self.ops()
+        value = dict(self.status(), activeContinuations=1, authenticatingDependencies=1, pendingResponses=1)
+        ops.clients['receiver'].call = lambda op:value
+        self.assertIs(ops.resume_receiver_stage_one(), value)
+        self.assertTrue(ops.receiver_resume_verified)
+        for change in ({'sameGateVerified':False}, {'installationCount':2}, {'requests':1}, {'originalRequestsBound':1}):
+            with self.subTest(change=change):
+                ops.receiver_resume_verified = False
+                ops.clients['receiver'].call = lambda op:dict(value, **change)
+                with self.assertRaises(C.Hold): ops.resume_receiver_stage_one()
+                self.assertFalse(ops.receiver_resume_verified)
+
+    def test_final_seal_cannot_precede_verified_control_drain_and_same_gate_resume(self):
+        ops = self.ops()
+        calls = []
+        ops.clients['receiver'].call = lambda op:calls.append(op)
+        ops.boundary = SimpleNamespace(phase='services')
+        ops.status = {'control':{'ready':True}}
+        with self.assertRaisesRegex(C.Hold, 'control_dependencies_not_drained'): ops.seal_receiver()
+        ops.receiver_resume_verified = True
+        ops.status['control']['ready'] = False
+        with self.assertRaisesRegex(C.Hold, 'control_dependencies_not_drained'): ops.seal_receiver()
+        self.assertEqual(calls, [])
+
 
 class FullPayloadBackupTests(unittest.TestCase):
     def make_fixture(self, root):

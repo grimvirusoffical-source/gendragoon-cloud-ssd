@@ -31,6 +31,9 @@ function raw(port,subject,method='GET',route='/v1/receivers/me',body=null){
  });return socket;
 }
 async function main(){
+ const args=process.argv.slice(2);assert(args.length===0||(args.length===1&&args[0]==='--fail-after-stage-one'),'Unknown disposable fixture argument');
+ const injectStageOneFailure=args[0]==='--fail-after-stage-one',injectedFailure=new Error('disposable_injected_after_stage_one');
+ const available=await fs.statfs(os.tmpdir());assert(Number(available.bavail)*Number(available.bsize)>=2*1024**3+4096,'Disposable upload fixture requires the original 2 GiB free reserve plus generated payload margin');
  const temporary=await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(),'gd-receiver35-proof-')));await fs.chmod(temporary,0o700);
  const root=path.join(temporary,'storage'),release=path.join(temporary,'release-decoders'),marker=path.join(temporary,'decoders');
  await fs.mkdir(marker,{mode:0o700});
@@ -64,17 +67,22 @@ async function main(){
  const port=Number(new URL(await cloud.listen(0)).port),lock=path.join(root,'.writer-lock');
  const session=new inspector.Session();session.connect();
  const post=(method,params)=>new Promise((resolve,reject)=>session.post(method,params,(error,result)=>error?reject(error):resolve(result)));
- const gate=new AdmissionGate(post,{role:'receiver',source:bytes['server.cjs'],port,pid:process.pid});
- const sockets=[];let released=false,finished=false;
+ const gate=new AdmissionGate(post,{role:'receiver',source:bytes['server.cjs'],port,pid:process.pid,operationNonce:'d'.repeat(32)});
+ const payload=Buffer.from('Disposable generated carrier bytes; no user file or key.'),ids=['b'.repeat(32),'c'.repeat(32)];
+ const unrelatedSentinel=path.join(temporary,'unrelated-fixture-sentinel'),sentinelBytes=Buffer.from('Original graceful close must preserve this owned fixture file.');
+ if(injectStageOneFailure)await fs.writeFile(unrelatedSentinel,sentinelBytes,{mode:0o600});
+ const sockets=[];let released=false,finished=false,injected=false,cleanupSealed=false,cleanupFinal,cleanupElapsedMs;
  try{
   await gate.locate(); // Captured scopes must stay live as counters later change.
   sockets.push(raw(port,'held'));await waitUntil(()=>entered.has('held'));sockets[0].destroy();
   sockets.push(raw(port,'late'));await waitUntil(()=>identitySeen.has('late'));sockets[1].destroy();
-  const payload=Buffer.from('Disposable generated carrier bytes; no user file or key.'),ids=['b'.repeat(32),'c'.repeat(32)];
   for(const id of ids)sockets.push(raw(port,'payload','PUT','/v1/receivers/me/workspaces/'+note+'/blobs/'+id,payload));
   await waitUntil(async()=>{const values=await fs.readdir(marker);return values.some(n=>n.endsWith('.started'));});
   sockets.push(raw(port,'pipeline'));await waitUntil(()=>entered.has('pipeline'));
-  let initial=await gate.install();
+  if(injectStageOneFailure)await waitUntil(()=>Object.keys(states.get(owner('payload')).reservations).length===2);
+  const stageOne=await gate.installStageOne();assert.equal(stageOne.stage,'dependency-open');assert.equal(stageOne.ready,false);
+  if(injectStageOneFailure){injected=true;throw injectedFailure;}
+  let initial=await gate.sealReceiver();assert.equal(initial.stage,'sealed');assert.equal(initial.installationCount,1);assert.equal(initial.sameGateVerified,true);
   await waitUntil(async()=>{initial=await gate.status();return initial.decoderWaiters===1;});
   assert(initial.requests>=5,JSON.stringify(initial));assert.equal(initial.decoders,1);assert.equal(initial.decoderWaiters,1);assert(initial.busy>0&&initial.workspaceOperations>0&&initial.transfers>0);assert.equal(initial.ready,false);
   assert(await exists(lock),'Underlying HTTP close must retain the original writer lock');
@@ -100,10 +108,20 @@ async function main(){
   assert(!await exists(lock),'Only the original graceful close removes its writer lock');assert.equal(storeWrites,snapshotWrites,'Closing must not change the retained ledger');assert.deepEqual(states.get(owner('payload')),committedState);assert.equal(JSON.stringify([...states]),snapshotLedger);
   for(const [file,body] of snapshotFiles)assert.deepEqual(await fs.readFile(file),body,'Graceful close changed a retained PNG or sidecar');
   console.log(JSON.stringify({localDisposableOnly:true,node:process.version,platform:process.platform,sourceCommit:COMMIT,sourceHashes:HASHES,sourceBytesUnmodified:true,fakeStoreAndIdentity:true,fakeCodecRealChildProcesses:true,actualLibraryAdmissionGate:true,scopeCapturedBeforeRequests:true,disconnectedPreIdentityAndStoreCallbacksCounted:true,queuedDecoderWaiterBlockedReadiness:true,postFencePipelineRefusedBeforeIdentity:true,twoGeneratedUploadsCompletedWithoutCancellation:true,decoderChildSignalsSent:0,writerLockRetainedThroughActualCounterDrain:true,originalGracefulCloseRemovedOnlyOwnLock:true,retainedLedgerAndPayloadsUnchangedByClose:true,actualSigtermMainEntrypointTested:false,liveOperations:0,final},null,2));
+ }catch(error){if(error!==injectedFailure)throw error;
  }finally{
+  const cleanupStarted=Date.now();
   lateIdentity.resolve();for(const hold of holds.values())hold.resolve();if(!released)await fs.writeFile(release,'release fixture cleanup',{mode:0o600});for(const socket of sockets)socket.destroy();
-  if(!finished){try{await waitUntil(async()=>{const s=await gate.status();return s.ready;});await gate.releaseFixtureHold();await cloud.close();finished=true;}catch{}}
+  if(!finished){try{
+   if(gate.installed){const state=await gate.status();if(state.stage==='dependency-open'){await gate.sealReceiver();cleanupSealed=true;}await waitUntil(async()=>{cleanupFinal=await gate.status();return cleanupFinal.ready;});await gate.releaseFixtureHold();}
+   let beforeClose;
+   if(injected){assert(await exists(lock),'Injected cleanup must retain the own lock through actual drain');assert(cleanupFinal?.ready&&cleanupFinal.closed);const files=new Map();for(const id of ids)for(const extension of ['.png','.json']){const file=path.join(root,owner('payload'),note,id+extension);files.set(file,await fs.readFile(file));}beforeClose={ledger:JSON.stringify([...states]),writes:storeWrites,files};}
+   await cloud.close();finished=true;
+   if(injected){assert(!await exists(lock),'Only original graceful close may remove its own lock');assert.equal(JSON.stringify([...states]),beforeClose.ledger);assert.equal(storeWrites,beforeClose.writes);for(const [file,body] of beforeClose.files)assert.deepEqual(await fs.readFile(file),body);assert.deepEqual(await fs.readFile(unrelatedSentinel),sentinelBytes);}
+  }catch(error){if(injected)throw error;}}
+  cleanupElapsedMs=Date.now()-cleanupStarted;
   session.disconnect();if(finished)await fs.rm(temporary,{recursive:true});
  }
+ if(injectStageOneFailure){assert(injected&&finished&&cleanupSealed,'Injected stage-one failure must naturally seal and close');assert(cleanupElapsedMs<30000,'Disposable cleanup exceeded its observation bound');console.log(JSON.stringify({localDisposableOnly:true,node:process.version,platform:process.platform,injectedFailureAfterStageOne:true,cleanupSealedInstalledDependencyOpenGate:true,actualFinalReadinessBeforeOriginalClose:true,originalGracefulCloseRemovedOnlyOwnLock:true,retainedLedgerPayloadsAndUnrelatedSentinelUnchangedByClose:true,fixtureTemporaryTreeRemovedAfterOriginalClose:true,cleanupElapsedMs,processSignalsSent:0,forcedCancellation:false,manualLockRemoval:false,liveOperations:0},null,2));}
 }
 main().catch(error=>{console.error(error.stack);process.exitCode=1;});

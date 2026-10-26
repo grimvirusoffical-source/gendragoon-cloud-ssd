@@ -35,6 +35,11 @@ jobs:
         run: node native/Tests/ControlMaintenance/control33-drain-local-proof.cjs
       - name: Disposable original Receiver counters, decoders and writer-lock ordering
         run: node native/Tests/ControlMaintenance/receiver35-drain-local-proof.cjs
+      - name: Injected Receiver stage-one failure drains and closes naturally
+        timeout-minutes: 1
+        run: node native/Tests/ControlMaintenance/receiver35-drain-local-proof.cjs --fail-after-stage-one
+      - name: Coupled original Control and Receiver dependency handoff
+        run: node --experimental-websocket native/Tests/ControlMaintenance/control33-receiver35-coupled-drain-local-proof.cjs
       - name: Disposable external inspector and implementation admission fence
         run: node --experimental-websocket --test native/Tests/ControlMaintenance/external-inspector-boundary.test.cjs
       - name: Controller phase failures and fresh Mac admission gate
