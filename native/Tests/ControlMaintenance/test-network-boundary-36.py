@@ -132,10 +132,10 @@ class MemoryNft:
             if self.fail_read:
                 raise RuntimeError("PRIVATE SENTINEL: never disclose raw error")
             rows = [row for row in self.objects if "table" in row]
+            rows += [row for row in self.objects if "chain" in row]
             for chain in ("output", "input"):
                 rows += [row for row in self.objects
-                         if row.get("chain", {}).get("name") == chain
-                         or row.get("rule", {}).get("chain") == chain]
+                         if row.get("rule", {}).get("chain") == chain]
             rows = copy.deepcopy(rows)
             if self.corrupt_read:
                 rows[-1]["rule"]["expr"] = [{"accept": None}]
@@ -299,6 +299,35 @@ class BoundaryTests(unittest.TestCase):
                     self.backend.invoke(("-f", "-"), script, mutation=True)
                 self.assertEqual(self.backend.objects, before)
                 self.assertEqual(self.backend.next_handle, before_handle)
+
+    def test_exact_nft_table_listing_puts_all_chains_before_ordered_rules(self):
+        self.boundary.install_guard()
+        for services in (False, True):
+            if services:
+                self.boundary.add_service_fence(drain())
+            rows = json.loads(self.backend.invoke(
+                ("list", "table", "inet", self.boundary.table)))["nftables"][1:]
+            kinds = [next(iter(row)) for row in rows]
+            self.assertEqual(kinds, ["table", "chain", "chain"] + ["rule"] * (6 if services else 2))
+            self.assertEqual([row["rule"]["chain"] for row in rows if "rule" in row],
+                             ["output"] * (3 if services else 1) + ["input"] * (3 if services else 1))
+            self.assertTrue(self.boundary.readback()["verified"])
+
+    def test_swapped_rules_within_one_chain_still_hold_with_every_guard_retained(self):
+        self.boundary.install_guard()
+        self.boundary.add_service_fence(drain())
+        indices = [index for index, row in enumerate(self.backend.objects)
+                   if row.get("rule", {}).get("chain") == "output"]
+        self.assertEqual(len(indices), 3)
+        first, second = indices[:2]
+        self.backend.objects[first], self.backend.objects[second] = (
+            self.backend.objects[second], self.backend.objects[first])
+        before = copy.deepcopy(self.backend.objects)
+        with self.assertRaisesRegex(mod.BoundaryError, "boundary_readback_hold"):
+            self.boundary.remove_service_fence(cleanup())
+        self.assertEqual(self.boundary.phase, "hold")
+        self.assertEqual(self.backend.objects, before)
+        self.assertEqual(len(self.backend.writes()), 2)
 
     def test_readback_tampering_or_handle_replacement_prevents_cleanup(self):
         for tamper in ("expression", "identity", "extra"):

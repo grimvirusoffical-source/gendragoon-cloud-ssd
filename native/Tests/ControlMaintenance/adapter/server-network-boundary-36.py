@@ -231,11 +231,11 @@ class NetworkBoundary:
                     self._rule("input", "service-input-" + str(port), [
                         _match(_meta("iifname"), "lo", "!="), _tcp_port(port),
                         _initial_syn(), {"drop": None}])]
-        # nft lists each chain followed by its rules. Preserve within-chain order.
-        return [objects[0]] + [obj for chain in ("output", "input")
-                                  for obj in objects[1:]
-                                  if obj.get("chain", {}).get("name") == chain
-                                  or obj.get("rule", {}).get("chain") == chain]
+        # nftables1.0.9 lists all chain declarations before their rules.
+        # Rules remain grouped by chain in their exact evaluation order.
+        return [obj for obj in objects if "table" in obj or "chain" in obj] + [
+            obj for chain in ("output", "input") for obj in objects
+            if obj.get("rule", {}).get("chain") == chain]
 
     def render_guard(self) -> str:
         return json.dumps({"nftables": [{"add" if "rule" in obj else "create": obj}
