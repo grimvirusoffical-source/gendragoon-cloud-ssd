@@ -45,6 +45,14 @@ Mac. Tool dependencies and their transitive integrity hashes are locked;
   method. This test does not establish signed store installation, ordinary user
   consent, Opera support, or behavior on another operating system. A failure of
   that experimental install path remains a failed candidate, not a pass.
+- **Opera candidate:** a separate job downloads the exact checksum-pinned stable
+  Opera Debian package from its official repository, verifies the package fields,
+  and extracts it into a new private CI directory without running an installer or
+  changing system registrations. It retains the package's notices, removes any
+  privileged permission bits, and records both package and actual ELF hashes.
+  The real Opera process must load its packaged extension and pass the same
+  native-messaging checks. The fixture stays on Linux and does not prove Opera
+  store installation or native consent UI.
 
 The companion fixture uses production transport, identity checks, frame bounds,
 and route validation with an explicitly synthetic dispatch callback. It never

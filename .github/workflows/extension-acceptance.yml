@@ -40,7 +40,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        client: [chromium, chrome, edge, vscode, firefox]
+        client: [chromium, chrome, edge, opera, vscode, firefox]
     env:
       PYTHONDONTWRITEBYTECODE: '1'
     steps:
@@ -75,7 +75,7 @@ jobs:
         run: node node_modules/playwright/cli.js install --with-deps ${{ matrix.client == 'chromium' && 'chromium' || 'firefox' }}
         working-directory: ${{ runner.temp }}/gd-extension-tools
       - name: Prepare Linux Electron system libraries
-        if: matrix.client == 'vscode' || matrix.client == 'chrome' || matrix.client == 'edge'
+        if: matrix.client == 'vscode' || matrix.client == 'chrome' || matrix.client == 'edge' || matrix.client == 'opera'
         run: node node_modules/playwright/cli.js install-deps chromium
         working-directory: ${{ runner.temp }}/gd-extension-tools
       - name: Require the actual vendor browser already installed on the official runner
@@ -90,6 +90,9 @@ jobs:
             command -v microsoft-edge
             microsoft-edge --version
           fi
+      - name: Stage only the checksum-pinned official Opera package in the disposable runner
+        if: matrix.client == 'opera'
+        run: python -B native/Tests/ExtensionAcceptance/stage_ci_opera.py --destination "$RUNNER_TEMP/gd-opera-fixture"
       - name: Build the actual first-party ELF native messaging host
         if: matrix.client != 'firefox'
         run: |

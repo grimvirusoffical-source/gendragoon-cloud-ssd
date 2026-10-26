@@ -78,21 +78,35 @@ async function chromiumTest(root, directory, archive, tools, python, client = 'c
   const child = await startCompanion(root, origin, python);
   let context;
   try {
-    const vendorVersion = client === 'chromium' ? null : (await execute(client === 'chrome' ? 'google-chrome' : 'microsoft-edge', ['--version'], {maxBuffer: 65536})).stdout.trim();
-    if (vendorVersion) assert.match(vendorVersion, client === 'chrome' ? /^Google Chrome / : /^Microsoft Edge /);
+    let opera = null;
+    if (client === 'opera') {
+      const provenance = path.resolve(process.env.GD_EXTENSION_OPERA_PROVENANCE || '');
+      const binary = path.resolve(process.env.GD_EXTENSION_OPERA_BINARY || '');
+      const runnerRoot = await fs.realpath(process.env.RUNNER_TEMP);
+      assert.ok(provenance.startsWith(runnerRoot + path.sep) && binary.startsWith(runnerRoot + path.sep));
+      opera = JSON.parse(await fs.readFile(provenance, 'utf8'));
+      assert.equal(opera.fixture, 'opera-stable');
+      assert.equal(opera.packageSha256, '0ee45e6d17d2153860251e614ba09d6edca2fe2a32f40198a140896aaa3daf60');
+      assert.equal(opera.binarySha256, checksum(await fs.readFile(binary)));
+      assert.equal(opera.installerExecuted, false);
+      assert.equal(opera.systemRegistrationChanged, false);
+    }
+    const vendorVersion = client === 'chromium' ? null : (await execute(client === 'opera' ? process.env.GD_EXTENSION_OPERA_BINARY : client === 'chrome' ? 'google-chrome' : 'microsoft-edge', ['--version'], {maxBuffer: 65536})).stdout.trim();
+    if (vendorVersion) assert.match(vendorVersion, client === 'opera' ? /138\.0\.6044\.24/ : client === 'chrome' ? /^Google Chrome / : /^Microsoft Edge /);
     const profile = path.join(root, 'chromium-profile');
     const hosts = path.join(profile, 'NativeMessagingHosts');
     await fs.mkdir(hosts, {recursive: true, mode: 0o700});
     const binary = path.join(root, 'state/gendragoon/NativeMessaging/gendragoon-native-host');
     await fs.writeFile(path.join(hosts, HOST_NAME + '.json'), JSON.stringify({name: HOST_NAME, description: 'Disposable GenDragoon acceptance fixture', path: binary, type: 'stdio', allowed_origins: [origin]}), {mode: 0o600});
     const branded = client !== 'chromium';
+    const cdpInstall = client === 'chrome' || client === 'edge';
     context = await chromium.launchPersistentContext(profile, {
-      channel: client === 'edge' ? 'msedge' : client === 'chrome' ? 'chrome' : 'chromium', headless: !branded,
+      ...(client === 'opera' ? {executablePath: process.env.GD_EXTENSION_OPERA_BINARY} : {channel: client === 'edge' ? 'msedge' : client === 'chrome' ? 'chrome' : 'chromium'}), headless: !branded,
       // Stable Chrome/Edge removed --load-extension. Their experimental CDP
       // unpacked-install API is used only in this fresh account-free CI profile.
       // It does not establish signed store installation or normal user consent.
       ignoreDefaultArgs: branded ? ['--disable-extensions'] : [],
-      args: branded ? ['--enable-unsafe-extension-debugging'] : ['--disable-extensions-except=' + directory, '--load-extension=' + directory],
+      args: cdpInstall ? ['--enable-unsafe-extension-debugging'] : ['--disable-extensions-except=' + directory, '--load-extension=' + directory],
       env: {...process.env, XDG_STATE_HOME: path.join(root, 'state'), PYTHONDONTWRITEBYTECODE: '1'}
     });
     await context.route(/^https?:/, route => route.abort());
@@ -103,7 +117,7 @@ async function chromiumTest(root, directory, archive, tools, python, client = 'c
     const browserVersion = (await browserSession.send('Browser.getVersion')).product;
     await browserSession.detach();
     assert.ok(typeof browserVersion === 'string' && browserVersion.length > 0, 'Record the actual running Chromium version');
-    if (branded) {
+    if (cdpInstall) {
       const install = await context.browser().newBrowserCDPSession();
       try {
         const loaded = await install.send('Extensions.loadUnpacked', {path: directory});
@@ -160,14 +174,14 @@ async function chromiumTest(root, directory, archive, tools, python, client = 'c
     assert.ok(trace.some(event => event.method === 'selectUpload'));
     assert.ok(!trace.some(event => event.method === 'uploadSelection' || event.path === '/v1/integrations/keys'));
     assert.deepEqual(errors, [], 'Unexpected real extension page errors');
-    await report(root, client, {passed: true, browserVersion, vendorVersion, runnerImage: process.env.ImageVersion || null, extensionVersion: manifest.version,
+    await report(root, client, {passed: true, browserVersion, vendorVersion, runnerImage: process.env.ImageVersion || null, operaFixture: opera, extensionVersion: manifest.version,
       extensionId: identifier, extensionArchiveSHA256: checksum(await fs.readFile(archive)), nativeHostSHA256: checksum(await fs.readFile(binary)),
       actualNativeMessaging: true, actualProductionPrivateIPC: true, approvalDeniedThenFixtureApproved: true,
       readOnlyControls: true, metadataRenderedAsText: true, disallowedRoutesRejected: true,
       fixtureApprovalRevokedOnExistingConnection: true, exactOriginRemovalDeniesNewConnection: true,
       teamsPageLoaded: true, syntheticAccountFreeDispatch: true, realNativeConsentUITested: false, liveAccountOrUploadTest: false,
-      testedBrowser: client === 'chromium' ? 'Playwright bundled Chromium on Linux' : 'Actual installed stable ' + client + ' on disposable Linux runner',
-      installationMethod: branded ? 'Experimental CDP Extensions.loadUnpacked in fresh CI profile' : 'Chromium test-only --load-extension',
+      testedBrowser: client === 'chromium' ? 'Playwright bundled Chromium on Linux' : client === 'opera' ? 'Actual checksum-pinned official Opera extracted without installer on disposable Linux runner' : 'Actual installed stable ' + client + ' on disposable Linux runner',
+      installationMethod: cdpInstall ? 'Experimental CDP Extensions.loadUnpacked in fresh CI profile' : 'Test-only --load-extension in fresh CI profile',
       signedStoreInstallationTested: false, normalUserApprovalTested: false, otherOperatingSystemsTested: false});
   } finally {
     try { if (context) await context.close(); }
@@ -224,8 +238,8 @@ async function firefoxTest(root, directory, archive, tools) {
 
 async function main() {
   const client = process.argv[2];
-  if (client === '--help') { console.log('usage: node run.cjs chromium|chrome|edge|vscode|firefox\nRuns only inside the dedicated disposable Linux CI workflow.'); return; }
-  assert.ok(['chromium', 'chrome', 'edge', 'vscode', 'firefox'].includes(client));
+  if (client === '--help') { console.log('usage: node run.cjs chromium|chrome|edge|opera|vscode|firefox\nRuns only inside the dedicated disposable Linux CI workflow.'); return; }
+  assert.ok(['chromium', 'chrome', 'edge', 'opera', 'vscode', 'firefox'].includes(client));
   assert.equal(process.platform, 'linux', 'Never launch these tests in a user desktop session');
   assert.equal(process.env.GITHUB_ACTIONS, 'true');
   const root = path.resolve(process.env.GD_EXTENSION_ACCEPTANCE_ROOT || '');
@@ -243,7 +257,7 @@ async function main() {
   const archive = path.join(root, 'packages', matching[0]);
   const directory = path.join(root, 'unpacked');
   await extract(python, archive, directory);
-  if (['chromium', 'chrome', 'edge'].includes(client)) await chromiumTest(root, directory, archive, tools, python, client);
+  if (['chromium', 'chrome', 'edge', 'opera'].includes(client)) await chromiumTest(root, directory, archive, tools, python, client);
   else if (client === 'vscode') await vscodeTest(root, path.join(directory, 'extension'), archive, tools, python);
   else await firefoxTest(root, directory, archive, tools);
   console.log(JSON.stringify({client, passed: true, syntheticFixtureOnly: true}));
