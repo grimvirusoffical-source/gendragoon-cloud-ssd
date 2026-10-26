@@ -404,9 +404,24 @@ class PlatformTests(unittest.TestCase):
             message=str(platform.startup_failure(process))
             for expected in ("exit 2","unknown_flag_timeout","invalid_security_descriptor","fuse_start_failed"):self.assertIn(expected,message)
             for secret in ("private-token","private.example","Customer","customer","private.txt","local-dav-token","/private/"):self.assertNotIn(secret,message)
-            self.assertLessEqual(len(process._gd_startup_reasons),8);self.assertLess(len(message),512)
+            self.assertLessEqual(len(process._gd_startup_reasons),8);self.assertLess(len(message),1024)
             self.assertEqual(platform._startup_reasons(b"unknown vendor text with "+taint),[])
             self.assertIn("invalid_mountpoint",platform._startup_reasons(b"Cannot create WinFsp-FUSE file system: invalid mount point"))
+
+    def test_native_utf16_stdout_is_classified_without_recording_raw_words_or_paths(self):
+        text="WinFsp cannot create filesystem: invalid argument for secretCustomer https://secret.example/s privateToken C:\\secretCustomer\\file.txt"
+        with tempfile.TemporaryDirectory() as temporary:
+            binary=Path(temporary)/"rclone";binary.write_bytes(b"native fixture")
+            process=SimpleNamespace(stdout=io.BytesIO(text.encode("utf-16-le")),stderr=io.BytesIO(),poll=lambda:1)
+            tools={"rclone":str(binary),"sha256":hashlib.sha256(binary.read_bytes()).hexdigest()}
+            with patch.object(platform,"sys",SimpleNamespace(platform="linux")),patch.object(platform,"trusted_binary",return_value=str(binary)),patch.object(platform.subprocess,"Popen",return_value=process):
+                platform.start(tools,{"mountPath":"/fixture/mount","label":"Fixture"},"http://127.0.0.1:43124/","local-only",Path(temporary)/"cache")
+            message=str(platform.startup_failure(process))
+            self.assertIn("invalid_argument",message);self.assertIn("technical words:",message)
+            self.assertEqual(process._gd_output_sizes["stdout"],len(text.encode("utf-16-le")));self.assertEqual(process._gd_output_sizes["stderr"],0)
+            self.assertLessEqual(len(process._gd_startup_words),24)
+            for word in process._gd_startup_words:self.assertIn(word.encode(),platform.STARTUP_WORDS)
+            for secret in ("secretCustomer","secret.example","privateToken","http","C:\\", ".txt"):self.assertNotIn(secret,message)
     def test_kernel_busy_or_changed_process_identity_never_stops_a_helper(self):
         record={"mountPath":"/fixture/mount","tools":{"unmount":"/fixture/fusermount"},"process":{"pid":1}}
         process=MagicMock()

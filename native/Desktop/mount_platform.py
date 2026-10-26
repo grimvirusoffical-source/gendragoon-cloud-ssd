@@ -34,9 +34,10 @@ STARTUP_REASONS=(
     (rb"failed to create file system|couldn't connect|connection refused|deadline exceeded","remote_connect_failed"),
 )
 STARTUP_FLAGS=(b"config",b"read-only",b"vfs-cache-mode",b"cache-dir",b"dir-cache-time",b"attr-timeout",b"dir-perms",b"file-perms",b"volname",b"timeout",b"rc",b"rc-addr",b"log-level",b"log-format",b"option")
+STARTUP_WORDS=frozenset(b"config configuration file filesystem found using defaults critical fatal error failed mount fuse mountpoint stopped before calling init unknown option invalid security descriptor cannot create system winfsp unsupported function parameter timeout duration must positive zero unable read connect address listen tcp bind authentication empty required directory exist exists already use specified incorrect service driver device bad argument enough memory handle missing dll notice logging network transport protocol supported windows version minimum valid operation cancelled canceled syntax daemon foreground background initialization unrecognized status code library permission access denied locked resource busy".split())
 
 def _startup_reasons(fragment):
-    lower=fragment[:8192].lower();reasons=[]
+    lower=fragment[:8192].replace(b"\0",b"").lower();reasons=[]
     for expression,code in STARTUP_REASONS:
         if re.search(expression,lower):reasons.append(code)
     if "unknown_flag" in reasons:
@@ -47,12 +48,14 @@ def _startup_reasons(fragment):
     return reasons[:8]
 
 def startup_failure(process):
-    reader=getattr(process,"_gd_diagnostic_reader",None)
-    if reader:reader.join(timeout=.5)
+    for reader in getattr(process,"_gd_diagnostic_readers",[]):reader.join(timeout=.25)
     status=process.poll()
     status=str(status) if type(status) is int and -0x80000000<=status<=0xffffffff else "unknown"
     reasons=getattr(process,"_gd_startup_reasons",[])[:8]
-    return PlatformMountError("The filesystem process exited before creating a drive (exit "+status+"; reasons: "+(", ".join(reasons) or "unclassified")+"). Check the existing rclone and filesystem driver installation. No process was forcibly stopped.")
+    words=" ".join(getattr(process,"_gd_startup_words",[])[:24]) or "none"
+    sizes=getattr(process,"_gd_output_sizes",{})
+    counts="; stdout/stderr bytes: "+str(sizes.get("stdout",0))+"/"+str(sizes.get("stderr",0))
+    return PlatformMountError("The filesystem process exited before creating a drive (exit "+status+"; reasons: "+(", ".join(reasons) or "unclassified")+counts+"; technical words: "+words+"). Check the existing rclone and filesystem driver installation. No process was forcibly stopped.")
 
 def trusted_binary(path):
     path=Path(path).absolute()
@@ -245,16 +248,26 @@ def start(tools,record,url,token,cache):
         "--volname",record["label"],"--timeout=0","--rc","--rc-addr=127.0.0.1:0","--log-level=NOTICE","--log-format="]
     if sys.platform=="win32":args.extend(("--option",_windows_file_security()))
     flags={"creationflags":subprocess.CREATE_NO_WINDOW} if sys.platform=="win32" else {"start_new_session":True}
-    process=subprocess.Popen(args,env=environment,stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.PIPE,**flags)
-    process._gd_rc_password=password;process._gd_rc_url=None;process._gd_startup_reasons=[]
-    def drain():
-        for line in iter(lambda:process.stderr.readline(8192),b""):
+    process=subprocess.Popen(args,env=environment,stdin=subprocess.DEVNULL,stdout=subprocess.PIPE,stderr=subprocess.PIPE,**flags)
+    process._gd_rc_password=password;process._gd_rc_url=None;process._gd_startup_reasons=[];process._gd_startup_words=[]
+    process._gd_output_sizes={"stdout":0,"stderr":0};process._gd_diagnostic_lock=threading.Lock()
+    def drain(stream,name):
+        for line in iter(lambda:stream.readline(8192),b""):
             match=re.search(rb"Serving remote control on (http://127\.0\.0\.1:[0-9]+/)",line)
             if match:process._gd_rc_url=match[1].decode("ascii")
-            for code in _startup_reasons(line):
-                if code not in process._gd_startup_reasons and len(process._gd_startup_reasons)<8:process._gd_startup_reasons.append(code)
-        process.stderr.close()
-    process._gd_diagnostic_reader=threading.Thread(target=drain,daemon=True);process._gd_diagnostic_reader.start()
+            words=re.findall(rb"[a-z][a-z_]+",line.replace(b"\0",b"").lower())
+            with process._gd_diagnostic_lock:
+                process._gd_output_sizes[name]+=len(line)
+                for code in _startup_reasons(line):
+                    if code not in process._gd_startup_reasons and len(process._gd_startup_reasons)<8:process._gd_startup_reasons.append(code)
+                for word in words:
+                    if word in STARTUP_WORDS and word.decode("ascii") not in process._gd_startup_words and len(process._gd_startup_words)<24:process._gd_startup_words.append(word.decode("ascii"))
+        stream.close()
+    process._gd_diagnostic_readers=[]
+    for name in ("stdout","stderr"):
+        stream=getattr(process,name,None)
+        if stream is not None:
+            reader=threading.Thread(target=drain,args=(stream,name),daemon=True);process._gd_diagnostic_readers.append(reader);reader.start()
     return process
 
 def _quit(process):
