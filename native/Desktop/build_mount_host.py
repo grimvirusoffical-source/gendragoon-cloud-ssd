@@ -26,6 +26,20 @@ def json_stream(data):
         if position==len(text):break
         item,position=decoder.raw_decode(text,position);yield item
 
+def verify_windows_output(path):
+    """Windows can split an inheritable ACE; every effective principal stays ours."""
+    from gendragoon_platform_ipc import modules,user_sid
+    security=modules()[-1];sid=security.ConvertSidToStringSid(user_sid())
+    descriptor=security.GetFileSecurity(str(path),security.OWNER_SECURITY_INFORMATION|security.DACL_SECURITY_INFORMATION)
+    acl=descriptor.GetSecurityDescriptorDacl()
+    if (security.ConvertSidToStringSid(descriptor.GetSecurityDescriptorOwner())!=sid
+            or not descriptor.GetSecurityDescriptorControl()[0]&0x1000 or acl is None or not 1<=acl.GetAceCount()<=4):
+        raise RuntimeError("The generated host output lacks a protected current-user Windows ACL.")
+    for index in range(acl.GetAceCount()):
+        ace=acl.GetAce(index)
+        if ace[0][0]!=security.ACCESS_ALLOWED_ACE_TYPE or security.ConvertSidToStringSid(ace[-1])!=sid:
+            raise RuntimeError("The generated host output permits another Windows principal.")
+
 def build(destination):
     destination=Path(destination).absolute()
     if destination.exists() or destination.is_symlink():raise RuntimeError("A fresh standalone host destination is required.")
@@ -96,7 +110,9 @@ def build(destination):
     for path in destination.rglob("*"):
         if path.is_file():manifest["files"][path.relative_to(destination).as_posix()]={"bytes":path.stat().st_size,"sha256":hashlib.sha256(path.read_bytes()).hexdigest()}
     (destination/"STANDALONE_HOST_MANIFEST.json").write_text(json.dumps(manifest,sort_keys=True,indent=2)+"\n")
-    if os.name=="nt":private_fs.protect_generated_tree(destination)
+    if os.name=="nt":
+        private_fs.protect_generated_tree(destination)
+        for path in (destination,*destination.rglob("*")):verify_windows_output(path)
     return {"binary":str(binary),"sha256":hashlib.sha256(binary.read_bytes()).hexdigest(),"independentFlossArtifact":True}
 
 def main(argv=None):

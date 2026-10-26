@@ -6,8 +6,9 @@ from pathlib import Path
 import sys
 import tempfile
 import tarfile
+from types import SimpleNamespace
 import unittest
-from unittest.mock import patch
+from unittest.mock import patch,MagicMock
 
 DESKTOP=Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(DESKTOP))
@@ -49,6 +50,23 @@ class DistributionTests(unittest.TestCase):
         self.assertEqual([v["ImportPath"] for v in records],["one","two"])
         with self.assertRaises(ValueError):list(build_mount_host.json_stream(b'{"ImportPath":"one"}\ninvalid'))
 
+    def test_windows_acl_split_entries_preserve_exact_owner_scope(self):
+        sid="synthetic-current-user";descriptor=MagicMock();acl=descriptor.GetSecurityDescriptorDacl.return_value
+        descriptor.GetSecurityDescriptorOwner.return_value=sid;descriptor.GetSecurityDescriptorControl.return_value=(0x1000,1)
+        security=SimpleNamespace(OWNER_SECURITY_INFORMATION=1,DACL_SECURITY_INFORMATION=4,ACCESS_ALLOWED_ACE_TYPE=0,
+            ConvertSidToStringSid=lambda value:value,GetFileSecurity=lambda *_:descriptor)
+        fixture=SimpleNamespace(modules=lambda:(security,),user_sid=lambda:sid)
+        entries=[((0,3),0x1f01ff,sid),((0,11),0x10000000,sid)]
+        acl.GetAceCount.side_effect=lambda:len(entries);acl.GetAce.side_effect=lambda index:entries[index]
+        with patch.dict(sys.modules,{"gendragoon_platform_ipc":fixture}):
+            build_mount_host.verify_windows_output(Path("synthetic-output"))
+            for principal in ("S-1-5-18","S-1-5-32-544","synthetic-other-user"):
+                entries[1]=((0,11),0x10000000,principal)
+                with self.subTest(principal=principal),self.assertRaisesRegex(RuntimeError,"another Windows principal"):
+                    build_mount_host.verify_windows_output(Path("synthetic-output"))
+            entries[1]=((0,11),0x10000000,sid);descriptor.GetSecurityDescriptorControl.return_value=(0,1)
+            with self.assertRaisesRegex(RuntimeError,"protected current-user"):build_mount_host.verify_windows_output(Path("synthetic-output"))
+
     def test_standalone_host_artifact_contains_only_public_host_source_and_actual_notices(self):
         with tempfile.TemporaryDirectory() as temporary:
             root=Path(temporary);module=root/"module";module.mkdir();dependency=root/"rclone";dependency.mkdir();goroot=root/"go";goroot.mkdir()
@@ -84,7 +102,10 @@ class DistributionTests(unittest.TestCase):
                     private_fs.verify(path)
                     descriptor=security.GetFileSecurity(str(path),security.OWNER_SECURITY_INFORMATION|security.DACL_SECURITY_INFORMATION)
                     self.assertEqual(security.ConvertSidToStringSid(descriptor.GetSecurityDescriptorOwner()),sid)
-                    acl=descriptor.GetSecurityDescriptorDacl();self.assertIsNotNone(acl);self.assertEqual(acl.GetAceCount(),1)
-                    self.assertEqual(security.ConvertSidToStringSid(acl.GetAce(0)[-1]),sid)
+                    self.assertTrue(descriptor.GetSecurityDescriptorControl()[0]&0x1000)
+                    acl=descriptor.GetSecurityDescriptorDacl();self.assertIsNotNone(acl);self.assertGreaterEqual(acl.GetAceCount(),1)
+                    for index in range(acl.GetAceCount()):
+                        self.assertEqual(acl.GetAce(index)[0][0],security.ACCESS_ALLOWED_ACE_TYPE)
+                        self.assertEqual(security.ConvertSidToStringSid(acl.GetAce(index)[-1]),sid)
 
 if __name__=="__main__":unittest.main()
