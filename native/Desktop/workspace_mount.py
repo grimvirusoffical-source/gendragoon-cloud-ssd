@@ -368,6 +368,7 @@ class WorkspaceMountManager:
                         record["state"]="mounted";self._save(record);return dict(record)
                     if process.poll() is not None:break
                     time.sleep(.1)
+                if process.poll() is not None:raise platform_api.startup_failure(process)
                 raise MountError("The filesystem driver could not create a drive. Check rclone, WinFsp/FUSE and retained drive status.")
             except Exception:
                 actual=platform_api.mounted(record)

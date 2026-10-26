@@ -248,6 +248,13 @@ class ManagerTests(unittest.TestCase):
         self.assertEqual(request(server)[1],("owned note "+OTHER).encode())
         self.assertEqual(set(self.manager.live),{existing["id"]})
 
+    def test_early_child_exit_reports_only_fixed_reason_codes_and_closes_new_dav(self):
+        process=FakeProcess(777);process.returncode=1;process._gd_startup_reasons=["invalid_option","invalid_filesecurity_option"]
+        with patch.object(platform,"start",return_value=process):
+            with self.assertRaisesRegex(platform.PlatformMountError,"exit 1; reasons: invalid_option, invalid_filesecurity_option"):
+                self.manager.mount(self.model,NOTE)
+        self.assertFalse(self.manager.live);self.assertFalse(self.manager.has_mounts)
+
 class ActualArchiveTests(unittest.TestCase):
     def setUp(self):
         try:client.crypto_runtime()
@@ -384,6 +391,22 @@ class PlatformTests(unittest.TestCase):
         acl=descriptor.GetSecurityDescriptorDacl();self.assertEqual(acl.GetAceCount(),1)
         ace=acl.GetAce(0);self.assertEqual(ace[0],(0,0));self.assertEqual(ace[1],0x1200a9)
         self.assertEqual(security.ConvertSidToStringSid(ace[-1]),sid)
+
+    def test_startup_diagnostics_are_bounded_fixed_codes_without_stderr_secrets(self):
+        taint=b"private-token https://private.example/path /private/customer/file C:\\Customer\\private.txt "
+        stderr=(taint+b" unknown flag: --timeout\n"+taint+b" Invalid security descriptor; Cannot create WinFsp-FUSE file system\n"+b"x"*20000+b"\n")
+        with tempfile.TemporaryDirectory() as temporary:
+            binary=Path(temporary)/"rclone";binary.write_bytes(b"native fixture")
+            process=SimpleNamespace(stderr=io.BytesIO(stderr),poll=lambda:2)
+            tools={"rclone":str(binary),"sha256":hashlib.sha256(binary.read_bytes()).hexdigest()}
+            with patch.object(platform,"sys",SimpleNamespace(platform="linux")),patch.object(platform,"trusted_binary",return_value=str(binary)),patch.object(platform.subprocess,"Popen",return_value=process):
+                platform.start(tools,{"mountPath":"/fixture/mount","label":"Fixture"},"http://127.0.0.1:43124/","local-dav-token",Path(temporary)/"cache")
+            message=str(platform.startup_failure(process))
+            for expected in ("exit 2","unknown_flag_timeout","invalid_security_descriptor","fuse_start_failed"):self.assertIn(expected,message)
+            for secret in ("private-token","private.example","Customer","customer","private.txt","local-dav-token","/private/"):self.assertNotIn(secret,message)
+            self.assertLessEqual(len(process._gd_startup_reasons),8);self.assertLess(len(message),512)
+            self.assertEqual(platform._startup_reasons(b"unknown vendor text with "+taint),[])
+            self.assertIn("invalid_mountpoint",platform._startup_reasons(b"Cannot create WinFsp-FUSE file system: invalid mount point"))
     def test_kernel_busy_or_changed_process_identity_never_stops_a_helper(self):
         record={"mountPath":"/fixture/mount","tools":{"unmount":"/fixture/fusermount"},"process":{"pid":1}}
         process=MagicMock()

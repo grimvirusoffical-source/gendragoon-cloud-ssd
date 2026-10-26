@@ -17,6 +17,43 @@ import urllib.request
 
 class PlatformMountError(RuntimeError):pass
 
+STARTUP_REASONS=(
+    (rb"cannot find (?:winfsp|fuse)|cannot load (?:winfsp|fuse)|failed to load.{0,80}(?:winfsp|fuse)","fuse_library_unavailable"),
+    (rb"(?:cannot|failed to) create.{0,80}(?:winfsp|fuse)|(?:winfsp|fuse).{0,80}(?:initiali[sz]|create).{0,80}(?:fail|error)","fuse_start_failed"),
+    (rb"(?:invalid|bad|unsupported).{0,40}(?:security|descriptor)|security descriptor.{0,40}(?:invalid|bad|unsupported)","invalid_security_descriptor"),
+    (rb"unknown (?:flag|shorthand flag)|flag provided but not defined","unknown_flag"),
+    (rb"unknown option|unrecognized option|unrecognised option|invalid option|unsupported option","invalid_option"),
+    (rb"invalid (?:mountpoint|mount point)|mountpoint.{0,80}(?:exists|invalid)|mount point.{0,80}(?:exists|invalid)","invalid_mountpoint"),
+    (rb"(?:unknown|invalid).{0,20}duration","invalid_duration"),
+    (rb"access is denied|access denied|permission denied","access_denied"),
+    (rb"device.{0,40}(?:not ready|not found|unavailable)|driver.{0,40}not.{0,20}(?:running|available|found)","driver_unavailable"),
+    (rb"invalid handle|invalid parameter|invalid argument|bad file descriptor","invalid_argument"),
+    (rb"mount failed|failed to mount|mount stopped","mount_failed"),
+    (rb"address already in use|only one usage of each socket address","address_in_use"),
+    (rb"panic:|assertion failed|fatal exception","process_runtime_error"),
+    (rb"failed to create file system|couldn't connect|connection refused|deadline exceeded","remote_connect_failed"),
+)
+STARTUP_FLAGS=(b"config",b"read-only",b"vfs-cache-mode",b"cache-dir",b"dir-cache-time",b"attr-timeout",b"dir-perms",b"file-perms",b"volname",b"timeout",b"rc",b"rc-addr",b"log-level",b"log-format",b"option")
+
+def _startup_reasons(fragment):
+    lower=fragment[:8192].lower();reasons=[]
+    for expression,code in STARTUP_REASONS:
+        if re.search(expression,lower):reasons.append(code)
+    if "unknown_flag" in reasons:
+        for flag in STARTUP_FLAGS:
+            if re.search(rb"--"+re.escape(flag)+rb"(?:[^a-z0-9-]|$)",lower):
+                reasons.append("unknown_flag_"+flag.decode("ascii").replace("-","_"))
+    if "invalid_option" in reasons and b"filesecurity" in lower:reasons.append("invalid_filesecurity_option")
+    return reasons[:8]
+
+def startup_failure(process):
+    reader=getattr(process,"_gd_diagnostic_reader",None)
+    if reader:reader.join(timeout=.5)
+    status=process.poll()
+    status=str(status) if type(status) is int and -0x80000000<=status<=0xffffffff else "unknown"
+    reasons=getattr(process,"_gd_startup_reasons",[])[:8]
+    return PlatformMountError("The filesystem process exited before creating a drive (exit "+status+"; reasons: "+(", ".join(reasons) or "unclassified")+"). Check the existing rclone and filesystem driver installation. No process was forcibly stopped.")
+
 def trusted_binary(path):
     path=Path(path).absolute()
     if path.is_symlink() or not path.is_file():raise PlatformMountError("Choose the real installed rclone executable, without a link or wrapper.")
@@ -209,13 +246,15 @@ def start(tools,record,url,token,cache):
     if sys.platform=="win32":args.extend(("--option",_windows_file_security()))
     flags={"creationflags":subprocess.CREATE_NO_WINDOW} if sys.platform=="win32" else {"start_new_session":True}
     process=subprocess.Popen(args,env=environment,stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.PIPE,**flags)
-    process._gd_rc_password=password;process._gd_rc_url=None
+    process._gd_rc_password=password;process._gd_rc_url=None;process._gd_startup_reasons=[]
     def drain():
-        for line in iter(process.stderr.readline,b""):
+        for line in iter(lambda:process.stderr.readline(8192),b""):
             match=re.search(rb"Serving remote control on (http://127\.0\.0\.1:[0-9]+/)",line)
             if match:process._gd_rc_url=match[1].decode("ascii")
+            for code in _startup_reasons(line):
+                if code not in process._gd_startup_reasons and len(process._gd_startup_reasons)<8:process._gd_startup_reasons.append(code)
         process.stderr.close()
-    threading.Thread(target=drain,daemon=True).start()
+    process._gd_diagnostic_reader=threading.Thread(target=drain,daemon=True);process._gd_diagnostic_reader.start()
     return process
 
 def _quit(process):
