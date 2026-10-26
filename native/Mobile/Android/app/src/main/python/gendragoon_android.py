@@ -372,12 +372,16 @@ def android_origin(config):
 
 
 def upload(config_json, source, cache, java_auth, callback):
+    return _upload(config_json, source, cache, callback, client_type(java_auth))
+
+
+def _upload(config_json, source, cache, callback, receiver):
+    """Shared operation; callers supply a class, never a route or global override."""
     import gendragoon_redx_storage as storage
     with _operation_lock:
         config = json.loads(config_json)
         progress = Progress(callback)
         storage.progress = progress
-        receiver = client_type(java_auth)
         source, cache = Path(source), Path(cache)
         cache.mkdir(mode=0o700, parents=True, exist_ok=True)
         selection = snapshot(source)
@@ -407,6 +411,10 @@ def upload(config_json, source, cache, java_auth, callback):
 
 
 def download(config_json, item_json, cache, java_auth, callback):
+    return _download(config_json, item_json, cache, callback, client_type(java_auth))
+
+
+def _download(config_json, item_json, cache, callback, receiver):
     import gendragoon_redx_storage as storage
     with _operation_lock:
         config, item = json.loads(config_json), json.loads(item_json)
@@ -423,7 +431,7 @@ def download(config_json, item_json, cache, java_auth, callback):
         target = root / "verified.archive"
         target.unlink(missing_ok=True)
         target.with_name("."+target.name+".partial").unlink(missing_ok=True)
-        restored = storage.download_archive(config, item, target, client_factory=client_type(java_auth))
+        restored = storage.download_archive(config, item, target, client_factory=receiver)
         progress.phase("verifying", total_bytes=expected)
         verify_archive(target, restored["root"], restored["manifest"])
         name = checked_name(restored["root"]["name"])

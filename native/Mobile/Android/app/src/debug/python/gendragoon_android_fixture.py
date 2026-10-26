@@ -55,3 +55,73 @@ def roundtrip(directory):
             else:raise RuntimeError('Invalid legacy input unexpectedly restored')
             if target.exists():raise RuntimeError('Invalid legacy input published plaintext')
     return json.dumps({"ok":True,"verified":True,"pngObjects":len(blobs)-1,"plainBytes":len(plain),"crossWorkspaceRejected":rejected,"legacyCompactBytes":len(legacy_plain),"legacyBadAuthNoOutput":True})
+
+
+class TransferFixture:
+    """Owned debug state, passed explicitly to the real Android operation cores."""
+    def __init__(self, directory, receiver, workspace):
+        import re
+        import threading
+        import gendragoon_android as android
+        import gendragoon_redx_storage as storage
+        if not re.fullmatch(r"[a-f0-9]{64}", receiver) or not re.fullmatch(r"[a-f0-9]{32}", workspace):
+            raise ValueError("Invalid public fixture identity")
+        self.root = Path(directory)
+        self.root.mkdir(mode=0o700, parents=True, exist_ok=False)
+        vault = self.root / receiver
+        vault.mkdir(mode=0o700)
+        secret = "PUBLIC-ONLY-Android-transfer-fixture-secret-1234"
+        android.initialize_vault(str(vault / "private.keymap"), secret)
+        self.config = {"provider": "redxai", "cloudApi": storage.API,
+                       "workspaceId": workspace, "receiverId": receiver,
+                       "bearerToken": "rxca_" + "x" * 43, "storageSecret": secret,
+                       "keymapPath": str(vault / "private.keymap"), "constrained": False}
+        self.blobs, self.items, self.lock = {}, {}, threading.RLock()
+        fixture = self
+        class Receiver:
+            def __init__(self, config):
+                if config["receiverId"] != receiver or config["workspaceId"] != workspace:
+                    raise storage.RedXStorageError("Fixture ownership mismatch", 403)
+                self.config = config
+                self.workspace, self.receiver = workspace, receiver
+                self.secret, self.keymap = config["storageSecret"], Path(config["keymapPath"])
+            def verified_workers(self, write=False):
+                return 1
+            def put_png(self, oid, png):
+                with fixture.lock:
+                    fixture.blobs[oid] = bytes(png)
+                return {"id": oid, "carrierBytes": len(png), "carrierSha256": hashlib.sha256(png).hexdigest()}
+            def get_png(self, oid):
+                with fixture.lock:
+                    if oid not in fixture.blobs:
+                        raise storage.RedXStorageError("Fixture blob missing", 404)
+                    return fixture.blobs[oid]
+            def register(self, key, value):
+                with fixture.lock:
+                    fixture.items[key] = {"key": key, **value}
+                    return dict(fixture.items[key])
+            def json(self, route):
+                if route != "/v1/receivers/me/library":
+                    raise RuntimeError("Unsupported fixture route")
+                with fixture.lock:
+                    return {"items": [dict(value) for value in fixture.items.values()]}
+        self.receiver_factory = Receiver
+    def configuration(self):
+        return json.dumps(self.config)
+    def upload(self, source, stage, callback):
+        import gendragoon_android as android
+        return android._upload(self.configuration(), source, stage, callback, self.receiver_factory)
+    def download(self, item, stage, callback):
+        import gendragoon_android as android
+        return android._download(self.configuration(), item, stage, callback, self.receiver_factory)
+    def item(self):
+        with self.lock:
+            if len(self.items) != 1:
+                raise RuntimeError("Expected exactly one owned fixture item")
+            return json.dumps(next(iter(self.items.values())))
+    def corrupt(self):
+        with self.lock:
+            if not self.blobs:
+                raise RuntimeError("No fixture ciphertext exists")
+            for key, value in self.blobs.items():
+                self.blobs[key] = b"INVALID-OWNED-PNG-SIGNATURE" + value[25:]

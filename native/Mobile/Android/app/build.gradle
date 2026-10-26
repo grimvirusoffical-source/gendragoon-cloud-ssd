@@ -24,7 +24,7 @@ android {
  packaging { jniLibs { useLegacyPackaging true } }
  sourceSets { main { assets.srcDirs += ['build/generated/teamsAssets', 'build/generated/licenses', 'build/generated/cryptoAssets']; jniLibs.srcDirs += ['build/generated/jniLibs'] }; test { resources.srcDirs += ['build/generated/testResources'] }; androidTest { assets.srcDirs += ['build/generated/androidTestAssets'] } }
  compileOptions { coreLibraryDesugaringEnabled true; sourceCompatibility JavaVersion.VERSION_17; targetCompatibility JavaVersion.VERSION_17 }
- buildTypes { release { minifyEnabled false } }
+ buildTypes { debug { applicationIdSuffix ".debug" }; release { minifyEnabled false } }
  lint { abortOnError true; error 'NewApi' }
 }
 chaquopy {
@@ -70,6 +70,7 @@ dependencies {
  implementation 'androidx.webkit:webkit:1.14.0'
  testImplementation 'junit:junit:4.13.2'
  testImplementation 'org.json:json:20250517'
+ androidTestImplementation 'androidx.test:core:1.6.1'
  androidTestImplementation 'androidx.test:runner:1.6.2'
  androidTestImplementation 'androidx.test.ext:junit:1.2.1'
 }
