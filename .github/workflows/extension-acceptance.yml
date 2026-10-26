@@ -93,13 +93,23 @@ jobs:
       - name: Stage only the checksum-pinned official Opera package in the disposable runner
         if: matrix.client == 'opera'
         run: python -B native/Tests/ExtensionAcceptance/stage_ci_opera.py --destination "$RUNNER_TEMP/gd-opera-fixture"
+      - name: Supply Opera's normal desktop settings schema from the official Ubuntu repository
+        if: matrix.client == 'opera'
+        run: sudo apt-get install --yes --no-install-recommends gsettings-desktop-schemas
       - name: Build the actual first-party ELF native messaging host
         if: matrix.client != 'firefox'
         run: |
           python -B -m pip install --only-binary=:all: -r native/Desktop/requirements-build.txt
           python -B native/Desktop/build_native_host.py --destination "$RUNNER_TEMP/gd-native-host"
       - name: Load the real packaged client and verify its declared boundary
-        run: xvfb-run -a node native/Tests/ExtensionAcceptance/run.cjs ${{ matrix.client }}
+        env:
+          GD_BROWSER_CLIENT: ${{ matrix.client }}
+        run: |
+          if [ "$GD_BROWSER_CLIENT" = opera ]; then
+            dbus-run-session -- xvfb-run -a node native/Tests/ExtensionAcceptance/run.cjs "$GD_BROWSER_CLIENT"
+          else
+            xvfb-run -a node native/Tests/ExtensionAcceptance/run.cjs "$GD_BROWSER_CLIENT"
+          fi
       - name: Preserve only sanitized fixture reports and screenshots
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
