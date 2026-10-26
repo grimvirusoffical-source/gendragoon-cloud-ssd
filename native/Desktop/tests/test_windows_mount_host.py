@@ -220,7 +220,8 @@ class ActualOwnedHostTests(unittest.TestCase):
             value=platform.host_request(process,"/v1/status")
             native_status.clear()
             if value.get("state") in ("mounted","quiescing","unmounted"):native_status["state"]=value["state"]
-            for key in ("openFiles","openDirectories","pending","inflight"):
+            if type(value.get("fault")) is bool:native_status["fault"]=value["fault"]
+            for key in ("openFiles","openDirectories","pending","inflight","closeFailures"):
                 count=value.get(key)
                 if type(count) is int and 0<=count<=1000000:native_status[key]=count
             return native_status

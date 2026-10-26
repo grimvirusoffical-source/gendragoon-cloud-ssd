@@ -102,6 +102,24 @@ func TestGateUncertainCloseAndUnknownCloseFailClosed(t *testing.T) {
 		if g.prepareUnmount() || g.beginOpen(fileHandle) != nil {
 			t.Fatal("uncertain state allowed unmount/admission")
 		}
+		if s := g.status(); !s.Fault || s.CloseFailures != 1 {
+			t.Fatal("close failure diagnostics missing", s)
+		}
+	}
+}
+
+func TestGateDiagnosticCountersAreBoundedAndDoNotClearFaults(t *testing.T) {
+	g := newGate()
+	if s := g.status(); s.Fault || s.CloseFailures != 0 {
+		t.Fatal("clean gate reported failure", s)
+	}
+	g.closeFailures = 1000000
+	g.beginClose(fileHandle, 77)
+	if s := g.status(); !s.Fault || s.CloseFailures != 1000000 {
+		t.Fatal("diagnostic counter was not bounded", s)
+	}
+	if g.prepareUnmount() || g.beginOperation() != nil {
+		t.Fatal("diagnostics changed fail-closed behavior")
 	}
 }
 

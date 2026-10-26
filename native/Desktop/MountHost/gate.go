@@ -18,13 +18,14 @@ type handleKey struct {
 // process's handles. A pending open is reserved before calling the filesystem.
 // A successful descriptor stays reserved until the native Close callback.
 type admissionGate struct {
-	mu       sync.Mutex
-	state    string
-	pending  int
-	inflight int
-	handles  map[handleKey]int
-	closing  map[handleKey]int
-	fault    bool
+	mu            sync.Mutex
+	state         string
+	pending       int
+	inflight      int
+	handles       map[handleKey]int
+	closing       map[handleKey]int
+	fault         bool
+	closeFailures int
 }
 
 type gateStatus struct {
@@ -34,6 +35,8 @@ type gateStatus struct {
 	OpenDirectories int    `json:"openDirectories"`
 	Pending         int    `json:"pending"`
 	Inflight        int    `json:"inflight"`
+	Fault           bool   `json:"fault"`
+	CloseFailures   int    `json:"closeFailures"`
 }
 
 func newGate() *admissionGate {
@@ -43,7 +46,7 @@ func newGate() *admissionGate {
 func (g *admissionGate) status() gateStatus {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	s := gateStatus{Schema: 1, State: g.state, Pending: g.pending, Inflight: g.inflight}
+	s := gateStatus{Schema: 1, State: g.state, Pending: g.pending, Inflight: g.inflight, Fault: g.fault, CloseFailures: g.closeFailures}
 	for k, n := range g.handles {
 		if k.kind == fileHandle {
 			s.OpenFiles += n
@@ -104,6 +107,9 @@ func (g *admissionGate) beginClose(kind handleKind, fh uint64) func(bool) {
 	g.mu.Lock()
 	if g.handles[k] <= g.closing[k] {
 		g.fault = true
+		if g.closeFailures < 1000000 {
+			g.closeFailures++
+		}
 		g.mu.Unlock()
 		return nil
 	}
@@ -125,6 +131,9 @@ func (g *admissionGate) beginClose(kind handleKind, fh uint64) func(bool) {
 				}
 			} else {
 				g.fault = true
+				if g.closeFailures < 1000000 {
+					g.closeFailures++
+				}
 			}
 		})
 	}
