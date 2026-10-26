@@ -3,9 +3,10 @@ import contextlib
 import io
 import http.server
 import json
-import mmap
 import os
 from pathlib import Path
+import queue
+import subprocess
 import sys
 import tempfile
 import threading
@@ -18,7 +19,56 @@ import test_workspace_drives as fixture
 platform=fixture.platform
 mounts=fixture.mounts
 
+MAPPED_READER=r'''
+import hashlib,json,mmap,os,sys
+source=open(sys.argv[1],"rb")
+view=mmap.mmap(source.fileno(),0,access=mmap.ACCESS_READ)
+source.close()
+try:
+    value=view[:]
+    print(json.dumps({"schema":1,"pid":os.getpid(),"originalClosed":source.closed,
+        "size":len(value),"sha256":hashlib.sha256(value).hexdigest()}),flush=True)
+    sys.stdin.buffer.read(1)
+finally:view.close()
+'''
+
+@contextlib.contextmanager
+def mapped_reader(path):
+    # A page fault in mmap[:] holds CPython's GIL. The DAV server must run in
+    # another interpreter, just as it does when a separate user app maps a drive.
+    environment={k:v for k,v in os.environ.items() if k in
+        ("SystemRoot","SYSTEMROOT","WINDIR","PATH","TEMP","TMP","TMPDIR","LANG","LC_ALL")}
+    process=subprocess.Popen([sys.executable,"-I","-B","-u","-c",MAPPED_READER,str(path)],
+        stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,text=True,env=environment)
+    replies=queue.Queue(maxsize=1)
+    thread=threading.Thread(target=lambda:replies.put(process.stdout.readline(4097)),daemon=True);thread.start()
+    try:
+        try:raw=replies.get(timeout=20)
+        except queue.Empty:raise AssertionError("The independent mapped-file reader did not become ready.")
+        if not raw.endswith("\n") or len(raw)>4096:raise AssertionError("The mapped-file reader returned invalid metadata.")
+        value=json.loads(raw)
+        if (not isinstance(value,dict) or set(value)!={"schema","pid","originalClosed","size","sha256"}
+                or value.get("schema")!=1 or value.get("pid")!=process.pid or value.get("originalClosed") is not True):
+            raise AssertionError("The mapped-file reader did not retain an independent mapped view.")
+        yield value,process
+    finally:
+        # EOF is the reader's explicit normal-close request. Never terminate or
+        # signal a held mapped view to manufacture a successful unmount.
+        process.stdin.close()
+        try:process.wait(timeout=20)
+        except subprocess.TimeoutExpired:raise AssertionError("The mapped-file reader did not close normally.")
+        thread.join(timeout=1);process.stdout.close()
+        if process.returncode!=0:raise AssertionError("The independent mapped-file reader failed.")
+
 class HostControlTests(unittest.TestCase):
+    def test_mapped_reader_is_independent_preserves_bytes_and_closes_normally(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path=Path(temporary)/"mapped-fixture.bin";payload=b"Verified independent mapped bytes"*1024;path.write_bytes(payload)
+            with mapped_reader(path) as (value,process):
+                self.assertNotEqual(value["pid"],os.getpid());self.assertIsNone(process.poll())
+                self.assertEqual(value["size"],len(payload));self.assertEqual(value["sha256"],fixture.hashlib.sha256(payload).hexdigest())
+            self.assertEqual(process.returncode,0);self.assertEqual(path.read_bytes(),payload)
+
     def test_real_control_http_is_local_authenticated_bounded_and_never_redirected(self):
         observed=[];reply={"status":200,"body":b'{"schema":1,"state":"mounted"}'}
         class Handler(http.server.BaseHTTPRequestHandler):
@@ -154,9 +204,10 @@ class ActualOwnedHostTests(unittest.TestCase):
             try:busy()
             finally:duplicate.Close()
             checks.append("duplicate-handle-refused");wait_closed(process)
-            source=path.open("rb");view=mmap.mmap(source.fileno(),0,access=mmap.ACCESS_READ);source.close()
-            try:self.assertEqual(view[:],self.payload);busy()
-            finally:view.close()
+            with mapped_reader(path) as (mapped,reader):
+                self.assertEqual(mapped["size"],len(self.payload));self.assertEqual(mapped["sha256"],fixture.hashlib.sha256(self.payload).hexdigest())
+                self.assertIsNone(reader.poll());busy()
+            self.assertEqual(reader.returncode,0)
             checks.append("mapped-view-refused");wait_closed(process)
             directory=win32file.CreateFile(record["mountPath"],win32con.FILE_READ_ATTRIBUTES|win32con.FILE_LIST_DIRECTORY,
                 win32con.FILE_SHARE_READ|win32con.FILE_SHARE_WRITE|win32con.FILE_SHARE_DELETE,None,win32con.OPEN_EXISTING,win32con.FILE_FLAG_BACKUP_SEMANTICS,None)
