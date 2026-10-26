@@ -94,6 +94,36 @@ def _safe_ancestors(path):
         if stat.S_ISLNK(info.st_mode) or getattr(info,"st_file_attributes",0)&0x400:
             raise PortableAppError("A portable app cache cannot use linked parent folders.")
 
+def _inventory_kind(path):
+    name=Path(path).name
+    if ATOMIC_TEMP.fullmatch(name):return "atomic-temp"
+    for kind in ("lease","launch","diagnostic"):
+        if re.fullmatch(kind+r"-[a-f0-9]{32}\.json",name):return kind
+    return "binding" if name=="binding.json" else "other"
+
+def _inventory_failure(path,error,operation,layout):
+    """Fixed, bounded evidence only; never a path or exception message."""
+    name=type(error).__name__
+    value=dict(stage="inventory-metadata",errorCode="inventory_unverified",entryKind=_inventory_kind(path),
+        layout=layout if layout in WINDOWS_LAYOUTS|{"legacy"} else "unlisted",
+        operation=operation if operation in ("path-metadata","private-acl","control-identity","fresh-absence") else "unlisted",
+        pathUtf16Units=min(32768,len(str(path).encode("utf-16-le",errors="surrogatepass"))//2),
+        errorType=name if name in ERROR_TYPES|{"FileNotFoundError"} else "Exception")
+    for field in ("errno","winerror"):
+        code=getattr(error,field,None)
+        if type(code) is int and 0<=code<=0xffffffff:value[field]=code
+    value["nativeOperation"]="GetFileSecurity" if len(error.args)>=2 and error.args[1]=="GetFileSecurity" else "unlisted"
+    result=PortableAppError("The retained app inventory needs review. Cached files and process leases were retained.")
+    result.diagnostic=value
+    return result
+
+def _native_missing_security_leaf(error):
+    if os.name!="nt":return False
+    try:import pywintypes
+    except ImportError:return False
+    return (type(error) is pywintypes.error and len(error.args)>=2
+        and type(error.args[0]) is int and error.args[:2]==(2,"GetFileSecurity"))
+
 def _open_record(path,*,delete=False):
     if os.name=="nt":
         import msvcrt,win32api,win32con,win32file
@@ -335,17 +365,37 @@ class PortableApps:
         # Path.glob suppresses directory scan errors on Python 3.13. Explicit
         # traversal must fail closed if any reserved cache level is unreadable.
         visited=0
-        def children(directory,atomic=False):
+        def children(directory,atomic=False,layout="unlisted"):
             nonlocal visited
+            original_control=None
+            if atomic:
+                try:
+                    original_control=_real(directory);verified=private.verify(directory)
+                    if (original_control.st_dev,original_control.st_ino)!=(verified.st_dev,verified.st_ino):
+                        raise PortableAppError("The control directory changed during inspection.")
+                except Exception as error:raise _inventory_failure(directory,error,"control-identity",layout) from None
             for child in directory.iterdir():
                 visited+=1
                 if visited>100000:raise PortableAppError("The retained app inventory needs review.")
-                try:info=_real(child);private.verify(child)
-                except FileNotFoundError:
+                operation="path-metadata"
+                try:
+                    info=_real(child);operation="private-acl";private.verify(child)
+                except Exception as error:
                     # A known atomic-write leaf can be renamed between the
                     # enumeration and metadata read. It still blocks guards;
                     # it never becomes evidence that a lease completed.
-                    if not atomic or not ATOMIC_TEMP.fullmatch(child.name):raise
+                    if (not atomic or not ATOMIC_TEMP.fullmatch(child.name)
+                            or not (isinstance(error,FileNotFoundError) or _native_missing_security_leaf(error))):
+                        raise _inventory_failure(child,error,operation,layout) from None
+                    try:
+                        current=_real(directory);verified=private.verify(directory)
+                        if any((row.st_dev,row.st_ino)!=(original_control.st_dev,original_control.st_ino) for row in (current,verified)):
+                            raise PortableAppError("The control directory changed during inspection.")
+                    except Exception as recheck:raise _inventory_failure(directory,recheck,"control-identity",layout) from None
+                    try:child.lstat()
+                    except FileNotFoundError:pass
+                    except Exception as recheck:raise _inventory_failure(child,recheck,"fresh-absence",layout) from None
+                    else:raise _inventory_failure(child,error,"fresh-absence",layout) from None
                     info=None
                 yield child,info
         def reserved(child,info,width):
@@ -363,21 +413,21 @@ class PortableApps:
                         if account.name=="v1":reserved(attempt,info,32)
                         elif not stat.S_ISDIR(info.st_mode) or not _canonical_attempt(attempt.name):
                             raise PortableAppError("The retained app attempt name needs review.")
-                        directories.append((attempt,binding))
+                        directories.append((attempt,binding,account.name))
                 continue
             # Keep every legacy account/note/generation/attempt tree visible,
             # including copies prepared before the compact Windows layout.
             following=[reserved(account,info,64)]
             for width in (32,64,32):
                 following=[reserved(child,info,width) for directory in following for child,info in children(directory)]
-            directories.extend((directory,None) for directory in following)
+            directories.extend((directory,None,"legacy") for directory in following)
         paths=[];unsettled=[]
-        for directory,binding in directories:
+        for directory,binding,layout in directories:
             for child,info in children(directory):
                 if child.name not in ("content","control") or not stat.S_ISDIR(info.st_mode):
                     raise PortableAppError("The retained app attempt inventory needs review.")
             control=directory/"control";_real(control);private.verify(control)
-            for child,info in children(control,atomic=True):
+            for child,info in children(control,atomic=True,layout=layout):
                 if ATOMIC_TEMP.fullmatch(child.name):
                     if info is not None and (not stat.S_ISREG(info.st_mode) or info.st_nlink!=1):
                         raise PortableAppError("The retained app control inventory needs review.")

@@ -1,12 +1,14 @@
 """Current desktop protocol, vault interoperability, renewal, and original retention."""
 import base64
 import concurrent.futures
+from contextlib import contextmanager
 import copy
 import hashlib
 import importlib.util
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import stat
 import struct
@@ -14,6 +16,7 @@ import sys
 import tempfile
 import threading
 import queue
+import select
 import subprocess
 import time
 import unittest
@@ -310,7 +313,7 @@ class ActualCodecTests(unittest.TestCase):
         except (ImportError,vault.VaultError):
             if os.environ.get('GD_DESKTOP_RUNTIME'):self.fail('Mandatory pinned runtime dependencies missing')
             self.skipTest('Pinned desktop encryption runtime required')
-        with tempfile.TemporaryDirectory(prefix='gd-portable-encrypted-') as td:
+        with native_fixture_directory(prefix='gd-portable-encrypted-') as td:
             root=Path(td).resolve();binary=compile_portable_fixture(root)
             source=root/'Original portable app';source.mkdir();shutil.copyfile(binary,source/binary.name)
             if os.name!='nt':(source/binary.name).chmod(0o700)
@@ -440,6 +443,93 @@ class CompiledRuntimeTests(unittest.TestCase):
             self.assertTrue(all(str(root) in p for p in result["manifests"]))
 
 class PortableAppFormatTests(unittest.TestCase):
+    def test_missing_atomic_temp_requires_fresh_absence_and_retains_uncertainty(self):
+        for absent in (True,False):
+            with self.subTest(absent=absent),tempfile.TemporaryDirectory() as td,patch.object(apps,'host',return_value=('linux','x86_64')):
+                manager,prepared,_,_=self._handshake_fixture(td);control=prepared.directory/'control';lease_id='c'*32
+                record=dict(schema=apps.SCHEMA,id=lease_id,state='uncertain',identity=prepared.identity)
+                lease=control/('lease-'+lease_id+'.json');apps._write(lease,record);before=lease.read_bytes()
+                temporary=control/('.private-'+('d'*32));private.write_private(temporary,b'{}');verify=private.verify
+                def vanished(path):
+                    if Path(path)==temporary:
+                        if absent:temporary.unlink()
+                        raise FileNotFoundError('private fixture text must never be logged')
+                    return verify(path)
+                with patch.object(private,'verify',vanished):
+                    if absent:
+                        rows=manager.leases();self.assertTrue(any(row['path']==str(temporary) and row['state']=='uncertain' for row in rows))
+                    else:
+                        with self.assertRaises(apps.PortableAppError) as caught:manager.leases()
+                        diagnostic=caught.exception.diagnostic
+                        self.assertEqual(diagnostic['entryKind'],'atomic-temp');self.assertEqual(diagnostic['operation'],'fresh-absence')
+                        self.assertNotIn(str(Path(td)),json.dumps(diagnostic));self.assertNotIn('private fixture text',json.dumps(diagnostic))
+                    for uncertain_only in (False,True):
+                        with self.assertRaises(apps.PortableAppError):manager.assert_safe('change protected state',uncertain_only=uncertain_only)
+                self.assertEqual(lease.read_bytes(),before)
+    @unittest.skipUnless(sys.platform=='win32','Actual Windows native ACL lookup/publication race required')
+    def test_windows_native_security_disappearance_keeps_atomic_uncertainty_and_final_bytes(self):
+        import pywintypes
+        with tempfile.TemporaryDirectory(prefix='gd-native-acl-race-') as td,patch.object(apps,'host',return_value=('linux','x86_64')):
+            manager,prepared,_,_=self._handshake_fixture(td);control=prepared.directory/'control';lease_id='c'*32
+            old=dict(schema=apps.SCHEMA,id=lease_id,state='uncertain',identity=prepared.identity,publication=1)
+            new=dict(old,publication=2);lease=control/('lease-'+lease_id+'.json');apps._write(lease,old)
+            temporary=control/('.private-'+('d'*32));private.write_private(temporary,json.dumps(new).encode())
+            security=private._windows()[0][-1];native=security.GetFileSecurity
+            ready=threading.Event();release=threading.Event();rows=[];errors=[];observed=[]
+            def lookup(path,flags):
+                if threading.current_thread() is reader and Path(path)==temporary:
+                    ready.set()
+                    if not release.wait(10):raise AssertionError('Generated native ACL reader was not released')
+                    try:return native(path,flags)
+                    except pywintypes.error as error:observed.append((type(error),error.args[:2]));raise
+                return native(path,flags)
+            def scan():
+                try:rows.extend(manager.leases())
+                except BaseException as error:errors.append(type(error).__name__)
+            reader=threading.Thread(target=scan)
+            with patch.object(security,'GetFileSecurity',lookup):
+                reader.start()
+                try:
+                    self.assertTrue(ready.wait(5));apps._replace_windows_record(temporary,lease)
+                finally:release.set();reader.join(5)
+            self.assertFalse(reader.is_alive());self.assertEqual(errors,[])
+            self.assertEqual(observed,[(pywintypes.error,(2,'GetFileSecurity'))])
+            self.assertFalse(temporary.exists());self.assertEqual(apps._read(lease),new)
+            self.assertTrue(any(row['path']==str(temporary) and row['state']=='uncertain' for row in rows))
+            for uncertain_only in (False,True):
+                with self.assertRaises(apps.PortableAppError):manager.assert_safe('change protected state',uncertain_only=uncertain_only)
+    @unittest.skipUnless(sys.platform=='win32','Actual Windows native exception provenance and private ACLs required')
+    def test_windows_atomic_missing_allowlist_rejects_present_final_and_security_failures(self):
+        import pywintypes
+        for fault in ('present-temp','final-record','lookalike-name','wrong-type','wrong-api','code-3','code-5','unsafe-acl','hardlink'):
+            with self.subTest(fault=fault),tempfile.TemporaryDirectory(prefix='gd-acl-negative-') as td,patch.object(apps,'host',return_value=('linux','x86_64')):
+                manager,prepared,_,_=self._handshake_fixture(td);control=prepared.directory/'control';lease_id='c'*32
+                record=dict(schema=apps.SCHEMA,id=lease_id,state='uncertain',identity=prepared.identity)
+                lease=control/('lease-'+lease_id+'.json');apps._write(lease,record);before=lease.read_bytes()
+                target=lease if fault=='final-record' else control/('.private-'+('X'*32 if fault=='lookalike-name' else 'd'*32))
+                if target!=lease:private.write_private(target,b'{}')
+                modules,sid,*_=private._windows();security=modules[-1];native=security.GetFileSecurity
+                if fault=='hardlink':os.link(target,Path(td)/'owned-hardlink')
+                if fault=='unsafe-acl':
+                    acl=security.ACL();acl.AddAccessAllowedAceEx(security.ACL_REVISION,0,0x1f01ff,sid())
+                    acl.AddAccessAllowedAceEx(security.ACL_REVISION,0,0x120089,security.CreateWellKnownSid(security.WinWorldSid,None))
+                    security.SetNamedSecurityInfo(str(target),security.SE_FILE_OBJECT,
+                        security.DACL_SECURITY_INFORMATION|security.PROTECTED_DACL_SECURITY_INFORMATION,None,None,acl,None)
+                def denied(path,flags):
+                    if Path(path)==target:
+                        if fault in ('present-temp','final-record','lookalike-name'):return native(str(Path(td)/'absent-native-fixture'),flags)
+                        if fault=='wrong-type':raise PermissionError(2,'GetFileSecurity','private fixture text')
+                        if fault in ('code-3','code-5'):raise pywintypes.error(int(fault[-1]),'GetFileSecurity','private fixture text')
+                        if fault=='wrong-api':raise pywintypes.error(2,'UnlistedFixtureAPI','private fixture text')
+                    return native(path,flags)
+                with patch.object(security,'GetFileSecurity',denied):
+                    with self.assertRaises(apps.PortableAppError) as caught:manager.leases()
+                    diagnostic=getattr(caught.exception,'diagnostic',{})
+                    self.assertNotIn(str(Path(td)),json.dumps(diagnostic));self.assertNotIn('private fixture text',json.dumps(diagnostic))
+                    if fault in ('wrong-type','wrong-api','code-3','code-5'):self.assertEqual(diagnostic['operation'],'private-acl')
+                    for uncertain_only in (False,True):
+                        with self.assertRaises(apps.PortableAppError):manager.assert_safe('change protected state',uncertain_only=uncertain_only)
+                self.assertEqual(lease.read_bytes(),before);self.assertTrue(target.exists())
     def _handshake_fixture(self,directory):
         manager=apps.PortableApps(Path(directory).resolve()/'cache');binding=apps.identity(OWNER,NOTE,item())
         raw=bytearray(64);raw[:7]=b'\x7fELF\x02\x01\x01';struct.pack_into('<HH',raw,16,2,62);struct.pack_into('<Q',raw,24,0x400000)
@@ -567,16 +657,17 @@ class PortableAppFormatTests(unittest.TestCase):
                     rows=manager.leases();self.assertEqual(rows[0]['state'],'running');self.assertTrue(any(row['state']=='uncertain' for row in rows))
                     for uncertain_only in (False,True):
                         with self.assertRaises(apps.PortableAppError):manager.assert_safe('change protected state',uncertain_only=uncertain_only)
-                    # Simulate the exact leaf disappearing after enumeration,
-                    # as can happen when atomic publication finishes in a scan.
+                    # Complete the real stalled publication after enumeration,
+                    # then let the actual metadata lookup observe its absence.
                     real=apps._real
                     def vanished(path):
-                        if Path(path)==temporary[0]:raise FileNotFoundError('fixture atomic rename completed')
+                        if Path(path)==temporary[0]:
+                            release.set();writer.join(3)
+                            self.assertFalse(writer.is_alive());self.assertEqual(errors,[])
                         return real(path)
                     with patch.object(apps,'_real',vanished):
-                        self.assertEqual(manager.leases()[0]['state'],'running')
-                        self.assertTrue(any(row['state']=='uncertain' for row in manager.leases()))
-                        with self.assertRaises(apps.PortableAppError):manager.assert_safe('launch another app',uncertain_only=True)
+                        rows=manager.leases();self.assertEqual(rows[0]['state'],'complete')
+                        self.assertTrue(any(row['state']=='uncertain' and row['path']==str(temporary[0]) for row in rows))
                 finally:release.set();writer.join(3)
             self.assertFalse(writer.is_alive());self.assertEqual(errors,[])
             self.assertEqual(manager.leases()[0]['state'],'complete');self.assertFalse(temporary[0].exists());manager.assert_safe('change accounts')
@@ -839,7 +930,15 @@ usleep(50000);
 #endif
 }
 static void child_fixture(void) {
-  FILE *f=fopen("child-started","wb");if(f){fputs("started",f);fclose(f);}
+  FILE *f=fopen("child-started","wb");
+  if(f){
+#ifdef _WIN32
+    fprintf(f,"%lu",(unsigned long)GetCurrentProcessId());
+#else
+    fprintf(f,"%ld",(long)getpid());
+#endif
+    fclose(f);
+  }
 #ifdef _WIN32
   wchar_t directory[32768];DWORD count=GetDllDirectoryW(32768,directory);
   f=fopen("child-dll-directory","wb");if(f){fprintf(f,"%lu",(unsigned long)count);fclose(f);}
@@ -851,6 +950,13 @@ static void child_fixture(void) {
     f=fopen("release-child","rb");if(f){fclose(f);break;}pause_fixture();
   }
   f=fopen("child-finished","wb");if(f){fputs("finished",f);fclose(f);}
+  f=fopen("hold-after-finished","rb");
+  if(f){
+    fclose(f);
+    for(int i=0;i<300;i++) {
+      f=fopen("release-finished-child","rb");if(f){fclose(f);break;}pause_fixture();
+    }
+  }
 }
 int main(int argc,char **argv) {
   if(argc>1 && !strcmp(argv[1],"--child")){child_fixture();return 0;}
@@ -888,7 +994,13 @@ def compile_portable_fixture(directory):
 def wait_fixture(predicate,seconds=8):
     deadline=time.monotonic()+seconds
     while time.monotonic()<deadline:
-        if predicate():return
+        try:ready=predicate()
+        except Exception as error:
+            diagnostic=getattr(error,'diagnostic',None)
+            if isinstance(diagnostic,dict) and diagnostic.get('stage')=='inventory-metadata':
+                raise AssertionError('Disposable inventory diagnostics: '+json.dumps(fixture_error(error),sort_keys=True)) from None
+            raise
+        if ready:return
         time.sleep(.025)
     raise AssertionError('Disposable portable app condition was not confirmed')
 
@@ -897,16 +1009,124 @@ def launch_native_fixture(action):
     except apps.PortableAppError as error:
         raise AssertionError('Native broker fixed diagnostics: '+json.dumps(getattr(error,'diagnostic',{'stage':'unreported'}),sort_keys=True)) from None
 
-def finish_native_fixture(manager,prepared):
+def fixture_error(error):
+    name=type(error).__name__;value=dict(errorType=name if name in apps.ERROR_TYPES|{'AssertionError','FileNotFoundError'} else 'Exception')
+    for field in ('errno','winerror'):
+        code=getattr(error,field,None)
+        if type(code) is int and 0<=code<=0xffffffff:value[field]=code
+    supplied=getattr(error,'diagnostic',{})
+    if isinstance(supplied,dict) and supplied.get('stage')=='inventory-metadata':
+        value['stage']='inventory-metadata'
+        allowed={'entryKind':{'atomic-temp','lease','launch','diagnostic','binding','other'},'layout':{'legacy','v1','v2','unlisted'},
+            'operation':{'path-metadata','private-acl','control-identity','fresh-absence','unlisted'},'nativeOperation':{'GetFileSecurity','unlisted'}}
+        for field,choices in allowed.items():
+            entry=supplied.get(field);value[field]=entry if type(entry) is str and entry in choices else 'unlisted'
+        for field in ('pathUtf16Units','errno','winerror'):
+            code=supplied.get(field)
+            if type(code) is int and 0<=code<=(32768 if field=='pathUtf16Units' else 0xffffffff):value[field]=code
+    return value
+
+_NATIVE_FIXTURE_FAILED=False
+
+@contextmanager
+def native_fixture_directory(prefix='gd-native-app-'):
+    """A failed fixture retains files instead of deleting a possibly-live app."""
+    global _NATIVE_FIXTURE_FAILED
+    directory=tempfile.TemporaryDirectory(prefix=prefix,delete=False)
+    try:yield directory.name
+    except BaseException:
+        _NATIVE_FIXTURE_FAILED=True
+        raise
+    else:directory.cleanup()
+
+def capture_fixture_process(pid,executable,expected_identity=None):
+    """Hold only query/synchronize access to this exact generated process."""
+    if type(pid) is not int or pid<=1:raise AssertionError('Invalid generated process identity')
+    handle=None
+    try:
+        if sys.platform=='win32':
+            import ctypes,win32api,win32event,win32process
+            from ctypes import wintypes
+            handle=win32api.OpenProcess(0x1000|0x100000,False,pid)
+            kernel=ctypes.WinDLL('kernel32',use_last_error=True)
+            kernel.QueryFullProcessImageNameW.argtypes=[wintypes.HANDLE,wintypes.DWORD,wintypes.LPWSTR,ctypes.POINTER(wintypes.DWORD)]
+            kernel.QueryFullProcessImageNameW.restype=wintypes.BOOL
+            buffer=ctypes.create_unicode_buffer(32768);size=wintypes.DWORD(len(buffer))
+            if not kernel.QueryFullProcessImageNameW(int(handle),0,buffer,ctypes.byref(size)):raise ctypes.WinError(ctypes.get_last_error())
+            actual=buffer.value;identity=str(win32process.GetProcessTimes(handle)['CreationTime'])
+            if win32event.WaitForSingleObject(handle,0)!=258:raise AssertionError('Generated process was not running at capture')
+        elif sys.platform.startswith('linux'):
+            handle=os.pidfd_open(pid,0);identity=apps.process_identity(pid,required=True)
+            actual=os.readlink('/proc/'+str(pid)+'/exe')
+            if select.select([handle],[],[],0)[0]:raise AssertionError('Generated process was not running at capture')
+        else:raise AssertionError('An actual Windows/Linux process is required')
+        if (not identity or os.path.normcase(os.path.abspath(actual))!=os.path.normcase(os.path.abspath(executable))
+                or expected_identity is not None and identity!=expected_identity
+                or apps.process_identity(pid,required=True)!=identity):
+            raise AssertionError('Generated process image or start identity did not match')
+        return dict(pid=pid,identity=identity,handle=handle,windows=sys.platform=='win32',confirmedExited=False)
+    except BaseException as error:
+        if handle is not None:
+            if sys.platform=='win32':handle.Close()
+            else:os.close(handle)
+        raise AssertionError('Disposable process capture diagnostics: '+json.dumps(fixture_error(error),sort_keys=True)) from None
+
+def capture_fixture_child(prepared,name):
+    raw=(prepared.payload/'child-started').read_bytes()
+    if not re.fullmatch(rb'[0-9]{1,10}',raw):raise AssertionError('Generated child identity marker was invalid')
+    return capture_fixture_process(int(raw),prepared.payload/name)
+
+def fixture_process_exited(process):
+    if process['confirmedExited']:return True
+    if process['windows']:
+        import win32event
+        state=win32event.WaitForSingleObject(process['handle'],0)
+        if state not in (0,258):raise AssertionError('Generated process exit could not be observed')
+        exited=state==0
+    else:exited=bool(select.select([process['handle']],[],[],0)[0])
+    if exited:process['confirmedExited']=True
+    return exited
+
+def finish_native_fixture(manager,prepared,*,owned_child=None,owned_broker=None):
     """Release only the generated child, even when launch confirmation fails."""
     (prepared.payload/'release-child').write_text('release only this generated fixture')
+    latest=[];inspection=None
     def finished():
-        try:rows=[row for row in manager.leases() if Path(row['path']).parent==prepared.directory/'control']
-        except Exception:return False
-        if not rows or all(row['state'] in ('complete','failed-before-start') for row in rows):return True
-        return ((prepared.payload/'child-finished').exists() and all(row['state']=='uncertain' and row.get('brokerPid')
-            and apps.process_identity(row['brokerPid'])!=row.get('brokerIdentity') for row in rows))
-    wait_fixture(finished,seconds=20);time.sleep(.15)
+        nonlocal latest,inspection
+        try:
+            rows=[row for row in manager.leases() if Path(row['path']).parent==prepared.directory/'control'];latest=rows
+            exited=all(fixture_process_exited(process) for process in (owned_child,owned_broker) if process is not None)
+            if not rows:return exited and not (prepared.payload/'child-started').exists() and not any((prepared.directory/'control').iterdir())
+            if all(row['state'] in ('complete','failed-before-start') for row in rows):return exited
+            if owned_child is None or owned_broker is None or not exited or not (prepared.payload/'child-finished').exists():return False
+            leases=[row for row in rows if apps._inventory_kind(row['path'])=='lease']
+            residues=[row for row in rows if apps._inventory_kind(row['path'])=='atomic-temp']
+            return (bool(leases) and len(leases)+len(residues)==len(rows)
+                and all(row['state']=='uncertain' and row.get('brokerPid')==owned_broker['pid']
+                    and row.get('brokerIdentity')==owned_broker['identity'] for row in leases)
+                and all(row['state']=='uncertain' for row in residues))
+        except Exception as error:inspection=fixture_error(error);return False
+    try:
+        wait_fixture(finished,seconds=20);time.sleep(.15)
+    except AssertionError:
+        kinds={};states={}
+        for row in latest:
+            kind=apps._inventory_kind(row.get('path',''));state=row.get('state') if row.get('state') in ('pending','running','complete','failed-before-start','uncertain') else 'unlisted'
+            kinds[kind]=min(100000,kinds.get(kind,0)+1);states[state]=min(100000,states.get(state,0)+1)
+        process_state={}
+        for label,process in (('child',owned_child),('broker',owned_broker)):
+            process_state[label+'Known']=process is not None
+            try:process_state[label+'Exited']=fixture_process_exited(process) if process is not None else False
+            except Exception:process_state[label+'Exited']=False
+        details=dict(stage='fixture-cleanup',rowKindCounts=kinds,rowStateCounts=states,
+            childStarted=(prepared.payload/'child-started').exists(),childFinished=(prepared.payload/'child-finished').exists(),**process_state)
+        if inspection is not None:details['inventoryFailure']=inspection
+        raise AssertionError('Disposable cleanup diagnostics: '+json.dumps(details,sort_keys=True)) from None
+    finally:
+        for process in (owned_child,owned_broker):
+            if process is not None and process['confirmedExited']:
+                if process['windows']:process['handle'].Close()
+                else:os.close(process['handle'])
 
 def prepare_native_fixture(manager,binary):
     binding=apps.identity(OWNER,NOTE,item())
@@ -921,12 +1141,13 @@ def prepare_native_fixture(manager,binary):
 class PortableAppLifecycleTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.fixture=tempfile.TemporaryDirectory(prefix='gd-native-portable-fixture-');cls.binary=compile_portable_fixture(Path(cls.fixture.name).resolve())
+        cls.fixture=tempfile.TemporaryDirectory(prefix='gd-native-portable-fixture-',delete=False);cls.binary=compile_portable_fixture(Path(cls.fixture.name).resolve())
     @classmethod
-    def tearDownClass(cls):cls.fixture.cleanup()
+    def tearDownClass(cls):
+        if not _NATIVE_FIXTURE_FAILED:cls.fixture.cleanup()
     @unittest.skipUnless(sys.platform=='win32','Actual Windows old/new working-directory length and native launch required')
     def test_windows_compact_cwd_native_launch_and_legacy_uncertainty_barrier(self):
-        with tempfile.TemporaryDirectory(prefix='gd-app-cwd-') as td:
+        with native_fixture_directory(prefix='gd-app-cwd-') as td:
             manager=apps.PortableApps(Path(td).resolve()/'cache');prepared=prepare_native_fixture(manager,self.binary)
             binding=prepared.identity
             legacy=private.private_directory(manager.root/binding['receiverId']/binding['workspaceId']/apps.generation(binding)/('b'*32))
@@ -962,7 +1183,7 @@ class PortableAppLifecycleTests(unittest.TestCase):
             with self.assertRaises(apps.PortableAppError):manager.launch(prepared,self.binary.name,approved=True)
             self.assertTrue(lease.exists());self.assertTrue(legacy_payload.exists());self.assertTrue(v1_payload.exists());self.assertTrue((prepared.payload/self.binary.name).exists());self.assertTrue(self.binary.exists())
     def test_detached_grandchild_keeps_lease_after_parent_exit_and_all_cache_is_retained(self):
-        with tempfile.TemporaryDirectory(prefix='gd-app-lease-') as td:
+        with native_fixture_directory(prefix='gd-app-lease-') as td:
             manager=apps.PortableApps(Path(td).resolve()/'cache');prepared=prepare_native_fixture(manager,self.binary)
             try:
                 receipt=launch_native_fixture(lambda:manager.launch(prepared,self.binary.name,approved=True))
@@ -978,22 +1199,66 @@ class PortableAppLifecycleTests(unittest.TestCase):
             manager.assert_safe('change accounts');self.assertTrue((prepared.payload/'child-finished').exists());self.assertTrue((prepared.payload/self.binary.name).exists());self.assertTrue(self.binary.exists())
             self.assertNotIn('storageSecret',json.dumps(manager.leases()));self.assertNotIn('rxca_',json.dumps(manager.leases()))
     def test_broker_failure_does_not_kill_app_children_and_uncertainty_blocks_changes(self):
-        with tempfile.TemporaryDirectory(prefix='gd-app-orphan-') as td:
+        self._broker_failure_case()
+    @unittest.skipUnless(sys.platform=='win32','Actual Windows orphaned atomic receipt and owned process exit required')
+    def test_windows_broker_failure_atomic_residue_waits_for_owned_child_exit(self):
+        self._broker_failure_case(residue=True)
+    def _broker_failure_case(self,*,residue=False):
+        with native_fixture_directory(prefix='gd-app-orphan-') as td:
             manager=apps.PortableApps(Path(td).resolve()/'cache');prepared=prepare_native_fixture(manager,self.binary)
+            owned_child=owned_broker=None;retained=None;before_lease=None
             try:
                 receipt=launch_native_fixture(lambda:manager.launch(prepared,self.binary.name,approved=True))
                 wait_fixture(lambda:(prepared.payload/'child-heartbeat').exists())
+                owned_child=capture_fixture_child(prepared,self.binary.name)
+                owned_broker=capture_fixture_process(receipt['brokerPid'],Path(sys.executable).resolve(),receipt['brokerIdentity'])
                 # Only the broker created by this disposable fixture is stopped.
                 import signal
+                self.assertEqual(apps.process_identity(receipt['brokerPid'],required=True),owned_broker['identity'])
                 os.kill(receipt['brokerPid'],signal.SIGTERM if sys.platform=='win32' else signal.SIGKILL)
+                wait_fixture(lambda:fixture_process_exited(owned_broker))
                 wait_fixture(lambda:manager.leases()[0]['state']=='uncertain')
+                if residue:
+                    # Deterministically model the owned atomic leaf a stopped
+                    # broker may retain. This does not identify the CI incident.
+                    retained=prepared.directory/'control'/('.private-'+apps.uuid.uuid4().hex)
+                    private.write_private(retained,b'{"fixture":"interrupted publication"}')
+                    before_lease=Path(manager.leases()[0]['path']).read_bytes()
+                    (prepared.payload/'hold-after-finished').write_text('Only this generated fixture waits after its marker')
+                    rows=manager.leases();self.assertEqual(len(rows),2)
+                    self.assertEqual({apps._inventory_kind(row['path']) for row in rows},{'lease','atomic-temp'})
+                    self.assertTrue(all(row['state']=='uncertain' for row in rows))
                 before=(prepared.payload/'child-heartbeat').read_text();time.sleep(.2)
                 self.assertNotEqual((prepared.payload/'child-heartbeat').read_text(),before,'The broker failure must leave the native child running')
-                with self.assertRaises(apps.PortableAppError):manager.assert_safe('delete library items')
+                for uncertain_only in (False,True):
+                    with self.assertRaises(apps.PortableAppError):manager.assert_safe('delete library items',uncertain_only=uncertain_only)
                 self.assertTrue(prepared.payload.exists())
-            finally:finish_native_fixture(manager,prepared)
-            wait_fixture(lambda:(prepared.payload/'child-finished').exists())
-            time.sleep(.15)
+            finally:
+                if residue and retained is not None and owned_child is not None and owned_broker is not None:
+                    failures=[];finished=threading.Event()
+                    def clean():
+                        try:finish_native_fixture(manager,prepared,owned_child=owned_child,owned_broker=owned_broker)
+                        except BaseException as error:failures.append(error)
+                        finally:finished.set()
+                    cleaner=threading.Thread(target=clean);cleaner.start()
+                    try:
+                        wait_fixture(lambda:(prepared.payload/'child-finished').exists())
+                        self.assertFalse(fixture_process_exited(owned_child),'The marker precedes the generated child exit')
+                        self.assertFalse(finished.is_set(),'The marker must not allow cleanup of an executing child')
+                    finally:
+                        (prepared.payload/'release-finished-child').write_text('Release only this generated post-marker wait')
+                        cleaner.join(25)
+                    self.assertFalse(cleaner.is_alive(),'Owned child exit must be established before fixture cleanup')
+                    if failures:raise failures[0]
+                else:finish_native_fixture(manager,prepared,owned_child=owned_child,owned_broker=owned_broker)
+            self.assertTrue(owned_child['confirmedExited']);self.assertTrue(owned_broker['confirmedExited'])
+            self.assertTrue((prepared.payload/'child-finished').exists())
             self.assertEqual(manager.leases()[0]['state'],'uncertain','Broker failure cannot be auto-cleared by a missing PID')
+            if residue:
+                self.assertEqual(retained.read_bytes(),b'{"fixture":"interrupted publication"}')
+                self.assertEqual(Path(manager.leases()[0]['path']).read_bytes(),before_lease)
+            for uncertain_only in (False,True):
+                with self.assertRaises(apps.PortableAppError):manager.assert_safe('delete library items',uncertain_only=uncertain_only)
+            self.assertTrue((prepared.payload/self.binary.name).exists());self.assertTrue(self.binary.exists())
 
 if __name__=="__main__":unittest.main()
