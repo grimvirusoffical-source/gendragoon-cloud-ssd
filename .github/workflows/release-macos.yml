@@ -19,7 +19,7 @@ permissions:
 
 jobs:
   verify:
-    runs-on: macos-14
+    runs-on: macos-latest
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
@@ -37,7 +37,7 @@ jobs:
   build-signed:
     needs: verify
     if: ${{ inputs.sign }}
-    runs-on: macos-14
+    runs-on: macos-latest
     timeout-minutes: 60
     environment: mac-release   # create this environment with required reviewers so signing needs a human click
     steps:
