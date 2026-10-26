@@ -43,10 +43,6 @@ jobs:
         client: [chromium, vscode, firefox]
     env:
       PYTHONDONTWRITEBYTECODE: '1'
-      GD_EXTENSION_TEST_TOOLS: ${{ runner.temp }}/gd-extension-tools
-      GD_EXTENSION_ACCEPTANCE_ROOT: ${{ runner.temp }}/gdx-${{ matrix.client }}
-      GD_EXTENSION_NATIVE_HOST: ${{ runner.temp }}/gd-native-host/GenDragoonNativeHost
-      PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/gd-extension-browsers
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -58,9 +54,18 @@ jobs:
         with:
           python-version: '3.13'
       - name: Prepare a separate locked tool directory without modifying extension packages
+        env:
+          GD_EXTENSION_TEST_TOOLS: ${{ runner.temp }}/gd-extension-tools
+          GD_EXTENSION_ACCEPTANCE_ROOT: ${{ runner.temp }}/gdx-${{ matrix.client }}
+          GD_EXTENSION_NATIVE_HOST: ${{ runner.temp }}/gd-native-host/GenDragoonNativeHost
+          PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/gd-extension-browsers
         run: |
           mkdir -m 700 "$GD_EXTENSION_TEST_TOOLS"
           cp native/Tests/ExtensionAcceptance/package.json native/Tests/ExtensionAcceptance/package-lock.json "$GD_EXTENSION_TEST_TOOLS/"
+          printf 'GD_EXTENSION_TEST_TOOLS=%s\n' "$GD_EXTENSION_TEST_TOOLS" >> "$GITHUB_ENV"
+          printf 'GD_EXTENSION_ACCEPTANCE_ROOT=%s\n' "$GD_EXTENSION_ACCEPTANCE_ROOT" >> "$GITHUB_ENV"
+          printf 'GD_EXTENSION_NATIVE_HOST=%s\n' "$GD_EXTENSION_NATIVE_HOST" >> "$GITHUB_ENV"
+          printf 'PLAYWRIGHT_BROWSERS_PATH=%s\n' "$PLAYWRIGHT_BROWSERS_PATH" >> "$GITHUB_ENV"
           echo "GD_EXTENSION_PYTHON=$(command -v python)" >> "$GITHUB_ENV"
       - name: Install the integrity-locked test APIs without install scripts
         run: npm ci --ignore-scripts --no-audit --no-fund
