@@ -183,12 +183,13 @@ def prepare(source, destination):
                 directory = row["type"] == "directory"
                 entry = zipfile.ZipInfo(name + ("/" if directory else ""), (2020, 1, 1, 0, 0, 0))
                 entry.create_system = 3
+                entry.file_size = row.get("size", 0)
                 entry.external_attr = ((stat.S_IFDIR | 0o700) if directory else (stat.S_IFREG | 0o600 | row["executable"])) << 16
                 entry.compress_type = zipfile.ZIP_DEFLATED
                 if directory:
                     output.writestr(entry, b"")
                 else:
-                    with item.open("rb") as incoming, output.open(entry, "w") as outgoing:
+                    with item.open("rb") as incoming, output.open(entry, "w", force_zip64=row.get("size", 0) >= 2 * 1024 ** 3) as outgoing:
                         shutil.copyfileobj(incoming, outgoing, 1024 * 1024)
         layout, kind = "zip-root", "folder" if source.is_dir() else "file"
     if snapshot(source) != manifest:
@@ -230,6 +231,32 @@ def verify_archive(archive, root, manifest):
         # symlinks. It does not extract or claim it can run a macOS app bundle.
 
 
+
+def require_space(path, additional_bytes):
+    """Require measured operation space, keeping a small working margin."""
+    if type(additional_bytes) is not int or additional_bytes < 0:
+        raise ValueError("Invalid measured transfer space requirement")
+    required = additional_bytes + 64 * 1024 ** 2
+    if shutil.disk_usage(path).free < required:
+        raise RuntimeError("Not enough local space for this preparation and verified readback; original retained")
+    return required
+
+
+def archive_bound(source, manifest):
+    """ZIP deflate worst case plus actual UTF-8 member/header lengths."""
+    source = Path(source)
+    if source.is_file() and source.stat().st_size > 0:
+        return source.stat().st_size
+    total = 128
+    for row in manifest:
+        size = row.get("size", 0)
+        # zlib's documented compressBound formula, plus ZIP/ZIP64 headers.
+        compressed = size + (size >> 12) + (size >> 14) + (size >> 25) + 13
+        name = source.name + ("" if row["path"] == "." else "/" + row["path"])
+        total += compressed + 2 * len(name.encode("utf-8")) + 256
+    return total
+
+
 def upload(config_json, source, cache, java_auth, callback):
     import gendragoon_redx_storage as storage
     with _operation_lock:
@@ -239,9 +266,9 @@ def upload(config_json, source, cache, java_auth, callback):
         receiver = client_type(java_auth)
         source, cache = Path(source), Path(cache)
         cache.mkdir(mode=0o700, parents=True, exist_ok=True)
-        logical = sum(row.get("size", 0) for row in snapshot(source))
-        if shutil.disk_usage(cache).free < 10 * 1024 ** 3 + logical * 3 + 64 * 1024 ** 2:
-            raise RuntimeError("Keep 10 GiB free plus three times the selected size for preparation and verified readback")
+        selection = snapshot(source)
+        logical = sum(row.get("size", 0) for row in selection)
+        require_space(cache, archive_bound(source, selection) * 2)
         progress.phase("archiving", total_bytes=logical)
         archive = cache / "prepared.archive"
         manifest, layout, kind = prepare(source, archive)
@@ -273,8 +300,9 @@ def download(config_json, item_json, cache, java_auth, callback):
         root = Path(cache)
         root.mkdir(mode=0o700, parents=True, exist_ok=True)
         expected = item.get("archiveBytes")
-        if type(expected) is not int or expected < 0 or shutil.disk_usage(root).free < 10 * 1024 ** 3 + expected * 2:
-            raise RuntimeError("Keep 10 GiB free plus twice the archive size for verified restoration")
+        if type(expected) is not int or expected < 0:
+            raise RuntimeError("Invalid authenticated archive size")
+        require_space(root, expected)
         progress = Progress(callback)
         storage.progress = progress
         target = root / "verified.archive"

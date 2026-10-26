@@ -44,4 +44,21 @@ class AdapterTests(unittest.TestCase):
         encoded=json.dumps(callback.values);self.assertNotIn("bearer",encoded);self.assertNotIn("keymap",encoded);self.assertNotIn(str(self.root),encoded)
 
 
+
+class MeasuredSpaceTests(unittest.TestCase):
+    def test_small_transfer_below_ten_gib_passes_and_actual_shortfall_fails(self):
+        from unittest.mock import patch
+        from collections import namedtuple
+        Usage=namedtuple('Usage','total used free');margin=64*1024**2
+        with patch.object(adapter.shutil,'disk_usage',return_value=Usage(1024**3,0,128*1024**2)):
+            self.assertEqual(adapter.require_space('.',1024**2),margin+1024**2)
+        with patch.object(adapter.shutil,'disk_usage',return_value=Usage(1024**3,0,margin+1024**2-1)):
+            with self.assertRaisesRegex(RuntimeError,'Not enough local space'):adapter.require_space('.',1024**2)
+    def test_measured_zip_bound_covers_actual_folder_archive_without_fixed_gigabyte_floor(self):
+        with tempfile.TemporaryDirectory()as directory:
+            root=Path(directory);source=root/'Folder 🔐';source.mkdir();(source/'small.bin').write_bytes(os.urandom(4096));(source/'empty').mkdir()
+            manifest=adapter.snapshot(source);bound=adapter.archive_bound(source,manifest);archive=root/'archive.zip';adapter.prepare(source,archive)
+            self.assertGreaterEqual(bound,archive.stat().st_size);self.assertLess(bound,1024**2)
+
+
 if __name__=="__main__":unittest.main()

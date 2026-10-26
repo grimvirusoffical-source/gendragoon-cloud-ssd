@@ -1,0 +1,15 @@
+[tool.cibuildwheel]
+build = "cp313-android_*"
+before-build = ""
+before-test = ""
+# Candidates must subsequently pass GenDragoon's actual APK device fixtures.
+test-command = ""
+build-verbosity = 1
+
+[tool.cibuildwheel.config-settings]
+setup-args = [
+  "-Dblas=none", "-Dlapack=none", "-Dallow-noblas=true", "-Duse-ilp64=false",
+  "-Dc_link_args=['-Wl,-z,max-page-size=16384']",
+  "-Dcpp_link_args=['-Wl,-z,max-page-size=16384']",
+]
+compile-args = ["-j2"]
