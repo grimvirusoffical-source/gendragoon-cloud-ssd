@@ -394,6 +394,69 @@ class BoundaryTests(unittest.TestCase):
             self.boundary.remove_service_fence(cleanup())
         self.assertEqual(len(self.backend.writes()), 2)
 
+    def test_exact_destination_fib_local_accepts_symbolic_and_numeric_local_only(self):
+        for right in ("local", 2):
+            for flags in (["daddr"], "daddr"):
+                with self.subTest(numeric=type(right) is int, scalar_flags=type(flags) is str):
+                    backend = MemoryNft()
+                    boundary = mod.NetworkBoundary(NONCE, backend=backend)
+                    boundary.install_guard()
+                    boundary.add_service_fence(drain())
+                    changed = 0
+                    for row in backend.objects:
+                        for expr in row.get("rule", {}).get("expr", []):
+                            match = expr.get("match", {})
+                            if "fib" in match.get("left", {}):
+                                match["left"]["fib"]["flags"] = flags
+                                match["right"] = right
+                                changed += 1
+                    self.assertEqual(changed, 2)
+                    self.assertTrue(boundary.readback()["verified"])
+
+    def test_fib_local_alias_rejects_other_types_flags_operators_and_expressions(self):
+        original = {"op": "==", "left": {"fib": {"result": "type", "flags": ["daddr"]}},
+                    "right": 2}
+        variants = []
+        for value in ("unicast", 0, 1, 3, -1, True, False, 2.0, "2", [2]):
+            variant = copy.deepcopy(original)
+            variant["right"] = value
+            variants.append(variant)
+        for flags in (["daddr", "saddr"], ["saddr"], [], "saddr"):
+            variant = copy.deepcopy(original)
+            variant["left"]["fib"]["flags"] = flags
+            variants.append(variant)
+        for operation in ("!=", "in", "<"):
+            variant = copy.deepcopy(original)
+            variant["op"] = operation
+            variants.append(variant)
+        for left in ({"fib": {"result": "oif", "flags": ["daddr"]}},
+                     {"fib": {"result": "type", "flags": ["daddr"], "extra": True}},
+                     {"meta": {"key": "skuid"}},
+                     {"payload": {"protocol": "tcp", "field": "dport"}}):
+            variant = copy.deepcopy(original)
+            variant["left"] = left
+            variants.append(variant)
+        for index, variant in enumerate(variants):
+            with self.subTest(case=index):
+                canonical = mod._canonical({"rule": {"expr": [{"match": variant}]}})
+                unchanged_right = canonical["rule"]["expr"][0]["match"]["right"]
+                self.assertIs(type(unchanged_right), type(variant["right"]))
+                self.assertEqual(unchanged_right, variant["right"])
+                backend = MemoryNft()
+                boundary = mod.NetworkBoundary(NONCE, backend=backend)
+                boundary.install_guard()
+                boundary.add_service_fence(drain())
+                rule = next(row["rule"] for row in backend.objects
+                            if row.get("rule", {}).get("expr", [{}])[0].get("match", {})
+                            .get("left", {}).get("fib"))
+                rule["expr"][0] = {"match": variant}
+                before = copy.deepcopy(backend.objects)
+                with self.assertRaisesRegex(mod.BoundaryError, "boundary_readback_hold"):
+                    boundary.remove_service_fence(cleanup())
+                self.assertEqual(boundary.phase, "hold")
+                self.assertEqual(backend.objects, before)
+                self.assertEqual(len(backend.writes()), 2)
+
 
 DIAGNOSTIC_PHASES = frozenset((
     "unknown", "namespace-check", "loopback-up", "sentinel-create", "sentinel-read",

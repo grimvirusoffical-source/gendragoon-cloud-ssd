@@ -179,6 +179,12 @@ def _canonical(obj: dict) -> dict:
         left = match.get("left", {})
         if left.get("fib", {}).get("flags") == "daddr":
             left["fib"]["flags"] = ["daddr"]
+        # With -n, nftables1.0.9 prints local's RTN_LOCAL value as integer2.
+        # Accept that alias only for this exact destination route-type test.
+        if (match.get("op") == "=="
+                and left == {"fib": {"result": "type", "flags": ["daddr"]}}
+                and type(match.get("right")) is int and match["right"] == 2):
+            match["right"] = "local"
         operands = left.get("&")
         if (type(operands) is list and len(operands) == 2
                 and operands[0] == {"payload": {"protocol": "tcp", "field": "flags"}}):
