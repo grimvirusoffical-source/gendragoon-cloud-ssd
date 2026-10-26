@@ -243,7 +243,10 @@ def start(tools,record,url,token,cache):
     password=secrets.token_urlsafe(32)
     environment.update(RCLONE_WEBDAV_URL=url,RCLONE_WEBDAV_VENDOR="other",RCLONE_WEBDAV_BEARER_TOKEN=token,
         RCLONE_RC_USER="GenDragoon",RCLONE_RC_PASS=password)
-    args=[tools["rclone"],"--config",os.devnull,"mount",":webdav:",record["mountPath"],"--read-only","--vfs-cache-mode=off",
+    # rclone compares Go's null-device spelling exactly before checking reserved
+    # Windows paths. Python's lowercase "nul" is rejected; Go expects "NUL".
+    null_config="NUL" if sys.platform=="win32" else os.devnull
+    args=[tools["rclone"],"--config",null_config,"mount",":webdav:",record["mountPath"],"--read-only","--vfs-cache-mode=off",
         "--cache-dir",str(cache),"--dir-cache-time=0s","--attr-timeout=0s","--dir-perms=0500","--file-perms=0400",
         "--volname",record["label"],"--timeout=0","--rc","--rc-addr=127.0.0.1:0","--log-level=NOTICE","--log-format="]
     if sys.platform=="win32":args.extend(("--option",_windows_file_security()))

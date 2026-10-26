@@ -355,6 +355,7 @@ class PlatformTests(unittest.TestCase):
             with patch.dict(sys.modules,{"gendragoon_platform_ipc":fixture}),patch.object(platform,"sys",SimpleNamespace(platform="win32")),patch.object(platform,"trusted_binary",return_value=str(binary)),patch.object(platform.subprocess,"CREATE_NO_WINDOW",0,create=True),patch.object(platform.subprocess,"Popen",return_value=process) as start:
                 platform.start(tools,{"mountPath":"Z:\\","label":"Fixture"},"http://127.0.0.1:43124/","local-only",Path(temporary)/"cache")
             args=start.call_args.args[0];position=args.index("--option")
+            self.assertEqual(args[args.index("--config")+1],"NUL")
             self.assertEqual(args[position:position+2],["--option",expected]);self.assertEqual(args.count(expected),1)
             self.assertIn("--read-only",args);self.assertNotIn("--allow-other",args)
             security.ConvertStringSecurityDescriptorToSecurityDescriptor.assert_called_once_with(expected.removeprefix("FileSecurity="),1)
