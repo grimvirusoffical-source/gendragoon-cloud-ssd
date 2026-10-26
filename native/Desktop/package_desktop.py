@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from build_native_host import build as build_host
 
 def drop_package_options(runtime):
@@ -61,6 +62,46 @@ def check_native_host(host,runtime):
                 raise RuntimeError("The packaged native host did not reject an unlisted extension.")
         finally:server.close()
 
+def check_packaged_portable_broker(binary,runtime):
+    """Actual target binary, generated native app, detached child, retained cache.
+
+    Only disposable test programs are compiled or launched. Missing compiler,
+    packaged broker support, descendant accounting or exit receipts fails the
+    candidate build; none of these target checks can turn into a skip.
+    """
+    from unittest.mock import patch
+    sys.path.insert(0,str(runtime));sys.path.insert(0,str(runtime/"runtime"))
+    sys.path.insert(0,str(Path(__file__).resolve().parent/"tests"))
+    import portable_apps as apps
+    from test_machinenotes import compile_portable_fixture,prepare_native_fixture,wait_fixture
+    with tempfile.TemporaryDirectory(prefix="gd-packaged-app-check-") as temporary:
+        directory=Path(temporary).resolve();native=compile_portable_fixture(directory)
+        original_hash=hashlib.sha256(native.read_bytes()).hexdigest()
+        manager=apps.PortableApps(directory/"cache");prepared=prepare_native_fixture(manager,native)
+        try:
+            with patch.object(apps,"_broker_command",lambda spec:[str(binary),"--portable-broker",str(spec)]):
+                manager.launch(prepared,native.name,approved=True)
+            wait_fixture(lambda:(prepared.payload/"child-heartbeat").exists())
+            if sys.platform=="win32":
+                if (prepared.payload/"child-dll-directory").read_text()!="0":raise RuntimeError("The external app inherited the packaged Windows DLL directory.")
+            elif (prepared.payload/"child-ld-library-path").read_text()!="":
+                raise RuntimeError("The external app inherited the packaged Linux library path.")
+            wait_fixture(lambda:manager.leases()[0].get("mainExitCode")==7)
+            if manager.leases()[0]["state"]!="running":raise RuntimeError("The packaged broker lost its detached child after the main app exited.")
+            try:manager.assert_safe("change accounts")
+            except apps.PortableAppError:pass
+            else:raise RuntimeError("The packaged app lease did not protect account changes.")
+            before=(prepared.payload/"child-heartbeat").read_text();time.sleep(.2)
+            if (prepared.payload/"child-heartbeat").read_text()==before:raise RuntimeError("The native app child did not outlive packaged launch preparation.")
+        finally:(prepared.payload/"release-child").write_text("release only this generated packaged-app fixture")
+        wait_fixture(lambda:manager.leases()[0]["state"]=="complete")
+        receipt=manager.leases()[0]
+        if (receipt.get("mainExitCode")!=7 or not (prepared.payload/"child-finished").exists()
+                or hashlib.sha256((prepared.payload/native.name).read_bytes()).hexdigest()!=original_hash
+                or hashlib.sha256(native.read_bytes()).hexdigest()!=original_hash):
+            raise RuntimeError("The packaged portable app outcome or retained original/cache failed verification.")
+    return {"packagedBroker":True,"mainExitCode":7,"childTreeTracked":True,"cacheRetained":True,"originalRetained":True,"externalLibrarySearchClean":True}
+
 def package(runtime,output):
     runtime=Path(runtime).resolve();output=Path(output).resolve()
     if sys.platform!="win32" and not sys.platform.startswith("linux"):raise RuntimeError("Package desktop candidates on their Windows/Linux target.")
@@ -95,7 +136,8 @@ def package(runtime,output):
     checked=subprocess.run([str(host),"--help"],capture_output=True,timeout=45)
     if checked.returncode:raise RuntimeError("The packaged native host could not start.")
     check_native_host(host,runtime)
-    manifest={"schema":1,"platform":sys.platform,"protocol":"MachineNotes-v1","candidate":True,"files":{}}
+    portable_check=check_packaged_portable_broker(binary,runtime)
+    manifest={"schema":1,"platform":sys.platform,"protocol":"MachineNotes-v1","candidate":True,"portableAppCheck":portable_check,"files":{}}
     for path in folder.rglob("*"):
         if path.is_file():manifest["files"][path.relative_to(folder).as_posix()]={"bytes":path.stat().st_size,"sha256":hashlib.sha256(path.read_bytes()).hexdigest()}
     (folder/"CANDIDATE_MANIFEST.json").write_text(json.dumps(manifest,sort_keys=True,indent=2)+"\n")

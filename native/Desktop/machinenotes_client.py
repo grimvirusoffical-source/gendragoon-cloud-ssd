@@ -26,6 +26,7 @@ from codec_loader import install_sourceless_runtime
 
 from redx_session import RedXSession, IntegrationSession, SessionError, API
 import portable_vault as vault
+from portable_apps import PortableApps, PortableAppError, identity as app_identity
 from gendragoon_desktop import safe_path
 
 RESOURCE=Path(__file__).resolve().parent/"runtime"
@@ -297,6 +298,7 @@ class MachineNotesClient:
         self.notes=[];self.selected_note=None;self.selected_parent=None;self.items=[];self.revision=None
         self.keys=None;self.keymap=None;self.vault_exported=False
         self.progress=None
+        self.portable_apps=PortableApps(self.root/"portable-apps")
     def refresh_notes(self):
         value=self.session.request("/v1/receivers/me")
         notes=value.get("machineNotes",value.get("workspaces"))
@@ -329,6 +331,7 @@ class MachineNotesClient:
         self.items=value["items"];self.revision=value["revision"]
         return value
     def organize(self,operation,keys=(),name=None,parent=None):
+        if operation in ("delete","move","rename"):self.portable_apps.assert_safe("change library items")
         if self.revision is None:raise SessionError("Refresh the library before changing it.")
         if operation not in ("create-folder","rename","move","copy","delete") or len(keys)>100:raise ValueError("Unsupported library action.")
         if any(not storage.KEY.fullmatch(k or "") for k in keys) or parent is not None and not storage.KEY.fullmatch(parent):raise ValueError("Invalid library selection.")
@@ -415,6 +418,29 @@ class MachineNotesClient:
             if item is None:raise SessionError("Refresh the library selection before restoring.")
             ensure_restore_compatible(item)
             if item.get('virtualFolder'):pending.extend(children.get(key,()))
+    @transfer_progress
+    def prepare_portable_app(self,key):
+        config=self.config();tree=self.refresh_tree();item=next((row for row in tree["items"] if row["key"]==key),None)
+        if item is None or item.get("virtualFolder") or item.get("kind")=="app":
+            raise PortableAppError("Select one portable Windows or Linux application archive.")
+        binding=app_identity(self.session.receiver,self.selected_note,item)
+        def restore(directory):
+            require_space(directory,item.get("archiveBytes",0)*2)
+            archive=directory/"verified-archive.zip"
+            result=storage.download_archive(config,item,archive,client_factory=DesktopReceiver)
+            records=result["manifest"]
+            total=sum(row.get("size",0) for row in records);self.progress.phase("restoring",total_bytes=total)
+            payload=extract_checked(archive,directory,records,item["name"],result["root"]["archiveLayout"])
+            self.progress.advance(total)
+            return payload,records
+        return self.portable_apps.prepare(binding,restore)
+    def launch_portable_app(self,prepared,selected,*,approved=False):
+        if (prepared.identity["receiverId"]!=self.session.receiver or prepared.identity["workspaceId"]!=self.selected_note):
+            raise PortableAppError("The selected app belongs to another account or MachineNote.")
+        tree=self.refresh_tree();item=next((row for row in tree["items"] if row["key"]==prepared.identity["key"]),None)
+        if item is None or app_identity(self.session.receiver,self.selected_note,item)!=prepared.identity:
+            raise PortableAppError("The archive generation changed. Prepare the current item again.")
+        return self.portable_apps.launch(prepared,selected,approved=approved)
     @transfer_progress
     def download(self,key,destination):
         config=self.config();tree=self.refresh_tree();items={i["key"]:i for i in tree["items"]}

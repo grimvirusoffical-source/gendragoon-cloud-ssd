@@ -1,0 +1,375 @@
+"""Explicit portable PE/ELF launch and retained, account-bound process leases.
+
+Catalog origin and filename hints never authorize execution. The current
+MachineNotes client supplies a freshly authenticated archive and manifest.
+Every preparation is retained, including failures. There is deliberately no
+cache eviction, original removal, process termination, or companion IPC API.
+"""
+from dataclasses import dataclass
+import ctypes
+import hashlib
+import json
+import os
+from pathlib import Path
+import platform
+import re
+import stat
+import struct
+import subprocess
+import sys
+import time
+import uuid
+
+import private_fs as private
+
+SCHEMA="gendragoon.portable-app/v1"
+HEX=re.compile(r"[a-f0-9]+")
+MAX_RECORD=128*1024*1024
+
+class PortableAppError(ValueError):pass
+
+def host():
+    system="windows" if sys.platform=="win32" else "linux" if sys.platform.startswith("linux") else None
+    architecture={"amd64":"x86_64","x86_64":"x86_64","aarch64":"arm64","arm64":"arm64","i386":"x86","i686":"x86","x86":"x86"}.get(platform.machine().lower())
+    if not system or not architecture:raise PortableAppError("Managed portable launch requires a supported Windows or Linux computer.")
+    return system,architecture
+
+def identity(receiver,note,item):
+    values=(receiver,note,item.get("key"),item.get("manifestId"),item.get("archiveSha256"))
+    if any(not isinstance(value,str) or len(value)!=length or not HEX.fullmatch(value) for value,length in zip(values,(64,32,18,32,64))):
+        raise PortableAppError("Refresh the authenticated archive generation before preparing an app.")
+    return dict(zip(("receiverId","workspaceId","key","manifestId","archiveSha256"),values))
+
+def generation(value):
+    return hashlib.sha256(json.dumps(value,sort_keys=True,separators=(",",":")).encode("ascii")).hexdigest()
+
+def _real(path):
+    path=Path(path)
+    if not path.is_absolute():raise PortableAppError("Portable app paths must be absolute.")
+    for ancestor in (path,*path.parents):
+        info=ancestor.lstat()
+        if stat.S_ISLNK(info.st_mode) or getattr(info,"st_file_attributes",0)&0x400:
+            raise PortableAppError("Portable app paths cannot contain links or reparse points.")
+    return path.lstat()
+
+def _safe_ancestors(path):
+    for ancestor in (Path(path),*Path(path).parents):
+        try:info=ancestor.lstat()
+        except FileNotFoundError:continue
+        if stat.S_ISLNK(info.st_mode) or getattr(info,"st_file_attributes",0)&0x400:
+            raise PortableAppError("A portable app cache cannot use linked parent folders.")
+
+def _read(path):
+    info=private.verify(path);_real(path)
+    if not stat.S_ISREG(info.st_mode) or info.st_nlink!=1 or info.st_size>MAX_RECORD:raise PortableAppError("The retained portable app record needs review.")
+    fd=os.open(path,os.O_RDONLY|getattr(os,"O_NOFOLLOW",0))
+    with os.fdopen(fd,"rb") as source:
+        opened=os.fstat(source.fileno())
+        if (opened.st_dev,opened.st_ino)!=(info.st_dev,info.st_ino):raise PortableAppError("The portable app record changed while opening it.")
+        return json.load(source)
+
+def _write(path,value):
+    _real(path.parent);private.verify(path.parent)
+    private.write_private(path,json.dumps(value,sort_keys=True,separators=(",",":"),ensure_ascii=True).encode("ascii"),replace=path.exists())
+
+def _digest(path):
+    digest=hashlib.sha256()
+    with path.open("rb") as source:
+        while block:=source.read(1024*1024):digest.update(block)
+    return digest.hexdigest()
+
+def binary_kind(path):
+    """Inspect executable headers, never a name, suffix, or catalog hint."""
+    path=Path(path);info=_real(path)
+    if not stat.S_ISREG(info.st_mode) or info.st_nlink!=1:return None
+    with path.open("rb") as source:
+        header=source.read(64)
+        if header[:4]==b"\x7fELF":
+            if len(header)<52 or header[4] not in (1,2) or header[5]!=1 or header[6]!=1 or header[7] not in (0,3):return None
+            endian="<" if header[5]==1 else ">"
+            kind,machine=struct.unpack_from(endian+"HH",header,16)
+            entry=struct.unpack_from(endian+("Q" if header[4]==2 else "I"),header,24)[0]
+            architecture={62:"x86_64",183:"arm64",3:"x86"}.get(machine)
+            if kind not in (2,3) or not entry or not architecture:return None
+            if (architecture in ("x86_64","arm64"))!=(header[4]==2):return None
+            return "linux",architecture
+        if header[:2]==b"MZ" and len(header)==64:
+            offset=struct.unpack_from("<I",header,60)[0]
+            if not 64<=offset<=min(info.st_size-96,16*1024*1024):return None
+            source.seek(offset);pe=source.read(128)
+            if pe[:4]!=b"PE\0\0" or len(pe)<96:return None
+            machine,sections=struct.unpack_from("<HH",pe,4)
+            optional,flags=struct.unpack_from("<HH",pe,20)
+            architecture={0x8664:"x86_64",0xAA64:"arm64",0x14C:"x86"}.get(machine)
+            magic=struct.unpack_from("<H",pe,24)[0];subsystem=struct.unpack_from("<H",pe,92)[0]
+            if (not architecture or not 1<=sections<=96 or optional<72 or not flags&2 or flags&(0x2000|0x1000)
+                    or magic!=(0x10B if architecture=="x86" else 0x20B) or subsystem not in (2,3)):return None
+            return "windows",architecture
+    return None
+
+def verify_payload(payload,records):
+    """Recheck the complete restored tree against authenticated manifest bytes."""
+    payload=Path(payload);_real(payload);private.verify(payload)
+    expected={};folded=set()
+    if not isinstance(records,list) or not records:raise PortableAppError("The authenticated app manifest is missing.")
+    for row in records:
+        relative=row.get("path") if isinstance(row,dict) else None
+        if (not isinstance(relative,str) or relative!="." and (not relative or relative.startswith("/") or "\\" in relative or any(p in (".","..","") for p in relative.split("/")))
+                or relative in expected or relative.casefold() in folded or row.get("type") not in ("file","directory")):
+            raise PortableAppError("The authenticated app manifest contains unsafe paths.")
+        expected[relative]=row;folded.add(relative.casefold())
+    if "." not in expected:raise PortableAppError("The authenticated app manifest has no root.")
+    actual={"."}
+    if payload.is_dir():actual.update(path.relative_to(payload).as_posix() for path in payload.rglob("*"))
+    if actual!=set(expected):raise PortableAppError("The retained app tree changed. Its cache was retained for review.")
+    for relative,row in expected.items():
+        path=payload if relative=="." else payload/relative
+        info=_real(path);private.verify(path)
+        if row["type"]=="directory":
+            if not stat.S_ISDIR(info.st_mode):raise PortableAppError("The restored app directory changed.")
+        elif (not stat.S_ISREG(info.st_mode) or info.st_nlink!=1 or info.st_size!=row.get("size") or _digest(path)!=row.get("sha256")):
+            raise PortableAppError("The restored app bytes changed. Its cache was retained for review.")
+    return expected
+
+@dataclass(frozen=True)
+class PreparedApp:
+    directory: Path
+    payload: Path
+    identity: dict
+    records: list
+    candidates: tuple
+
+def process_identity(pid):
+    """PID reuse cannot make an orphaned lease look healthy."""
+    try:
+        if sys.platform.startswith("linux"):
+            raw=Path(f"/proc/{pid}/stat").read_text();fields=raw[raw.rindex(")")+2:].split()
+            if fields[0]=="Z":return None
+            return Path("/proc/sys/kernel/random/boot_id").read_text().strip()+":"+fields[19]
+        if sys.platform=="win32":
+            import win32api,win32process,win32event
+            handle=win32api.OpenProcess(0x1000|0x100000,False,pid)
+            try:
+                if win32event.WaitForSingleObject(handle,0)!=258:return None
+                return str(win32process.GetProcessTimes(handle)["CreationTime"])
+            finally:handle.Close()
+    except Exception:return None
+    return None
+
+class PortableApps:
+    def __init__(self,root):self.root=Path(root).absolute()
+    def prepare(self,binding,restore):
+        binding=identity(binding.get("receiverId"),binding.get("workspaceId"),binding)
+        host();self.assert_safe("prepare another app",uncertain_only=True)
+        _safe_ancestors(self.root)
+        parent=private.private_directory(self.root/binding["receiverId"]/binding["workspaceId"]/generation(binding))
+        _real(parent)
+        directory=private.private_directory(parent/uuid.uuid4().hex)
+        content=private.private_directory(directory/"content");private.private_directory(directory/"control")
+        # Each preparation re-authenticates the cloud archive through the
+        # current downloader. Old verified, failed, and changed copies remain.
+        payload,records=restore(content)
+        payload=Path(payload)
+        if payload.parent!=content:raise PortableAppError("The verified restore escaped its private cache.")
+        private.protect_generated_tree(directory);verify_payload(payload,records)
+        candidates=[]
+        for row in records:
+            if row["type"]!="file":continue
+            path=payload if row["path"]=="." else payload/row["path"]
+            if binary_kind(path)==host():candidates.append(row["path"])
+        if not candidates:raise PortableAppError("This archive has no verified native executable matching this computer. Choose a recognized portable native app; scripts and installation packages are unsupported.")
+        return PreparedApp(directory,payload,dict(binding),records,tuple(sorted(candidates)))
+    def leases(self):
+        if not self.root.exists() and not self.root.is_symlink():return []
+        _real(self.root);private.verify(self.root);result=[]
+        # Path.glob suppresses directory scan errors on Python 3.13. Explicit
+        # traversal must fail closed if any reserved cache level is unreadable.
+        directories=[self.root];visited=0
+        for width in (64,32,64,32):
+            following=[]
+            for directory in directories:
+                for child in directory.iterdir():
+                    visited+=1
+                    if visited>100000:raise PortableAppError("The retained app inventory needs review.")
+                    info=_real(child);private.verify(child)
+                    if not stat.S_ISDIR(info.st_mode) or len(child.name)!=width or not HEX.fullmatch(child.name):
+                        raise PortableAppError("The retained app inventory contains an unexpected path.")
+                    following.append(child)
+            directories=following
+        paths=[]
+        for directory in directories:
+            control=directory/"control";_real(control);private.verify(control)
+            for child in control.iterdir():
+                if child.name.startswith("lease-") and child.suffix==".json":paths.append(child)
+        # Authority records are siblings of content; app-owned similarly named
+        # files inside a restored payload can never be interpreted as leases.
+        for path in paths:
+            try:
+                value=_read(path)
+                if (value.get("schema")!=SCHEMA or value.get("state") not in ("pending","running","complete","failed-before-start","uncertain")
+                        or value.get("id")!=path.stem.removeprefix("lease-")
+                        or not isinstance(value.get("id"),str) or len(value["id"])!=32 or not HEX.fullmatch(value["id"])
+                        or "mainExitCode" in value and (type(value["mainExitCode"]) is not int or not -255<=value["mainExitCode"]<=0xffffffff)
+                        or value.get("state")=="complete" and "mainExitCode" not in value):
+                    raise PortableAppError("Invalid portable lease")
+                state=value["state"]
+                if state in ("pending","running"):
+                    pid=value.get("brokerPid");start=value.get("brokerIdentity")
+                    if type(pid) is not int or not start or process_identity(pid)!=start:state="uncertain"
+                result.append(dict(value,state=state,path=str(path)))
+            except Exception:result.append(dict(state="uncertain",path=str(path)))
+        return result
+    def assert_safe(self,action,*,uncertain_only=False):
+        blocked={"uncertain"} if uncertain_only else {"pending","running","uncertain"}
+        try:unsafe=any(row["state"] in blocked for row in self.leases())
+        except Exception:unsafe=True
+        if unsafe:
+            raise PortableAppError("Close every launched portable app and its children before you "+action+". An uncertain process lease needs review; all cached files and this account are retained.")
+    def launch(self,prepared,selected,*,approved=False):
+        if approved is not True:raise PortableAppError("Explicit local approval is required to launch a portable app.")
+        self.assert_safe("launch another app",uncertain_only=True)
+        if selected not in prepared.candidates:raise PortableAppError("Select one verified executable from this archive.")
+        expected_parent=self.root/prepared.identity["receiverId"]/prepared.identity["workspaceId"]/generation(prepared.identity)
+        if prepared.directory.parent!=expected_parent:raise PortableAppError("The launch belongs to a different account or archive generation.")
+        verify_payload(prepared.payload,prepared.records)
+        executable=prepared.payload if selected=="." else prepared.payload/selected
+        if binary_kind(executable)!=host():raise PortableAppError("The selected bytes are not a matching native executable.")
+        control=prepared.directory/"control";_real(control);private.verify(control)
+        launch_id=uuid.uuid4().hex;lease=control/("lease-"+launch_id+".json");spec=control/("launch-"+launch_id+".json")
+        record=dict(schema=SCHEMA,id=launch_id,state="pending",identity=prepared.identity,createdAt=time.time(),cacheRetained=True)
+        _write(lease,record)
+        _write(spec,dict(schema=SCHEMA,lease=str(lease),payload=str(prepared.payload),records=prepared.records,selected=selected,identity=prepared.identity))
+        command=_broker_command(spec)
+        options=dict(stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,close_fds=True,env=_environment())
+        if sys.platform=="win32":options["creationflags"]=subprocess.DETACHED_PROCESS|subprocess.CREATE_NEW_PROCESS_GROUP
+        else:options["start_new_session"]=True
+        try:child=subprocess.Popen(command,**options)
+        except Exception:
+            _write(lease,dict(record,state="failed-before-start"));raise PortableAppError("The app broker could not start. Cached files were retained.") from None
+        # Popen is never terminated on timeout or on GUI shutdown. The detached
+        # broker owns the process tree and persists its terminal receipt.
+        deadline=time.monotonic()+10
+        while time.monotonic()<deadline:
+            value=_read(lease)
+            if value["state"] in ("running","complete"):return value
+            if value["state"] in ("failed-before-start","uncertain"):break
+            if child.poll() is not None:break
+            time.sleep(.025)
+        raise PortableAppError("Launch could not be confirmed. The cache and process lease were retained; review them before changing accounts or deleting items.")
+
+def _broker_command(spec):
+    if getattr(sys,"frozen",False):return [sys.executable,"--portable-broker",str(spec)]
+    return [sys.executable,"-B",str(Path(__file__).resolve()),"--broker",str(spec)]
+
+def _environment():
+    # Desktop account tokens and keys are never included in the spec or env.
+    allowed={"PATH","HOME","USER","LOGNAME","SHELL","LANG","LANGUAGE","TZ","TMPDIR","TMP","TEMP","SYSTEMROOT","WINDIR","COMSPEC","USERPROFILE","LOCALAPPDATA","APPDATA","PROGRAMDATA","HOMEDRIVE","HOMEPATH","DISPLAY","WAYLAND_DISPLAY","XAUTHORITY","DBUS_SESSION_BUS_ADDRESS","XDG_RUNTIME_DIR","XDG_CONFIG_HOME","XDG_DATA_HOME","XDG_STATE_HOME","XDG_CURRENT_DESKTOP","DESKTOP_SESSION"}
+    environment={key:value for key,value in os.environ.items() if key.upper() in allowed or key.startswith("LC_")}
+    bundled=getattr(sys,"_MEIPASS",None)
+    if bundled:
+        root=os.path.normcase(os.path.abspath(bundled))
+        for key in tuple(environment):
+            if key.upper()!="PATH":continue
+            kept=[]
+            for entry in environment[key].split(os.pathsep):
+                candidate=os.path.normcase(os.path.abspath(entry.strip('"')))
+                try:inside=os.path.commonpath((root,candidate))==root
+                except ValueError:inside=False
+                if not inside:kept.append(entry)
+            environment[key]=os.pathsep.join(kept)
+    return environment
+
+def broker(spec_path):
+    """Dedicated, detached process; never terminate a running app or child."""
+    spec_path=Path(spec_path).absolute();spec=_read(spec_path);lease=Path(spec["lease"])
+    if lease.parent!=spec_path.parent or lease.name!="lease-"+spec_path.stem.removeprefix("launch-")+".json":raise PortableAppError("Invalid launch receipt.")
+    record=_read(lease);started=False
+    try:
+        if spec.get("schema")!=SCHEMA or record.get("schema")!=SCHEMA or record.get("state")!="pending":raise PortableAppError("Invalid launch specification.")
+        payload=Path(spec["payload"])
+        if spec_path.parent.name!="control" or payload.parent!=spec_path.parent.parent/"content" or spec["identity"]!=record["identity"]:raise PortableAppError("Launch cache identity changed.")
+        expected=verify_payload(payload,spec["records"]);selected=spec["selected"]
+        if selected not in expected or expected[selected]["type"]!="file":raise PortableAppError("Select a verified executable.")
+        executable=payload if selected=="." else payload/selected
+        if binary_kind(executable)!=host():raise PortableAppError("Executable format or architecture changed.")
+        record.update(brokerPid=os.getpid(),brokerIdentity=process_identity(os.getpid()))
+        if not record["brokerIdentity"]:raise PortableAppError("The app broker identity could not be verified.")
+        # Publish ownership before any executable can run; a crash at any later
+        # instruction leaves a conservative uncertain lease.
+        _write(lease,record)
+        def running(pid):
+            nonlocal started
+            started=True;record.update(state="running",appPid=pid);_write(lease,record)
+        def possible_start():
+            nonlocal started
+            started=True
+        def exited(code):
+            record.update(mainExitCode=code,mainExitedAt=time.time());_write(lease,record)
+        if sys.platform.startswith("linux"):_linux_tree(executable,running,possible_start,exited)
+        elif sys.platform=="win32":_windows_tree(executable,running,possible_start,exited)
+        else:raise PortableAppError("Unsupported portable app platform.")
+        record.update(state="complete",completedAt=time.time());_write(lease,record)
+        return 0
+    except BaseException:
+        # Even interruption does not send a signal or terminate a job. A
+        # receipt after a possibly-started launch must remain uncertain.
+        record.update(state="uncertain" if started else "failed-before-start",updatedAt=time.time())
+        _write(lease,record);return 1
+
+def _linux_tree(executable,running,possible_start,exited):
+    import signal
+    libc=ctypes.CDLL(None,use_errno=True)
+    if libc.prctl(36,1,0,0,0)!=0:raise PortableAppError("Linux process-tree tracking is unavailable.")
+    # Parent/GUI terminal closure must not propagate a hangup to this broker.
+    signal.signal(signal.SIGHUP,signal.SIG_IGN)
+    executable.chmod(0o700)
+    possible_start()
+    process=subprocess.Popen([str(executable)],cwd=str(executable.parent),env=_environment(),stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,close_fds=True,start_new_session=True)
+    # Mark the tree possibly started before any receipt write can fail.
+    running(process.pid)
+    while True:
+        try:
+            pid,status=os.waitpid(-1,0)
+            if pid==process.pid:
+                process.returncode=os.waitstatus_to_exitcode(status);exited(process.returncode)
+        except InterruptedError:continue
+        except ChildProcessError:break
+
+def _windows_tree(executable,running,possible_start,exited):
+    import win32api,win32con,win32event,win32job,win32process
+    job=win32job.CreateJobObject(None,None)
+    process=thread=None;resumed=False
+    try:
+        limits=win32job.QueryInformationJobObject(job,win32job.JobObjectExtendedLimitInformation)
+        # No kill-on-close, breakaway, process-count, memory, or time limit.
+        if limits["BasicLimitInformation"]["LimitFlags"]!=0:raise PortableAppError("Unexpected process Job limits.")
+        # PyInstaller sets a process-wide DLL directory inherited by children;
+        # environment filtering alone cannot undo it. All broker extensions
+        # above are already imported. Reset only this dedicated broker before
+        # the external app starts; the GUI keeps its own runtime intact.
+        kernel=ctypes.WinDLL("kernel32",use_last_error=True)
+        kernel.SetDllDirectoryW.argtypes=[ctypes.c_wchar_p];kernel.SetDllDirectoryW.restype=ctypes.c_int
+        if not kernel.SetDllDirectoryW(None):raise PortableAppError("The external app DLL search directory could not be reset safely.")
+        startup=win32process.STARTUPINFO()
+        process,thread,pid,_=win32process.CreateProcess(str(executable),subprocess.list2cmdline([str(executable)]),None,None,False,win32con.CREATE_SUSPENDED|win32con.CREATE_NEW_PROCESS_GROUP|win32con.CREATE_UNICODE_ENVIRONMENT,_environment(),str(executable.parent),startup)
+        # Assignment occurs before the first application instruction. If this
+        # fails the never-executed suspended fixture can safely be discarded.
+        win32job.AssignProcessToJobObject(job,process)
+        possible_start();resumed=True;win32process.ResumeThread(thread);running(pid)
+        main_exited=False
+        while win32job.QueryInformationJobObject(job,win32job.JobObjectBasicAccountingInformation)["ActiveProcesses"]:
+            if not main_exited and win32event.WaitForSingleObject(process,0)==win32con.WAIT_OBJECT_0:
+                main_exited=True;exited(win32process.GetExitCodeProcess(process))
+            time.sleep(.05)
+        if not main_exited:exited(win32process.GetExitCodeProcess(process))
+    finally:
+        if process is not None and not resumed:
+            # This path owns only a suspended process that never executed.
+            win32api.TerminateProcess(process,1)
+        if thread is not None:thread.Close()
+        if process is not None:process.Close()
+        job.Close()
+
+if __name__=="__main__":
+    if len(sys.argv)!=3 or sys.argv[1]!="--broker":raise SystemExit(2)
+    raise SystemExit(broker(sys.argv[2]))

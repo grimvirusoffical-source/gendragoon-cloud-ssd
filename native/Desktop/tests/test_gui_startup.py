@@ -13,6 +13,33 @@ if (RUNTIME/"runtime").is_dir():sys.path.insert(0,str(RUNTIME/"runtime"))
 
 @unittest.skipUnless(sys.platform=="win32" or sys.platform.startswith("linux"),"Target Windows/Linux GUI runtime required")
 class DesktopGUIStartupTests(unittest.TestCase):
+    def test_quitting_actual_gui_retains_portable_process_tree_and_uncertain_state_blocks_account_change(self):
+        from gendragoon_gui import GenDragoonGUI
+        from desktop_drop import create_root
+        from test_machinenotes import compile_portable_fixture,prepare_native_fixture,wait_fixture
+        import time
+        with tempfile.TemporaryDirectory(prefix='gd-gui-portable-fixture-') as td:
+            directory=Path(td).resolve();binary=compile_portable_fixture(directory)
+            env={'XDG_DATA_HOME':str(directory/'data'),'XDG_STATE_HOME':str(directory/'state'),'LOCALAPPDATA':str(directory/'local')}
+            with patch.dict(os.environ,env),patch('redx_session.http_json',side_effect=AssertionError('Portable GUI fixture cannot use network')):
+                window=create_root();window.withdraw();app=GenDragoonGUI(window,companion_directory=directory/'ipc');closed=False;prepared=None
+                try:
+                    prepared=prepare_native_fixture(app.model.portable_apps,binary)
+                    receipt=app.model.portable_apps.launch(prepared,binary.name,approved=True)
+                    wait_fixture(lambda:(prepared.payload/'child-heartbeat').exists())
+                    with patch('tkinter.messagebox.showwarning') as warning:
+                        self.assertFalse(app.can_switch());self.assertTrue(warning.called)
+                    app.close();closed=True
+                    before=(prepared.payload/'child-heartbeat').read_text();time.sleep(.2)
+                    self.assertNotEqual((prepared.payload/'child-heartbeat').read_text(),before)
+                    self.assertEqual(app.model.portable_apps.leases()[0]['state'],'running')
+                    self.assertTrue((prepared.payload/binary.name).exists())
+                finally:
+                    if prepared is not None:(prepared.payload/'release-child').write_text('release only the disposable GUI fixture')
+                    if not closed:app.close()
+                wait_fixture(lambda:app.model.portable_apps.leases()[0]['state']=='complete')
+                self.assertTrue((prepared.payload/'child-finished').exists())
+
     def test_real_files_teams_keys_widgets_and_clean_close_without_network(self):
         import tkinter as tk
         from gendragoon_gui import GenDragoonGUI

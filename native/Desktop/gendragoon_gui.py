@@ -17,6 +17,7 @@ sys.dont_write_bytecode=True
 from redx_session import RedXSession, IntegrationSession, SessionError
 from machinenotes_client import MachineNotesClient, DesktopInstance, storage, team_route_allowed
 from portable_vault import VaultError, ENVELOPE_LIMIT
+from portable_apps import PortableAppError, broker as portable_broker
 from desktop_transfer_ui import destination,validate_sources,directory_page,TransferPresentation,format_bytes,format_eta,filter_library,source_key,source_label,PLATFORM_LABELS
 from gendragoon_device_origin import application_platform
 from desktop_drop import create_root,bind_file_drop
@@ -130,6 +131,7 @@ class GenDragoonGUI:
         self.team_values=[];self.drag=None
         self.visible_items={};self.visible_note=None;self.source_picker=None;self.active_job=None;self.transfer_presentations={};self.transfer_rows={};self.last_transfer=None;self.next_jobs_refresh=0;self.operation_job=None
         self.companion_grants=set();self.companion=None;self.companion_completed={}
+        self.portable_lease_id=None;self.portable_lease_state=None
         root.title("GenDragoon · MachineNotes");root.geometry("1060x760");root.minsize(800,600)
         self.status=tk.StringVar(value="Connect Red-XAI to browse your MachineNotes.")
         header=ttk.Frame(root,padding=12);header.pack(fill="x")
@@ -154,7 +156,7 @@ class GenDragoonGUI:
             except queue.Empty:break
         self.update_transfer_progress()
         if time.monotonic()>=self.next_jobs_refresh:
-            self.next_jobs_refresh=time.monotonic()+.75;self.refresh_jobs()
+            self.next_jobs_refresh=time.monotonic()+.75;self.refresh_jobs();self.refresh_portable_status()
         self.root.after(40,self.pump)
     def _error(self,error):
         if isinstance(error,(SessionError,VaultError,storage.RedXStorageError,ValueError,MountError,PlatformMountError)):
@@ -194,7 +196,7 @@ class GenDragoonGUI:
         self.source_choices={'All source devices':'all'}
         for chooser in (self.artifact_choice,self.source_choice):chooser.bind('<<ComboboxSelected>>',lambda _:self.display_tree(refresh_snapshot=False))
         toolbar=ttk.Frame(self.files);toolbar.pack(fill="x",pady=8)
-        for title,command in (("New folder",self.new_folder),("Upload selected…",self.upload),("Transfers…",self.show_transfers),("Download…",self.download),("Rename",self.rename),("Delete",self.delete)):
+        for title,command in (("New folder",self.new_folder),("Upload selected…",self.upload),("Transfers…",self.show_transfers),("Download…",self.download),("Launch portable app…",self.launch_portable),("Rename",self.rename),("Delete",self.delete)):
             ttk.Button(toolbar,text=title,command=command).pack(side="left",padx=2)
         self.tree=ttk.Treeview(self.files,columns=("kind","source","bytes"),selectmode="extended")
         self.tree.heading("#0",text="Name");self.tree.heading("kind",text="Type / artifact OS hint");self.tree.heading("source",text="Uploaded from (client reported)");self.tree.heading("bytes",text="Archive bytes")
@@ -358,6 +360,9 @@ class GenDragoonGUI:
     def can_switch(self):
         from tkinter import messagebox
         if self.busy:return False
+        try:self.model.portable_apps.assert_safe("disconnect or change accounts")
+        except PortableAppError as error:
+            messagebox.showwarning("Portable app lease active",str(error),parent=self.root);return False
         if self.mounts.has_mounts:
             messagebox.showwarning("Unmount workspace drives","Unmount all drives before disconnecting, changing accounts, or quitting. Retained or uncertain drives also need review; the current session was preserved.",parent=self.root);return False
         if self.model.keys and not self.model.vault_exported:
@@ -466,7 +471,7 @@ class GenDragoonGUI:
         key=self.tree.identify_row(event.y)
         if key and key not in self.selected():self.tree.selection_set(key)
         menu=self.tk.Menu(self.root,tearoff=False)
-        for title,command in (("New folder",self.new_folder),("Rename",self.rename),("Copy",lambda:self.copy(False)),("Cut / move",lambda:self.copy(True)),("Paste here",self.paste),("Download…",self.download),("Delete",self.delete)):
+        for title,command in (("New folder",self.new_folder),("Rename",self.rename),("Copy",lambda:self.copy(False)),("Cut / move",lambda:self.copy(True)),("Paste here",self.paste),("Download…",self.download),("Launch portable app…",self.launch_portable),("Delete",self.delete)):
             menu.add_command(label=title,command=command)
         menu.tk_popup(event.x_root,event.y_root)
     def drag_start(self,event):self.drag=(event.x,event.y,self.tree.identify_row(event.y))
@@ -528,6 +533,46 @@ class GenDragoonGUI:
         if self.busy:return
         try:self.model.retry_jobs();self.drain_queue()
         except Exception as error:self.status.set(self._error(error))
+    def launch_portable(self):
+        selected=self.selected()
+        if self.busy or len(selected)!=1:
+            self.status.set("Select one portable application archive to prepare.");return
+        self.run("Restoring and verifying a retained portable app cache…",lambda:self.model.prepare_portable_app(selected[0]),self.review_portable)
+    def review_portable(self,prepared):
+        from tkinter import messagebox
+        window=self.tk.Toplevel(self.root);window.title("Choose a verified portable executable");window.geometry("720x430");window.transient(self.root)
+        self.ttk.Label(window,text="Select the app's executable. Only verified native binaries matching this computer are listed. Choose an application you know is portable; installation packages and scripts are unsupported.",wraplength=670,padding=12).pack(fill="x")
+        choices=self.tk.Listbox(window,exportselection=False)
+        for relative in prepared.candidates:choices.insert("end",prepared.payload.name if relative=="." else relative)
+        choices.pack(fill="both",expand=True,padx=12);approved=self.tk.BooleanVar(value=False)
+        self.ttk.Checkbutton(window,text="I recognize this app and confirm it is portable, with no installation required.",variable=approved).pack(anchor="w",padx=12,pady=8)
+        self.ttk.Label(window,text="Apps run with your local user permissions. Originals and cached copies stay on disk. Apps and children keep running if GenDragoon closes.",wraplength=670,padding=12).pack(fill="x")
+        def launch():
+            selection=choices.curselection()
+            if not selection or not approved.get():
+                messagebox.showinfo("Choose and approve an app","Select one executable and confirm that you recognize it as a portable app.",parent=window);return
+            relative=prepared.candidates[selection[0]]
+            if not messagebox.askyesno("Launch selected portable app?","Launch "+(prepared.payload.name if relative=="." else relative)+" with your local permissions? Its verified cache will be retained, including after the app exits.",parent=window):return
+            window.destroy()
+            self.run("Starting the approved portable app…",lambda:self.model.launch_portable_app(prepared,relative,approved=True),self.portable_launched)
+        self.ttk.Button(window,text="Launch selected app",command=launch).pack(side="right",padx=12,pady=10)
+        self.ttk.Button(window,text="Keep cache and close",command=window.destroy).pack(side="right",pady=10)
+    def portable_launched(self,receipt):
+        self.portable_lease_id=receipt['id'];self.portable_lease_state=None;self.show_portable_status(receipt)
+    def show_portable_status(self,receipt):
+        current=(receipt['state'],receipt.get('mainExitCode'))
+        if current==self.portable_lease_state:return
+        self.portable_lease_state=current;state,code=current
+        if state=='uncertain':message="Portable app process tracking needs review. The app was not stopped; cache, deletion and account changes remain protected."
+        elif state=='complete':message="Portable app exited with code "+str(code)+"; every tracked child has exited. Cached copies and originals are retained."
+        elif code is not None:message="The selected app exited with code "+str(code)+". Its children are still tracked; cached copies and this account remain protected."
+        else:message="Portable app started; its exit outcome is pending. Close the app and every child before changing accounts or deleting library items. Cached copies are retained."
+        self.status.set(message)
+    def refresh_portable_status(self):
+        if self.busy or self.portable_lease_id is None:return
+        try:receipt=next((row for row in self.model.portable_apps.leases() if row.get('id')==self.portable_lease_id),None)
+        except Exception:receipt=None
+        self.show_portable_status(receipt or dict(state='uncertain'))
     def download(self):
         from tkinter import filedialog
         selected=self.selected()
@@ -763,7 +808,9 @@ def main(argv=None):
     parser.add_argument("--check",action="store_true",help="Check the GUI and encryption runtime without signing in or opening a window")
     parser.add_argument("--check-gui",action="store_true",help="Construct and close the actual window and private companion using a disposable signed-out profile")
     parser.add_argument("--check-idle",action="store_true",help="Refuse installation while this user's desktop coordinator is active")
+    parser.add_argument("--portable-broker",type=Path,help=argparse.SUPPRESS)
     arguments=parser.parse_args(argv)
+    if arguments.portable_broker:raise SystemExit(portable_broker(arguments.portable_broker))
     import tkinter as tk
     if arguments.check_gui:
         check_gui();return

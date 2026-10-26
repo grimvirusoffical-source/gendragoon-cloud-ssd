@@ -14,6 +14,8 @@ import sys
 import tempfile
 import threading
 import queue
+import subprocess
+import time
 import unittest
 import urllib.error
 from unittest.mock import patch
@@ -31,6 +33,7 @@ import redx_session as auth
 import portable_vault as vault
 import machinenotes_client as client
 import private_fs as private
+import portable_apps as apps
 
 FIXTURE=json.loads((NATIVE/"Tests/fixtures/portable-vault-v1.json").read_text(encoding="utf-8"))
 OWNER=FIXTURE["receiverId"]
@@ -164,6 +167,35 @@ class ModelTests(unittest.TestCase):
         self.assertEqual(value["expectedRevision"],0);self.assertEqual(value["workspace"],NOTE);self.assertEqual(value["keys"],[KEY])
         self.session.rows=[item(workspace=OTHER)]
         with self.assertRaises(auth.SessionError):self.model.refresh_tree()
+    def test_portable_prepare_uses_current_authenticated_download_and_never_origin_hints(self):
+        raw=bytearray(64);raw[:7]=b'\x7fELF\x02\x01\x01';struct.pack_into('<HH',raw,16,2,62);struct.pack_into('<Q',raw,24,0x400000)
+        metadata=[dict(path='.',type='file',size=len(raw),sha256=hashlib.sha256(raw).hexdigest(),executable=0o100)]
+        self.session.rows=[item(name='portable',displayName='portable',applicationPlatform='windows',origin=dict(schema=1,platform='windows',architecture='arm64',deviceId='f'*32))]
+        called=[]
+        def authenticated_download(config,selected,path,client_factory=None):
+            called.append((config,selected,client_factory));private.write_private(path,raw)
+            return dict(manifest=metadata,root=dict(archiveLayout='flat'))
+        with patch.object(self.model,'config',return_value={'_session':self.session}),patch.object(client.storage,'download_archive',side_effect=authenticated_download),patch.object(apps,'host',return_value=('linux','x86_64')):
+            prepared=self.model.prepare_portable_app(KEY)
+        self.assertEqual(prepared.candidates,('.',));self.assertEqual(called[0][2],client.DesktopReceiver)
+        self.assertEqual(prepared.payload.read_bytes(),raw);self.assertTrue((prepared.payload.parent/'verified-archive.zip').is_file())
+        self.assertEqual(prepared.identity,apps.identity(OWNER,NOTE,self.session.rows[0]))
+        with patch.object(self.model.portable_apps,'launch') as launch:
+            self.model.selected_note=OTHER
+            with self.assertRaises(apps.PortableAppError):self.model.launch_portable_app(prepared,'.',approved=True)
+            launch.assert_not_called()
+            self.model.selected_note=NOTE;self.session.rows[0]['manifestId']='f'*32
+            with self.assertRaises(apps.PortableAppError):self.model.launch_portable_app(prepared,'.',approved=True)
+            launch.assert_not_called()
+    def test_uncertain_portable_lease_blocks_destructive_model_actions_before_network(self):
+        directory=private.private_directory(self.model.portable_apps.root/OWNER/NOTE/('a'*64)/('b'*32)/'control')
+        lease_id='f'*32
+        private.write_private(directory/('lease-'+lease_id+'.json'),json.dumps(dict(schema=apps.SCHEMA,id=lease_id,state='running',brokerPid=123,brokerIdentity='unverifiable')).encode())
+        self.model.revision=0;before=len(self.session.calls)
+        with patch.object(apps,'process_identity',return_value=None):
+            for operation in ('delete','move','rename'):
+                with self.assertRaises(apps.PortableAppError):self.model.organize(operation,[KEY],name='changed')
+        self.assertEqual(len(self.session.calls),before);self.assertTrue(directory.is_dir())
     def test_tree_cycles_missing_parents_and_crossnote_selections_rejected(self):
         for values in ([item(parentKey="f"*18)],[item(key="a"*18,kind="folder",virtualFolder=True,parentKey="b"*18),item(key="b"*18,kind="folder",virtualFolder=True,parentKey="a"*18)]):
             self.session.rows=values
@@ -270,6 +302,32 @@ class CompanionDispatchTests(unittest.TestCase):
                 self.assertFalse(result["ok"])
 
 class ActualCodecTests(unittest.TestCase):
+    @unittest.skipUnless(sys.platform=='win32' or sys.platform.startswith('linux'),'Actual matching native app runtime required')
+    def test_actual_encrypted_current_machinenotes_portable_native_archive_launch(self):
+        try:
+            import numpy,PIL,cryptography
+            client.crypto_runtime()
+        except (ImportError,vault.VaultError):
+            if os.environ.get('GD_DESKTOP_RUNTIME'):self.fail('Mandatory pinned runtime dependencies missing')
+            self.skipTest('Pinned desktop encryption runtime required')
+        with tempfile.TemporaryDirectory(prefix='gd-portable-encrypted-') as td:
+            root=Path(td).resolve();binary=compile_portable_fixture(root)
+            source=root/'Original portable app';source.mkdir();shutil.copyfile(binary,source/binary.name)
+            if os.name!='nt':(source/binary.name).chmod(0o700)
+            before=client.manifest(source);session=MemorySession();model=client.MachineNotesClient(session,root/'state');model.refresh_notes()
+            model.import_vault(json.dumps(FIXTURE['envelope']).encode(),FIXTURE['password'])
+            with patch.object(client,'DesktopReceiver',MemoryReceiver):
+                uploaded=model.upload(source);prepared=model.prepare_portable_app(uploaded['key'])
+                self.assertEqual(prepared.records,before['manifest']);self.assertEqual(prepared.candidates,(binary.name,))
+                receipt=model.launch_portable_app(prepared,binary.name,approved=True)
+            try:
+                wait_fixture(lambda:(prepared.payload/'child-started').exists())
+                with self.assertRaises(apps.PortableAppError):model.organize('delete',[uploaded['key']])
+                self.assertEqual(client.manifest(source),before)
+            finally:(prepared.payload/'release-child').write_text('release only this encrypted fixture')
+            wait_fixture(lambda:model.portable_apps.leases()[0]['state']=='complete')
+            self.assertTrue((prepared.payload.parent/'verified-archive.zip').exists());self.assertTrue((prepared.payload/binary.name).exists());self.assertEqual(client.manifest(source),before)
+
     def test_real_pinned_core_visual_png_upload_readback_and_renamed_copy_restore(self):
         if os.environ.get("GD_DESKTOP_RUNTIME"):
             self.assertEqual(Path(client.__file__).resolve().parent,RUNTIME.resolve(),"Mandatory tests must exercise the staged desktop client")
@@ -380,5 +438,195 @@ class CompiledRuntimeTests(unittest.TestCase):
                 result=installer.install(platform="linux",home=root,helper=None,python=None,browser_ids={"chrome":"a"*32},vscode=True,host_executable=binary)
             installed=Path(result["host"]);self.assertEqual(installed.read_bytes(),data);self.assertEqual(installed.stat().st_mode&0o777,0o700)
             self.assertTrue(all(str(root) in p for p in result["manifests"]))
+
+class PortableAppFormatTests(unittest.TestCase):
+    def test_external_environment_excludes_bundle_paths_and_runtime_or_account_secrets(self):
+        with tempfile.TemporaryDirectory() as td:
+            root=Path(td).resolve();bundle=root/'bundle';outside=root/'system-bin'
+            environment={'PATH':os.pathsep.join((str(bundle),str(bundle/'dlls'),str(outside))),'LD_LIBRARY_PATH':str(bundle),'LD_LIBRARY_PATH_ORIG':'private-test-value','GD_TOKEN':'not-a-real-token','RSX_LIB':'private-test-path','HOME':str(root)}
+            with patch.dict(os.environ,environment,clear=True),patch.object(apps.sys,'_MEIPASS',str(bundle),create=True):
+                actual=apps._environment()
+            self.assertEqual(actual,{'PATH':str(outside),'HOME':str(root)})
+    def test_ui_reports_nonzero_main_exit_separately_from_child_completion(self):
+        from gendragoon_gui import GenDragoonGUI
+        class Status:
+            def set(self,value):self.value=value
+        app=GenDragoonGUI.__new__(GenDragoonGUI);app.status=Status();app.portable_lease_state=None
+        app.show_portable_status(dict(state='running',mainExitCode=7))
+        self.assertIn('exited with code 7',app.status.value);self.assertIn('children are still tracked',app.status.value)
+        app.show_portable_status(dict(state='complete',mainExitCode=7))
+        self.assertIn('exited with code 7',app.status.value);self.assertIn('every tracked child has exited',app.status.value)
+    def test_unreadable_lease_directory_blocks_both_guard_modes(self):
+        with tempfile.TemporaryDirectory() as td:
+            manager=apps.PortableApps(Path(td).resolve()/'cache')
+            control=private.private_directory(manager.root/OWNER/NOTE/('a'*64)/('b'*32)/'control');original=Path.iterdir
+            def denied(path):
+                if path==control:raise PermissionError('generated fixture scan is inaccessible')
+                return original(path)
+            with patch.object(Path,'iterdir',denied):
+                for uncertain_only in (False,True):
+                    with self.assertRaises(apps.PortableAppError):manager.assert_safe('change protected state',uncertain_only=uncertain_only)
+    @unittest.skipIf(os.name=='nt','Portable symlink rejection is also checked by the Windows reparse verifier')
+    def test_linked_cache_parent_is_rejected_before_creating_any_content(self):
+        with tempfile.TemporaryDirectory() as td:
+            root=Path(td).resolve();outside=root/'outside';outside.mkdir();link=root/'linked';link.symlink_to(outside,target_is_directory=True)
+            manager=apps.PortableApps(link/'cache')
+            with patch.object(apps,'host',return_value=('linux','x86_64')):
+                with self.assertRaises(apps.PortableAppError):manager.prepare(apps.identity(OWNER,NOTE,item()),lambda directory:self.fail('Linked cache must fail before restore'))
+            self.assertEqual(list(outside.iterdir()),[])
+    def test_binary_magic_architecture_and_dll_script_installer_rejection(self):
+        with tempfile.TemporaryDirectory() as td:
+            root=private.private_directory(Path(td).resolve()/'cache');binary=root/'misleading.exe'
+            elf=bytearray(64);elf[:7]=b'\x7fELF\x02\x01\x01';struct.pack_into('<HH',elf,16,2,62);struct.pack_into('<Q',elf,24,0x400000)
+            private.write_private(binary,elf)
+            self.assertEqual(apps.binary_kind(binary),('linux','x86_64'))
+            elf[7]=9;binary.write_bytes(elf);self.assertIsNone(apps.binary_kind(binary),'FreeBSD is not Linux')
+            elf[7]=0;elf[5]=2;binary.write_bytes(elf);self.assertIsNone(apps.binary_kind(binary),'Big-endian x86_64 is not a matching host binary')
+            elf[5]=1
+            struct.pack_into('<H',elf,18,183);binary.write_bytes(elf);self.assertEqual(apps.binary_kind(binary),('linux','arm64'))
+            for raw in (b'#!/bin/sh\nexit 0\n',b'PK\x03\x04installer.msix',b'\xd0\xcf\x11\xe0installer.msi',b'MZtruncated'):
+                binary.write_bytes(raw);self.assertIsNone(apps.binary_kind(binary))
+            pe=bytearray(256);pe[:2]=b'MZ';struct.pack_into('<I',pe,60,64);pe[64:68]=b'PE\0\0';struct.pack_into('<HH',pe,68,0x8664,1);struct.pack_into('<HH',pe,84,112,2);struct.pack_into('<H',pe,88,0x20b);struct.pack_into('<H',pe,156,3)
+            binary.write_bytes(pe);self.assertEqual(apps.binary_kind(binary),('windows','x86_64'))
+            struct.pack_into('<H',pe,86,0x2002);binary.write_bytes(pe);self.assertIsNone(apps.binary_kind(binary),'DLL is not a selected executable')
+    def test_cache_generation_binding_full_tree_tamper_and_explicit_selection(self):
+        with tempfile.TemporaryDirectory() as td:
+            manager=apps.PortableApps(Path(td).resolve()/'apps');binding=apps.identity(OWNER,NOTE,item())
+            raw=bytearray(64);raw[:7]=b'\x7fELF\x02\x01\x01';struct.pack_into('<HH',raw,16,2,62);struct.pack_into('<Q',raw,24,0x400000)
+            records=[dict(path='.',type='file',size=len(raw),sha256=hashlib.sha256(raw).hexdigest(),executable=0o100)]
+            def restore(directory):
+                path=directory/'portable';private.write_private(path,raw);return path,records
+            with patch.object(apps,'host',return_value=('linux','x86_64')):
+                prepared=manager.prepare(binding,restore)
+                self.assertIn(OWNER,str(prepared.directory));self.assertIn(NOTE,str(prepared.directory));self.assertIn(apps.generation(binding),str(prepared.directory))
+                for selected,approved in (('.',False),('../escape',True)):
+                    with self.assertRaises(apps.PortableAppError):manager.launch(prepared,selected,approved=approved)
+                prepared.payload.write_bytes(b'changed')
+                with self.assertRaises(apps.PortableAppError):manager.launch(prepared,'.',approved=True)
+                self.assertTrue(prepared.payload.exists())
+                other=apps.identity('f'*64,NOTE,item());second=manager.prepare(other,restore)
+                self.assertNotEqual(prepared.directory.parent,second.directory.parent)
+                replacement=manager.prepare(dict(binding,archiveSha256='f'*64),restore)
+                self.assertNotEqual(prepared.directory.parent,replacement.directory.parent)
+                self.assertTrue(prepared.payload.exists());self.assertTrue(second.payload.exists())
+
+NATIVE_PORTABLE_SOURCE=r'''
+#ifdef _WIN32
+#include <windows.h>
+#else
+#include <unistd.h>
+#include <sys/types.h>
+#endif
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+static void pause_fixture(void) {
+#ifdef _WIN32
+Sleep(50);
+#else
+usleep(50000);
+#endif
+}
+static void child_fixture(void) {
+  FILE *f=fopen("child-started","wb");if(f){fputs("started",f);fclose(f);}
+#ifdef _WIN32
+  wchar_t directory[32768];DWORD count=GetDllDirectoryW(32768,directory);
+  f=fopen("child-dll-directory","wb");if(f){fprintf(f,"%lu",(unsigned long)count);fclose(f);}
+#else
+  f=fopen("child-ld-library-path","wb");if(f){const char *value=getenv("LD_LIBRARY_PATH");fputs(value?value:"",f);fclose(f);}
+#endif
+  for(int i=0;i<300;i++) {
+    f=fopen("child-heartbeat","wb");if(f){fprintf(f,"%d",i);fclose(f);}
+    f=fopen("release-child","rb");if(f){fclose(f);break;}pause_fixture();
+  }
+  f=fopen("child-finished","wb");if(f){fputs("finished",f);fclose(f);}
+}
+int main(int argc,char **argv) {
+  if(argc>1 && !strcmp(argv[1],"--child")){child_fixture();return 0;}
+#ifdef _WIN32
+  char executable[32768],command[32800];GetModuleFileNameA(NULL,executable,sizeof(executable));snprintf(command,sizeof(command),"\"%s\" --child",executable);
+  STARTUPINFOA startup={0};PROCESS_INFORMATION process={0};startup.cb=sizeof(startup);
+  if(!CreateProcessA(executable,command,NULL,NULL,FALSE,CREATE_NEW_PROCESS_GROUP|DETACHED_PROCESS,NULL,NULL,&startup,&process))return 2;
+  CloseHandle(process.hThread);CloseHandle(process.hProcess);
+#else
+  pid_t child=fork();if(child<0)return 2;
+  if(child==0){setsid();pid_t grandchild=fork();if(grandchild<0)_exit(3);if(grandchild>0)_exit(0);child_fixture();_exit(0);}
+#endif
+  return 7; /* Deliberately distinguish main exit from child-tree completion. */
+}
+'''
+
+def compile_portable_fixture(directory):
+    """Compile only our disposable native program on the actual target OS."""
+    source=Path(directory)/'fixture.c';source.write_text(NATIVE_PORTABLE_SOURCE)
+    binary=Path(directory)/('fixture.exe' if sys.platform=='win32' else 'fixture')
+    candidates=[shutil.which(name) for name in ('gcc','clang','cc')]
+    if sys.platform=='win32':candidates.extend(str(path) for path in (Path('C:/mingw64/bin/gcc.exe'),Path('C:/ProgramData/chocolatey/bin/gcc.exe')) if path.is_file())
+    errors=[]
+    for compiler in dict.fromkeys(value for value in candidates if value):
+        result=subprocess.run([compiler,'-O0',str(source),'-o',str(binary)],capture_output=True,text=True,timeout=60)
+        if result.returncode==0:
+            if apps.binary_kind(binary)!=apps.host():raise AssertionError('Fixture compiler did not generate a matching native executable')
+            return binary
+        errors.append(result.stderr[-1000:])
+    raise AssertionError('An actual native C compiler is required for the portable process-tree tests: '+'; '.join(errors))
+
+def wait_fixture(predicate,seconds=8):
+    deadline=time.monotonic()+seconds
+    while time.monotonic()<deadline:
+        if predicate():return
+        time.sleep(.025)
+    raise AssertionError('Disposable portable app condition was not confirmed')
+
+def prepare_native_fixture(manager,binary):
+    binding=apps.identity(OWNER,NOTE,item())
+    def restore(directory):
+        payload=private.private_directory(directory/'Disposable portable app');target=payload/binary.name;shutil.copyfile(binary,target)
+        if os.name!='nt':target.chmod(0o700)
+        private.protect_generated_tree(directory)
+        return payload,client.manifest(payload)['manifest']
+    return manager.prepare(binding,restore)
+
+@unittest.skipUnless(sys.platform=='win32' or sys.platform.startswith('linux'),'Actual Windows/Linux process-tree lifecycle required')
+class PortableAppLifecycleTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.fixture=tempfile.TemporaryDirectory(prefix='gd-native-portable-fixture-');cls.binary=compile_portable_fixture(Path(cls.fixture.name).resolve())
+    @classmethod
+    def tearDownClass(cls):cls.fixture.cleanup()
+    def test_detached_grandchild_keeps_lease_after_parent_exit_and_all_cache_is_retained(self):
+        with tempfile.TemporaryDirectory(prefix='gd-app-lease-') as td:
+            manager=apps.PortableApps(Path(td).resolve()/'cache');prepared=prepare_native_fixture(manager,self.binary)
+            receipt=manager.launch(prepared,self.binary.name,approved=True)
+            try:
+                wait_fixture(lambda:(prepared.payload/'child-started').exists())
+                wait_fixture(lambda:manager.leases()[0].get('mainExitCode')==7)
+                self.assertEqual(manager.leases()[0]['state'],'running')
+                self.assertEqual(manager.leases()[0]['mainExitCode'],7)
+                with self.assertRaises(apps.PortableAppError):manager.assert_safe('change accounts')
+                self.assertTrue(prepared.payload.exists())
+            finally:(prepared.payload/'release-child').write_text('release only this disposable fixture')
+            wait_fixture(lambda:manager.leases()[0]['state']=='complete')
+            self.assertEqual(manager.leases()[0]['mainExitCode'],7)
+            manager.assert_safe('change accounts');self.assertTrue((prepared.payload/'child-finished').exists());self.assertTrue((prepared.payload/self.binary.name).exists());self.assertTrue(self.binary.exists())
+            self.assertNotIn('storageSecret',json.dumps(manager.leases()));self.assertNotIn('rxca_',json.dumps(manager.leases()))
+    def test_broker_failure_does_not_kill_app_children_and_uncertainty_blocks_changes(self):
+        with tempfile.TemporaryDirectory(prefix='gd-app-orphan-') as td:
+            manager=apps.PortableApps(Path(td).resolve()/'cache');prepared=prepare_native_fixture(manager,self.binary)
+            receipt=manager.launch(prepared,self.binary.name,approved=True)
+            try:
+                wait_fixture(lambda:(prepared.payload/'child-heartbeat').exists())
+                # Only the broker created by this disposable fixture is stopped.
+                import signal
+                os.kill(receipt['brokerPid'],signal.SIGTERM if sys.platform=='win32' else signal.SIGKILL)
+                wait_fixture(lambda:manager.leases()[0]['state']=='uncertain')
+                before=(prepared.payload/'child-heartbeat').read_text();time.sleep(.2)
+                self.assertNotEqual((prepared.payload/'child-heartbeat').read_text(),before,'The broker failure must leave the native child running')
+                with self.assertRaises(apps.PortableAppError):manager.assert_safe('delete library items')
+                self.assertTrue(prepared.payload.exists())
+            finally:(prepared.payload/'release-child').write_text('release only this disposable fixture')
+            wait_fixture(lambda:(prepared.payload/'child-finished').exists())
+            time.sleep(.15)
+            self.assertEqual(manager.leases()[0]['state'],'uncertain','Broker failure cannot be auto-cleared by a missing PID')
 
 if __name__=="__main__":unittest.main()
