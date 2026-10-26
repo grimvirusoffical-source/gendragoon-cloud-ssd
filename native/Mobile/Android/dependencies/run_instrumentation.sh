@@ -21,5 +21,14 @@ finish() {
 }
 trap finish EXIT
 test "$(adb shell getconf PAGE_SIZE | tr -d '\r')" = "$pages"
+# Bind results to the actual booted OS rather than just the requested AVD name.
+# The old API 35 16 KiB image crashed system_server in accessibility services;
+# retain that distinction from app/native failures on replacement fixtures.
+for property in ro.build.fingerprint ro.build.version.sdk ro.build.version.release ro.product.cpu.abilist; do
+    printf '%s=' "$property" >> "$report/device-properties.txt"
+    adb shell getprop "$property" | tr -d '\r' >> "$report/device-properties.txt"
+done
+printf 'page_size=%s\n' "$pages" >> "$report/device-properties.txt"
+emulator -version 2>/dev/null | head -n 3 > "$report/emulator-version.txt" || true
 adb shell cat /proc/meminfo > "$report/memory-before.txt"
 timeout 10m gradle :app:connectedDebugAndroidTest --rerun-tasks --no-daemon --console=plain --stacktrace

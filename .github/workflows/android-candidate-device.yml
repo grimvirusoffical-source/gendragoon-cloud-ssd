@@ -31,7 +31,7 @@ jobs:
             target: google_apis
             ram: 2048M
           - pages: 16384
-            target: google_apis_playstore_ps16k
+            target: google_apis_ps16k
             ram: 4096M
     env:
       GENDRAGOON_ANDROID_CANDIDATE_WHEELS: ${{ github.workspace }}/.gendragoon-reviewed-candidates
@@ -72,7 +72,7 @@ jobs:
         timeout-minutes: 15
         with:
           working-directory: native/Mobile/Android
-          api-level: 35
+          api-level: 36
           target: ${{ matrix.target }}
           arch: x86_64
           cores: 2
