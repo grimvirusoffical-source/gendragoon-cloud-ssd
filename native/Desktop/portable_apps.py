@@ -388,7 +388,9 @@ def _linux_tree(executable,running,possible_start,exited,mark):
 def _windows_tree(executable,running,possible_start,exited,mark):
     mark("native-imports")
     import win32api,win32con,win32event,win32job,win32process
-    mark("job-create");job=win32job.CreateJobObject(None,None)
+    # The pinned pywin32 WCHAR* wrapper requires a Unicode name, including
+    # an empty string for an unnamed Job; it rejects Python None as TypeError.
+    mark("job-create");job=win32job.CreateJobObject(None,"")
     process=thread=None;resumed=False
     try:
         mark("job-limits");limits=win32job.QueryInformationJobObject(job,win32job.JobObjectExtendedLimitInformation)
