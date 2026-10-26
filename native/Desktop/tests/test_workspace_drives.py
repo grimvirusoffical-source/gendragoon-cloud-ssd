@@ -96,6 +96,15 @@ def request(server,path="/document.txt",method="GET",headers=None,token=True):
     except urllib.error.HTTPError as error:
         with error:return error.code,error.read(),dict(error.headers)
 
+def linux_fuse_fixture_helper():
+    helper=os.environ.get("GD_TEST_RCLONE")
+    try:platform.prerequisites(helper)
+    except platform.PlatformMountError as error:
+        if os.environ.get("GD_REQUIRE_LINUX_FUSE")=="1":
+            raise AssertionError("Mandatory Linux FUSE prerequisites are unavailable; no mount was attempted.") from None
+        raise unittest.SkipTest(str(error)) from None
+    return helper
+
 class DAVTests(unittest.TestCase):
     def setUp(self):
         self.temporary=tempfile.TemporaryDirectory(prefix="gd-drive-dav-");self.addCleanup(self.temporary.cleanup)
@@ -288,7 +297,13 @@ class ActualArchiveTests(unittest.TestCase):
         except Exception:
             if os.environ.get("GD_DESKTOP_RUNTIME"):raise
             self.skipTest("A pinned native codec runtime is required")
-        self.temporary=tempfile.TemporaryDirectory(prefix="gd-drive-verified-測試-");self.addCleanup(self.temporary.cleanup)
+        self.temporary=tempfile.TemporaryDirectory(prefix="gd-drive-verified-測試-",delete=False)
+        def cleanup():
+            manager=getattr(self,"_mount_fixture_manager",None)
+            # Retain a fixture with any uncertain or active mount; even a failed
+            # acceptance test must not recursively remove its mounted contents.
+            if manager is None or not manager.has_mounts:self.temporary.cleanup()
+        self.addCleanup(cleanup)
         self.root=Path(self.temporary.name).resolve();self.model=client.MachineNotesClient(Session(),self.root/"profile");self.model.refresh_notes()
         self.model.import_vault(json.dumps(FIXTURE["envelope"]).encode(),FIXTURE["password"])
         self.patches=[patch.object(client,"DesktopReceiver",Receiver),patch.object(mounts,"DesktopReceiver",Receiver)]
@@ -328,7 +343,7 @@ class ActualArchiveTests(unittest.TestCase):
         try:platform.prerequisites(helper)
         except platform.PlatformMountError as error:
             emit("prerequisite-unavailable",str(error));self.skipTest(str(error))
-        manager=mounts.WorkspaceMountManager(self.model.root);record=None
+        manager=mounts.WorkspaceMountManager(self.model.root);self._mount_fixture_manager=manager;record=None
         try:
             record=manager.mount(self.model,NOTE,helper);self.assertTrue(platform.mounted(record))
             path=Path(record["mountPath"])/self.source.name
@@ -343,7 +358,116 @@ class ActualArchiveTests(unittest.TestCase):
         finally:
             if record and manager.has_mounts:manager.unmount(record["id"])
 
+    @unittest.skipUnless(sys.platform.startswith("linux"),"Actual Linux simultaneous FUSE mount gate")
+    def test_real_linux_two_note_mounts_isolate_bytes_tokens_and_open_file_lifetime(self):
+        report=Path(os.environ["GD_LINUX_MULTI_MOUNT_REPORT"]) if os.environ.get("GD_LINUX_MULTI_MOUNT_REPORT") else None
+        proof=dict(schema=1,platform=sys.platform,mount="pending",stage="prerequisites",checks=[],mountIds=[],cleanup="pending")
+        manager=None;complete=False
+        def emit():
+            if report:report.write_text(json.dumps(proof,sort_keys=True),encoding="utf-8")
+        def normal_unmount(key):
+            deadline=time.monotonic()+10
+            while True:
+                try:manager.unmount(key);return
+                except (mounts.MountError,platform.PlatformMountError):
+                    if time.monotonic()>=deadline:raise
+                    time.sleep(.05)
+        emit()
+        try:
+            helper=linux_fuse_fixture_helper()
+            proof["stage"]="second-encrypted-note"
+            self.model.selected_note=OTHER
+            other=self.root/"other-note-測試.txt";other_payload=b"Second MachineNote encrypted fixture\n"+os.urandom(4096)
+            other.write_bytes(other_payload);self.model.upload(other)
+            self.assertNotEqual(self.payload,other_payload)
+            manager=mounts.WorkspaceMountManager(self.model.root);self._mount_fixture_manager=manager
+            proof["stage"]="mount-both"
+            first=manager.mount(self.model,NOTE,helper);second=manager.mount(self.model,OTHER,helper)
+            self.assertNotEqual(first["mountPath"],second["mountPath"])
+            self.assertIs(platform.mounted(first),True);self.assertIs(platform.mounted(second),True)
+            self.assertNotEqual(first["mountId"],second["mountId"])
+            proof["mountIds"]=[first["mountId"],second["mountId"]]
+            first_tree,first_server,_,first_process=manager.live[first["id"]]
+            second_tree,second_server,_,second_process=manager.live[second["id"]]
+            self.assertNotEqual(first_process.pid,second_process.pid);self.assertNotEqual(first_tree.cache,second_tree.cache)
+            self.assertNotEqual(first_server.token,second_server.token);self.assertNotEqual(first_server.url,second_server.url)
+            from urllib.parse import quote
+            self.assertEqual(request(first_server,"/"+quote(self.source.name))[1],self.payload)
+            self.assertEqual(request(second_server,"/"+quote(other.name))[1],other_payload)
+            self.assertEqual(request(second_server,"/"+quote(other.name),headers={"Authorization":"Bearer "+first_server.token})[0],401)
+            self.assertEqual(request(first_server,"/"+quote(self.source.name),headers={"Authorization":"Bearer "+second_server.token})[0],401)
+            proof["checks"].append("distinct-mounted-identities-and-authenticated-token-isolation")
+            proof["stage"]="mounted-content-isolation"
+            first_path=Path(first["mountPath"])/self.source.name;second_path=Path(second["mountPath"])/other.name
+            self.assertEqual(first_path.read_bytes(),self.payload);self.assertEqual(second_path.read_bytes(),other_payload)
+            self.assertFalse((Path(first["mountPath"])/other.name).exists())
+            self.assertFalse((Path(second["mountPath"])/self.source.name).exists())
+            proof["checks"].append("genuine-encrypted-bytes-isolated-through-both-fuse-mounts")
+            proof["stage"]="first-open-file-refuses-unmount"
+            with first_path.open("rb") as held:
+                self.assertEqual(held.read(),self.payload)
+                deadline=time.monotonic()+10
+                while True:
+                    try:
+                        with self.assertRaises(platform.PlatformMountError):manager.unmount(first["id"])
+                        break
+                    except mounts.MountError:
+                        # Finish any transient authenticated DAV read before
+                        # requiring the kernel's held-descriptor refusal.
+                        if time.monotonic()>=deadline:raise
+                        time.sleep(.05)
+                self.assertIs(platform.mounted(first),True);self.assertIsNone(first_process.poll())
+                proof["checks"].append("first-open-descriptor-refuses-ordinary-unmount")
+                proof["stage"]="second-normal-unmount-while-first-held"
+                normal_unmount(second["id"])
+                self.assertIs(platform.mounted(second),False);self.assertEqual(second_process.returncode,0)
+                self.assertIs(platform.mounted(first),True);self.assertIsNone(first_process.poll())
+                held.seek(0);self.assertEqual(held.read(),self.payload)
+                self.assertEqual(first_path.read_bytes(),self.payload)
+                self.assertEqual(len(manager.records),1);self.assertTrue(manager.has_mounts)
+                proof["checks"].append("other-drive-unmounts-normally-while-held-drive-remains-readable")
+            proof["stage"]="first-normal-unmount-after-close"
+            normal_unmount(first["id"])
+            self.assertIs(platform.mounted(first),False);self.assertEqual(first_process.returncode,0)
+            self.assertFalse(manager.has_mounts)
+            self.assertEqual(self.source.read_bytes(),self.payload);self.assertEqual(other.read_bytes(),other_payload)
+            proof["checks"].append("both-normal-unmounts-and-originals-unchanged")
+            complete=True
+        except unittest.SkipTest:
+            proof["mount"]="prerequisite-unavailable";raise
+        except Exception:
+            proof["mount"]="failed";raise
+        finally:
+            try:
+                if manager is not None:
+                    # Only this test's manager and disposable mounts. No lazy
+                    # unmount, signal, process kill or removal of retained data.
+                    for key in reversed(list(manager.live)):normal_unmount(key)
+                    self.assertFalse(manager.has_mounts)
+                proof["cleanup"]="normal-unmounts-complete"
+                if complete:proof.update(mount="verified",stage="complete")
+            except Exception:
+                proof["cleanup"]="retained-for-review";proof["mount"]="failed";raise
+            finally:emit()
+
 class PlatformTests(unittest.TestCase):
+    def test_fixture_cleanup_retains_directory_for_reported_active_mount(self):
+        case=ActualArchiveTests("test_real_drive_read_busy_refusal_and_normal_unmount_when_available")
+        with patch.object(client,"crypto_runtime"),patch.object(client,"MachineNotesClient",return_value=MagicMock()):
+            case.setUp()
+        # This manager is a pure fixture: no FUSE, codec, HTTP or child process.
+        self.addCleanup(case.temporary.cleanup)
+        case._mount_fixture_manager=SimpleNamespace(has_mounts=True)
+        self.assertTrue(case.doCleanups())
+        self.assertTrue(case.root.is_dir());self.assertEqual(case.source.read_bytes(),case.payload)
+
+    def test_required_linux_fuse_prerequisite_is_failure_and_optional_local_run_can_skip(self):
+        with patch.dict(os.environ,{"GD_TEST_RCLONE":"/fixture/rclone","GD_REQUIRE_LINUX_FUSE":"1"}),patch.object(platform,"prerequisites",side_effect=platform.PlatformMountError("Fixture FUSE unavailable")) as prerequisite:
+            with self.assertRaisesRegex(AssertionError,"Mandatory Linux FUSE prerequisites"):linux_fuse_fixture_helper()
+            prerequisite.assert_called_once_with("/fixture/rclone")
+        with patch.dict(os.environ,{"GD_REQUIRE_LINUX_FUSE":"0"}),patch.object(platform,"prerequisites",side_effect=platform.PlatformMountError("Fixture FUSE unavailable")):
+            with self.assertRaises(unittest.SkipTest):linux_fuse_fixture_helper()
+
     @staticmethod
     def windows_security_fixture(sid="S-1-5-21-123-456-789-1001"):
         descriptor=MagicMock();acl=descriptor.GetSecurityDescriptorDacl.return_value

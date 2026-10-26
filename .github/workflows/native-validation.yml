@@ -103,12 +103,14 @@ jobs:
         run: python -B native/Desktop/windows_utf8.py --destination "${{ runner.temp }}/gendragoon-python-utf8" --path "${{ runner.temp }}/gendragoon-desktop" --path "${{ runner.temp }}/gendragoon-desktop/runtime"
       - name: Stage only an official hash-pinned rclone CI fixture without installing a driver
         run: python -B native/Desktop/stage_ci_rclone.py --destination "${{ runner.temp }}/gendragoon-rclone-fixture"
-      - name: Verify authenticated drive reads and real Linux FUSE mounting when already permitted
+      - name: Require real Linux FUSE reads and simultaneous isolated workspace drive lifetimes
         if: runner.os == 'Linux'
         run: python -B -m unittest discover -s native/Desktop/tests -p test_workspace_drives.py -v
         env:
           GD_DESKTOP_RUNTIME: ${{ runner.temp }}/gendragoon-desktop
           GD_MOUNT_REPORT: ${{ runner.temp }}/desktop-mount-capabilities.json
+          GD_REQUIRE_LINUX_FUSE: '1'
+          GD_LINUX_MULTI_MOUNT_REPORT: ${{ runner.temp }}/desktop-linux-multiple-mounts.json
       - name: Verify private Windows drive adapter and existing WinFsp prerequisites
         if: runner.os == 'Windows'
         run: |
@@ -120,7 +122,9 @@ jobs:
         if: always()
         with:
           name: GenDragoon-desktop-${{ runner.os }}-mount-capability
-          path: ${{ runner.temp }}/desktop-mount-capabilities.json
+          path: |
+            ${{ runner.temp }}/desktop-mount-capabilities.json
+            ${{ runner.temp }}/desktop-linux-multiple-mounts.json
           if-no-files-found: warn
       - name: Verify current MachineNotes, portable vault, genuine encrypted transfer, renewal and private filesystem
         if: runner.os == 'Linux'
