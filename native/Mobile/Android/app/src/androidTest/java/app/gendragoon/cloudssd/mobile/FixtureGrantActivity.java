@@ -30,7 +30,9 @@ public final class FixtureGrantActivity extends Activity {
                 }else uri=FixtureDocumentsProvider.create(this,mode);
                 int flags=Intent.FLAG_GRANT_READ_URI_PERMISSION|Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION|Intent.FLAG_GRANT_PREFIX_URI_PERMISSION;
                 if(mode.startsWith("output"))flags|=Intent.FLAG_GRANT_WRITE_URI_PERMISSION;
-                setResult(RESULT_OK,new Intent().setData(uri).addFlags(flags).setClipData(ClipData.newRawUri("Owned fixture",uri)));
+                Intent result=new Intent().setData(uri).addFlags(flags);
+                result.setClipData(ClipData.newRawUri("Owned fixture",uri));
+                setResult(RESULT_OK,result);
             }
         }catch(Exception error){setResult(RESULT_CANCELED,new Intent().putExtra("fixtureError",error.getClass().getSimpleName()));}
         finish();
