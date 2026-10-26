@@ -4,6 +4,8 @@ const crypto=require('node:crypto');
 const {ControlState}=require('./control-state.cjs');
 const {RedXState,CloudError,digest,origin}=require('./redx-state.cjs');
 const {STORAGE,PERFORMANCE:PAID_PERFORMANCE}=require('../Backend/catalog.js');
+// Receiver subscriptions support a genuinely free one-worker option. Keep the
+// legacy Firebase paid-price catalog unchanged (there is no Stripe Free price).
 const PERFORMANCE=Object.freeze({free:{cents:0,workers:1},...PAID_PERFORMANCE});
 
 const OWNER_EMAIL='support@infected-nation.com';
@@ -31,15 +33,14 @@ function recurringPriceIds(p){
  if(p.performanceTier!=='free')ids.push(price('performance|'+p.performanceTier+'|'+p.interval));
  return ids;
 }
-function recurringCents(p){
- const factor=p.interval==='year'?10:1;
- return STORAGE[p.storageTier].standard*factor+PERFORMANCE[p.performanceTier].cents*factor+(p.feeWaived?0:WORKSPACE_MONTHLY_CENTS);
-}
+function recurringCents(p){const factor=p.interval==='year'?10:1;return STORAGE[p.storageTier].standard*factor+PERFORMANCE[p.performanceTier].cents*factor;}
+function feeRequired(p){return !p.owner&&!p.feeWaived;}
 function publicProject(p){return {id:p.id,name:p.name,status:p.status,active:p.active===true,readOnly:p.readOnly===true,
  feeWaived:p.feeWaived===true,workspaceMonthlyCents:p.feeWaived?0:WORKSPACE_MONTHLY_CENTS,owner:p.owner===true,
  storageTier:p.storageTier||null,performanceTier:p.performanceTier||null,interval:p.interval||null,
  quotaBytes:p.quotaBytes||0,workers:p.workers||0,subscriptionStatus:p.subscriptionStatus||null,
- checkoutPending:!!p.checkoutSessionId&&!p.subscriptionId,createdMs:p.createdMs||null};}
+ checkoutPending:!p.owner&&Boolean(p.storageTier&&p.performanceTier)&&(!p.subscriptionId||['canceled','incomplete_expired'].includes(p.subscriptionStatus)||feeRequired(p)&&!p.workspaceFeePriceId&&(!p.workspaceSubscriptionId||['canceled','incomplete_expired'].includes(p.workspaceSubscriptionStatus))),
+ checkoutStage:!p.subscriptionId||['canceled','incomplete_expired'].includes(p.subscriptionStatus)?'plans':feeRequired(p)&&!p.workspaceFeePriceId&&(!p.workspaceSubscriptionId||['canceled','incomplete_expired'].includes(p.workspaceSubscriptionStatus))?'workspace_fee':null,createdMs:p.createdMs||null};}
 
 async function createControl(config){
  const issuer=origin(config.issuer||'https://red-xai.com',false);
@@ -48,11 +49,23 @@ async function createControl(config){
  const receiverStore=config.receiverStore||new RedXState({url:config.redxURL,key:config.redxKey,db:config.redxDB||'gendragoon_receivers',local:config.redxLocal===true});
  const publicBase=config.publicBase||'https://api.red-xai.com/gendragoon';
  const receiverLocal=config.receiverLocal||'http://127.0.0.1:17779';
- if(new URL(receiverLocal).origin!=='http://127.0.0.1:17779')throw new Error('Receiver delete endpoint must stay on local loopback');
+ const receiverEndpoint=new URL(receiverLocal);
+ if(receiverEndpoint.protocol!=='http:'||receiverEndpoint.hostname!=='127.0.0.1'||receiverEndpoint.username||receiverEndpoint.password||receiverEndpoint.pathname!=='/'||receiverEndpoint.search||receiverEndpoint.hash)throw new Error('Receiver delete endpoint must stay on local loopback');
  let billingReady=false;
  if(stripe){
-   const probe=await stripe.prices.retrieve(price('storage|standard|100GB|month'));
-   if(probe?.active!==true||probe?.livemode!==true||probe?.currency!=='usd')throw new Error('Stripe catalog/account mismatch');
+   const expected=[];
+   for(const term of ['month','year']){
+     const factor=term==='year'?10:1;
+     for(const [tier,entry] of Object.entries(STORAGE))expected.push({key:'storage|standard|'+tier+'|'+term,amount:entry.standard*factor,term});
+     for(const [tier,entry] of Object.entries(PAID_PERFORMANCE))expected.push({key:'performance|'+tier+'|'+term,amount:entry.cents*factor,term});
+   }
+   expected.push({key:'one_time|remove_ads',amount:REMOVE_ADS_CENTS,term:null});
+   // Verify the entire purchasable catalog, not just a single cheap tier.
+   for(let offset=0;offset<expected.length;offset+=6)await Promise.all(expected.slice(offset,offset+6).map(async item=>{
+     const probe=await stripe.prices.retrieve(price(item.key));
+     if(probe?.active!==true||probe?.livemode!==true||probe?.currency!=='usd'||probe.unit_amount!==item.amount||
+       (item.term?probe.recurring?.interval!==item.term||(probe.recurring?.interval_count||1)!==1:Boolean(probe.recurring)))throw new Error('Stripe catalog/account mismatch: '+item.key);
+   }));
    billingReady=true;
  }
  const secureFetch=async(url,opts={})=>{if(new URL(url).origin!==issuer)throw new CloudError('issuer_endpoint_invalid',503);return (config.fetchImpl||fetch)(url,{...opts,redirect:'error'});};
@@ -68,26 +81,29 @@ async function createControl(config){
    return {owner:digest(JSON.stringify(['red-xai-receiver/v1',issuer,u.sub])),sub:u.sub,email:String(u.email||'').toLowerCase(),bearer:'Bearer '+m[1]};
  }
  async function seed(identity){
-   const receiver=await receiverStore.get(identity.owner).catch(()=>null);
+   const receiver=await receiverStore.get(identity.owner);
    const existing=Object.values(receiver?.workspaces||{});
    const owner=identity.email===OWNER_EMAIL;
    const projects={};
    existing.forEach((w,index)=>{
      const id=ID.test(w.id||'')?w.id:crypto.randomBytes(16).toString('hex');
      projects[id]={id,name:cleanName(w.name||('Workspace '+(index+1))),createdMs:Date.now()+index,
-       feeWaived:!owner&&index===0,owner,storageTier:owner?'6TB':null,performanceTier:owner?'max':null,
+       feeWaived:owner||index===0,owner,storageTier:owner?'6TB':null,performanceTier:owner?'max':null,
        interval:owner?'year':null,quotaBytes:owner?6_000_000_000_000:0,workers:owner?20:0,
        active:owner,readOnly:!owner,status:owner?'active':'plan_required',subscriptionStatus:owner?'owner':null};
    });
-   return {policyVersion:2,ownerBenefits:owner,adFree:owner,projects};
+   return {policyVersion:3,ownerBenefits:owner,adFree:owner,projects};
  }
  async function state(identity){
    let s=await store.get(identity.owner);
    if(!s)s=await store.ensure(identity.owner,await seed(identity));
-   if(identity.email===OWNER_EMAIL&&!s.ownerBenefits){
-     s=await store.change(identity.owner,x=>{x.policyVersion=2;x.ownerBenefits=true;x.adFree=true;for(const p of Object.values(x.projects||{})){p.owner=true;p.feeWaived=true;p.storageTier='6TB';p.performanceTier='max';p.interval='year';p.quotaBytes=6_000_000_000_000;p.workers=20;p.active=true;p.readOnly=false;p.status='active';p.subscriptionStatus='owner';}});
-   } else if(identity.email!==OWNER_EMAIL&&(s.policyVersion||0)<2){
-     s=await store.change(identity.owner,x=>{x.policyVersion=2;const ordered=Object.values(x.projects||{}).sort((a,b)=>(a.createdMs||0)-(b.createdMs||0));ordered.forEach((p,i)=>{if(!p.subscriptionId){p.owner=false;p.feeWaived=i===0;p.storageTier=null;p.performanceTier=null;p.interval=null;p.quotaBytes=0;p.workers=0;p.active=false;p.readOnly=true;p.status='plan_required';p.subscriptionStatus=null;}});});
+   if(identity.email===OWNER_EMAIL&&(!s.ownerBenefits||(s.policyVersion||0)<3)){
+     s=await store.change(identity.owner,x=>{x.policyVersion=3;x.ownerBenefits=true;x.adFree=true;for(const p of Object.values(x.projects||{})){p.owner=true;p.feeWaived=true;p.storageTier='6TB';p.performanceTier='max';p.interval='year';p.quotaBytes=6_000_000_000_000;p.workers=20;p.active=true;p.readOnly=false;p.status='active';p.subscriptionStatus='owner';}});
+   } else if(identity.email!==OWNER_EMAIL&&((s.policyVersion||0)<3||s.ownerBenefits)){
+     s=await store.change(identity.owner,x=>{x.policyVersion=3;if(x.ownerBenefits)x.adFree=false;x.ownerBenefits=false;const ordered=Object.values(x.projects||{}).sort((a,b)=>(a.createdMs||0)-(b.createdMs||0));ordered.forEach((p,i)=>{
+       p.owner=false;p.feeWaived=i===0;
+       if(!p.subscriptionId){p.storageTier=null;p.performanceTier=null;p.interval=null;p.quotaBytes=0;p.workers=0;p.active=false;p.readOnly=true;p.status='plan_required';p.subscriptionStatus=null;}
+     });});
    }
    return s;
  }
@@ -99,111 +115,177 @@ async function createControl(config){
    await store.change(identity.owner,x=>{x.stripeCustomerId=customer.id;});
    return customer.id;
  }
- async function openProjectCheckout(identity,p,s){
-   if(!billingReady)throw new CloudError('billing_unavailable',503);
-   if(p.owner)return {complimentary:true,message:'Owner lifetime access is active.',project:publicProject(p)};
-   if(!p.storageTier||!p.performanceTier||!p.interval)throw new CloudError('plans_required',409);
-   if(p.checkoutSessionId&&!p.subscriptionId){
-     const prior=await stripe.checkout.sessions.retrieve(p.checkoutSessionId);
-     if(prior.status==='open'&&prior.url)return {url:prior.url,resumed:true,project:publicProject(p)};
-   }
-   const customer=await ensureCustomer(identity,s),metadata={service:'GenDragoonSSD',kind:'workspace_plans',redxOwner:identity.owner,projectId:p.id};
-   const items=[{price:price('storage|standard|'+p.storageTier+'|'+p.interval),quantity:1}];
-   if(p.performanceTier!=='free')items.push({price:price('performance|'+p.performanceTier+'|'+p.interval),quantity:1});
-   if(!p.feeWaived)items.push({price_data:{currency:'usd',unit_amount:WORKSPACE_MONTHLY_CENTS,recurring:{interval:'month'},product_data:{name:'GenDragoon Workspace'}},quantity:1});
-   const session=await stripe.checkout.sessions.create({mode:'subscription',customer,client_reference_id:p.id,line_items:items,
-     metadata,subscription_data:{metadata},success_url:publicBase+'/billing/success?session_id={CHECKOUT_SESSION_ID}',cancel_url:publicBase+'/billing/cancel'},
-     {idempotencyKey:'gd-rx-project-'+identity.owner+'-'+p.id+'-'+p.storageTier+'-'+p.performanceTier+'-'+p.interval+'-'+(p.feeWaived?'free':'fee')});
-   await store.change(identity.owner,x=>{const q=x.projects[p.id];q.checkoutSessionId=session.id;q.status='pending_payment';});
-   return {url:session.url,projectId:p.id,workspaceMonthlyCents:p.feeWaived?0:WORKSPACE_MONTHLY_CENTS,recurringCents:recurringCents(p)};
+ function metadata(identity,p,kind){return {service:'GenDragoonSSD',kind,redxOwner:identity.owner,projectId:p.id};}
+ function matchesIdentity(object,identity,p,kind,customer){
+   const m=object?.metadata||{},cid=typeof object?.customer==='string'?object.customer:object?.customer?.id;
+   return m.service==='GenDragoonSSD'&&m.kind===kind&&m.redxOwner===identity.owner&&m.projectId===p.id&&cid===customer;
  }
- async function reconcileProject(identity,p){
-   if(p.owner||!stripe)return;
+ function exactItems(object,expected){
+   const rows=object?.data||[];
+   return !object?.has_more&&rows.length===expected.length&&rows.every(x=>x.quantity===1)&&expected.every(id=>rows.filter(x=>x.price?.id===id).length===1);
+ }
+ function validFee(row){return row?.quantity===1&&row.price?.currency==='usd'&&row.price?.unit_amount===WORKSPACE_MONTHLY_CENTS&&row.price?.recurring?.interval==='month'&&(row.price.recurring.interval_count||1)===1;}
+ async function openProjectCheckout(identity,p,s){
+   if(p.owner)return {complimentary:true,message:'Owner lifetime access is active.',project:publicProject(p)};
+   if(!billingReady)throw new CloudError('billing_unavailable',503);
+   if(!p.storageTier||!p.performanceTier||!p.interval)throw new CloudError('plans_required',409);
+   if(p.subscriptionId&&['canceled','incomplete_expired'].includes(p.subscriptionStatus)){
+     s=await store.change(identity.owner,x=>{const q=x.projects[p.id];q.subscriptionId=null;q.checkoutSessionId=null;q.checkoutGeneration=(q.checkoutGeneration||0)+1;});p=s.projects[p.id];
+   }
+   const workspace=Boolean(p.subscriptionId&&feeRequired(p)&&!p.workspaceFeePriceId);
+   if(p.subscriptionId&&!workspace)throw new CloudError('subscription_already_exists',409);
+   if(workspace&&p.workspaceSubscriptionId&&!['canceled','incomplete_expired'].includes(p.workspaceSubscriptionStatus))throw new CloudError('billing_portal_required',409);
+   if(workspace&&p.workspaceSubscriptionId){s=await store.change(identity.owner,x=>{const q=x.projects[p.id];q.workspaceSubscriptionId=null;q.workspaceCheckoutSessionId=null;q.workspaceCheckoutGeneration=(q.workspaceCheckoutGeneration||0)+1;});p=s.projects[p.id];}
+   const sessionKey=workspace?'workspaceCheckoutSessionId':'checkoutSessionId',generationKey=workspace?'workspaceCheckoutGeneration':'checkoutGeneration';
+   if(p[sessionKey]){
+     const prior=await stripe.checkout.sessions.retrieve(p[sessionKey]);
+     if(prior.status==='open'&&prior.url)return {url:prior.url,resumed:true,checkoutStage:workspace?'workspace_fee':'plans',project:publicProject(p)};
+     if(prior.status==='complete')throw new CloudError('checkout_processing',409);
+     s=await store.change(identity.owner,x=>{const q=x.projects[p.id];q[sessionKey]=null;q[generationKey]=(q[generationKey]||0)+1;});p=s.projects[p.id];
+   }
+   const customer=await ensureCustomer(identity,s),kind=workspace?'workspace_fee':'workspace_plans',meta=metadata(identity,p,kind);
+   // Checkout cannot create mixed month/year subscriptions. The workspace fee
+   // therefore has its own monthly Checkout, independent of the plan interval.
+   const items=workspace?[{price_data:{currency:'usd',unit_amount:WORKSPACE_MONTHLY_CENTS,recurring:{interval:'month'},product_data:{name:'GenDragoon Workspace'}},quantity:1}]:recurringPriceIds(p).map(id=>({price:id,quantity:1}));
+   const session=await stripe.checkout.sessions.create({mode:'subscription',customer,client_reference_id:p.id,line_items:items,
+     metadata:meta,subscription_data:{metadata:meta},success_url:publicBase+'/billing/success?session_id={CHECKOUT_SESSION_ID}',cancel_url:publicBase+'/billing/cancel'},
+     {idempotencyKey:'gd-rx-'+kind+'-'+identity.owner+'-'+p.id+'-'+p.storageTier+'-'+p.performanceTier+'-'+p.interval+'-'+(p[generationKey]||0)});
+   s=await store.change(identity.owner,x=>{const q=x.projects[p.id];q[sessionKey]=session.id;q.status=workspace?'workspace_fee_required':'pending_payment';});
+   return {url:session.url,projectId:p.id,project:publicProject(s.projects[p.id]),checkoutStage:workspace?'workspace_fee':'plans',
+     workspaceMonthlyCents:p.feeWaived?0:WORKSPACE_MONTHLY_CENTS,recurringCents:recurringCents(p),recurringInterval:p.interval,
+     message:workspace?'Approve the separate $5/month workspace subscription.':'Storage and performance bill together. Additional workspaces also require a separate $5/month workspace checkout.'};
+ }
+ async function reconcileProject(identity,p,s){
+   if(p.owner)return;
+   // Without a configured billing provider, existing paid entitlements fail
+   // closed rather than retaining a stale paid worker/quota grant.
+   if(!stripe){await store.change(identity.owner,x=>Object.assign(x.projects[p.id],{active:false,readOnly:true,quotaBytes:0,workers:0,status:'billing_unavailable'}));return;}
    if(p.checkoutSessionId&&!p.subscriptionId){
      const session=await stripe.checkout.sessions.retrieve(p.checkoutSessionId);
      if(session.status==='complete'&&session.payment_status==='paid'&&session.subscription){
-       const line=await stripe.checkout.sessions.listLineItems(session.id,{limit:10}),rows=line.data||[],expected=recurringPriceIds(p);
-       const ids=rows.map(x=>x.price?.id).filter(Boolean);
-       const feeRow=rows.find(x=>x.price?.recurring?.interval==='month'&&x.price?.unit_amount===WORKSPACE_MONTHLY_CENTS&&!expected.includes(x.price?.id));
-       if(line.has_more||expected.some(id=>ids.filter(x=>x===id).length!==1)||(!p.feeWaived&&!feeRow)||p.feeWaived&&feeRow)
-         throw new CloudError('checkout_verification_failed',503);
+       const line=await stripe.checkout.sessions.listLineItems(session.id,{limit:10}),expected=recurringPriceIds(p),rows=line.data||[];
+       // Accept previously created monthly bundled fees, but never create new
+       // mixed-interval Checkouts. Migration keeps the existing fee subscription.
+       const feeRow=!p.feeWaived?rows.find(x=>!expected.includes(x.price?.id)&&validFee(x)):null;
+       if(!matchesIdentity(session,identity,p,'workspace_plans',s.stripeCustomerId)||session.mode!=='subscription'||session.client_reference_id!==p.id||!exactItems(line,feeRow?[...expected,feeRow.price.id]:expected))throw new CloudError('checkout_verification_failed',503);
        const sid=typeof session.subscription==='string'?session.subscription:session.subscription.id;
-       await store.change(identity.owner,x=>{const q=x.projects[p.id];q.subscriptionId=sid;q.checkoutSessionId=session.id;q.workspaceFeePriceId=feeRow?.price?.id||null;});
+       await store.change(identity.owner,x=>{const q=x.projects[p.id];q.subscriptionId=sid;q.workspaceFeePriceId=feeRow?.price?.id||null;});
        p.subscriptionId=sid;p.workspaceFeePriceId=feeRow?.price?.id||null;
      }
    }
-   if(p.subscriptionId){
-     const sub=await stripe.subscriptions.retrieve(p.subscriptionId),expected=recurringPriceIds(p),items=sub.items?.data||[];
-     const ids=items.map(x=>x.price?.id).filter(Boolean);
-     const feeOkay=p.feeWaived?!p.workspaceFeePriceId:typeof p.workspaceFeePriceId==='string'&&ids.includes(p.workspaceFeePriceId);
-     const matches=feeOkay&&ids.length===expected.length+(p.feeWaived?0:1)&&expected.every(id=>ids.filter(x=>x===id).length===1);
-     const entitled=matches&&ACTIVE.has(sub.status);
-     await store.change(identity.owner,x=>{const q=x.projects[p.id];q.subscriptionStatus=sub.status;q.active=entitled;q.readOnly=!entitled;
-       q.status=entitled?'active':'subscription_required';q.quotaBytes=entitled?STORAGE[q.storageTier].gb*1_000_000_000:0;q.workers=entitled?workersFor(q.performanceTier):0;});
+   if(p.workspaceCheckoutSessionId&&!p.workspaceSubscriptionId&&!p.feeWaived){
+     const session=await stripe.checkout.sessions.retrieve(p.workspaceCheckoutSessionId);
+     if(session.status==='complete'&&session.payment_status==='paid'&&session.subscription){
+       const line=await stripe.checkout.sessions.listLineItems(session.id,{limit:10});
+       if(!matchesIdentity(session,identity,p,'workspace_fee',s.stripeCustomerId)||session.mode!=='subscription'||session.client_reference_id!==p.id||line.has_more||line.data?.length!==1||!validFee(line.data[0]))throw new CloudError('checkout_verification_failed',503);
+       const sid=typeof session.subscription==='string'?session.subscription:session.subscription.id;
+       await store.change(identity.owner,x=>{x.projects[p.id].workspaceSubscriptionId=sid;});p.workspaceSubscriptionId=sid;
+     }
    }
+   let entitled=false,status=p.storageTier?'pending_payment':'plan_required',subscriptionStatus=p.subscriptionStatus||null,workspaceSubscriptionStatus=p.workspaceSubscriptionStatus||null;
+   if(p.subscriptionId){
+     const sub=await stripe.subscriptions.retrieve(p.subscriptionId),expected=recurringPriceIds(p);
+     if(p.workspaceFeePriceId)expected.push(p.workspaceFeePriceId);
+     const feeRow=p.workspaceFeePriceId?(sub.items?.data||[]).find(x=>x.price?.id===p.workspaceFeePriceId):null;
+     const plansActive=matchesIdentity(sub,identity,p,'workspace_plans',s.stripeCustomerId)&&exactItems(sub.items,expected)&&(!feeRow||validFee(feeRow))&&ACTIVE.has(sub.status);
+     let feeActive=p.feeWaived||Boolean(feeRow&&validFee(feeRow));
+     if(feeRequired(p)&&p.workspaceSubscriptionId){
+       const fee=await stripe.subscriptions.retrieve(p.workspaceSubscriptionId);
+       workspaceSubscriptionStatus=fee.status;
+       feeActive=matchesIdentity(fee,identity,p,'workspace_fee',s.stripeCustomerId)&&!fee.items?.has_more&&fee.items?.data?.length===1&&validFee(fee.items.data[0])&&ACTIVE.has(fee.status);
+     }
+     subscriptionStatus=sub.status;entitled=plansActive&&feeActive;status=entitled?'active':plansActive?'workspace_fee_required':'subscription_required';
+   }
+   await store.change(identity.owner,x=>{const q=x.projects[p.id];Object.assign(q,{subscriptionStatus,workspaceSubscriptionStatus,active:entitled,readOnly:!entitled,status,quotaBytes:entitled?STORAGE[q.storageTier].gb*1e9:0,workers:entitled?workersFor(q.performanceTier):0});});
  }
  async function reconcile(identity,s){
-   for(const p of Object.values(s.projects||{}))await reconcileProject(identity,p);
-   if(s.adsCheckoutSessionId&&!s.adFree&&stripe){const c=await stripe.checkout.sessions.retrieve(s.adsCheckoutSessionId);if(c.status==='complete'&&c.payment_status==='paid')await store.change(identity.owner,x=>{x.adFree=true;});}
+   for(const p of Object.values(s.projects||{}))await reconcileProject(identity,p,s);
+   if(s.adsCheckoutSessionId&&!s.adFree&&stripe){
+     const c=await stripe.checkout.sessions.retrieve(s.adsCheckoutSessionId);
+     if(c.status==='complete'&&c.payment_status==='paid'){
+       const customer=typeof c.customer==='string'?c.customer:c.customer?.id,meta=c.metadata||{},lines=await stripe.checkout.sessions.listLineItems(c.id,{limit:10});
+       if(c.mode!=='payment'||customer!==s.stripeCustomerId||meta.service!=='GenDragoonSSD'||meta.kind!=='remove_ads'||meta.redxOwner!==identity.owner||!exactItems(lines,[price('one_time|remove_ads')]))throw new CloudError('checkout_verification_failed',503);
+       await store.change(identity.owner,x=>{x.adFree=true;});
+     }
+   }
    return store.get(identity.owner);
  }
  async function createProject(identity,s,body){
-   const name=cleanName(body.name),count=Object.keys(s.projects||{}).length,limit=limitFor(s),owner=s.ownerBenefits===true;
-   if(count>=limit)throw new CloudError('project_limit_reached',409);
-   const id=crypto.randomBytes(16).toString('hex'),feeWaived=owner||count===0;
+   const name=cleanName(body.name),owner=s.ownerBenefits===true;
+   if(!owner&&!billingReady)throw new CloudError('billing_unavailable',503);
    const tier=owner?'6TB':storageTier(body.storageTier),perf=owner?'max':performanceTier(body.performanceTier||'free'),iv=owner?'year':interval(body.interval||'month');
-   const p={id,name,createdMs:Date.now(),feeWaived,owner,storageTier:tier,performanceTier:perf,interval:iv,
-     quotaBytes:owner?6_000_000_000_000:0,workers:owner?20:0,active:owner,readOnly:!owner,status:owner?'active':'pending_payment',subscriptionStatus:owner?'owner':null};
-   s=await store.change(identity.owner,x=>{x.projects[id]=p;});
-   return {state:s,project:p,checkout:owner?null:await openProjectCheckout(identity,p,s)};
+   // A failed Checkout creation leaves a recoverable pending workspace. A retry
+   // resumes it instead of consuming another slot or creating a duplicate bill.
+   const pending=Object.values(s.projects||{}).find(p=>p.name===name&&!p.subscriptionId&&!p.owner&&p.storageTier===tier&&p.performanceTier===perf&&p.interval===iv);
+   if(pending)return {state:s,project:pending,checkout:await openProjectCheckout(identity,pending,s)};
+   const id=crypto.randomBytes(16).toString('hex');
+   s=await store.change(identity.owner,x=>{
+     const count=Object.keys(x.projects||{}).length;if(count>=limitFor(x))throw new CloudError('project_limit_reached',409);
+     x.projects[id]={id,name,createdMs:Date.now(),feeWaived:owner||count===0,owner,storageTier:tier,performanceTier:perf,interval:iv,
+       quotaBytes:owner?6_000_000_000_000:0,workers:owner?20:0,active:owner,readOnly:!owner,status:owner?'active':'pending_payment',subscriptionStatus:owner?'owner':null};
+   });
+   const p=s.projects[id];return {state:s,project:p,checkout:owner?null:await openProjectCheckout(identity,p,s)};
  }
  async function changePlan(identity,s,id,body){
    const p=s.projects[id];if(!p)throw new CloudError('project_not_found',404);
    const st=storageTier(body.storageTier),pt=performanceTier(body.performanceTier||'free'),iv=interval(body.interval||p.interval||'month');
    if(s.ownerBenefits){await store.change(identity.owner,x=>Object.assign(x.projects[id],{storageTier:st,performanceTier:pt,interval:iv,quotaBytes:STORAGE[st].gb*1e9,workers:workersFor(pt),active:true,readOnly:false,status:'active',owner:true,subscriptionStatus:'owner'}));return;}
-   if(!p.subscriptionId)throw new CloudError('subscription_required',409);
+   if(!p.subscriptionId||['canceled','incomplete_expired'].includes(p.subscriptionStatus)){
+     if(!p.subscriptionId&&p.checkoutSessionId){const prior=await stripe.checkout.sessions.retrieve(p.checkoutSessionId);if(prior.status==='complete')throw new CloudError('checkout_processing',409);if(prior.status==='open')await stripe.checkout.sessions.expire(prior.id);}
+     await store.change(identity.owner,x=>Object.assign(x.projects[id],{storageTier:st,performanceTier:pt,interval:iv,subscriptionId:null,workspaceFeePriceId:null,checkoutSessionId:null,checkoutGeneration:(p.checkoutGeneration||0)+1,status:'pending_payment'}));return;
+   }
    if(!billingReady)throw new CloudError('billing_unavailable',503);
    const sub=await stripe.subscriptions.retrieve(p.subscriptionId),items=sub.items?.data||[];
    const oldStorage=price('storage|standard|'+p.storageTier+'|'+p.interval),oldPerf=p.performanceTier==='free'?null:price('performance|'+p.performanceTier+'|'+p.interval);
    const storageItem=items.find(x=>x.price?.id===oldStorage),perfItem=oldPerf?items.find(x=>x.price?.id===oldPerf):null;
-   if(!storageItem||(!p.feeWaived&&!items.some(x=>x.price?.id===p.workspaceFeePriceId)))throw new CloudError('subscription_review_required',409);
-   const updates=[{id:storageItem.id,price:price('storage|standard|'+st+'|'+iv)}];
+   if(!matchesIdentity(sub,identity,p,'workspace_plans',s.stripeCustomerId)||!exactItems(sub.items,p.workspaceFeePriceId?[...recurringPriceIds(p),p.workspaceFeePriceId]:recurringPriceIds(p))||!storageItem||(oldPerf&&!perfItem))throw new CloudError('subscription_review_required',409);
+   // Legacy bundled fees cannot switch intervals inside Checkout. Migrate that
+   // subscription to flexible mode before an API update that mixes intervals.
+   if(p.workspaceFeePriceId&&iv!==p.interval&&sub.billing_mode?.type!=='flexible'){if(!stripe.subscriptions.migrate)throw new CloudError('subscription_review_required',409);await stripe.subscriptions.migrate(p.subscriptionId,{billing_mode:{type:'flexible'}});}
+   const updates=[{id:storageItem.id,price:price('storage|standard|'+st+'|'+iv),quantity:1}];
    if(perfItem&&pt==='free')updates.push({id:perfItem.id,deleted:true});
    else if(perfItem)updates.push({id:perfItem.id,price:price('performance|'+pt+'|'+iv)});
    else if(pt!=='free')updates.push({price:price('performance|'+pt+'|'+iv),quantity:1});
-   await stripe.subscriptions.update(p.subscriptionId,{items:updates,proration_behavior:'create_prorations',metadata:{...sub.metadata,storageTier:st,performanceTier:pt,interval:iv}});
+   await stripe.subscriptions.update(p.subscriptionId,{items:updates,proration_behavior:'always_invoice',payment_behavior:'error_if_incomplete',metadata:{...sub.metadata,storageTier:st,performanceTier:pt,interval:iv}});
    await store.change(identity.owner,x=>Object.assign(x.projects[id],{storageTier:st,performanceTier:pt,interval:iv}));
  }
  async function transferFreeSlot(s,deletedId){
    const deleted=s.projects[deletedId];if(!deleted?.feeWaived||s.ownerBenefits)return;
    const next=Object.values(s.projects).filter(p=>p.id!==deletedId).sort((a,b)=>(a.createdMs||0)-(b.createdMs||0))[0];if(!next)return;
-   if(next.subscriptionId&&next.workspaceFeePriceId&&stripe){
+   if(next.workspaceSubscriptionId)await stripe.subscriptions.cancel(next.workspaceSubscriptionId);
+   if(next.workspaceCheckoutSessionId){const session=await stripe.checkout.sessions.retrieve(next.workspaceCheckoutSessionId);if(session.status==='open')await stripe.checkout.sessions.expire(session.id);}
+   if(next.subscriptionId&&next.workspaceFeePriceId){
      const sub=await stripe.subscriptions.retrieve(next.subscriptionId),item=(sub.items?.data||[]).find(x=>x.price?.id===next.workspaceFeePriceId);
      if(item)await stripe.subscriptions.update(next.subscriptionId,{items:[{id:item.id,deleted:true}],proration_behavior:'none'});
    }
-   await store.change(s.owner,x=>{const q=x.projects[next.id];q.feeWaived=true;q.workspaceFeePriceId=null;});
+   await store.change(s.owner,x=>{const q=x.projects[next.id];q.feeWaived=true;q.workspaceFeePriceId=null;q.workspaceSubscriptionId=null;q.workspaceCheckoutSessionId=null;});
  }
  async function deleteProject(identity,s,id,body){
    const p=s.projects[id];if(!p)throw new CloudError('project_not_found',404);
-   if(cleanName(body.confirmName)!==p.name)throw new CloudError('confirm_name_required',409);
-   if(p.subscriptionId&&stripe)await stripe.subscriptions.cancel(p.subscriptionId);
+   if(typeof body.confirmName!=='string'||body.confirmName!==p.name)throw new CloudError('confirm_name_required',409);
+   if((p.subscriptionId||p.workspaceSubscriptionId)&&!stripe)throw new CloudError('billing_unavailable',503);
+   for(const sid of [p.subscriptionId,p.workspaceSubscriptionId].filter(Boolean)){const sub=await stripe.subscriptions.retrieve(sid);if(sub.status!=='canceled')await stripe.subscriptions.cancel(sid);}
+   for(const csid of [p.checkoutSessionId,p.workspaceCheckoutSessionId].filter(Boolean)){const session=await stripe.checkout.sessions.retrieve(csid);if(session.status==='open')await stripe.checkout.sessions.expire(csid);}
    const remover=config.deleteWorkspace||(async()=>{
-     const r=await fetch(receiverLocal+'/v1/receivers/me/workspaces/'+id,{method:'DELETE',headers:{authorization:identity.bearer,'x-confirm-workspace':id},signal:AbortSignal.timeout(30000)});
-     if(!r.ok)throw new CloudError('workspace_delete_failed',503);
+     if(!config.redxKey)throw new CloudError('workspace_delete_unavailable',503);
+     const stamp=String(Date.now()),proof=crypto.createHmac('sha256',config.redxKey).update(identity.owner+'/'+id+'/'+stamp).digest('hex');
+     const r=await fetch(receiverLocal+'/v1/receivers/me/workspaces/'+id,{method:'DELETE',headers:{authorization:identity.bearer,'x-confirm-workspace':id,'x-control-delete':proof,'x-control-delete-time':stamp},signal:AbortSignal.timeout(30000)});
+     // A pending checkout may never have created its Receiver workspace.
+     if(!r.ok&&r.status!==404)throw new CloudError('workspace_delete_failed',503);
    });
    await remover({identity,project:p});
    await transferFreeSlot({...s,owner:identity.owner},id);
    await store.change(identity.owner,x=>{delete x.projects[id];});
-   return {deleted:true,id,name:p.name,subscriptionCanceled:Boolean(p.subscriptionId)};
+   return {deleted:true,id,name:p.name,subscriptionCanceled:Boolean(p.subscriptionId||p.workspaceSubscriptionId)};
  }
  async function removeAds(identity,s){
    if(s.ownerBenefits)return {complimentary:true,message:'Owner ad-free access is active.'};
    if(s.adFree)return {alreadyActivated:true,message:'Ad-free access is already active.'};
    if(!billingReady)throw new CloudError('billing_unavailable',503);
-   if(s.adsCheckoutSessionId){const old=await stripe.checkout.sessions.retrieve(s.adsCheckoutSessionId);if(old.status==='open'&&old.url)return {url:old.url,resumed:true};}
+   if(s.adsCheckoutSessionId){const old=await stripe.checkout.sessions.retrieve(s.adsCheckoutSessionId);if(old.status==='open'&&old.url)return {url:old.url,resumed:true};if(old.status==='complete')throw new CloudError('checkout_processing',409);s=await store.change(identity.owner,x=>{x.adsCheckoutSessionId=null;x.adsCheckoutGeneration=(x.adsCheckoutGeneration||0)+1;});}
    const customer=await ensureCustomer(identity,s);
    const session=await stripe.checkout.sessions.create({mode:'payment',customer,line_items:[{price:price('one_time|remove_ads'),quantity:1}],metadata:{service:'GenDragoonSSD',kind:'remove_ads',redxOwner:identity.owner},
-     success_url:publicBase+'/billing/success?session_id={CHECKOUT_SESSION_ID}',cancel_url:publicBase+'/billing/cancel'},{idempotencyKey:'gd-rx-ads-'+identity.owner});
+     success_url:publicBase+'/billing/success?session_id={CHECKOUT_SESSION_ID}',cancel_url:publicBase+'/billing/cancel'},{idempotencyKey:'gd-rx-ads-'+identity.owner+'-'+(s.adsCheckoutGeneration||0)});
    await store.change(identity.owner,x=>{x.adsCheckoutSessionId=session.id;});
    return {url:session.url,oneTimeCents:REMOVE_ADS_CENTS};
  }
@@ -213,6 +295,8 @@ async function createControl(config){
    storage:Object.fromEntries(Object.entries(STORAGE).map(([k,v])=>[k,{gb:v.gb,monthlyCents:v.standard,yearlyCents:v.standard*10}])),
    performance:Object.fromEntries(Object.entries(PERFORMANCE).map(([k,v])=>[k,{workers:v.workers,monthlyCents:v.cents,yearlyCents:v.cents*10}])),
    removeAds:{oneTimeCents:REMOVE_ADS_CENTS},owner:{email:OWNER_EMAIL,allPlansIncluded:true,lifetime:true}};
+ const accountLocks=new Map();
+ async function serial(owner,fn){const before=accountLocks.get(owner)||Promise.resolve();let release;const gate=new Promise(r=>{release=r;});const tail=before.catch(()=>{}).then(()=>gate);accountLocks.set(owner,tail);await before.catch(()=>{});try{return await fn();}finally{release();if(accountLocks.get(owner)===tail)accountLocks.delete(owner);}}
  const server=http.createServer(async(req,res)=>{
    try{
      const host=req.headers.host||'',u=new URL(req.url,'http://'+host);if(req.headers.origin)throw new CloudError('invalid_origin',403);
@@ -220,7 +304,7 @@ async function createControl(config){
      if(req.method==='GET'&&pathname==='/healthz')return send(res,200,{service:'gendragoon-control',redx:true,billing:billingReady});
      if(req.method==='GET'&&pathname==='/v2/pricing')return send(res,200,pricing);
      if(req.method==='GET'&&['/billing/success','/billing/cancel','/billing/return'].includes(pathname)){res.writeHead(200,{'content-type':'text/html; charset=utf-8','cache-control':'no-store','x-content-type-options':'nosniff'});return res.end('<!doctype html><meta charset="utf-8"><title>GenDragoon</title><body style="font-family:system-ui;background:#0b0912;color:#eee;padding:48px"><h1>GenDragoon billing</h1><p>Return to GenDragoon Cloud SSD. The app will verify your current entitlement with the server.</p></body>');}
-     const identity=await identify(req);let s=await state(identity);s=await reconcile(identity,s);
+     const identity=await identify(req);return await serial(identity.owner,async()=>{let s=await state(identity);s=await reconcile(identity,s);
      if(req.method==='GET'&&pathname==='/v2/account')return send(res,200,{ownerBenefits:s.ownerBenefits===true,adFree:s.adFree===true,projectLimit:limitFor(s),usedProjectSlots:Object.keys(s.projects||{}).length,email:identity.email});
      if(req.method==='GET'&&pathname==='/v2/projects')return send(res,200,{ownerBenefits:s.ownerBenefits===true,projectLimit:limitFor(s),projects:Object.values(s.projects||{}).sort((a,b)=>a.createdMs-b.createdMs).map(publicProject)});
      if(req.method==='GET'&&pathname==='/v2/receiver-entitlements')return send(res,200,{schema:1,ownerBenefits:s.ownerBenefits===true,projectLimit:limitFor(s),usedProjectSlots:Object.keys(s.projects||{}).length,workspaces:Object.values(s.projects||{}).map(p=>({projectId:p.id,id:p.id,name:p.name,active:p.active===true,readOnly:p.readOnly===true,quotaBytes:p.quotaBytes||0,workers:p.workers||0,status:p.status,storageTier:p.storageTier||null,performanceTier:p.performanceTier||null,entitlementSource:p.owner?'owner':p.feeWaived?'fee-waived':'subscription'}))});
@@ -231,6 +315,7 @@ async function createControl(config){
      if(req.method==='POST'&&pathname==='/v2/remove-ads/checkout')return send(res,200,await removeAds(identity,s));
      if(req.method==='POST'&&pathname==='/v2/billing/portal'){const x=await portal(identity,s);return send(res,200,{url:x.url});}
      throw new CloudError('not_found',404);
+     });
    }catch(e){if(!res.headersSent)send(res,e instanceof CloudError?e.status:503,{error:e instanceof CloudError?e.code:'service_unavailable'});else res.destroy();}
  });
  server.requestTimeout=60000;server.headersTimeout=10000;server.maxHeadersCount=30;

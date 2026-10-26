@@ -50,11 +50,17 @@ test('existing red-xai.com app grant owns one Receiver, survives browser sign-ou
 
 test('production health is explicit and uses the dedicated Receiver route',{timeout:5000},async t=>{
  const root=await fs.mkdtemp(path.join(await fs.realpath(os.tmpdir()),'prod-health-'));
- const cloud=await createCloud({issuer:'https://red-xai.com',dev:false,productionReady:true,authProvider:'redx-site-session',store:new Store(),root});
+ const cloud=await createCloud({issuer:'https://red-xai.com',dev:false,productionReady:true,authProvider:'redx-site-session',
+  entitlementURL:'https://api.red-xai.com/gendragoon/v2/receiver-entitlements',store:new Store(),root});
  const api=await cloud.listen();
  t.after(async()=>{await cloud.close();await fs.rm(root,{recursive:true,force:true});});
  const r=await fetch(api+'/v1/receivers/healthz');assert.equal(r.status,200);
  const h=await r.json();assert.equal(h.service,'Red-XAI-Reiceivers');assert.equal(h.productionReady,true);assert.equal(h.developmentOnly,false);assert.equal(h.authProvider,'redx-site-session');
+});
+test('production startup refuses a Receiver without billing entitlement configuration',async t=>{
+ const root=await fs.mkdtemp(path.join(await fs.realpath(os.tmpdir()),'missing-entitlements-'));
+ t.after(()=>fs.rm(root,{recursive:true,force:true}));
+ await assert.rejects(createCloud({issuer:'https://red-xai.com',productionReady:true,authProvider:'redx-site-session',store:new Store(),root}),/requires billing entitlements/);
 });
 test('RedX metadata may use plain HTTP only on explicit IPv4 loopback',()=>{
  const {RedXState}=require('../redx-state.cjs');

@@ -385,12 +385,13 @@ private struct GDRXTokenSet {
         }
         var buckets: [UploadCloudBucket] = []
         for workspace in workspaces {
+            if workspace["active"] as? Bool == false || workspace["readOnly"] as? Bool == true { continue }
             guard let id = workspace["id"] as? String,
                   id.range(of: "^[a-f0-9]{32}$", options: .regularExpression) != nil,
                   let rawName = workspace["name"] as? String else { continue }
             let name = rawName.trimmingCharacters(in: .whitespacesAndNewlines)
             let workers = (workspace["workers"] as? NSNumber)?.intValue ?? 1
-            guard !name.isEmpty, name.count <= 80, (1...24).contains(max(1, workers)) else { continue }
+            guard !name.isEmpty, name.count <= 80, (1...24).contains(workers) else { continue }
             buckets.append(UploadCloudBucket(id: id, displayName: name, remote: "redxai", prefix: "Library", workers: workers))
         }
         buckets.sort { $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending }
@@ -437,7 +438,7 @@ private struct GDRXTokenSet {
     }
 
     var usageSummary: String {
-        guard quotaBytes > 0 else { return "Receiver quota is loading…" }
+        guard quotaBytes > 0 else { return linked ? "Choose and activate a workspace storage plan to begin." : "Receiver quota is loading…" }
         let formatter = ByteCountFormatter()
         formatter.countStyle = .file
         return formatter.string(fromByteCount: usedBytes) + " used of " + formatter.string(fromByteCount: quotaBytes)

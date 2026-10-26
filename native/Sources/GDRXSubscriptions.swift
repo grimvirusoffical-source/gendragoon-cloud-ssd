@@ -105,7 +105,9 @@ final class GDRXSubscriptionModel: ObservableObject {
               url.scheme == "https", url.host == "api.red-xai.com",
               url.user == nil, url.password == nil,
               ["/gendragoon", "/gendragoon/"].contains(url.path) else { return nil }
-        return url
+        // Foundation normalizes URL.path independently of the base URL's slash.
+        // Resolve child routes against a directory URL in either case.
+        return url.appendingPathComponent("")
     }
 
     private func endpoint(_ path: String) throws -> URL {
@@ -170,7 +172,28 @@ final class GDRXSubscriptionModel: ObservableObject {
             throw GDTransferError(message: "Your browser could not open Stripe Checkout.", status: 0)
         }
         checkoutPending = true
-        status = "Stripe Checkout opened. Return to GenDragoon after payment; access is verified by the server."
+        status = result.message ?? "Stripe Checkout opened. Return to GenDragoon after payment; access is verified by the server."
+    }
+
+    private func loadVerifiedState(_ redX: GDRedXAIAuthSession) async throws {
+        pricing = try JSONDecoder().decode(GDRXPricing.self,
+            from: await request(redX, "v2/pricing", authenticated: false))
+        let p = try JSONDecoder().decode(GDRXProjectsResponse.self,
+            from: await request(redX, "v2/projects"))
+        let a = try JSONDecoder().decode(GDRXAccountResponse.self,
+            from: await request(redX, "v2/account"))
+        projects = p.projects
+        ownerBenefits = a.ownerBenefits || p.ownerBenefits
+        adFree = a.adFree
+        projectLimit = a.projectLimit
+        usedProjectSlots = a.usedProjectSlots
+        checkoutPending = projects.contains(where: { $0.checkoutPending })
+        status = ownerBenefits
+            ? "Owner lifetime access active · all storage and performance plans included."
+            : checkoutPending
+              ? "Checkout still needs attention. Continue Checkout on the workspace to complete its required subscriptions."
+              : "Red-XAI plans verified · \(usedProjectSlots) of \(projectLimit) workspace slots used."
+        await redX.refreshWorkspaces()
     }
 
     func refresh(_ redX: GDRedXAIAuthSession) {
@@ -179,22 +202,7 @@ final class GDRXSubscriptionModel: ObservableObject {
         Task {
             defer { busy = false }
             do {
-                pricing = try JSONDecoder().decode(GDRXPricing.self,
-                    from: await request(redX, "v2/pricing", authenticated: false))
-                let p = try JSONDecoder().decode(GDRXProjectsResponse.self,
-                    from: await request(redX, "v2/projects"))
-                let a = try JSONDecoder().decode(GDRXAccountResponse.self,
-                    from: await request(redX, "v2/account"))
-                projects = p.projects
-                ownerBenefits = a.ownerBenefits || p.ownerBenefits
-                adFree = a.adFree
-                projectLimit = a.projectLimit
-                usedProjectSlots = a.usedProjectSlots
-                checkoutPending = projects.contains(where: { $0.checkoutPending })
-                status = ownerBenefits
-                    ? "Owner lifetime access active · all storage and performance plans included."
-                    : "Red-XAI plans verified · \(usedProjectSlots) of \(projectLimit) project slots used."
-                await redX.refreshWorkspaces()
+                try await loadVerifiedState(redX)
             } catch {
                 status = error.localizedDescription
             }
@@ -216,11 +224,8 @@ final class GDRXSubscriptionModel: ObservableObject {
                     "performanceTier": performanceTier,
                     "interval": yearly ? "year" : "month"
                 ])
+                try await loadVerifiedState(redX)
                 try openCheckout(data)
-                await redX.refreshWorkspaces()
-                let p = try JSONDecoder().decode(GDRXProjectsResponse.self, from: await request(redX, "v2/projects"))
-                projects = p.projects; ownerBenefits = p.ownerBenefits; projectLimit = p.projectLimit
-                usedProjectSlots = projects.count
             } catch { status = error.localizedDescription }
         }
     }
@@ -230,7 +235,11 @@ final class GDRXSubscriptionModel: ObservableObject {
         busy = true
         Task {
             defer { busy = false }
-            do { try openCheckout(await request(redX, "v2/projects/\(project.id)/checkout", method: "POST", payload: [:])) }
+            do {
+                let data = try await request(redX, "v2/projects/\(project.id)/checkout", method: "POST", payload: [:])
+                try await loadVerifiedState(redX)
+                try openCheckout(data)
+            }
             catch { status = error.localizedDescription }
         }
     }
@@ -248,9 +257,12 @@ final class GDRXSubscriptionModel: ObservableObject {
                         "performanceTier": performanceTier,
                         "interval": yearly ? "year" : "month"
                     ]))
-                if let index = projects.firstIndex(where: { $0.id == result.project.id }) { projects[index] = result.project }
-                status = ownerBenefits ? "Owner plan changed at no charge." : "Plan updated. Stripe applies any verified proration."
-                await redX.refreshWorkspaces()
+                try await loadVerifiedState(redX)
+                if !result.project.active && !ownerBenefits {
+                    try openCheckout(await request(redX, "v2/projects/\(projectID)/checkout", method: "POST", payload: [:]))
+                } else {
+                    status = ownerBenefits ? "Owner plan changed at no charge." : "Plan updated. Stripe applies any verified proration."
+                }
             } catch { status = error.localizedDescription }
         }
     }
@@ -263,10 +275,8 @@ final class GDRXSubscriptionModel: ObservableObject {
             defer { busy = false }
             do {
                 _ = try await request(redX, "v2/projects/\(project.id)", method: "DELETE", payload: ["confirmName": confirmName])
-                status = "Workspace deleted. Its subscription was canceled and encrypted cloud data was removed."
-                projects.removeAll { $0.id == project.id }
-                await redX.refreshWorkspaces()
-                refresh(redX)
+                try await loadVerifiedState(redX)
+                status = "Workspace deleted. Its subscriptions were canceled and encrypted cloud data was removed."
             } catch { status = error.localizedDescription }
         }
     }
@@ -335,11 +345,11 @@ struct GDRXSubscriptionsPanel: View {
         if let pricing = model.pricing {
             VStack(alignment: .leading, spacing: 12) {
                 HStack {
-                    Text("CREATE PROJECT").font(.system(size: 10, weight: .heavy, design: .monospaced)).tracking(2).foregroundStyle(gdPurple)
+                    Text("CREATE WORKSPACE").font(.system(size: 10, weight: .heavy, design: .monospaced)).tracking(2).foregroundStyle(gdPurple)
                     Spacer()
                     Text("\(model.usedProjectSlots) / \(model.projectLimit) slots").font(.caption.monospaced()).foregroundStyle(.secondary)
                 }
-                TextField("Project name", text: $projectName).textFieldStyle(.roundedBorder)
+                TextField("Workspace name", text: $projectName).textFieldStyle(.roundedBorder)
                 Picker("Storage", selection: $storageTier) {
                     ForEach(storageKeys, id: \.self) { key in
                         if let p = pricing.storage[key] { Text("\(key) · \(money(yearly ? p.yearlyCents : p.monthlyCents))/\(yearly ? "yr" : "mo")").tag(key) }
@@ -357,6 +367,10 @@ struct GDRXSubscriptionsPanel: View {
                        ? "Your first workspace has no workspace fee forever. Storage is still subscribed; performance may be Free (1 worker) or a faster paid tier."
                        : "Additional workspace: \(money(pricing.projects.additionalWorkspaceMonthlyCents))/month + selected storage + selected performance. Free performance is allowed.")
                     .font(.caption).foregroundStyle(.secondary)
+                if !model.ownerBenefits && !model.projects.isEmpty {
+                    Text("Storage and performance share your selected billing interval. The workspace fee is billed monthly through a second checkout. Complete both checkouts to activate the workspace.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
                 Button(model.ownerBenefits ? "Create Workspace · Included" : "Create Workspace & Open Checkout") {
                     model.createProject(redX, name: projectName, storageTier: storageTier, performanceTier: performanceTier, yearly: yearly)
                 }.buttonStyle(.borderedProminent).tint(gdPurple)
@@ -368,12 +382,12 @@ struct GDRXSubscriptionsPanel: View {
     @ViewBuilder private var projectList: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack {
-                Text("PROJECTS").font(.system(size: 10, weight: .heavy, design: .monospaced)).tracking(2).foregroundStyle(gdPurple)
+                Text("WORKSPACES").font(.system(size: 10, weight: .heavy, design: .monospaced)).tracking(2).foregroundStyle(gdPurple)
                 Spacer()
                 Button("Refresh") { model.refresh(redX) }.disabled(model.busy)
             }
             if model.projects.isEmpty {
-                Text("No projects yet. Create the first one above.").font(.caption).foregroundStyle(.secondary)
+                Text("No workspaces yet. Create the first one above.").font(.caption).foregroundStyle(.secondary)
             } else {
                 ForEach(model.projects) { p in
                     HStack(spacing: 12) {
@@ -381,13 +395,12 @@ struct GDRXSubscriptionsPanel: View {
                             .foregroundStyle(p.active ? .green : .orange)
                         VStack(alignment: .leading, spacing: 4) {
                             Text(p.name).font(.system(size: 13, weight: .bold))
-                            Text(p.owner ? "Owner · 6 TB · Max · included" :
-                                 "\(p.storageTier ?? "Plan required") · \((p.performanceTier ?? "—").capitalized) · \(p.workers) worker(s) · workspace \(p.feeWaived ? "fee waived" : money(p.workspaceMonthlyCents) + "/mo")")
+                            Text("\(p.storageTier ?? "Plan required") · \((p.performanceTier ?? "—").capitalized) · \(p.workers) worker(s) · \(p.owner ? "owner included" : "workspace " + (p.feeWaived ? "fee waived" : money(p.workspaceMonthlyCents) + "/mo"))")
                                 .font(.caption).foregroundStyle(.secondary)
                         }
                         Spacer()
                         if p.checkoutPending {
-                            Button("Resume Checkout") { model.resumeCheckout(redX, project: p) }.buttonStyle(.bordered)
+                            Button("Continue Checkout") { model.resumeCheckout(redX, project: p) }.buttonStyle(.bordered).disabled(model.busy)
                         } else {
                             Text(p.status.replacingOccurrences(of: "_", with: " ").capitalized).font(.caption2).foregroundStyle(.secondary)
                         }
@@ -420,8 +433,8 @@ struct GDRXSubscriptionsPanel: View {
     @ViewBuilder private var planEditor: some View {
         if let pricing = model.pricing {
             VStack(alignment: .leading, spacing: 12) {
-                Picker("Project", selection: $selectedProjectID) {
-                    Text("Choose project").tag("")
+                Picker("Workspace", selection: $selectedProjectID) {
+                    Text("Choose workspace").tag("")
                     ForEach(model.projects) { p in Text(p.name).tag(p.id) }
                 }
                 if focus == .storage || focus == .plans {
@@ -459,7 +472,7 @@ struct GDRXSubscriptionsPanel: View {
                     }
                 }
                 Picker("Billing", selection: $yearly) { Text("Monthly").tag(false); Text("Yearly").tag(true) }.pickerStyle(.segmented)
-                Button(model.ownerBenefits ? "Apply Included Plan" : "Apply Plan Change") {
+                Button(model.ownerBenefits ? "Apply Included Plan" : selectedProject?.active == true ? "Apply Plan Change" : "Choose Plan & Continue Checkout") {
                     model.changePlan(redX, projectID: selectedProjectID, storageTier: storageTier, performanceTier: performanceTier, yearly: yearly)
                 }.buttonStyle(.borderedProminent).tint(.cyan)
                     .disabled(model.busy || selectedProjectID.isEmpty)
@@ -521,7 +534,9 @@ struct GDRXSubscriptionsPanel: View {
             yearly = p.interval == "year"
         }
         .onChange(of: model.projects) { _, value in
-            if selectedProjectID.isEmpty, let first = value.first { selectedProjectID = first.id }
+            if !value.contains(where: { $0.id == selectedProjectID }) {
+                selectedProjectID = value.first?.id ?? ""
+            }
         }
     }
 }

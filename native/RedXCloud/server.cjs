@@ -1,6 +1,6 @@
 'use strict';
-// Private development integration, deliberately separate from the serving
-// Firebase backend. No cloud resource purchase, migration, or paid entitlement.
+// RedX Receiver storage, with billing-controlled workspace entitlements kept
+// separate from the optional Firebase backend.
 const fs = require('node:fs/promises');
 const syncFS = require('node:fs');
 const path = require('node:path');
@@ -30,12 +30,12 @@ async function directory(p) {
 }
 async function fsyncDirectory(p) { const f = await fs.open(p, 'r'); try { await f.sync(); } finally { await f.close(); } }
 async function createCloud(config) {
-  // Restrict this preview to loopback. Public deployment needs the documented
-  // readiness gates, rate limiting, TLS and paid entitlement integration.
+  // Bind storage to loopback; the public service terminates TLS at its proxy.
   const issuer = origin(config.issuer, config.dev);
   const root = path.resolve(config.root);
   const quota = config.quota ?? 64 * 1024 * 1024;
   if (!Number.isSafeInteger(quota) || quota < 1 || quota > MAX_QUOTA) throw new Error('Invalid Receiver quota');
+  if (config.productionReady === true && !config.entitlementURL) throw new Error('Production Receiver requires billing entitlements');
   await directory(root);
   const lock = path.join(root, '.writer-lock');
   await fs.mkdir(lock, {mode: 0o700}); // refuse two writers or an unreconciled crash
@@ -59,7 +59,11 @@ async function createCloud(config) {
     : null;
   const developmentOnly = config.dev === true;
   const productionReady = config.productionReady === true && !developmentOnly && authProvider === 'redx-site-session';
-  const busy = new Set(); let requests = 0; let decoderBusy = false;
+  const busy = new Set(), deletingWorkspaces = new Set(), workspaceOperations = new Map(), transfers = new Map();
+  const decoderWaiters = []; let requests = 0, decoders = 0;
+  const decoderLimit = config.decoderConcurrency ?? 4;
+  if (!Number.isInteger(decoderLimit) || decoderLimit < 1 || decoderLimit > 8) throw new Error('Invalid decoder concurrency');
+  const workspaceDeleteKey = config.workspaceDeleteKey || config.redxKey || null;
   async function responseJSON(response, max = 65536) {
     const chunks = []; let size = 0;
     for await (const chunk of response.body) {
@@ -130,8 +134,8 @@ async function createCloud(config) {
     return {record, bytes, file, meta, dir};
   }
   async function validatePNG(file) {
-    if (decoderBusy) throw new CloudError('decoder_busy_retry', 503);
-    decoderBusy = true;
+    if (decoders >= decoderLimit) await new Promise(resolve => decoderWaiters.push(resolve));
+    else decoders++;
     try {
       const {stdout} = await exec(config.python || 'python3', [path.join(__dirname, 'png-carrier.py'), file], {
         timeout: 25000, maxBuffer: 16384, env: {...process.env, OPENBLAS_NUM_THREADS: '1', OMP_NUM_THREADS: '1'},
@@ -139,7 +143,49 @@ async function createCloud(config) {
       const v = JSON.parse(stdout);
       if (v.format !== 'redsecretsxai-png-v1') throw new Error('format');
     } catch(e) { throw new CloudError('invalid_redx_png_carrier', 422); }
-    finally { decoderBusy = false; }
+    finally { const next = decoderWaiters.shift(); if (next) next(); else decoders--; }
+  }
+  function signedWorkspaceDelete(req, owner, workspace) {
+    if (!workspaceDeleteKey) return false;
+    const supplied = req.headers['x-control-delete'];
+    const timestamp = req.headers['x-control-delete-time'];
+    if (typeof supplied !== 'string' || !SHA256.test(supplied)) return false;
+    if (typeof timestamp !== 'string' || !/^[0-9]{13}$/.test(timestamp) || Math.abs(Date.now() - Number(timestamp)) > 300000) return false;
+    const expected = crypto.createHmac('sha256', workspaceDeleteKey).update(owner + '/' + workspace + '/' + timestamp).digest();
+    return crypto.timingSafeEqual(expected, Buffer.from(supplied, 'hex'));
+  }
+  function writableWorkspace(s, workspace) {
+    const ws = s.workspaces[workspace];
+    if (!ws || s.workspaceDeletions?.[workspace] || s.deletedWorkspaces?.[workspace]) throw new CloudError('not_found', 404);
+    if (entitlementURL && (ws.active !== true || ws.readOnly === true || ws.quotaBytes <= 0 || ws.workers < 1))
+      throw new CloudError('workspace_subscription_required', 402);
+    return ws;
+  }
+  async function beginWorkspaceOperation(owner, workspace, transfer = false) {
+    const key = owner + '/' + workspace;
+    if (deletingWorkspaces.has(key)) throw new CloudError('workspace_busy', 409);
+    workspaceOperations.set(key, (workspaceOperations.get(key) || 0) + 1);
+    let countedTransfer = false;
+    const release = () => {
+      workspaceOperations.set(key, workspaceOperations.get(key) - 1);
+      if (!workspaceOperations.get(key)) workspaceOperations.delete(key);
+      if (countedTransfer) {
+        transfers.set(key, transfers.get(key) - 1);
+        if (!transfers.get(key)) transfers.delete(key);
+        countedTransfer = false;
+      }
+    };
+    try {
+      const current = await store.get(owner), ws = current?.workspaces?.[workspace];
+      if (!ws || current.workspaceDeletions?.[workspace] || current.deletedWorkspaces?.[workspace]) throw new CloudError('not_found', 404);
+      if (transfer) {
+        // Lapsed accounts keep bounded read access to retrieve their own data.
+        const limit = entitlementURL ? Math.max(1, ws.workers || 0) : 24;
+        if ((transfers.get(key) || 0) >= limit) throw new CloudError('performance_limit_retry', 429);
+        transfers.set(key, (transfers.get(key) || 0) + 1); countedTransfer = true;
+      }
+      return {release, workspace: ws};
+    } catch (e) { release(); throw e; }
   }
   async function entitlementState(identity) {
     if (!entitlementURL) return null;
@@ -174,12 +220,17 @@ async function createCloud(config) {
         if (existing.billingManaged === true && !byId.has(id)) Object.assign(existing, {active:false, readOnly:true, quotaBytes:0, workers:0});
       }
       for (const w of entitlement.workspaces) {
+        if (s.workspaceDeletions?.[w.id] || s.deletedWorkspaces?.[w.id]) continue;
         const existing = s.workspaces[w.id] || {id:w.id, usedBytes:0};
         const used = Number.isSafeInteger(existing.usedBytes) && existing.usedBytes >= 0 ? existing.usedBytes : 0;
+        // Older object uploads charged the account ledger but omitted the
+        // workspace ledger. Reconcile those bytes before enforcing its quota.
+        const legacyUsed = Object.values(s.objects || {}).filter(o => o.workspace === w.id).reduce((n,o) => n + o.bytes, 0);
+        const legacyMissing = Math.max(0, legacyUsed - (existing.legacyUsedBytes || 0));
         s.workspaces[w.id] = {...existing, id:w.id, name:w.name, projectId:w.projectId, billingManaged:true,
           active:w.active, readOnly:w.readOnly, quotaBytes:w.quotaBytes, workers:w.workers,
           status:w.status || null, storageTier:w.storageTier || null, performanceTier:w.performanceTier || null,
-          entitlementSource:w.entitlementSource || 'subscription', usedBytes:used};
+          entitlementSource:w.entitlementSource || 'subscription', usedBytes:used + legacyMissing, legacyUsedBytes:legacyUsed};
       }
       const entitled = Object.values(s.workspaces).filter(w => w.billingManaged === true)
         .reduce((n,w) => n + (Number.isSafeInteger(w.quotaBytes) ? w.quotaBytes : 0), 0);
@@ -188,7 +239,7 @@ async function createCloud(config) {
     return state;
   }
   function publicState(s) {
-    const workspaces = Object.values(s.workspaces || {}).filter(w => !entitlementURL || w.billingManaged === true);
+    const workspaces = Object.values(s.workspaces || {}).filter(w => !s.workspaceDeletions?.[w.id] && !s.deletedWorkspaces?.[w.id] && (!entitlementURL || w.billingManaged === true));
     const entitledQuota = entitlementURL ? workspaces.reduce((n,w) => n + (Number.isSafeInteger(w.quotaBytes) ? w.quotaBytes : 0), 0) : s.quota;
     return {id: s.id, state: 'ready', developmentOnly, storageFormat: 'redsecretsxai-png-v1', quotaBytes: entitledQuota,
       usedBytes: s.used, projectLimit:s.projectLimit || 10, ownerBenefits:s.ownerBenefits === true, workspaces,
@@ -205,15 +256,20 @@ async function createCloud(config) {
   }
   const server = http.createServer(async (req, res) => {
     requests++;
+    let releaseWorkspace;
     try {
-      if (requests > 8) throw new CloudError('busy_retry', 503);
+      if (requests > 128) throw new CloudError('busy_retry', 503);
       const host = req.headers.host;
       if (host !== '127.0.0.1:' + server.address().port || req.headers.origin) throw new CloudError('invalid_origin', 403);
       const u = new URL(req.url, 'http://' + host);
       if (u.search || /%|\\|\.\./.test(req.url)) throw new CloudError('invalid_path', 400);
       if (req.method === 'GET' && ['/healthz','/v1/receivers/healthz'].includes(u.pathname)) return json(res, 200, {service: 'Red-XAI-Reiceivers', developmentOnly, productionReady, authProvider});
       const identity = await identify(req), owner = identity.owner;
-      const entitlement = await entitlementState(identity);
+      const workspaceDelete = /^\/v1\/receivers\/me\/workspaces\/([a-f0-9]{32})$/.exec(u.pathname);
+      const internalDelete = req.method === 'DELETE' && workspaceDelete && signedWorkspaceDelete(req, owner, workspaceDelete[1]);
+      // The control plane calls this route while deleting its billing record;
+      // requesting its entitlements again would create a recursive operation.
+      const entitlement = internalDelete ? null : await entitlementState(identity);
       const base = '/v1/receivers/me';
       if (u.pathname === base && req.method === 'PUT') {
         let state = await store.ensure(owner, quota);
@@ -222,6 +278,7 @@ async function createCloud(config) {
         return json(res, 200, publicState(state));
       }
       let state = await store.get(owner);
+      if (!state && internalDelete) state = await store.ensure(owner, quota);
       if (!state) throw new CloudError('receiver_not_found', 404);
       state = await syncEntitlements(owner, state, entitlement);
       if (u.pathname === base && req.method === 'GET') return json(res, 200, publicState(state));
@@ -232,45 +289,66 @@ async function createCloud(config) {
         let body; try { body = JSON.parse((await read(req, 4096)).toString()); } catch(e) { throw new CloudError('bad_json'); }
         if (typeof body.name !== 'string' || !body.name.trim() || body.name.length > 80 || /[\x00-\x1f]/.test(body.name)) throw new CloudError('workspace_name_invalid');
         state = await store.change(owner, s => {
+          if (s.deletedWorkspaces?.[id] || s.workspaceDeletions?.[id]) throw new CloudError('workspace_deleted', 409);
           if (s.workspaces[id]) { if (s.workspaces[id].name !== body.name) throw new CloudError('idempotency_conflict', 409); return; }
           if (Object.keys(s.workspaces).length >= 10) throw new CloudError('workspace_limit', 409);
           s.workspaces[id] = {id, name: body.name};
         });
         return json(res, 200, state.workspaces[id]);
       }
-      const workspaceDelete = /^\/v1\/receivers\/me\/workspaces\/([a-f0-9]{32})$/.exec(u.pathname);
       if (workspaceDelete && req.method === 'DELETE') {
         const workspace = workspaceDelete[1];
         if (req.headers['x-confirm-workspace'] !== workspace) throw new CloudError('workspace_delete_confirmation_required', 409);
-        const ws = state.workspaces[workspace];
-        if (!ws) throw new CloudError('not_found', 404);
-        if ([...busy].some(key => key.startsWith(owner + '/' + workspace + '/'))) throw new CloudError('workspace_busy', 409);
-        const dir = path.join(root, owner, workspace);
+        if (entitlementURL && !internalDelete) throw new CloudError('delete_project_through_billing', 403);
+        const key = owner + '/' + workspace;
+        if (deletingWorkspaces.has(key) || workspaceOperations.has(key)) throw new CloudError('workspace_busy', 409);
+        deletingWorkspaces.add(key);
         try {
-          const st = await fs.lstat(dir);
-          if (!st.isDirectory() || st.isSymbolicLink()) throw new CloudError('stored_object_corrupt', 503);
-          await fs.rm(dir, {recursive: true, force: true});
-          await fsyncDirectory(path.join(root, owner));
-        } catch(e) { if (e.code !== 'ENOENT') throw e; }
-        const legacy = Object.values(state.objects || {}).filter(o => o.workspace === workspace);
-        for (const object of legacy) {
-          const file = path.join(root, owner, object.id + '.png');
-          await fs.unlink(file).catch(e => {if (e.code !== 'ENOENT') throw e;});
-        }
-        const freed = Number.isSafeInteger(ws.usedBytes) && ws.usedBytes >= 0 ? ws.usedBytes : 0;
-        state = await store.change(owner, s => {
-          const current = s.workspaces[workspace];
-          if (!current) throw new CloudError('not_found', 404);
-          const currentUsed = Number.isSafeInteger(current.usedBytes) && current.usedBytes >= 0 ? current.usedBytes : 0;
-          if (s.used < currentUsed) throw new CloudError('quota_state_corrupt', 503);
-          s.used -= currentUsed;
-          for (const [id,o] of Object.entries(s.objects || {})) if (o.workspace === workspace) delete s.objects[id];
-          for (const [key,item] of Object.entries(s.library || {})) if (item.workspace === workspace) delete s.library[key];
-          for (const [id,r] of Object.entries(s.reservations || {})) if (r.workspace === workspace) delete s.reservations[id];
-          for (const [id,d] of Object.entries(s.deletions || {})) if (d.workspace === workspace) delete s.deletions[id];
-          delete s.workspaces[workspace];
-        });
-        return json(res, 200, {ok:true, workspace, freedBytes:freed, usedBytes:state.used});
+          state = await store.get(owner);
+          if (state.deletedWorkspaces?.[workspace]) return json(res, 200, {ok:true, workspace, freedBytes:0, usedBytes:state.used, alreadyDeleted:true});
+          if (!state.workspaces[workspace]) {
+            if (!internalDelete) throw new CloudError('not_found', 404);
+            state = await store.change(owner, s => {s.deletedWorkspaces ||= {}; s.deletedWorkspaces[workspace] = {deletedMs:Date.now()};});
+            return json(res, 200, {ok:true, workspace, freedBytes:0, usedBytes:state.used, alreadyDeleted:true});
+          }
+          // Record deletion before touching files. A retry after any disk or
+          // metadata failure resumes this operation and never charges twice.
+          state = await store.change(owner, s => {
+            s.workspaceDeletions ||= {};
+            if (s.workspaceDeletions[workspace]) return;
+            const ws = s.workspaces[workspace];
+            const legacy = Object.values(s.objects || {}).filter(o => o.workspace === workspace);
+            const legacyBytes = legacy.reduce((n, o) => n + o.bytes, 0);
+            const countedLegacy = ws.legacyUsedBytes || 0;
+            const bytes = (ws.usedBytes || 0) + Math.max(0, legacyBytes - countedLegacy);
+            if (!Number.isSafeInteger(bytes) || bytes < 0 || bytes > s.used) throw new CloudError('quota_state_corrupt', 503);
+            s.workspaceDeletions[workspace] = {bytes, legacyIds:legacy.map(o => o.id)};
+            Object.assign(ws, {active:false, readOnly:true, quotaBytes:0, workers:0, status:'deleting'});
+          });
+          const deletion = state.workspaceDeletions[workspace], dir = path.join(root, owner, workspace);
+          try {
+            const st = await fs.lstat(dir);
+            if (!st.isDirectory() || st.isSymbolicLink()) throw new CloudError('stored_object_corrupt', 503);
+            await fs.rm(dir, {recursive:true, force:true});
+          } catch(e) { if (e.code !== 'ENOENT') throw e; }
+          for (const id of deletion.legacyIds) {
+            if (!ID.test(id)) throw new CloudError('quota_state_corrupt', 503);
+            await fs.unlink(path.join(root, owner, id + '.png')).catch(e => {if (e.code !== 'ENOENT') throw e;});
+          }
+          await fsyncDirectory(path.join(root, owner)).catch(e => {if (e.code !== 'ENOENT') throw e;});
+          state = await store.change(owner, s => {
+            const d = s.workspaceDeletions?.[workspace];
+            if (!d || d.bytes !== deletion.bytes || s.used < d.bytes) throw new CloudError('quota_state_corrupt', 503);
+            s.used -= d.bytes;
+            for (const [id,o] of Object.entries(s.objects || {})) if (o.workspace === workspace) delete s.objects[id];
+            for (const [key,item] of Object.entries(s.library || {})) if (item.workspace === workspace) delete s.library[key];
+            for (const [id,r] of Object.entries(s.reservations || {})) if (r.workspace === workspace) delete s.reservations[id];
+            for (const [id,d] of Object.entries(s.deletions || {})) if (d.workspace === workspace) delete s.deletions[id];
+            delete s.workspaces[workspace]; delete s.workspaceDeletions[workspace];
+            s.deletedWorkspaces ||= {}; s.deletedWorkspaces[workspace] = {deletedMs:Date.now()};
+          });
+          return json(res, 200, {ok:true, workspace, freedBytes:deletion.bytes, usedBytes:state.used});
+        } finally { deletingWorkspaces.delete(key); }
       }
       const libraryBase = base + '/library';
       if (u.pathname === libraryBase && req.method === 'GET') {
@@ -285,11 +363,14 @@ async function createCloud(config) {
             || !['app','folder','file'].includes(kind) || !ID.test(workspace || '') || !ID.test(manifestId || '')
             || !Number.isSafeInteger(body.archiveBytes) || body.archiveBytes < 0 || body.archiveBytes > MAX_QUOTA
             || !SHA256.test(body.archiveSha256 || '')) throw new CloudError('library_metadata_invalid', 400);
+        releaseWorkspace = (await beginWorkspaceOperation(owner, workspace)).release;
+        writableWorkspace(await store.get(owner), workspace);
         if (!state.workspaces[workspace]) throw new CloudError('not_found', 404);
         const manifest = await blobRecord(owner, workspace, manifestId);
         if (!manifest) throw new CloudError('manifest_not_found', 409);
         const now = Date.now();
         state = await store.change(owner, s => {
+          writableWorkspace(s, workspace);
           s.library ||= {};
           const previous = s.library[key];
           const generation = previous ? previous.generation + 1 : 1;
@@ -304,14 +385,18 @@ async function createCloud(config) {
       }
       if (libraryMatch && req.method === 'DELETE') {
         const key = libraryMatch[1];
+        const item = state.library?.[key];
+        if (!item) throw new CloudError('not_found', 404);
+        releaseWorkspace = (await beginWorkspaceOperation(owner, item.workspace)).release;
         state = await store.change(owner, s => {s.library ||= {}; if (!s.library[key]) throw new CloudError('not_found', 404); delete s.library[key];});
         return json(res, 200, {ok: true, key});
       }
       const blobMatch = /^\/v1\/receivers\/me\/workspaces\/([a-f0-9]{32})\/blobs\/([a-f0-9]{32})$/.exec(u.pathname);
       if (blobMatch) {
         const [, workspace, id] = blobMatch;
-        const workspaceState = state.workspaces[workspace];
-        if (!workspaceState) throw new CloudError('not_found', 404);
+        const operation = await beginWorkspaceOperation(owner, workspace, ['GET','PUT'].includes(req.method));
+        releaseWorkspace = operation.release;
+        const workspaceState = operation.workspace;
         if (req.method === 'GET') {
           const found = await blobRecord(owner, workspace, id);
           if (!found) throw new CloudError('not_found', 404);
@@ -364,8 +449,7 @@ async function createCloud(config) {
           } finally { busy.delete(deleteKey); }
         }
         if (req.method !== 'PUT') throw new CloudError('method_not_allowed', 405);
-        if (entitlementURL && (workspaceState.active !== true || workspaceState.readOnly === true || workspaceState.quotaBytes <= 0))
-          throw new CloudError('workspace_subscription_required', 402);
+        writableWorkspace({workspaces:{[workspace]:workspaceState}}, workspace);
         const bytes = Number(req.headers['content-length']), sha256 = req.headers['x-content-sha256'];
         if (req.headers['content-type'] !== 'image/png') throw new CloudError('png_required', 415);
         if (!Number.isSafeInteger(bytes) || bytes < 8 || bytes > MAX_BYTES || !SHA256.test(sha256 || '')) throw new CloudError('invalid_size_or_hash', 400);
@@ -406,8 +490,7 @@ async function createCloud(config) {
               if (old.workspace !== workspace || old.bytes !== bytes || old.sha256 !== sha256) throw new CloudError('upload_busy', 409);
               // Interrupted prior writer; this reservation already counts quota.
             } else {
-              const ws=s.workspaces[workspace];
-              if (!ws) throw new CloudError('not_found',404);
+              const ws=writableWorkspace(s, workspace);
               const wsUsed=Number.isSafeInteger(ws.usedBytes)?ws.usedBytes:0;
               if (entitlementURL && wsUsed + bytes > ws.quotaBytes) throw new CloudError('quota_exceeded', 507);
               if (s.used + bytes > s.quota) throw new CloudError('quota_exceeded', 507);
@@ -455,8 +538,9 @@ async function createCloud(config) {
       const match = /^\/v1\/receivers\/me\/workspaces\/([a-f0-9]{32})\/objects\/([a-f0-9]{32})$/.exec(u.pathname);
       if (!match) throw new CloudError('not_found', 404);
       const [, workspace, id] = match;
-      const objectWorkspace = state.workspaces[workspace];
-      if (!objectWorkspace) throw new CloudError('not_found', 404);
+      const operation = await beginWorkspaceOperation(owner, workspace, ['GET','PUT'].includes(req.method));
+      releaseWorkspace = operation.release;
+      const objectWorkspace = operation.workspace;
       const dir = path.join(root, owner); await directory(dir);
       const file = path.join(dir, id + '.png');
       if (req.method === 'GET') {
@@ -468,8 +552,7 @@ async function createCloud(config) {
         return res.end(bytes);
       }
       if (req.method !== 'PUT') throw new CloudError('method_not_allowed', 405);
-      if (entitlementURL && (objectWorkspace.active !== true || objectWorkspace.readOnly === true || objectWorkspace.quotaBytes <= 0))
-        throw new CloudError('workspace_subscription_required', 402);
+      writableWorkspace({workspaces:{[workspace]:objectWorkspace}}, workspace);
       const bytes = Number(req.headers['content-length']), sha256 = req.headers['x-content-sha256'];
       if (req.headers['content-type'] !== 'image/png') throw new CloudError('png_required', 415);
       if (!Number.isSafeInteger(bytes) || bytes < 8 || bytes > MAX_BYTES || !/^[a-f0-9]{64}$/.test(sha256 || '')) throw new CloudError('invalid_size_or_hash', 400);
@@ -488,13 +571,21 @@ async function createCloud(config) {
           }
           if (previous.status === 'ready') throw new CloudError('stored_object_missing', 503);
           // No active writer: safely release an interrupted reservation with no final object.
-          await store.change(owner, s => {s.used -= s.objects[id].bytes; delete s.objects[id];});
+          await store.change(owner, s => {
+            const bytes=s.objects[id].bytes,ws=s.workspaces[workspace];
+            s.used-=bytes;
+            if(ws){const counted=Math.min(ws.legacyUsedBytes||0,bytes);ws.usedBytes=Math.max(0,(ws.usedBytes||0)-counted);ws.legacyUsedBytes=Math.max(0,(ws.legacyUsedBytes||0)-counted);}
+            delete s.objects[id];
+          });
         }
         const stats = await fs.statfs(root);
         if (Number(stats.bavail) * Number(stats.bsize) < bytes * 2 + 2 * 1024**3) throw new CloudError('disk_reserve', 507);
         await store.change(owner, s => {
+          const ws=writableWorkspace(s, workspace),wsUsed=ws.usedBytes||0;
           if (Object.keys(s.objects).length >= 1000) throw new CloudError('object_limit', 507);
           if (s.objects[id]) throw new CloudError('upload_busy', 409);
+          if (s.used+bytes>s.quota || entitlementURL && wsUsed+bytes>ws.quotaBytes) throw new CloudError('quota_exceeded',507);
+          ws.usedBytes=wsUsed+bytes;ws.legacyUsedBytes=(ws.legacyUsedBytes||0)+bytes;
           s.used += bytes; s.objects[id] = {id, workspace, bytes, sha256, status: 'uploading', encoding: 'redsecretsxai-png-v1'};
         });
         reserved = true;
@@ -512,14 +603,14 @@ async function createCloud(config) {
         // Never release the quota after an uncertain final metadata commit: the
         // durable object can be reconciled by retrying its immutable ID + hash.
         if (reserved && !installed) await store.change(owner, s => {if (s.objects[id]?.status === 'uploading') {
-          const b=s.objects[id].bytes;s.used-=b;if(s.workspaces[workspace])s.workspaces[workspace].usedBytes=Math.max(0,(s.workspaces[workspace].usedBytes||0)-b);delete s.objects[id];
+          const b=s.objects[id].bytes;s.used-=b;if(s.workspaces[workspace]){s.workspaces[workspace].usedBytes=Math.max(0,(s.workspaces[workspace].usedBytes||0)-b);s.workspaces[workspace].legacyUsedBytes=Math.max(0,(s.workspaces[workspace].legacyUsedBytes||0)-b);}delete s.objects[id];
         }}).catch(() => {});
         busy.delete(key);
       }
     } catch(e) {
       if (!res.headersSent) json(res, e instanceof CloudError ? e.status : 503, {error: e instanceof CloudError ? e.code : 'service_unavailable'});
       else res.destroy();
-    } finally { requests--; }
+    } finally { if (releaseWorkspace) releaseWorkspace(); requests--; }
   });
   server.requestTimeout = 60000; server.headersTimeout = 10000;
   server.maxHeadersCount = 30;

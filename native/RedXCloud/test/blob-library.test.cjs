@@ -109,4 +109,16 @@ test('scalable compact-PNG blobs and library index use real RedX + account isola
  assert.equal((await call(a.access_token,'GET',route)).status,404);
  assert.equal((await call(a.access_token,'DELETE',route)).status,404);
  assert.equal((await call(a.access_token,'GET','/v1/receivers/me')).json.usedBytes,afterDelete);
+
+ // Deleting a workspace removes both storage generations and its library
+ // index, with exactly one durable quota release across retries.
+ const deletedWorkspace=await call(a.access_token,'DELETE','/v1/receivers/me/workspaces/'+wkId,
+  undefined,{'x-confirm-workspace':wkId});
+ assert.equal(deletedWorkspace.status,200);assert.equal(deletedWorkspace.json.freedBytes,afterDelete);
+ const empty=(await call(a.access_token,'GET','/v1/receivers/me')).json;
+ assert.equal(empty.usedBytes,0);assert.equal(empty.workspaces.length,0);assert.equal(empty.libraryItems,0);
+ assert.equal((await call(a.access_token,'GET',mroute)).status,404);
+ const retry=await call(a.access_token,'DELETE','/v1/receivers/me/workspaces/'+wkId,
+  undefined,{'x-confirm-workspace':wkId});
+ assert.equal(retry.status,200);assert.equal(retry.json.freedBytes,0);
 });

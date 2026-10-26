@@ -214,7 +214,7 @@ private struct GDPrimary: View {
             .background(LinearGradient(colors:[Color(red:0.34,green:0.20,blue:0.68),Color(red:0.13,green:0.10,blue:0.27)],startPoint:.topLeading,endPoint:.bottomTrailing),in:RoundedRectangle(cornerRadius:21))
             GDHeading(kicker:"GET STARTED",title:"Your setup, in three simple steps",subtitle:"Choose a storage option, connect your account, and open the cloud library.")
             GDPanel {
-                onboardingStep(1,"Free private cloud","Create a free 2 GB workspace to upload, list and restore files.","My Cloud","cloud.fill") { page = .cloud }
+                onboardingStep(1,"Your private workspace","Your first Red-XAI workspace has no workspace fee. Choose storage and Free or paid performance to start.","My Cloud","cloud.fill") { page = .cloud }
                 Divider()
                 onboardingStep(2,"API integrations","Manage your private, scoped API keys for server applications.","API Keys","key.fill") { page = .account }
                 Divider()

@@ -7,12 +7,16 @@ encrypted by the pinned Red-SecretsXAI C++ core, wrapped in compact red-X PNG
 carriers and stored through the account-owned Receiver.
 """
 import hashlib
+from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 import json
 import os
 from pathlib import Path
 import re
 import ssl
 import tempfile
+import threading
+import time
 import urllib.error
 import urllib.request
 import zlib
@@ -58,7 +62,9 @@ METADATA_SCHEMA = "gendragoon.metadata-stream/v1"
 
 
 class RedXStorageError(RuntimeError):
-    pass
+    def __init__(self, message, status=None):
+        super().__init__(message)
+        self.status = status
 
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -91,7 +97,7 @@ def validate_config(value):
             or not isinstance(value.get("receiverId"), str) or not RECEIVER.fullmatch(value["receiverId"])
             or not isinstance(value.get("storageSecret"), str) or not SECRET.fullmatch(value["storageSecret"])
             or not isinstance(value.get("keymapPath"), str) or not Path(value["keymapPath"]).is_absolute()
-            or "\0" in value["keymapPath"]):
+            or "\0" in value["keymapPath"] or type(value.get("constrained", False)) is not bool):
         raise RedXStorageError("Invalid private Red-XAI worker configuration")
     return value
 
@@ -146,25 +152,34 @@ class RedXReceiver:
         if headers:
             request_headers.update(headers)
         request = urllib.request.Request(self._url(route), data=data, method=method, headers=request_headers)
-        try:
-            with self.opener.open(request, timeout=90) as response:
-                if response.status not in expected:
-                    raise RedXStorageError("Receiver rejected the operation (HTTP %d)" % response.status)
-                body = response.read(limit + 1)
-                if len(body) > limit:
-                    raise RedXStorageError("Receiver response exceeded its safety limit")
-                return response.status, dict(response.headers), body
-        except urllib.error.HTTPError as error:
-            code = int(error.code)
-            if code == 401:
-                raise RedXStorageError("Red-XAI app session expired or was logged out") from None
-            if code == 404:
-                raise RedXStorageError("Red-XAI cloud item was not found") from None
-            if code == 507:
-                raise RedXStorageError("Red-XAI cloud storage quota is full") from None
-            raise RedXStorageError("Receiver rejected the operation (HTTP %d)" % code) from None
-        except (urllib.error.URLError, TimeoutError, ssl.SSLError) as error:
-            raise RedXStorageError("Red-XAI Receiver is temporarily unreachable; retry resumes verified chunks") from error
+        for attempt in range(6):
+            try:
+                with self.opener.open(request, timeout=90) as response:
+                    if response.status not in expected:
+                        raise RedXStorageError("Receiver rejected the operation (HTTP %d)" % response.status,
+                                               response.status)
+                    body = response.read(limit + 1)
+                    if len(body) > limit:
+                        raise RedXStorageError("Receiver response exceeded its safety limit")
+                    return response.status, dict(response.headers), body
+            except urllib.error.HTTPError as error:
+                code = int(error.code)
+                retry_after = error.headers.get("Retry-After") if error.headers else None
+                error.close()
+                if code == 429 and attempt < 5:
+                    try:
+                        delay = float(retry_after) if retry_after is not None else .2 * 2 ** attempt
+                    except (TypeError, ValueError):
+                        delay = .2 * 2 ** attempt
+                    time.sleep(min(3.0, max(.2, delay)))
+                    continue
+                messages = {401: "Red-XAI app session expired or was logged out",
+                            404: "Red-XAI cloud item was not found",
+                            429: "Red-XAI transfer allowance is busy; retry resumes verified chunks",
+                            507: "Red-XAI cloud storage quota is full"}
+                raise RedXStorageError(messages.get(code, "Receiver rejected the operation (HTTP %d)" % code), code) from None
+            except (urllib.error.URLError, TimeoutError, ssl.SSLError) as error:
+                raise RedXStorageError("Red-XAI Receiver is temporarily unreachable; retry resumes verified chunks") from error
 
     def json(self, route, method="GET", value=None, expected=(200,)):
         data = None if value is None else json.dumps(value, separators=(",", ":")).encode()
@@ -195,6 +210,29 @@ class RedXReceiver:
         if body.get("id") != object_id_value or body.get("status") != "ready":
             raise RedXStorageError("Receiver did not confirm the encrypted object")
         return {"id": object_id_value, "carrierBytes": len(png), "carrierSha256": digest}
+
+    def verified_workers(self, write=False):
+        """Read current account-owned entitlements; stdin never grants workers."""
+        result = self.json("/v1/receivers/me")
+        workspaces = result.get("workspaces")
+        if (result.get("id") != self.receiver or result.get("state") != "ready"
+                or not isinstance(workspaces, list)):
+            raise RedXStorageError("Receiver performance response is invalid")
+        matches = [w for w in workspaces if isinstance(w, dict) and w.get("id") == self.workspace]
+        if len(matches) != 1:
+            raise RedXStorageError("Selected Red-XAI workspace is unavailable")
+        workspace = matches[0]
+        workers, quota = workspace.get("workers"), workspace.get("quotaBytes")
+        active, read_only = workspace.get("active"), workspace.get("readOnly")
+        if (type(workers) is not int or not 0 <= workers <= 24 or type(quota) is not int or quota < 0
+                or type(active) is not bool or type(read_only) is not bool
+                or active and not read_only and (workers < 1 or quota < 1)):
+            raise RedXStorageError("Receiver workspace entitlement is invalid")
+        writable = active and not read_only and quota > 0 and workers > 0
+        if write and not writable:
+            raise RedXStorageError("Select an active storage subscription before uploading")
+        # Lapsed workspaces retain single-worker recovery of already stored data.
+        return workers if writable and not self.config.get("constrained", False) else 1
 
     def get_png(self, object_id_value):
         if not ID.fullmatch(object_id_value):
@@ -236,6 +274,7 @@ class Codec:
         self.client = client
         self._manager = None
         self._session = None
+        self._operation_lock = threading.Lock()
 
     def __enter__(self):
         _crypto_runtime()
@@ -245,9 +284,21 @@ class Codec:
 
     def __exit__(self, *exc):
         if self._manager is not None:
-            self._manager.__exit__(*exc)
-            self._manager = None
-            self._session = None
+            with self._operation_lock:
+                self._manager.__exit__(*exc)
+                self._manager = None
+                self._session = None
+
+    def worker(self, client):
+        # A worker borrows the already unlocked session. C++ operations are
+        # serialized, avoiding undocumented native thread safety and repeated
+        # memory-hard key derivation; HTTP transfers and PNG work run in parallel.
+        if self._session is None:
+            raise RedXStorageError("Encrypted transfer session is not initialized")
+        worker = Codec(client)
+        worker._session = self._session
+        worker._operation_lock = self._operation_lock
+        return worker
 
     def seal(self, plain, object_id_value):
         plain = bytes(plain)
@@ -257,8 +308,9 @@ class Codec:
             source = Path(td) / "plain"
             encrypted = Path(td) / "sealed"
             source.write_bytes(plain)
-            rsx.encrypt_file(self._session, str(source), out_path=str(encrypted),
-                             aad=aad(self.client.receiver, self.client.workspace, object_id_value))
+            with self._operation_lock:
+                rsx.encrypt_file(self._session, str(source), out_path=str(encrypted),
+                                 aad=aad(self.client.receiver, self.client.workspace, object_id_value))
             blob = encrypted.read_bytes()
         png = encode_storage_image(blob)
         if len(png) > MAX_PNG or decode_storage_image(png) != blob:
@@ -274,14 +326,35 @@ class Codec:
             sealed = Path(td) / "sealed"
             output = Path(td) / "plain"
             sealed.write_bytes(blob)
-            rsx.decrypt_file(self._session, str(sealed), out_path=str(output),
-                             aad=aad(self.client.receiver, self.client.workspace, object_id_value))
+            with self._operation_lock:
+                rsx.decrypt_file(self._session, str(sealed), out_path=str(output),
+                                 aad=aad(self.client.receiver, self.client.workspace, object_id_value))
             return output.read_bytes()
 
 
 def _put_plain(client, codec, object_id_value, plain):
+    # Encryption has random nonces. Re-encrypting an interrupted deterministic
+    # object id would conflict with the immutable stored carrier, so authenticate
+    # and compare any committed chunk before deciding to reuse it.
+    def reuse():
+        png = client.get_png(object_id_value)
+        restored = codec.open(png, object_id_value)
+        if len(restored) != len(plain) or sha256_bytes(restored) != sha256_bytes(plain):
+            raise RedXStorageError("Existing encrypted chunk does not match this archive")
+        return {"id": object_id_value, "carrierBytes": len(png), "carrierSha256": sha256_bytes(png),
+                "plainBytes": len(plain), "plainSha256": sha256_bytes(plain)}
+    try:
+        return reuse()
+    except RedXStorageError as error:
+        if error.status != 404:
+            raise
     png = codec.seal(plain, object_id_value)
-    record = client.put_png(object_id_value, png)
+    try:
+        record = client.put_png(object_id_value, png)
+    except RedXStorageError as error:
+        if error.status != 409:
+            raise
+        return reuse()
     record.update(plainBytes=len(plain), plainSha256=sha256_bytes(plain))
     return record
 
@@ -297,6 +370,43 @@ def _get_plain(client, codec, record):
     if record.get("plainBytes") != len(plain) or record.get("plainSha256") != sha256_bytes(plain):
         raise RedXStorageError("Decrypted chunk failed manifest integrity")
     return plain
+
+
+def _parallel_chunks(client, codec, workers, values, operation):
+    """At most `workers` chunks in flight; consume results in archive order.
+
+    Unlock the keymap once before starting threads. Each thread owns an HTTP
+    opener and codec wrapper; native crypto calls share the session's lock.
+    """
+    if workers == 1:
+        for value in values:
+            yield operation(codec, value)
+        return
+    codecs = deque([codec] + [codec.worker(RedXReceiver(client.config)) for _ in range(workers - 1)])
+    local = threading.local()
+    assignment = threading.Lock()
+    def initialize():
+        with assignment:
+            local.codec = codecs.popleft()
+    def perform(value):
+        return operation(local.codec, value)
+    with ThreadPoolExecutor(max_workers=workers, initializer=initialize) as executor:
+        pending = deque()
+        values = iter(values)
+        try:
+            for _ in range(workers):
+                value = next(values, None)
+                if value is None:
+                    break
+                pending.append(executor.submit(perform, value))
+            while pending:
+                yield pending.popleft().result()
+                value = next(values, None)
+                if value is not None:
+                    pending.append(executor.submit(perform, value))
+        finally:
+            for future in pending:
+                future.cancel()
 
 
 def _json_pages(client, codec, domain, archive_sha, records, page_size=512):
@@ -325,21 +435,24 @@ def _load_pages(client, codec, pages):
 
 def upload_archive(config, archive, key, name, kind, archive_layout, archive_sha, source_manifest):
     client = RedXReceiver(config)
+    workers = client.verified_workers(write=True)
     archive = Path(archive)
     if not archive.is_file() or archive.is_symlink() or sha256_file(archive) != archive_sha:
         raise RedXStorageError("Prepared archive changed before encrypted upload")
     chunks = []
     with Codec(client) as codec, archive.open("rb") as stream:
-        index = 0
-        while True:
-            plain = stream.read(CHUNK)
-            if not plain:
-                break
+        def parts():
+            for index, plain in enumerate(iter(lambda: stream.read(CHUNK), b"")):
+                yield index, plain
+        def upload(codec, value):
+            index, plain = value
             oid = object_id("archive-chunk", archive_sha, index)
-            record = _put_plain(client, codec, oid, plain)
+            record = _put_plain(codec.client, codec, oid, plain)
             record["index"] = index
+            return record
+        allowance = min(workers, max(1, (archive.stat().st_size + CHUNK - 1) // CHUNK))
+        for record in _parallel_chunks(client, codec, allowance, parts(), upload):
             chunks.append(record)
-            index += 1
         if not chunks:
             raise RedXStorageError("Refusing to upload an empty archive")
 
@@ -413,6 +526,7 @@ def _root_for_item(client, codec, item):
 
 def download_archive(config, item, destination):
     client = RedXReceiver(config)
+    workers = client.verified_workers()
     destination = Path(destination)
     if destination.exists() or destination.is_symlink():
         raise RedXStorageError("Restore target already exists")
@@ -422,15 +536,16 @@ def download_archive(config, item, destination):
         chunks = _load_pages(client, codec, root["chunkPages"])
         if len(chunks) != root.get("chunkCount"):
             raise RedXStorageError("Encrypted archive chunk count mismatch")
+        if any(not isinstance(record, dict) or record.get("index") != index for index, record in enumerate(chunks)):
+            raise RedXStorageError("Encrypted archive chunk order is invalid")
         hasher = hashlib.sha256()
         total = 0
         temp = destination.with_name("." + destination.name + ".partial")
         try:
             with temp.open("xb") as output:
-                for expected_index, record in enumerate(chunks):
-                    if record.get("index") != expected_index:
-                        raise RedXStorageError("Encrypted archive chunk order is invalid")
-                    plain = _get_plain(client, codec, record)
+                allowance = min(workers, max(1, len(chunks)))
+                for plain in _parallel_chunks(client, codec, allowance, chunks,
+                        lambda worker, record: _get_plain(worker.client, worker, record)):
                     output.write(plain)
                     hasher.update(plain)
                     total += len(plain)

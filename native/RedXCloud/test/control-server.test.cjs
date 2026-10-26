@@ -2,6 +2,9 @@
 const test=require('node:test');
 const assert=require('node:assert/strict');
 const {createControl}=require('../control-server.cjs');
+const {STORAGE,PERFORMANCE}=require('../../Backend/catalog.js');
+const priceIds=require('../../Backend/stripe_live_catalog.json').priceIds;
+function catalogPrice(id){const key=Object.keys(priceIds).find(k=>priceIds[k]===id),parts=key?.split('|')||[];const interval=parts.at(-1);return {id,active:true,livemode:true,currency:'usd',unit_amount:parts[0]==='storage'?STORAGE[parts[2]][parts[1]]*(interval==='year'?10:1):parts[0]==='performance'?PERFORMANCE[parts[1]].cents*(interval==='year'?10:1):499,...(parts[0]!=='one_time'?{recurring:{interval,interval_count:1}}:{})};}
 
 class MemoryStore{
  constructor(){this.map=new Map()}
@@ -14,29 +17,33 @@ function fakeStripe(){
  let ci=0,si=0,subi=0,inline=0;const sessions=new Map(),subs=new Map(),canceled=[];
  return {
   _sessions:sessions,_subs:subs,_canceled:canceled,
-  prices:{retrieve:async id=>({id,active:true,livemode:true,currency:'usd'})},
+  prices:{retrieve:async id=>catalogPrice(id)},
   customers:{create:async()=>({id:'cus_'+(++ci)})},
   checkout:{sessions:{
-   create:async data=>{const id='cs_'+(++si),rows=data.line_items.map(x=>x.price?{price:{id:x.price,unit_amount:999,recurring:{interval:'month'}},quantity:1}:{price:{id:'price_inline_'+(++inline),unit_amount:x.price_data.unit_amount,recurring:x.price_data.recurring},quantity:1});
-     const s={id,status:'open',payment_status:'unpaid',url:'https://checkout.stripe.com/'+id,customer:data.customer,mode:data.mode,metadata:data.metadata,line_items:data.line_items,subscription:null,_rows:rows};
+   create:async data=>{const id='cs_'+(++si),rows=data.line_items.map(x=>x.price?{price:catalogPrice(x.price),quantity:x.quantity}:{price:{id:'price_inline_'+(++inline),unit_amount:x.price_data.unit_amount,currency:x.price_data.currency,recurring:x.price_data.recurring},quantity:x.quantity});
+     const s={id,status:'open',payment_status:'unpaid',url:'https://checkout.stripe.com/'+id,customer:data.customer,client_reference_id:data.client_reference_id,mode:data.mode,metadata:data.metadata,line_items:data.line_items,subscription:null,_rows:rows};
      sessions.set(id,s);return s;},
    retrieve:async id=>structuredClone(sessions.get(id)),
+   expire:async id=>{sessions.get(id).status='expired';return structuredClone(sessions.get(id));},
    listLineItems:async id=>({data:structuredClone(sessions.get(id)._rows),has_more:false})
   }},
   subscriptions:{
    retrieve:async id=>structuredClone(subs.get(id)),
-   update:async(id,data)=>{const s=subs.get(id);for(const u of data.items||[]){if(u.deleted){s.items.data=s.items.data.filter(x=>x.id!==u.id);continue;}if(u.id){const x=s.items.data.find(x=>x.id===u.id);x.price={id:u.price,unit_amount:999,recurring:{interval:'month'}};}else{s.items.data.push({id:'si_added_'+Math.random(),price:{id:u.price,unit_amount:999,recurring:{interval:'month'}},quantity:1});}}s.metadata=data.metadata||s.metadata;return structuredClone(s);},
+   update:async(id,data)=>{const s=subs.get(id);for(const u of data.items||[]){if(u.deleted){s.items.data=s.items.data.filter(x=>x.id!==u.id);continue;}if(u.id){const x=s.items.data.find(x=>x.id===u.id);x.price=catalogPrice(u.price);}else{s.items.data.push({id:'si_added_'+Math.random(),price:catalogPrice(u.price),quantity:1});}}s.metadata=data.metadata||s.metadata;return structuredClone(s);},
    cancel:async id=>{canceled.push(id);const s=subs.get(id);if(s)s.status='canceled';return structuredClone(s)}
   },
   billingPortal:{sessions:{create:async()=>({url:'https://billing.stripe.com/session/test'})}},
-  complete(sessionId,status='active'){const s=sessions.get(sessionId),id='sub_'+(++subi);s.status='complete';s.payment_status='paid';s.subscription=id;subs.set(id,{id,status,metadata:s.metadata,items:{data:s._rows.map((x,i)=>({id:'si_'+id+'_'+i,price:x.price,quantity:1}))}});}
+  complete(sessionId,status='active'){
+   const s=sessions.get(sessionId),id='sub_'+(++subi);s.status='complete';s.payment_status='paid';s.subscription=id;
+   subs.set(id,{id,status,customer:s.customer,metadata:s.metadata,items:{data:s._rows.map((x,i)=>({id:'si_'+id+'_'+i,price:x.price,quantity:1}))}});
+  }
  };
 }
 const tokenA='rxca_'+ 'A'.repeat(43),tokenOwner='rxca_'+ 'O'.repeat(43);
 function fakeFetch(url,opts){const owner=opts?.headers?.authorization==='Bearer '+tokenOwner;return Promise.resolve(new Response(JSON.stringify({protocol:'redx-site-session-v1',client_id:'gendragoon',scope:'gendragoon.receiver',sub:owner?'owner-sub':'user-sub',email:owner?'support@infected-nation.com':'user@example.com',email_verified:true}),{status:200,headers:{'content-type':'application/json'}}));}
-async function fixture({owner=false,existing={}}={}){
- const store=new MemoryStore(),stripe=fakeStripe(),deleted=[];
- const c=await createControl({issuer:'https://red-xai.com',store,receiverStore:new ReceiverStore(existing),stripe,fetchImpl:fakeFetch,publicBase:'https://api.red-xai.com/gendragoon',deleteWorkspace:async({project})=>deleted.push(project.id)});
+async function fixture({owner=false,existing={},stripeOverride,deleteWorkspace}={}){
+ const store=new MemoryStore(),stripe=stripeOverride===undefined?fakeStripe():stripeOverride,deleted=[];
+ const c=await createControl({issuer:'https://red-xai.com',store,receiverStore:new ReceiverStore(existing),stripe,fetchImpl:fakeFetch,publicBase:'https://api.red-xai.com/gendragoon',deleteWorkspace:deleteWorkspace|| (async({project})=>deleted.push(project.id))});
  const root=await c.listen(),token=owner?tokenOwner:tokenA;
  const call=async(path,{method='GET',body}={})=>{const r=await fetch(root+path,{method,headers:{authorization:'Bearer '+token,...(body?{'content-type':'application/json'}:{})},body:body?JSON.stringify(body):undefined});return {status:r.status,body:await r.json()};};
  return {c,store,stripe,deleted,call};
@@ -48,20 +55,29 @@ test('first workspace waives only the $5 fee and still requires storage + perfor
  let r=await f.call('/v2/projects',{method:'POST',body:{name:'First',storageTier:'100GB',performanceTier:'free',interval:'month'}});
  assert.equal(r.status,201);assert.equal(r.body.project.feeWaived,true);assert.equal(r.body.workspaceMonthlyCents,0);assert.match(r.body.url,/checkout/);
  let state=await getState(f),p=Object.values(state.projects)[0],session=f.stripe._sessions.get(p.checkoutSessionId);
- assert.equal(session.line_items.length,1);
+ assert.equal(session.line_items.length,1); // storage only; free performance has no paid Stripe line and workspace fee is waived
  f.stripe.complete(p.checkoutSessionId);r=await f.call('/v2/projects');
  p=r.body.projects[0];assert.equal(p.active,true);assert.equal(p.quotaBytes,100_000_000_000);assert.equal(p.workers,1);
 });
 
-test('second workspace adds recurring $5 monthly fee plus storage and paid performance',async t=>{
- const f=await fixture();t.after(()=>f.c.close());
- await f.call('/v2/projects',{method:'POST',body:{name:'First',storageTier:'100GB',performanceTier:'free',interval:'month'}});
- let state=await getState(f),first=Object.values(state.projects)[0];f.stripe.complete(first.checkoutSessionId);await f.call('/v2/projects');
- let r=await f.call('/v2/projects',{method:'POST',body:{name:'Second',storageTier:'100GB',performanceTier:'boost',interval:'month'}});
- assert.equal(r.body.project.feeWaived,false);assert.equal(r.body.workspaceMonthlyCents,500);
- state=await getState(f);const second=Object.values(state.projects).find(x=>x.name==='Second'),session=f.stripe._sessions.get(second.checkoutSessionId);
- assert.equal(session.line_items.length,3);assert.equal(session.line_items[2].price_data.unit_amount,500);assert.deepEqual(session.line_items[2].price_data.recurring,{interval:'month'});
- f.stripe.complete(second.checkoutSessionId);r=await f.call('/v2/projects');const paid=r.body.projects.find(x=>x.name==='Second');assert.equal(paid.active,true);assert.equal(paid.workers,4);
+async function createAndPayPlans(f,name='First',performanceTier='free',interval='month'){
+ const r=await f.call('/v2/projects',{method:'POST',body:{name,storageTier:'100GB',performanceTier,interval}});assert.equal(r.status,201,JSON.stringify(r.body));
+ let state=await getState(f),p=state.projects[r.body.project.id];f.stripe.complete(p.checkoutSessionId);await f.call('/v2/projects');return (await getState(f)).projects[p.id];
+}
+async function payWorkspaceFee(f,p){
+ const r=await f.call('/v2/projects/'+p.id+'/checkout',{method:'POST',body:{}});assert.equal(r.status,200,JSON.stringify(r.body));assert.equal(r.body.checkoutStage,'workspace_fee');
+ const state=await getState(f);f.stripe.complete(state.projects[p.id].workspaceCheckoutSessionId);await f.call('/v2/projects');return (await getState(f)).projects[p.id];
+}
+test('additional workspaces require separate verified monthly fee for either plan interval',async t=>{
+ for(const interval of ['month','year']){
+  const f=await fixture();t.after(()=>f.c.close());await createAndPayPlans(f);
+  let p=await createAndPayPlans(f,'Second','boost',interval);
+  assert.equal(p.active,false);assert.equal(p.status,'workspace_fee_required');
+  let r=await f.call('/v2/projects');assert.equal(r.body.projects.find(x=>x.id===p.id).checkoutPending,true);
+  const plans=f.stripe._sessions.get(p.checkoutSessionId);assert.equal(plans.line_items.length,2);assert.ok(plans._rows.every(x=>x.price.recurring.interval===interval));
+  p=await payWorkspaceFee(f,p);assert.equal(p.active,true);assert.equal(p.workers,4);
+  const fee=f.stripe._subs.get(p.workspaceSubscriptionId);assert.equal(fee.items.data[0].price.unit_amount,500);assert.equal(fee.items.data[0].price.recurring.interval,'month');
+ }
 });
 
 test('performance upgrades and downgrades change verified worker entitlement including Free',async t=>{
@@ -80,14 +96,109 @@ test('deleting a workspace cancels billing, deletes Receiver data, and transfers
  let s=await getState(f),first=Object.values(s.projects)[0];f.stripe.complete(first.checkoutSessionId);await f.call('/v2/projects');
  await f.call('/v2/projects',{method:'POST',body:{name:'Second',storageTier:'100GB',performanceTier:'lite',interval:'month'}});
  s=await getState(f);const second=Object.values(s.projects).find(x=>x.name==='Second');f.stripe.complete(second.checkoutSessionId);await f.call('/v2/projects');
+ await payWorkspaceFee(f,(await getState(f)).projects[second.id]);
  s=await getState(f);const currentFirst=s.projects[first.id],currentFirstSubscription=currentFirst.subscriptionId;
  let r=await f.call('/v2/projects/'+first.id,{method:'DELETE',body:{confirmName:'First'}});
  assert.equal(r.status,200);assert.deepEqual(f.deleted,[first.id]);assert.ok(f.stripe._canceled.includes(currentFirstSubscription));
- s=await getState(f);assert.equal(s.projects[first.id],undefined);assert.equal(s.projects[second.id].feeWaived,true);assert.equal(s.projects[second.id].workspaceFeePriceId,null);
+ s=await getState(f);assert.equal(s.projects[first.id],undefined);assert.equal(s.projects[second.id].feeWaived,true);assert.equal(s.projects[second.id].workspaceFeePriceId,null);assert.equal(s.projects[second.id].workspaceSubscriptionId,null);const r2=await f.call('/v2/projects');assert.equal(r2.body.projects[0].active,true);
 });
 
 test('owner account gets lifetime 6TB Max on every workspace without Checkout',async t=>{
  const wid='a'.repeat(32),f=await fixture({owner:true,existing:{[wid]:{id:wid,name:'Existing'}}});t.after(()=>f.c.close());
  let r=await f.call('/v2/receiver-entitlements');assert.equal(r.body.ownerBenefits,true);assert.equal(r.body.workspaces[0].quotaBytes,6_000_000_000_000);assert.equal(r.body.workspaces[0].workers,20);
  r=await f.call('/v2/projects',{method:'POST',body:{name:'Owner Two'}});assert.equal(r.body.project.owner,true);assert.equal(r.body.url,undefined);
+});
+
+test('every storage and performance tier grants the exact paid worker/quota entitlement in both intervals',async t=>{
+ const f=await fixture();t.after(()=>f.c.close());let p=await createAndPayPlans(f);
+ for(const interval of ['month','year'])for(const [storageTier,storage] of Object.entries(STORAGE))for(const [performanceTier,performance] of Object.entries({free:{workers:1},...PERFORMANCE})){
+   const r=await f.call('/v2/projects/'+p.id+'/plan',{method:'PUT',body:{storageTier,performanceTier,interval}});
+   assert.equal(r.status,200,JSON.stringify(r.body));assert.equal(r.body.project.active,true);assert.equal(r.body.project.quotaBytes,storage.gb*1e9);assert.equal(r.body.project.workers,performance.workers);
+ }
+});
+
+test('unpaid, mismatched customer, extra quantity, and canceled subscriptions never grant storage or workers',async t=>{
+ const f=await fixture();t.after(()=>f.c.close());
+ let r=await f.call('/v2/projects',{method:'POST',body:{name:'First',storageTier:'100GB',performanceTier:'max'}});
+ let p=(await getState(f)).projects[r.body.project.id];r=await f.call('/v2/receiver-entitlements');assert.equal(r.body.workspaces[0].active,false);
+ f.stripe.complete(p.checkoutSessionId);await f.call('/v2/projects');p=(await getState(f)).projects[p.id];const sub=f.stripe._subs.get(p.subscriptionId),customer=sub.customer;
+ sub.customer='cus_other';r=await f.call('/v2/receiver-entitlements');assert.equal(r.body.workspaces[0].workers,0);assert.equal(r.body.workspaces[0].quotaBytes,0);
+ sub.customer=customer;sub.items.data[0].quantity=2;r=await f.call('/v2/receiver-entitlements');assert.equal(r.body.workspaces[0].active,false);
+ sub.items.data[0].quantity=1;sub.status='canceled';r=await f.call('/v2/receiver-entitlements');assert.equal(r.body.workspaces[0].workers,0);
+});
+
+test('workspace fee must belong to the same customer and stay current independently of annual plans',async t=>{
+ const f=await fixture();t.after(()=>f.c.close());await createAndPayPlans(f);let p=await createAndPayPlans(f,'Second','max','year');p=await payWorkspaceFee(f,p);
+ const sub=f.stripe._subs.get(p.workspaceSubscriptionId);sub.status='past_due';let r=await f.call('/v2/receiver-entitlements');assert.equal(r.body.workspaces.find(x=>x.id===p.id).active,false);
+ sub.status='active';sub.items.data[0].price.unit_amount=499;r=await f.call('/v2/receiver-entitlements');assert.equal(r.body.workspaces.find(x=>x.id===p.id).workers,0);
+ sub.items.data[0].price.unit_amount=500;sub.metadata.redxOwner='other';r=await f.call('/v2/receiver-entitlements');assert.equal(r.body.workspaces.find(x=>x.id===p.id).active,false);
+});
+
+test('concurrent workspace creation allocates one fee waiver and respects the limit',async t=>{
+ const f=await fixture();t.after(()=>f.c.close());const responses=await Promise.all(Array.from({length:12},(_,i)=>f.call('/v2/projects',{method:'POST',body:{name:'Workspace '+i,storageTier:'100GB',performanceTier:'free'}})));
+ assert.equal(responses.filter(r=>r.status===201).length,10);assert.equal(responses.filter(r=>r.status===409).length,2);
+ const state=await getState(f);assert.equal(Object.values(state.projects).filter(p=>p.feeWaived).length,1);assert.equal(Object.keys(state.projects).length,10);
+});
+
+test('Checkout retry resumes the same workspace and expired sessions get a fresh generation',async t=>{
+ const f=await fixture();t.after(()=>f.c.close());const body={name:'Retry Workspace',storageTier:'100GB',performanceTier:'free'};
+ const a=await f.call('/v2/projects',{method:'POST',body}),b=await f.call('/v2/projects',{method:'POST',body});assert.equal(a.body.project.id,b.body.project.id);assert.equal(f.stripe._sessions.size,1);
+ const p=(await getState(f)).projects[a.body.project.id];f.stripe._sessions.get(p.checkoutSessionId).status='expired';
+ const c=await f.call('/v2/projects/'+p.id+'/checkout',{method:'POST',body:{}});assert.equal(c.status,200);assert.equal(f.stripe._sessions.size,2);assert.equal((await getState(f)).projects[p.id].checkoutGeneration,1);
+});
+
+test('imported first workspace can select plans and activate after storage payment',async t=>{
+ const wid='b'.repeat(32),f=await fixture({existing:{[wid]:{id:wid,name:'Imported'}}});t.after(()=>f.c.close());
+ let r=await f.call('/v2/projects');assert.equal(r.body.projects[0].status,'plan_required');
+ r=await f.call('/v2/projects/'+wid+'/plan',{method:'PUT',body:{storageTier:'200GB',performanceTier:'free',interval:'year'}});assert.equal(r.status,200);assert.equal(r.body.project.checkoutPending,true);
+ r=await f.call('/v2/projects/'+wid+'/checkout',{method:'POST',body:{}});assert.equal(r.status,200);
+ const p=(await getState(f)).projects[wid];f.stripe.complete(p.checkoutSessionId);r=await f.call('/v2/projects');assert.equal(r.body.projects[0].active,true);assert.equal(r.body.projects[0].feeWaived,true);
+});
+
+test('changing unpaid plans expires the old checkout so obsolete prices cannot activate',async t=>{
+ const f=await fixture();t.after(()=>f.c.close());const r=await f.call('/v2/projects',{method:'POST',body:{name:'First',storageTier:'100GB',performanceTier:'free'}});const p=(await getState(f)).projects[r.body.project.id];
+ const change=await f.call('/v2/projects/'+p.id+'/plan',{method:'PUT',body:{storageTier:'1TB',performanceTier:'turbo',interval:'year'}});assert.equal(change.status,200);assert.equal(f.stripe._sessions.get(p.checkoutSessionId).status,'expired');
+ const checkout=await f.call('/v2/projects/'+p.id+'/checkout',{method:'POST',body:{}});assert.equal(checkout.status,200);assert.notEqual((await getState(f)).projects[p.id].checkoutSessionId,p.checkoutSessionId);
+});
+
+test('deleting an additional workspace cancels both subscriptions and requires exact confirmation',async t=>{
+ const f=await fixture();t.after(()=>f.c.close());await createAndPayPlans(f);let p=await createAndPayPlans(f,'Second','max','year');p=await payWorkspaceFee(f,p);
+ let r=await f.call('/v2/projects/'+p.id,{method:'DELETE',body:{confirmName:' Second '}});assert.equal(r.status,409);assert.equal(f.stripe._canceled.length,0);
+ r=await f.call('/v2/projects/'+p.id,{method:'DELETE',body:{confirmName:'Second'}});assert.equal(r.status,200);assert.ok(f.stripe._canceled.includes(p.subscriptionId));assert.ok(f.stripe._canceled.includes(p.workspaceSubscriptionId));
+});
+
+test('deleting the fee-waived workspace expires a pending fee checkout before transferring the waiver',async t=>{
+ const f=await fixture();t.after(()=>f.c.close());const first=await createAndPayPlans(f);let second=await createAndPayPlans(f,'Second');await f.call('/v2/projects/'+second.id+'/checkout',{method:'POST',body:{}});second=(await getState(f)).projects[second.id];
+ const r=await f.call('/v2/projects/'+first.id,{method:'DELETE',body:{confirmName:'First'}});assert.equal(r.status,200);assert.equal(f.stripe._sessions.get(second.workspaceCheckoutSessionId).status,'expired');
+ const list=await f.call('/v2/projects');assert.equal(list.body.projects[0].active,true);assert.equal(list.body.projects[0].workspaceMonthlyCents,0);
+});
+
+test('owner benefits do not depend on Stripe being configured and owner checkout never bills',async t=>{
+ const f=await fixture({owner:true,stripeOverride:null});t.after(()=>f.c.close());let r=await f.call('/v2/projects',{method:'POST',body:{name:'Owner Project'}});assert.equal(r.status,201);assert.equal(r.body.project.feeWaived,true);
+ r=await f.call('/v2/projects/'+r.body.project.id+'/checkout',{method:'POST',body:{}});assert.equal(r.status,200);assert.equal(r.body.complimentary,true);
+});
+
+test('ad-free access requires a verified receipt for this account and exact product',async t=>{
+ const f=await fixture();t.after(()=>f.c.close());let r=await f.call('/v2/remove-ads/checkout',{method:'POST',body:{}});assert.equal(r.status,200);
+ let s=await getState(f),session=f.stripe._sessions.get(s.adsCheckoutSessionId);f.stripe.complete(session.id);session.mode='payment';session.customer='cus_other';
+ r=await f.call('/v2/account');assert.equal(r.status,503);assert.equal((await getState(f)).adFree,false);
+ session.customer=s.stripeCustomerId;r=await f.call('/v2/account');assert.equal(r.status,200);assert.equal(r.body.adFree,true);
+});
+
+test('startup refuses any missing or mispriced tier, including a high performance annual tier',async()=>{
+ const stripe=fakeStripe(),original=stripe.prices.retrieve;stripe.prices.retrieve=async id=>{const p=await original(id);if(id===priceIds['performance|max|year'])p.unit_amount=1;return p;};
+ await assert.rejects(fixture({stripeOverride:stripe}),/Stripe catalog\/account mismatch: performance\|max\|year/);
+});
+
+test('a canceled monthly workspace fee can be checked out again without rebilling annual plans',async t=>{
+ const f=await fixture();t.after(()=>f.c.close());await createAndPayPlans(f);let p=await createAndPayPlans(f,'Second','max','year');p=await payWorkspaceFee(f,p);const plans=p.subscriptionId;
+ f.stripe._subs.get(p.workspaceSubscriptionId).status='canceled';let r=await f.call('/v2/projects');assert.equal(r.body.projects.find(x=>x.id===p.id).checkoutPending,true);
+ p=await payWorkspaceFee(f,p);assert.equal(p.active,true);assert.equal(p.subscriptionId,plans);assert.equal(p.workspaceCheckoutGeneration,1);
+});
+
+test('plan editor recovers a canceled storage subscription by selecting a fresh checkout',async t=>{
+ const f=await fixture();t.after(()=>f.c.close());let p=await createAndPayPlans(f);f.stripe._subs.get(p.subscriptionId).status='canceled';
+ let r=await f.call('/v2/projects/'+p.id+'/plan',{method:'PUT',body:{storageTier:'1TB',performanceTier:'turbo',interval:'year'}});assert.equal(r.status,200);assert.equal(r.body.project.checkoutPending,true);assert.equal(r.body.project.storageTier,'1TB');
+ r=await f.call('/v2/projects/'+p.id+'/checkout',{method:'POST',body:{}});assert.equal(r.status,200);p=(await getState(f)).projects[p.id];f.stripe.complete(p.checkoutSessionId);
+ r=await f.call('/v2/projects');assert.equal(r.body.projects[0].active,true);assert.equal(r.body.projects[0].quotaBytes,1e12);assert.equal(r.body.projects[0].workers,8);
 });
