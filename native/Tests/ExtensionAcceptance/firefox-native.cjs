@@ -38,6 +38,11 @@ async function connectBidi(url,{WebSocketImpl=globalThis.WebSocket,timeout=15000
  throw last||new Error('Firefox BiDi connection timed out');
 }
 async function freePort(){const server=net.createServer();await new Promise((resolve,reject)=>{server.once('error',reject);server.listen(0,'127.0.0.1',resolve);});const port=server.address().port;await new Promise(resolve=>server.close(resolve));return port;}
+async function withFirefoxLaunchEnvironment(stateHome,launch,environment=process.env){
+ const changes={XDG_STATE_HOME:stateHome,MOZ_REMOTE_ALLOW_SYSTEM_ACCESS:'1'},prior=Object.fromEntries(Object.keys(changes).map(key=>[key,{present:Object.hasOwn(environment,key),value:environment[key]}]));
+ try{Object.assign(environment,changes);return await launch();}
+ finally{for(const [key,value]of Object.entries(prior)){if(value.present)environment[key]=value.value;else delete environment[key];}}
+}
 async function ownedDirectory(directory,{create=false,created=[]}={}){let stat;try{stat=await fs.lstat(directory);}catch(error){if(error.code!=='ENOENT'||!create)throw error;await fs.mkdir(directory,{mode:0o700});created.push(directory);stat=await fs.lstat(directory);}assert.ok(stat.isDirectory()&&!stat.isSymbolicLink()&&stat.uid===process.getuid()&&(stat.mode&0o022)===0,'Firefox fixture registration requires owned non-writable directories');}
 async function registerFirefoxHost(root,binary,{environment=process.env,platform=process.platform,writeManifest=(handle,data)=>handle.writeFile(data)}={}){
  assert.equal(platform,'linux');assert.equal(environment.GITHUB_ACTIONS,'true');
@@ -63,14 +68,15 @@ async function firefoxNativeTest({root,directory,archive,firefoxBinary,webExt,we
  assert.equal(process.platform,'linux');assert.equal(process.env.GITHUB_ACTIONS,'true');const runnerRoot=await fs.realpath(process.env.RUNNER_TEMP);assert.ok(root.startsWith(runnerRoot+path.sep));
  const manifest=JSON.parse(await fs.readFile(path.join(directory,'manifest.json'),'utf8'));assert.equal(manifest.browser_specific_settings?.gecko?.id,FIREFOX_ID);
  const child=await startCompanion(root,FIREFOX_ID,python),binary=path.join(root,'state/gendragoon/NativeMessaging/gendragoon-native-host');
- let registration,runner,bidi,context,result;const originalStateHome=process.env.XDG_STATE_HOME;
+ let registration,runner,bidi,context,result;
  try{
   registration=await registerFirefoxHost(root,binary);
   const profile=path.join(root,'firefox-profile');await fs.mkdir(profile,{mode:0o700});const port=await freePort();
-  process.env.XDG_STATE_HOME=path.join(root,'state');
-  runner=await webExt.cmd.run({sourceDir:directory,firefox:firefoxBinary,firefoxProfile:profile,keepProfileChanges:true,noReload:true,noInput:true,startUrl:['about:blank'],
-   pref:{'extensions.webextensions.uuids':JSON.stringify({[FIREFOX_ID]:UUID})},args:['-headless','--remote-debugging-port',String(port)]},{shouldExitProgram:false});
-  if(originalStateHome===undefined)delete process.env.XDG_STATE_HOME;else process.env.XDG_STATE_HOME=originalStateHome;
+  // Firefox157 requires explicit test-driver authority for moz-extension pages.
+  // This reaches only the new CI process and is restored even if launch fails.
+  // https://github.com/mozilla-firefox/firefox/blob/main/remote/components/RemoteAgent.sys.mjs
+  runner=await withFirefoxLaunchEnvironment(path.join(root,'state'),()=>webExt.cmd.run({sourceDir:directory,firefox:firefoxBinary,firefoxProfile:profile,keepProfileChanges:true,noReload:true,noInput:true,startUrl:['about:blank'],
+   pref:{'extensions.webextensions.uuids':JSON.stringify({[FIREFOX_ID]:UUID})},args:['-headless','--remote-debugging-port',String(port)]},{shouldExitProgram:false}));
   const reload=await runner.reloadAllExtensions();for(const result of reload||[])assert.ok(!result.reloadError,'The actual temporary Firefox extension must reload');
   bidi=await connectBidi('ws://127.0.0.1:'+port+'/session');const session=await bidi.command('session.new',{capabilities:{alwaysMatch:{acceptInsecureCerts:false}}});assert.equal(session.capabilities.browserName,'firefox');
   await bidi.command('session.subscribe',{events:['log.entryAdded']});
@@ -125,13 +131,13 @@ async function firefoxNativeTest({root,directory,archive,firefoxBinary,webExt,we
    syntheticAccountFreeDispatch:true,realNativeConsentUITested:false,liveAccountOrUploadTest:false,signedStoreInstallationTested:false,normalUserApprovalTested:false,otherOperatingSystemsTested:false,
    installationMethod:'Pinned Mozilla web-ext temporary add-on, controlled by Firefox WebDriver BiDi in new disposable CI profile',
    nativeHostRegistration:'Exact allowed_extensions ID in disposable Actions VM user path; no existing manifest overwritten; exact created file removed after test',
-   protocol:'Mozilla WebDriver BiDi over IPv4 loopback; Node built-in WebSocket; no new test dependencies'};
+   protocol:'Mozilla WebDriver BiDi over IPv4 loopback; Node built-in WebSocket; no new test dependencies',privilegedExtensionAutomation:true,
+   firefoxAutomationEnvironment:'MOZ_REMOTE_ALLOW_SYSTEM_ACCESS=1',firefoxAutomationAuthoritySource:'https://github.com/mozilla-firefox/firefox/blob/main/remote/components/RemoteAgent.sys.mjs'};
  }catch(error){await report(root,'firefox-native-failure',{passed:false,stage:'native messaging/IPC acceptance',message:String(error.message).slice(0,500),bidiCommands:bidi?.trace||[],eventTypes:(bidi?.events||[]).slice(-20).map(event=>({method:event.method,type:event.params?.type,level:event.params?.level}))});throw error;}
  finally{
-  if(originalStateHome===undefined)delete process.env.XDG_STATE_HOME;else process.env.XDG_STATE_HOME=originalStateHome;
   try{if(bidi){try{await bidi.command('session.end');}catch{}bidi.close();}}
   finally{try{if(runner)await runner.exit();}finally{try{await stopChild(child);}finally{if(registration)await registration.close();}}}
  }
  await report(root,'firefox',{...result,createdHostManifestRemoved:true});
 }
-module.exports={BidiClient,connectBidi,registerFirefoxHost,firefoxNativeTest,FIREFOX_ID};
+module.exports={BidiClient,connectBidi,registerFirefoxHost,firefoxNativeTest,withFirefoxLaunchEnvironment,FIREFOX_ID};

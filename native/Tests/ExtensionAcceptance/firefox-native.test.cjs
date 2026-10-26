@@ -1,6 +1,6 @@
 'use strict';
 const test=require('node:test'),assert=require('node:assert/strict'),fs=require('node:fs/promises'),os=require('node:os'),path=require('node:path');
-const {BidiClient,connectBidi,registerFirefoxHost,FIREFOX_ID}=require('./firefox-native.cjs');
+const {BidiClient,connectBidi,registerFirefoxHost,withFirefoxLaunchEnvironment,FIREFOX_ID}=require('./firefox-native.cjs');
 class Socket extends EventTarget{constructor(){super();this.sent=[];}send(value){this.sent.push(JSON.parse(value));}close(){this.closed=true;}reply(value){this.dispatchEvent(new MessageEvent('message',{data:JSON.stringify(value)}));}}
 test('BiDi correlates concurrent responses, rejects protocol errors and fails outstanding requests on close',async()=>{
  const socket=new Socket(),client=new BidiClient(socket),a=client.command('first'),b=client.command('second');socket.reply({type:'success',id:2,result:{second:true}});socket.reply({type:'success',id:1,result:{first:true}});assert.deepEqual(await a,{first:true});assert.deepEqual(await b,{second:true});
@@ -37,4 +37,8 @@ test('failed exclusive manifest setup removes its own partial inode and preserve
  await assert.rejects(registerFirefoxHost(f.root,f.binary,{...f.options,writeManifest:async(handle,data)=>{await handle.writeFile(data.slice(0,25));throw new Error('Synthetic partial write failure');}}),/partial write failure/);await assert.rejects(fs.lstat(target),{code:'ENOENT'});
  const successful=await registerFirefoxHost(f.root,f.binary,f.options);await successful.close();
  await assert.rejects(registerFirefoxHost(f.root,f.binary,{...f.options,writeManifest:async handle=>{await handle.writeFile('independently changed');throw new Error('Synthetic changed content');}}),/changed content/);assert.equal(await fs.readFile(target,'utf8'),'independently changed');
+});
+test('only the isolated Firefox launch receives automation authority and both parent settings restore on success or throw',async()=>{
+ for(const fails of [false,true]){const environment={HOME:'/unchanged/synthetic-home',XDG_STATE_HOME:'/original/state',MOZ_REMOTE_ALLOW_SYSTEM_ACCESS:'original'},before={...environment};const launching=withFirefoxLaunchEnvironment('/private/fixture/state',async()=>{assert.equal(environment.MOZ_REMOTE_ALLOW_SYSTEM_ACCESS,'1');assert.equal(environment.XDG_STATE_HOME,'/private/fixture/state');assert.equal(environment.HOME,before.HOME);await new Promise(setImmediate);if(fails)throw new Error('Synthetic launch failure');return 'launched';},environment);if(fails)await assert.rejects(launching,/launch failure/);else assert.equal(await launching,'launched');assert.deepEqual(environment,before);}
+ const absent={HOME:'/unchanged/synthetic-home'};await assert.rejects(withFirefoxLaunchEnvironment('/fixture/state',async()=>{throw new Error('Launch failed before return');},absent));assert.deepEqual(absent,{HOME:'/unchanged/synthetic-home'});
 });
