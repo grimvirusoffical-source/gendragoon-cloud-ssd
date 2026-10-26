@@ -240,8 +240,8 @@ actor GDTransferClient {
         let limit=try budget.reserve(key:lease,verifiedLimit:workers(c,constrained:constrained),requestedWorkers:maximumWorkers)
         defer{budget.release(key:lease)}
         let state=root.appendingPathComponent("upload-"+key+".json")
-        var id=(try? String(contentsOf:state,encoding:.utf8)) ?? UUID().uuidString.lowercased()
-        if UUID(uuidString:id)==nil{id=UUID().uuidString.lowercased()}
+        let savedID=(try? String(contentsOf:state,encoding:.utf8)) ?? ""
+        let id=UUID(uuidString:savedID)==nil ? UUID().uuidString.lowercased() : savedID
         try persist(Data(id.utf8),to:state)
         var request:[String:Any]=["requestId":id,"name":name,"sizeBytes":size]
         if let metadata {
