@@ -1206,7 +1206,7 @@ class PortableAppLifecycleTests(unittest.TestCase):
     def _broker_failure_case(self,*,residue=False):
         with native_fixture_directory(prefix='gd-app-orphan-') as td:
             manager=apps.PortableApps(Path(td).resolve()/'cache');prepared=prepare_native_fixture(manager,self.binary)
-            owned_child=owned_broker=None;retained=None;before_lease=None
+            owned_child=owned_broker=None;retained=None;preserved={}
             try:
                 receipt=launch_native_fixture(lambda:manager.launch(prepared,self.binary.name,approved=True))
                 wait_fixture(lambda:(prepared.payload/'child-heartbeat').exists())
@@ -1221,13 +1221,29 @@ class PortableAppLifecycleTests(unittest.TestCase):
                 if residue:
                     # Deterministically model the owned atomic leaf a stopped
                     # broker may retain. This does not identify the CI incident.
-                    retained=prepared.directory/'control'/('.private-'+apps.uuid.uuid4().hex)
+                    control=prepared.directory/'control';lease=control/('lease-'+receipt['id']+'.json')
+                    def retained_inventory():
+                        rows=manager.leases();kinds={}
+                        for row in rows:
+                            kind=apps._inventory_kind(row['path']);kinds[kind]=kinds.get(kind,0)+1
+                        details='Disposable residue inventory counts: '+json.dumps(dict(rowCount=len(rows),rowKindCounts=kinds),sort_keys=True)
+                        self.assertEqual(len({row['path'] for row in rows}),len(rows),details)
+                        self.assertTrue(all(Path(row['path']).parent==control and row['state']=='uncertain'
+                            and apps._inventory_kind(row['path']) in ('lease','atomic-temp') for row in rows),details)
+                        leases=[row for row in rows if apps._inventory_kind(row['path'])=='lease']
+                        self.assertEqual(len(leases),1,details);current=leases[0]
+                        self.assertTrue(Path(current['path'])==lease and current.get('id')==receipt['id']
+                            and current.get('identity')==prepared.identity and current.get('brokerPid')==owned_broker['pid']
+                            and current.get('brokerIdentity')==owned_broker['identity'],'Disposable residue lease binding changed')
+                        return {Path(row['path']):row for row in rows}
+                    prior=retained_inventory()
+                    for path in prior:
+                        raw=path.read_bytes();preserved[path]=(raw,hashlib.sha256(raw).hexdigest())
+                    retained=control/('.private-'+apps.uuid.uuid4().hex)
                     private.write_private(retained,b'{"fixture":"interrupted publication"}')
-                    before_lease=Path(manager.leases()[0]['path']).read_bytes()
                     (prepared.payload/'hold-after-finished').write_text('Only this generated fixture waits after its marker')
-                    rows=manager.leases();self.assertEqual(len(rows),2)
-                    self.assertEqual({apps._inventory_kind(row['path']) for row in rows},{'lease','atomic-temp'})
-                    self.assertTrue(all(row['state']=='uncertain' for row in rows))
+                    self.assertTrue(set(retained_inventory())==set(prior)|{retained},'Disposable residue inventory changed beyond the generated leaf')
+                    raw=retained.read_bytes();preserved[retained]=(raw,hashlib.sha256(raw).hexdigest())
                 before=(prepared.payload/'child-heartbeat').read_text();time.sleep(.2)
                 self.assertNotEqual((prepared.payload/'child-heartbeat').read_text(),before,'The broker failure must leave the native child running')
                 for uncertain_only in (False,True):
@@ -1255,8 +1271,10 @@ class PortableAppLifecycleTests(unittest.TestCase):
             self.assertTrue((prepared.payload/'child-finished').exists())
             self.assertEqual(manager.leases()[0]['state'],'uncertain','Broker failure cannot be auto-cleared by a missing PID')
             if residue:
-                self.assertEqual(retained.read_bytes(),b'{"fixture":"interrupted publication"}')
-                self.assertEqual(Path(manager.leases()[0]['path']).read_bytes(),before_lease)
+                self.assertTrue(set(retained_inventory())==set(preserved),'Disposable residue inventory paths changed after owned process exit')
+                for path,(original,digest) in preserved.items():
+                    raw=path.read_bytes()
+                    self.assertTrue(raw==original and hashlib.sha256(raw).hexdigest()==digest,'Disposable residue control bytes changed')
             for uncertain_only in (False,True):
                 with self.assertRaises(apps.PortableAppError):manager.assert_safe('delete library items',uncertain_only=uncertain_only)
             self.assertTrue((prepared.payload/self.binary.name).exists());self.assertTrue(self.binary.exists())
