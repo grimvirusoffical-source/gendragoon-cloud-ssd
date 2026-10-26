@@ -1,0 +1,39 @@
+name: Windows portable application lifecycle
+
+on:
+  pull_request:
+    paths:
+      - 'native/Desktop/**'
+      - '.github/workflows/desktop-portable-acceptance.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-portable-acceptance-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  windows-portable:
+    runs-on: windows-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: '3.13'
+      - name: Install the reviewed desktop runtime and fixture dependencies
+        run: python -B -m pip install --only-binary=:all: -r native/Desktop/requirements.txt -r native/Desktop/requirements-build.txt
+      - name: Stage the pinned compiled Windows codec without private source
+        run: python -B native/Desktop/stage_runtime.py --destination "${{ runner.temp }}/gendragoon-desktop" --prebuilt native/Desktop/runtimes/windows-x86_64.zip
+      - name: Create the application-owned UTF-8 interpreter
+        run: python -B native/Desktop/windows_utf8.py --destination "${{ runner.temp }}/gendragoon-python-utf8" --path "${{ runner.temp }}/gendragoon-desktop" --path "${{ runner.temp }}/gendragoon-desktop/runtime"
+      - name: Verify authenticated preparation and native descendant leases
+        run: |
+          & "${{ runner.temp }}/gendragoon-python-utf8/python.exe" -B -m unittest discover -s native/Desktop/tests -p test_machinenotes.py -v
+        env:
+          GD_DESKTOP_RUNTIME: ${{ runner.temp }}/gendragoon-desktop

@@ -25,8 +25,39 @@ import private_fs as private
 SCHEMA="gendragoon.portable-app/v1"
 HEX=re.compile(r"[a-f0-9]+")
 MAX_RECORD=128*1024*1024
+FAILURE_STAGES=frozenset(("read-spec","read-lease","validate-spec","verify-payload","binary-header","broker-identity","receipt-owner","native-imports","job-create","job-limits","dll-reset","process-create","job-assign","process-resume","receipt-running","job-accounting","main-exit","receipt-main-exit","linux-subreaper","linux-process-create","linux-wait","receipt-complete","broker-create","unreported"))
+ERROR_TYPES=frozenset(("ImportError","ModuleNotFoundError","AttributeError","KeyError","PermissionError","OSError","ValueError","PortableAppError","TypeError","RuntimeError","SystemExit","KeyboardInterrupt","error"))
 
 class PortableAppError(ValueError):pass
+
+def _failure(stage,error):
+    """Fixed metadata only: never exception text, paths, keys or app output."""
+    name=type(error).__name__
+    value=dict(stage=stage if stage in FAILURE_STAGES else "unreported",errorType=name if name in ERROR_TYPES else "Exception")
+    for field in ("errno","winerror"):
+        code=getattr(error,field,None)
+        if type(code) is int and 0<=code<=0xffffffff:value[field]=code
+    return value
+
+def _launch_failure(lease,child):
+    diagnostic=lease.with_name("diagnostic-"+lease.stem.removeprefix("lease-")+".json")
+    result={"stage":"unreported"}
+    try:
+        saved=_read(diagnostic)
+        if saved.get("stage") in FAILURE_STAGES:result["stage"]=saved["stage"]
+        if saved.get("errorType") in ERROR_TYPES|{"Exception"}:result["errorType"]=saved["errorType"]
+        for field in ("errno","winerror"):
+            if type(saved.get(field)) is int and 0<=saved[field]<=0xffffffff:result[field]=saved[field]
+    except Exception:pass
+    try:
+        saved=_read(lease);result["leaseState"]=saved["state"] if saved.get("state") in ("pending","running","complete","uncertain","failed-before-start") else "uncertain"
+        result["brokerIdentityRecorded"]=bool(saved.get("brokerIdentity"))
+    except Exception:result["leaseState"]="uncertain"
+    code=child.poll()
+    if type(code) is int:result["brokerExitCode"]=code
+    error=PortableAppError("Launch could not be confirmed. The cache and process lease were retained; review them before changing accounts or deleting items.")
+    error.diagnostic=result
+    return error
 
 def host():
     system="windows" if sys.platform=="win32" else "linux" if sys.platform.startswith("linux") else None
@@ -139,7 +170,7 @@ class PreparedApp:
     records: list
     candidates: tuple
 
-def process_identity(pid):
+def process_identity(pid,*,required=False):
     """PID reuse cannot make an orphaned lease look healthy."""
     try:
         if sys.platform.startswith("linux"):
@@ -153,7 +184,9 @@ def process_identity(pid):
                 if win32event.WaitForSingleObject(handle,0)!=258:return None
                 return str(win32process.GetProcessTimes(handle)["CreationTime"])
             finally:handle.Close()
-    except Exception:return None
+    except Exception:
+        if required:raise
+        return None
     return None
 
 class PortableApps:
@@ -255,7 +288,7 @@ class PortableApps:
             if value["state"] in ("failed-before-start","uncertain"):break
             if child.poll() is not None:break
             time.sleep(.025)
-        raise PortableAppError("Launch could not be confirmed. The cache and process lease were retained; review them before changing accounts or deleting items.")
+        raise _launch_failure(lease,child)
 
 def _broker_command(spec):
     if getattr(sys,"frozen",False):return [sys.executable,"--portable-broker",str(spec)]
@@ -281,85 +314,105 @@ def _environment():
 
 def broker(spec_path):
     """Dedicated, detached process; never terminate a running app or child."""
-    spec_path=Path(spec_path).absolute();spec=_read(spec_path);lease=Path(spec["lease"])
-    if lease.parent!=spec_path.parent or lease.name!="lease-"+spec_path.stem.removeprefix("launch-")+".json":raise PortableAppError("Invalid launch receipt.")
-    record=_read(lease);started=False
+    spec_path=Path(spec_path).absolute();record=None;lease=None;started=False;stage="read-spec"
+    launch_id=spec_path.stem.removeprefix("launch-")
+    if spec_path.parent.name!="control" or spec_path.name!="launch-"+launch_id+".json" or len(launch_id)!=32 or not HEX.fullmatch(launch_id):return 1
+    diagnostic=spec_path.with_name("diagnostic-"+launch_id+".json")
+    def mark(value):
+        nonlocal stage
+        stage=value
     try:
+        spec=_read(spec_path);lease=Path(spec["lease"])
+        if lease.parent!=spec_path.parent or lease.name!="lease-"+launch_id+".json":raise PortableAppError("Invalid launch receipt.")
+        mark("read-lease");record=_read(lease);mark("validate-spec")
         if spec.get("schema")!=SCHEMA or record.get("schema")!=SCHEMA or record.get("state")!="pending":raise PortableAppError("Invalid launch specification.")
         payload=Path(spec["payload"])
         if spec_path.parent.name!="control" or payload.parent!=spec_path.parent.parent/"content" or spec["identity"]!=record["identity"]:raise PortableAppError("Launch cache identity changed.")
-        expected=verify_payload(payload,spec["records"]);selected=spec["selected"]
+        mark("verify-payload");expected=verify_payload(payload,spec["records"]);selected=spec["selected"]
         if selected not in expected or expected[selected]["type"]!="file":raise PortableAppError("Select a verified executable.")
         executable=payload if selected=="." else payload/selected
+        mark("binary-header")
         if binary_kind(executable)!=host():raise PortableAppError("Executable format or architecture changed.")
-        record.update(brokerPid=os.getpid(),brokerIdentity=process_identity(os.getpid()))
+        mark("broker-identity");record.update(brokerPid=os.getpid(),brokerIdentity=process_identity(os.getpid(),required=True))
         if not record["brokerIdentity"]:raise PortableAppError("The app broker identity could not be verified.")
         # Publish ownership before any executable can run; a crash at any later
         # instruction leaves a conservative uncertain lease.
-        _write(lease,record)
+        mark("receipt-owner");_write(lease,record)
         def running(pid):
             nonlocal started
-            started=True;record.update(state="running",appPid=pid);_write(lease,record)
+            started=True;record.update(state="running",appPid=pid);mark("receipt-running");_write(lease,record)
         def possible_start():
             nonlocal started
             started=True
         def exited(code):
-            record.update(mainExitCode=code,mainExitedAt=time.time());_write(lease,record)
-        if sys.platform.startswith("linux"):_linux_tree(executable,running,possible_start,exited)
-        elif sys.platform=="win32":_windows_tree(executable,running,possible_start,exited)
+            record.update(mainExitCode=code,mainExitedAt=time.time());mark("receipt-main-exit");_write(lease,record)
+        if sys.platform.startswith("linux"):_linux_tree(executable,running,possible_start,exited,mark)
+        elif sys.platform=="win32":_windows_tree(executable,running,possible_start,exited,mark)
         else:raise PortableAppError("Unsupported portable app platform.")
-        record.update(state="complete",completedAt=time.time());_write(lease,record)
+        record.update(state="complete",completedAt=time.time());mark("receipt-complete");_write(lease,record)
         return 0
-    except BaseException:
+    except BaseException as error:
         # Even interruption does not send a signal or terminate a job. A
         # receipt after a possibly-started launch must remain uncertain.
-        record.update(state="uncertain" if started else "failed-before-start",updatedAt=time.time())
-        _write(lease,record);return 1
+        failure=_failure(stage,error)
+        # A fresh private diagnostic leaf remains writable even if Windows
+        # refuses replacement of a lease opened by the GUI's read-only poll.
+        try:_write(diagnostic,failure)
+        except Exception:pass
+        if record is not None:
+            record.update(state="uncertain" if started else "failed-before-start",updatedAt=time.time(),failure=failure)
+            try:_write(lease,record)
+            except Exception:pass
+        return 1
 
-def _linux_tree(executable,running,possible_start,exited):
+def _linux_tree(executable,running,possible_start,exited,mark):
     import signal
-    libc=ctypes.CDLL(None,use_errno=True)
+    mark("linux-subreaper");libc=ctypes.CDLL(None,use_errno=True)
     if libc.prctl(36,1,0,0,0)!=0:raise PortableAppError("Linux process-tree tracking is unavailable.")
     # Parent/GUI terminal closure must not propagate a hangup to this broker.
     signal.signal(signal.SIGHUP,signal.SIG_IGN)
     executable.chmod(0o700)
     possible_start()
-    process=subprocess.Popen([str(executable)],cwd=str(executable.parent),env=_environment(),stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,close_fds=True,start_new_session=True)
+    mark("linux-process-create");process=subprocess.Popen([str(executable)],cwd=str(executable.parent),env=_environment(),stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,close_fds=True,start_new_session=True)
     # Mark the tree possibly started before any receipt write can fail.
     running(process.pid)
     while True:
         try:
+            mark("linux-wait")
             pid,status=os.waitpid(-1,0)
             if pid==process.pid:
                 process.returncode=os.waitstatus_to_exitcode(status);exited(process.returncode)
         except InterruptedError:continue
         except ChildProcessError:break
 
-def _windows_tree(executable,running,possible_start,exited):
+def _windows_tree(executable,running,possible_start,exited,mark):
+    mark("native-imports")
     import win32api,win32con,win32event,win32job,win32process
-    job=win32job.CreateJobObject(None,None)
+    mark("job-create");job=win32job.CreateJobObject(None,None)
     process=thread=None;resumed=False
     try:
-        limits=win32job.QueryInformationJobObject(job,win32job.JobObjectExtendedLimitInformation)
+        mark("job-limits");limits=win32job.QueryInformationJobObject(job,win32job.JobObjectExtendedLimitInformation)
         # No kill-on-close, breakaway, process-count, memory, or time limit.
         if limits["BasicLimitInformation"]["LimitFlags"]!=0:raise PortableAppError("Unexpected process Job limits.")
         # PyInstaller sets a process-wide DLL directory inherited by children;
         # environment filtering alone cannot undo it. All broker extensions
         # above are already imported. Reset only this dedicated broker before
         # the external app starts; the GUI keeps its own runtime intact.
-        kernel=ctypes.WinDLL("kernel32",use_last_error=True)
+        mark("dll-reset");kernel=ctypes.WinDLL("kernel32",use_last_error=True)
         kernel.SetDllDirectoryW.argtypes=[ctypes.c_wchar_p];kernel.SetDllDirectoryW.restype=ctypes.c_int
         if not kernel.SetDllDirectoryW(None):raise PortableAppError("The external app DLL search directory could not be reset safely.")
         startup=win32process.STARTUPINFO()
-        process,thread,pid,_=win32process.CreateProcess(str(executable),subprocess.list2cmdline([str(executable)]),None,None,False,win32con.CREATE_SUSPENDED|win32con.CREATE_NEW_PROCESS_GROUP|win32con.CREATE_UNICODE_ENVIRONMENT,_environment(),str(executable.parent),startup)
+        mark("process-create");process,thread,pid,_=win32process.CreateProcess(str(executable),subprocess.list2cmdline([str(executable)]),None,None,False,win32con.CREATE_SUSPENDED|win32con.CREATE_NEW_PROCESS_GROUP|win32con.CREATE_UNICODE_ENVIRONMENT,_environment(),str(executable.parent),startup)
         # Assignment occurs before the first application instruction. If this
         # fails the never-executed suspended fixture can safely be discarded.
-        win32job.AssignProcessToJobObject(job,process)
-        possible_start();resumed=True;win32process.ResumeThread(thread);running(pid)
+        mark("job-assign");win32job.AssignProcessToJobObject(job,process)
+        possible_start();resumed=True;mark("process-resume");win32process.ResumeThread(thread);running(pid)
         main_exited=False
-        while win32job.QueryInformationJobObject(job,win32job.JobObjectBasicAccountingInformation)["ActiveProcesses"]:
+        while True:
+            mark("job-accounting")
+            if not win32job.QueryInformationJobObject(job,win32job.JobObjectBasicAccountingInformation)["ActiveProcesses"]:break
             if not main_exited and win32event.WaitForSingleObject(process,0)==win32con.WAIT_OBJECT_0:
-                main_exited=True;exited(win32process.GetExitCodeProcess(process))
+                main_exited=True;mark("main-exit");exited(win32process.GetExitCodeProcess(process))
             time.sleep(.05)
         if not main_exited:exited(win32process.GetExitCodeProcess(process))
     finally:

@@ -319,7 +319,7 @@ class ActualCodecTests(unittest.TestCase):
             with patch.object(client,'DesktopReceiver',MemoryReceiver):
                 uploaded=model.upload(source);prepared=model.prepare_portable_app(uploaded['key'])
                 self.assertEqual(prepared.records,before['manifest']);self.assertEqual(prepared.candidates,(binary.name,))
-                receipt=model.launch_portable_app(prepared,binary.name,approved=True)
+                receipt=launch_native_fixture(lambda:model.launch_portable_app(prepared,binary.name,approved=True))
             try:
                 wait_fixture(lambda:(prepared.payload/'child-started').exists())
                 with self.assertRaises(apps.PortableAppError):model.organize('delete',[uploaded['key']])
@@ -440,6 +440,35 @@ class CompiledRuntimeTests(unittest.TestCase):
             self.assertTrue(all(str(root) in p for p in result["manifests"]))
 
 class PortableAppFormatTests(unittest.TestCase):
+    def test_private_fixed_diagnostic_survives_unreplaceable_lease_without_raw_error_text(self):
+        with tempfile.TemporaryDirectory() as td:
+            manager=apps.PortableApps(Path(td).resolve()/'cache');binding=apps.identity(OWNER,NOTE,item())
+            raw=bytearray(64);raw[:7]=b'\x7fELF\x02\x01\x01';struct.pack_into('<HH',raw,16,2,62);struct.pack_into('<Q',raw,24,0x400000)
+            records=[dict(path='.',type='file',size=len(raw),sha256=hashlib.sha256(raw).hexdigest(),executable=0o100)]
+            def restore(directory):
+                path=directory/'portable';private.write_private(path,raw);return path,records
+            with patch.object(apps,'host',return_value=('linux','x86_64')):prepared=manager.prepare(binding,restore)
+            control=prepared.directory/'control';launch_id='c'*32;lease=control/('lease-'+launch_id+'.json');spec=control/('launch-'+launch_id+'.json')
+            apps._write(lease,dict(schema=apps.SCHEMA,id=launch_id,state='pending',identity=binding))
+            apps._write(spec,dict(schema=apps.SCHEMA,lease=str(lease),payload=str(prepared.payload),records=records,selected='.',identity=binding))
+            original=apps._write
+            def locked(path,value):
+                if path==lease:
+                    error=PermissionError(13,'DO_NOT_LOG_RAW_ERROR rxca_'+'Q'*43);error.winerror=32;raise error
+                return original(path,value)
+            with patch.object(apps,'host',return_value=('linux','x86_64')),patch.object(apps,'process_identity',return_value='fixture-identity'),patch.object(apps,'_write',side_effect=locked):
+                self.assertEqual(apps.broker(spec),1)
+            diagnostic=apps._read(control/('diagnostic-'+launch_id+'.json'))
+            self.assertEqual(diagnostic,dict(stage='receipt-owner',errorType='PermissionError',errno=13,winerror=32))
+            self.assertNotIn('DO_NOT_LOG',json.dumps(diagnostic));self.assertNotIn('rxca_',json.dumps(diagnostic))
+            child=type('Child',(),{'poll':lambda self:1})()
+            failure=apps._launch_failure(lease,child)
+            self.assertEqual(failure.diagnostic['winerror'],32);self.assertEqual(failure.diagnostic['brokerExitCode'],1)
+            self.assertNotIn('winerror',str(failure),'Product error copy stays separate from CI diagnostics')
+            with self.assertRaises(apps.PortableAppError):manager.assert_safe('change accounts')
+    def test_fixed_diagnostic_does_not_accept_untrusted_stage_or_exception_values(self):
+        error=ValueError('private path and raw details');error.errno='private';error.winerror=True
+        self.assertEqual(apps._failure('untrusted private stage',error),dict(stage='unreported',errorType='ValueError'))
     def test_external_environment_excludes_bundle_paths_and_runtime_or_account_secrets(self):
         with tempfile.TemporaryDirectory() as td:
             root=Path(td).resolve();bundle=root/'bundle';outside=root/'system-bin'
@@ -578,6 +607,11 @@ def wait_fixture(predicate,seconds=8):
         time.sleep(.025)
     raise AssertionError('Disposable portable app condition was not confirmed')
 
+def launch_native_fixture(action):
+    try:return action()
+    except apps.PortableAppError as error:
+        raise AssertionError('Native broker fixed diagnostics: '+json.dumps(getattr(error,'diagnostic',{'stage':'unreported'}),sort_keys=True)) from None
+
 def prepare_native_fixture(manager,binary):
     binding=apps.identity(OWNER,NOTE,item())
     def restore(directory):
@@ -597,7 +631,7 @@ class PortableAppLifecycleTests(unittest.TestCase):
     def test_detached_grandchild_keeps_lease_after_parent_exit_and_all_cache_is_retained(self):
         with tempfile.TemporaryDirectory(prefix='gd-app-lease-') as td:
             manager=apps.PortableApps(Path(td).resolve()/'cache');prepared=prepare_native_fixture(manager,self.binary)
-            receipt=manager.launch(prepared,self.binary.name,approved=True)
+            receipt=launch_native_fixture(lambda:manager.launch(prepared,self.binary.name,approved=True))
             try:
                 wait_fixture(lambda:(prepared.payload/'child-started').exists())
                 wait_fixture(lambda:manager.leases()[0].get('mainExitCode')==7)
@@ -613,7 +647,7 @@ class PortableAppLifecycleTests(unittest.TestCase):
     def test_broker_failure_does_not_kill_app_children_and_uncertainty_blocks_changes(self):
         with tempfile.TemporaryDirectory(prefix='gd-app-orphan-') as td:
             manager=apps.PortableApps(Path(td).resolve()/'cache');prepared=prepare_native_fixture(manager,self.binary)
-            receipt=manager.launch(prepared,self.binary.name,approved=True)
+            receipt=launch_native_fixture(lambda:manager.launch(prepared,self.binary.name,approved=True))
             try:
                 wait_fixture(lambda:(prepared.payload/'child-heartbeat').exists())
                 # Only the broker created by this disposable fixture is stopped.
