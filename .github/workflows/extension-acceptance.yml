@@ -35,12 +35,12 @@ concurrency:
 jobs:
   actual-client:
     name: Actual ${{ matrix.client }} loading
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 25
     strategy:
       fail-fast: false
       matrix:
-        client: [chromium, vscode, firefox]
+        client: [chromium, chrome, edge, vscode, firefox]
     env:
       PYTHONDONTWRITEBYTECODE: '1'
     steps:
@@ -71,13 +71,25 @@ jobs:
         run: npm ci --ignore-scripts --no-audit --no-fund
         working-directory: ${{ runner.temp }}/gd-extension-tools
       - name: Install official browser runtime and Linux dependencies
-        if: matrix.client != 'vscode'
+        if: matrix.client == 'chromium' || matrix.client == 'firefox'
         run: node node_modules/playwright/cli.js install --with-deps ${{ matrix.client == 'chromium' && 'chromium' || 'firefox' }}
         working-directory: ${{ runner.temp }}/gd-extension-tools
       - name: Prepare Linux Electron system libraries
-        if: matrix.client == 'vscode'
+        if: matrix.client == 'vscode' || matrix.client == 'chrome' || matrix.client == 'edge'
         run: node node_modules/playwright/cli.js install-deps chromium
         working-directory: ${{ runner.temp }}/gd-extension-tools
+      - name: Require the actual vendor browser already installed on the official runner
+        if: matrix.client == 'chrome' || matrix.client == 'edge'
+        env:
+          GD_BROWSER_BRAND: ${{ matrix.client }}
+        run: |
+          if [ "$GD_BROWSER_BRAND" = chrome ]; then
+            command -v google-chrome
+            google-chrome --version
+          else
+            command -v microsoft-edge
+            microsoft-edge --version
+          fi
       - name: Build the actual first-party ELF native messaging host
         if: matrix.client != 'firefox'
         run: |

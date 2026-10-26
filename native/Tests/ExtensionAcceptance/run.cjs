@@ -69,7 +69,7 @@ async function events(root) {
   return (await fs.readFile(path.join(root, 'events.jsonl'), 'utf8')).trim().split('\n').filter(Boolean).map(JSON.parse);
 }
 
-async function chromiumTest(root, directory, archive, tools, python) {
+async function chromiumTest(root, directory, archive, tools, python, client = 'chromium') {
   const {chromium} = tools('playwright');
   const manifest = JSON.parse(await fs.readFile(path.join(directory, 'manifest.json'), 'utf8'));
   const idInput = manifest.key ? Buffer.from(manifest.key, 'base64') : Buffer.from(await fs.realpath(directory));
@@ -78,14 +78,21 @@ async function chromiumTest(root, directory, archive, tools, python) {
   const child = await startCompanion(root, origin, python);
   let context;
   try {
+    const vendorVersion = client === 'chromium' ? null : (await execute(client === 'chrome' ? 'google-chrome' : 'microsoft-edge', ['--version'], {maxBuffer: 65536})).stdout.trim();
+    if (vendorVersion) assert.match(vendorVersion, client === 'chrome' ? /^Google Chrome / : /^Microsoft Edge /);
     const profile = path.join(root, 'chromium-profile');
     const hosts = path.join(profile, 'NativeMessagingHosts');
     await fs.mkdir(hosts, {recursive: true, mode: 0o700});
     const binary = path.join(root, 'state/gendragoon/NativeMessaging/gendragoon-native-host');
     await fs.writeFile(path.join(hosts, HOST_NAME + '.json'), JSON.stringify({name: HOST_NAME, description: 'Disposable GenDragoon acceptance fixture', path: binary, type: 'stdio', allowed_origins: [origin]}), {mode: 0o600});
+    const branded = client !== 'chromium';
     context = await chromium.launchPersistentContext(profile, {
-      channel: 'chromium', headless: true,
-      args: ['--disable-extensions-except=' + directory, '--load-extension=' + directory],
+      channel: client === 'edge' ? 'msedge' : client === 'chrome' ? 'chrome' : 'chromium', headless: !branded,
+      // Stable Chrome/Edge removed --load-extension. Their experimental CDP
+      // unpacked-install API is used only in this fresh account-free CI profile.
+      // It does not establish signed store installation or normal user consent.
+      ignoreDefaultArgs: branded ? ['--disable-extensions'] : [],
+      args: branded ? ['--enable-unsafe-extension-debugging'] : ['--disable-extensions-except=' + directory, '--load-extension=' + directory],
       env: {...process.env, XDG_STATE_HOME: path.join(root, 'state'), PYTHONDONTWRITEBYTECODE: '1'}
     });
     await context.route(/^https?:/, route => route.abort());
@@ -96,6 +103,13 @@ async function chromiumTest(root, directory, archive, tools, python) {
     const browserVersion = (await browserSession.send('Browser.getVersion')).product;
     await browserSession.detach();
     assert.ok(typeof browserVersion === 'string' && browserVersion.length > 0, 'Record the actual running Chromium version');
+    if (branded) {
+      const install = await context.browser().newBrowserCDPSession();
+      try {
+        const loaded = await install.send('Extensions.loadUnpacked', {path: directory});
+        assert.equal(loaded.id, identifier, 'The actual brand-specific unpacked install must match the native allowlist');
+      } finally { await install.detach(); }
+    }
     await page.goto(origin + 'dashboard.html');
     assert.equal(await page.evaluate(() => chrome.runtime.id), identifier, 'The actual loaded extension identity must match the exact native-host allowlist');
     await page.locator('#status').filter({hasText: 'Approve this disposable CI fixture client first.'}).waitFor({timeout: 15000});
@@ -126,7 +140,7 @@ async function chromiumTest(root, directory, archive, tools, python) {
     assert.equal(await teams.title(), 'GenDragoon Teams');
     assert.equal(await teams.locator('h1').textContent(), 'Build together.');
     await teams.close();
-    await page.screenshot({path: path.join(root, 'reports/chromium-dashboard.png'), fullPage: true});
+    await page.screenshot({path: path.join(root, 'reports/' + client + '-dashboard.png'), fullPage: true});
     await atomicJSON(path.join(root, 'consent.json'), {approved: false});
     const approvalRevoked = await page.evaluate(async () => { try { await GDCompanion.call('status'); return null; } catch (error) { return error.code; } });
     assert.equal(approvalRevoked, 'approval_required', 'Fixture consent removal must deny the already connected client');
@@ -146,13 +160,15 @@ async function chromiumTest(root, directory, archive, tools, python) {
     assert.ok(trace.some(event => event.method === 'selectUpload'));
     assert.ok(!trace.some(event => event.method === 'uploadSelection' || event.path === '/v1/integrations/keys'));
     assert.deepEqual(errors, [], 'Unexpected real extension page errors');
-    await report(root, 'chromium', {passed: true, browserVersion, extensionVersion: manifest.version,
+    await report(root, client, {passed: true, browserVersion, vendorVersion, runnerImage: process.env.ImageVersion || null, extensionVersion: manifest.version,
       extensionId: identifier, extensionArchiveSHA256: checksum(await fs.readFile(archive)), nativeHostSHA256: checksum(await fs.readFile(binary)),
       actualNativeMessaging: true, actualProductionPrivateIPC: true, approvalDeniedThenFixtureApproved: true,
       readOnlyControls: true, metadataRenderedAsText: true, disallowedRoutesRejected: true,
       fixtureApprovalRevokedOnExistingConnection: true, exactOriginRemovalDeniesNewConnection: true,
       teamsPageLoaded: true, syntheticAccountFreeDispatch: true, realNativeConsentUITested: false, liveAccountOrUploadTest: false,
-      testedBrowser: 'Playwright bundled Chromium on Linux; physical Chrome/Edge/Opera not tested'});
+      testedBrowser: client === 'chromium' ? 'Playwright bundled Chromium on Linux' : 'Actual installed stable ' + client + ' on disposable Linux runner',
+      installationMethod: branded ? 'Experimental CDP Extensions.loadUnpacked in fresh CI profile' : 'Chromium test-only --load-extension',
+      signedStoreInstallationTested: false, normalUserApprovalTested: false, otherOperatingSystemsTested: false});
   } finally {
     try { if (context) await context.close(); }
     finally { await stopChild(child); }
@@ -208,8 +224,8 @@ async function firefoxTest(root, directory, archive, tools) {
 
 async function main() {
   const client = process.argv[2];
-  if (client === '--help') { console.log('usage: node run.cjs chromium|vscode|firefox\nRuns only inside the dedicated disposable Linux CI workflow.'); return; }
-  assert.ok(['chromium', 'vscode', 'firefox'].includes(client));
+  if (client === '--help') { console.log('usage: node run.cjs chromium|chrome|edge|vscode|firefox\nRuns only inside the dedicated disposable Linux CI workflow.'); return; }
+  assert.ok(['chromium', 'chrome', 'edge', 'vscode', 'firefox'].includes(client));
   assert.equal(process.platform, 'linux', 'Never launch these tests in a user desktop session');
   assert.equal(process.env.GITHUB_ACTIONS, 'true');
   const root = path.resolve(process.env.GD_EXTENSION_ACCEPTANCE_ROOT || '');
@@ -222,12 +238,12 @@ async function main() {
   assert.ok(python && path.isAbsolute(python));
   await execute(python, ['-B', path.join(NATIVE, 'Extensions/package_extensions.py'), '--output', path.join(root, 'packages')], {maxBuffer: 1024 * 1024});
   const names = await fs.readdir(path.join(root, 'packages'));
-  const matching = names.filter(name => client === 'vscode' ? name.endsWith('.vsix') : name.startsWith('gendragoon-' + (client === 'chromium' ? 'chrome' : 'firefox') + '-') && name.endsWith('.zip'));
+  const matching = names.filter(name => client === 'vscode' ? name.endsWith('.vsix') : name.startsWith('gendragoon-' + (client === 'chromium' ? 'chrome' : client) + '-') && name.endsWith('.zip'));
   assert.equal(matching.length, 1);
   const archive = path.join(root, 'packages', matching[0]);
   const directory = path.join(root, 'unpacked');
   await extract(python, archive, directory);
-  if (client === 'chromium') await chromiumTest(root, directory, archive, tools, python);
+  if (['chromium', 'chrome', 'edge'].includes(client)) await chromiumTest(root, directory, archive, tools, python, client);
   else if (client === 'vscode') await vscodeTest(root, path.join(directory, 'extension'), archive, tools, python);
   else await firefoxTest(root, directory, archive, tools);
   console.log(JSON.stringify({client, passed: true, syntheticFixtureOnly: true}));

@@ -36,6 +36,15 @@ Mac. Tool dependencies and their transitive integrity hashes are locked;
   real isolated Firefox process to install and reload the temporary add-on.
   It does not test Firefox native messaging, signed distribution, or a store
   installation. Warnings remain in the lint report; lint errors fail the job.
+- **Google Chrome and Microsoft Edge candidates:** separate jobs require the
+  actual vendor browser already installed in the official Ubuntu 24.04 runner.
+  They load each brand's generated package through experimental CDP
+  `Extensions.loadUnpacked` and run the same native-messaging boundary checks.
+  The explicit extension-debugging flag applies only to a new disposable,
+  account-free CI profile. Reports record the vendor version and installation
+  method. This test does not establish signed store installation, ordinary user
+  consent, Opera support, or behavior on another operating system. A failure of
+  that experimental install path remains a failed candidate, not a pass.
 
 The companion fixture uses production transport, identity checks, frame bounds,
 and route validation with an explicitly synthetic dispatch callback. It never
@@ -59,9 +68,13 @@ versions are recorded because the runner downloads the current stable editor.
 
 The browser job follows Playwright's
 [Chromium extension testing workflow](https://playwright.dev/docs/chrome-extensions).
-Chrome and Edge removed the flags used for this test side-loading path, so this
-job deliberately uses Playwright's Chromium. It does not claim physical Chrome,
-Edge, or Opera acceptance. The host registration follows Chromium's actual
+Chrome and Edge removed the flags used for the Chromium side-loading path, so
+that job uses Playwright's Chromium. The separate brand candidates use the
+[official experimental Extensions protocol](https://chromedevtools.github.io/devtools-protocol/tot/Extensions/)
+in disposable CI profiles. Browser availability is checked against the actual
+[official Ubuntu runner image](https://github.com/actions/runner-images/blob/main/images/ubuntu/Ubuntu2404-Readme.md),
+and execution still has to pass before acceptance can be claimed.
+The host registration follows Chromium's actual
 user-data-directory lookup and Chrome's
 [native messaging contract](https://developer.chrome.com/docs/extensions/develop/concepts/native-messaging).
 
