@@ -449,7 +449,7 @@ class PortableAppFormatTests(unittest.TestCase):
             # Reproduce the actual CRT denial first, using only generated JSON.
             fd=os.open(lease,os.O_RDONLY|os.O_BINARY|os.O_NOINHERIT)
             try:
-                with self.assertRaises(PermissionError):apps._write(lease,new)
+                with self.assertRaises(PermissionError):private.write_private(lease,json.dumps(new).encode(),replace=True)
             finally:os.close(fd)
             self.assertEqual(apps._read(lease),old)
             ready=threading.Event();release=threading.Event();result=[];errors=[];inheritable=[];load=apps.json.load
@@ -473,7 +473,8 @@ class PortableAppFormatTests(unittest.TestCase):
             manager=apps.PortableApps(Path(td).resolve()/'cache');binding=apps.identity(OWNER,NOTE,item())
             control=private.private_directory(manager.root/OWNER/NOTE/apps.generation(binding)/('b'*32)/'control');lease_id='c'*32
             lease=control/('lease-'+lease_id+'.json');record=dict(schema=apps.SCHEMA,id=lease_id,state='running',identity=binding,brokerPid=123,brokerIdentity='fixture-live')
-            apps._write(lease,record);ready=threading.Event();release=threading.Event();errors=[];temporary=[];replace=private.os.replace
+            apps._write(lease,record);ready=threading.Event();release=threading.Event();errors=[];temporary=[]
+            publisher=apps if os.name=='nt' else private.os;method='_replace_windows_record' if os.name=='nt' else 'replace';replace=getattr(publisher,method)
             def stalled(source,destination):
                 if Path(destination)==lease:
                     temporary.append(Path(source));ready.set()
@@ -482,7 +483,7 @@ class PortableAppFormatTests(unittest.TestCase):
             def write():
                 try:apps._write(lease,dict(record,state='complete',mainExitCode=7))
                 except BaseException as error:errors.append(type(error).__name__)
-            with patch.object(private.os,'replace',stalled),patch.object(apps,'process_identity',return_value='fixture-live'):
+            with patch.object(publisher,method,stalled),patch.object(apps,'process_identity',return_value='fixture-live'):
                 writer=threading.Thread(target=write);writer.start()
                 try:
                     self.assertTrue(ready.wait(3));self.assertTrue(temporary[0].exists());private.verify(temporary[0])
@@ -490,7 +491,7 @@ class PortableAppFormatTests(unittest.TestCase):
                     for uncertain_only in (False,True):
                         with self.assertRaises(apps.PortableAppError):manager.assert_safe('change protected state',uncertain_only=uncertain_only)
                     # Simulate the exact leaf disappearing after enumeration,
-                    # as can happen when os.replace finishes during a scan.
+                    # as can happen when atomic publication finishes in a scan.
                     real=apps._real
                     def vanished(path):
                         if Path(path)==temporary[0]:raise FileNotFoundError('fixture atomic rename completed')

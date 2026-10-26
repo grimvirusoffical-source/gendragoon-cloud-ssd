@@ -92,22 +92,26 @@ def _safe_ancestors(path):
         if stat.S_ISLNK(info.st_mode) or getattr(info,"st_file_attributes",0)&0x400:
             raise PortableAppError("A portable app cache cannot use linked parent folders.")
 
-def _read(path):
-    info=private.verify(path);_real(path)
-    if not stat.S_ISREG(info.st_mode) or info.st_nlink!=1 or info.st_size>MAX_RECORD:raise PortableAppError("The retained portable app record needs review.")
+def _open_record(path,*,delete=False):
     if os.name=="nt":
         import msvcrt,win32api,win32con,win32file
         # A CRT _wopen reader omits FILE_SHARE_DELETE and can prevent the
         # broker's atomic receipt replacement. Open a non-inherited native
         # read handle with rename sharing; retain all checks below and open
         # the leaf itself rather than following a replacement reparse point.
-        handle=win32file.CreateFile(str(path),win32con.GENERIC_READ,
+        handle=win32file.CreateFile(str(path),win32con.GENERIC_READ|(win32con.DELETE if delete else 0),
             win32con.FILE_SHARE_READ|win32con.FILE_SHARE_WRITE|win32con.FILE_SHARE_DELETE,
             None,win32con.OPEN_EXISTING,win32file.FILE_FLAG_OPEN_REPARSE_POINT,None)
         raw=handle.Detach()
         try:fd=msvcrt.open_osfhandle(raw,os.O_RDONLY|os.O_BINARY|os.O_NOINHERIT)
         except BaseException:win32api.CloseHandle(raw);raise
     else:fd=os.open(path,os.O_RDONLY|getattr(os,"O_NOFOLLOW",0))
+    return fd
+
+def _read(path):
+    info=private.verify(path);_real(path)
+    if not stat.S_ISREG(info.st_mode) or info.st_nlink!=1 or info.st_size>MAX_RECORD:raise PortableAppError("The retained portable app record needs review.")
+    fd=_open_record(path)
     with os.fdopen(fd,"rb") as source:
         opened=os.fstat(source.fileno())
         if (opened.st_dev,opened.st_ino)!=(info.st_dev,info.st_ino):raise PortableAppError("The portable app record changed while opening it.")
@@ -115,7 +119,49 @@ def _read(path):
 
 def _write(path,value):
     _real(path.parent);private.verify(path.parent)
-    private.write_private(path,json.dumps(value,sort_keys=True,separators=(",",":"),ensure_ascii=True).encode("ascii"),replace=path.exists())
+    data=json.dumps(value,sort_keys=True,separators=(",",":"),ensure_ascii=True).encode("ascii")
+    if os.name!="nt":
+        private.write_private(path,data,replace=path.exists());return
+    try:path.lstat()
+    except FileNotFoundError:
+        private.write_private(path,data);return
+    temporary=path.with_name(".private-"+uuid.uuid4().hex)
+    # Exclusive private creation includes flush/fsync before publication.
+    # A creation failure must not remove a pre-existing colliding leaf.
+    private.write_private(temporary,data)
+    try:
+        _replace_windows_record(temporary,path)
+    finally:temporary.unlink(missing_ok=True)  # Only our unpublished temp.
+
+def _replace_windows_record(temporary,path):
+    """Publish only an owned receipt, preserving readers of its old bytes."""
+    if temporary.parent!=path.parent or not ATOMIC_TEMP.fullmatch(temporary.name):raise PortableAppError("Invalid portable receipt publication.")
+    info=private.verify(temporary);_real(temporary)
+    target=private.verify(path);_real(path)
+    if any(not stat.S_ISREG(row.st_mode) or row.st_nlink!=1 for row in (info,target)):
+        raise PortableAppError("The portable receipt publication needs review.")
+    fd=_open_record(temporary,delete=True)
+    try:
+        opened=os.fstat(fd)
+        if ((opened.st_dev,opened.st_ino)!=(info.st_dev,info.st_ino) or not stat.S_ISREG(opened.st_mode) or opened.st_nlink!=1):
+            raise PortableAppError("The portable receipt changed before publication.")
+        import msvcrt
+        from ctypes import wintypes
+        class RenameInfo(ctypes.Structure):
+            _fields_=[("Flags",wintypes.DWORD),("RootDirectory",wintypes.HANDLE),("FileNameLength",wintypes.DWORD),("FileName",wintypes.WCHAR*1)]
+        name=str(path).encode("utf-16-le");buffer=ctypes.create_string_buffer(ctypes.sizeof(RenameInfo)+len(name)+2)
+        value=RenameInfo.from_buffer(buffer);value.Flags=3;value.RootDirectory=None;value.FileNameLength=len(name)
+        ctypes.memmove(ctypes.addressof(buffer)+RenameInfo.FileName.offset,name,len(name))
+        kernel=ctypes.WinDLL("kernel32",use_last_error=True)
+        kernel.SetFileInformationByHandle.argtypes=[wintypes.HANDLE,ctypes.c_int,ctypes.c_void_p,wintypes.DWORD]
+        kernel.SetFileInformationByHandle.restype=wintypes.BOOL
+        # FileRenameInfoEx (22), REPLACE_IF_EXISTS | POSIX_SEMANTICS (1 | 2).
+        # Legacy MoveFileEx/os.replace cannot replace a held target on Windows.
+        # Unsupported filesystems fail closed; never unlink the target first.
+        if not kernel.SetFileInformationByHandle(msvcrt.get_osfhandle(fd),22,buffer,len(buffer)):
+            raise ctypes.WinError(ctypes.get_last_error())
+        private.verify(path);_real(path)
+    finally:os.close(fd)
 
 def _binding(parent,expected=None):
     _real(parent);private.verify(parent)
