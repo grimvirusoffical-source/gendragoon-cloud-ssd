@@ -141,6 +141,34 @@ class UploadWorkspaceTests(unittest.TestCase):
         self.assertEqual(command[command.index("--folder") + 1], "bucket-one/apps/custom")
         self.assertNotIn("gen-dragoon-ssd", command)
 
+    def test_running_application_offload_reason_is_preserved_without_exposing_child_output(self):
+        original = self.source()
+        state, job_id = self.prepare([original], offload=True)
+        result = subprocess.CompletedProcess([], 1,
+            json.dumps({"ok": False, "message": "Quit this application before offloading it"}),
+            "private diagnostic containing Bearer fixture-never-expose")
+        with mock.patch.object(workspace.subprocess, "run", return_value=result):
+            with self.assertRaises(workspace.WorkspaceError) as caught:
+                workspace.run_next(self.home)
+        self.assertEqual(caught.exception.code, "source_in_use")
+        self.assertIn("Quit the selected application", caught.exception.message)
+        final = workspace.read_state(self.home)
+        self.assertEqual(final["jobs"][0]["state"], "failed")
+        self.assertIsNone(final["active_job_id"])
+        self.assertEqual(final["sources"], state["sources"])
+        self.assertEqual(original.read_bytes(), b"fixture source")
+        self.assertNotIn("fixture-never-expose", json.dumps(final))
+        self.assertIsNone(final["jobs"][0]["items"][0]["offloaded"])
+
+    def test_unknown_child_failures_remain_private_and_do_not_gain_the_guard_allowlist(self):
+        for message in ("Bearer private-fixture-token", "Quit this application before offloading it Bearer private-fixture-token"):
+            result = subprocess.CompletedProcess([], 1, json.dumps({"ok": False, "message": message}), message)
+            with mock.patch.object(workspace.subprocess, "run", return_value=result):
+                with self.assertRaises(workspace.WorkspaceError) as caught:
+                    workspace.child_result(["python3", "-B", "/fixture/gendragoon_library.py", "upload"])
+            self.assertEqual(caught.exception.code, "helper_failed")
+            self.assertNotIn("private-fixture-token", caught.exception.message)
+
     def test_cancel_legacy_queued_upload_preserves_sources_and_other_jobs(self):
         original = self.source()
         queued, job_id = self.prepare([original], offload=True)

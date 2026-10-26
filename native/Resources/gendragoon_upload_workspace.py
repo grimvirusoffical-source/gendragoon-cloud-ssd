@@ -485,9 +485,17 @@ def child_result(command, maintenance_fd=None):
         options["input"] = credential.decode("utf8")
     try:
         result = subprocess.run(command, **options)
-        if result.returncode != 0 or len(result.stdout.encode()) > MAX_RESPONSE_BYTES:
-            raise ValueError("helper did not complete")
+        if len(result.stdout.encode()) > MAX_RESPONSE_BYTES:
+            raise ValueError("helper response exceeded its limit")
         value = strict_json(result.stdout)
+        if result.returncode != 0:
+            # Only an exact known local guard may cross this boundary. Never
+            # expose arbitrary child output, stderr, credentials or tracebacks.
+            if (isinstance(value, dict) and value.get("ok") is False
+                    and value.get("message") == "Quit this application before offloading it"):
+                raise WorkspaceError("source_in_use",
+                    "Quit the selected application before moving it to Trash, or turn off Move originals to Trash to upload a backup while keeping it on this Mac.")
+            raise ValueError("helper did not complete")
         if not isinstance(value, dict) or value.get("ok") is not True:
             raise ValueError("helper did not return success")
         return value
