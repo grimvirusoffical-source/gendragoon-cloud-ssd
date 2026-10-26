@@ -117,7 +117,7 @@ def package(runtime,output):
             "--hidden-import","tkinter","--hidden-import","tkinter.ttk",
             "--exclude-module","redxai","--exclude-module","redsecretsxai"]
         args.extend(drop_package_options(runtime))
-        if sys.platform=="win32":args.extend(["--windowed","--manifest",str(Path(__file__).resolve().parent/"windows-utf8.manifest")])
+        if sys.platform=="win32":args.extend(["--windowed","--manifest",str(Path(__file__).resolve().parent/"windows-utf8.manifest"),"--hidden-import","win32timezone"])
         for module in ("numpy","PIL","cryptography"):args.extend(["--collect-all",module])
         args.append(str(runtime/"gendragoon_gui.py"))
         result=subprocess.run(args,capture_output=True,text=True,timeout=900)
