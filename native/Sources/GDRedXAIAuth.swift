@@ -25,6 +25,11 @@ private struct GDRXTokenSet {
     let expiresAt: Date
 }
 
+@MainActor private final class GDWorkerRenewalLease {
+    var token: String
+    init(_ token: String) { self.token = token }
+}
+
 @MainActor final class GDRedXAIAuthSession: ObservableObject {
     static let shared = GDRedXAIAuthSession()
     enum State { case disconnected, connecting, linked, error }
@@ -37,6 +42,7 @@ private struct GDRXTokenSet {
     @Published private(set) var approvalCode = ""
     @Published private(set) var linked = false
     @Published private(set) var busy = false
+    @Published private(set) var portableVaultBusy = false
     @Published private(set) var uploadProjects: [UploadCloudProject] = []
     @Published private(set) var readableProjects: [UploadCloudProject] = []
     @Published private(set) var quotaBytes: Int64 = 0
@@ -47,7 +53,7 @@ private struct GDRXTokenSet {
     private let clientID = "gendragoon"
     private let authService = "com.redxai.gendragoon.auth"
     private let storageService = "com.redxai.gendragoon.storage"
-    private let session = URLSession(configuration: .ephemeral)
+    private let session = URLSession(configuration: .ephemeral, delegate: GDMachineNotesRedirectDelegate(), delegateQueue: nil)
     private var tokens: GDRXTokenSet?
     private var refreshTask: Task<String, Error>?
     private var loaded = false
@@ -140,7 +146,7 @@ private struct GDRXTokenSet {
             request.httpBody = try JSONSerialization.data(withJSONObject: json)
         }
         let (data, response) = try await session.data(for: request)
-        guard let http = response as? HTTPURLResponse else { throw GDTransferError(message: "Red-XAI returned no HTTP response.", status: 0) }
+        guard let http = response as? HTTPURLResponse, http.url == url else { throw GDTransferError(message: "Red-XAI returned no valid HTTP response.", status: 0) }
         return (data, http)
     }
 
@@ -232,6 +238,7 @@ private struct GDRXTokenSet {
 
     func storageCredential() throws -> String {
         guard !subject.isEmpty else { throw GDTransferError(message: "Connect Red-XAI before cloud storage.", status: 401) }
+        guard !portableVaultBusy else { throw GDTransferError(message: "Finish the portable vault operation before starting cloud work.", status: 0) }
         let account = Self.storageAccount(issuer: issuer.absoluteString, subject: subject)
         if let existing = try Self.keychainRead(service: storageService, account: account) { return existing }
         let secret = Self.base64URL(try Self.random(32))
@@ -239,6 +246,91 @@ private struct GDRXTokenSet {
         try FileManager.default.createDirectory(at: storageRoot, withIntermediateDirectories: true,
             attributes: [.posixPermissions: 0o700])
         return secret
+    }
+
+    private func beginPortableVault() throws -> (subject: String, receiver: String, keymap: URL) {
+        guard linked, !subject.isEmpty, GDPortableVaultCodec.validReceiver(receiverID), let keymapURL,
+              !busy, !portableVaultBusy else {
+            throw GDPortableVaultFailure(message: "Connect the intended Red-XAI account before using a portable vault.")
+        }
+        guard !GDWorkspaceMounts.shared.hasMounts, GDUpdateActivity.shared.beginMaintenance(owner: self) else {
+            throw GDPortableVaultFailure(message: "Finish transfers, close managed apps, and unmount cloud drives before using a portable vault.")
+        }
+        portableVaultBusy = true
+        GDUpdateActivity.shared.set(self, key: "portableVault", active: true)
+        return (subject, receiverID, keymapURL)
+    }
+    private func endPortableVault() {
+        portableVaultBusy = false
+        GDUpdateActivity.shared.set(self, key: "portableVault", active: false)
+        GDUpdateActivity.shared.endMaintenance(owner: self)
+    }
+    private func validatePortableKeymap(secret: String, keymap: URL, bytes: Data) async throws {
+        let hash = Self.hex(SHA256.hash(data: bytes))
+        let input = try JSONSerialization.data(withJSONObject: ["storageSecret": secret, "keymapPath": keymap.path, "keymapSha256": hash])
+        let result = try await GDNativeHelper.invoke("gendragoon_vault", arguments: ["check-keymap"], timeout: 120, standardInput: input)
+        guard result["validated"] as? Bool == true else { throw GDPortableVaultFailure(message: "The encrypted keymap failed read-only validation.") }
+    }
+    func exportPortableVault(password: String) async throws -> Data {
+        let context = try beginPortableVault()
+        defer { endPortableVault() }
+        let account = Self.storageAccount(issuer: issuer.absoluteString, subject: context.subject)
+        guard let secret = try Self.keychainRead(service: storageService, account: account) else {
+            throw GDPortableVaultFailure(message: "This device has no storage keys to export. Import your original vault before restoring another device's files.")
+        }
+        let bytes = try GDPortableVaultFiles.read(context.keymap)
+        try GDPortableVaultCodec.validateKeymap(bytes)
+        try await validatePortableKeymap(secret: secret, keymap: context.keymap, bytes: bytes)
+        guard linked, subject == context.subject, receiverID == context.receiver else { throw GDPortableVaultFailure(message: "The connected account changed. Export was cancelled.") }
+        let keys = GDPortableVaultCodec.Keys(receiverId: context.receiver, storageSecret: secret, keymap: bytes)
+        return try await Task.detached(priority: .userInitiated) { try GDPortableVaultCodec.seal(keys, password: password) }.value
+    }
+    func importPortableVault(_ envelope: Data, password: String) async throws {
+        let context = try beginPortableVault()
+        defer { endPortableVault() }
+        let keys = try await Task.detached(priority: .userInitiated) {
+            try GDPortableVaultCodec.open(envelope, password: password, expectedReceiver: context.receiver)
+        }.value
+        guard linked, subject == context.subject, receiverID == context.receiver else { throw GDPortableVaultFailure(message: "The connected account changed. Import was cancelled.") }
+        let account = Self.storageAccount(issuer: issuer.absoluteString, subject: context.subject)
+        let existingSecret = try Self.keychainRead(service: storageService, account: account)
+        guard existingSecret == nil || existingSecret == keys.storageSecret else {
+            throw GDPortableVaultFailure(message: "This account already has different storage keys on this device. Import will not replace them.")
+        }
+        let root = context.keymap.deletingLastPathComponent()
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        let attributes = try FileManager.default.attributesOfItem(atPath: root.path)
+        guard root.resolvingSymlinksInPath().standardizedFileURL == root.standardizedFileURL,
+              attributes[.type] as? FileAttributeType == .typeDirectory,
+              (attributes[.ownerAccountID] as? NSNumber)?.uint32Value == getuid(),
+              ((attributes[.posixPermissions] as? NSNumber)?.intValue ?? 0) & 0o077 == 0 else {
+            throw GDPortableVaultFailure(message: "The private storage directory has unsafe permissions.")
+        }
+        var created = false, installed = false
+        defer { if created && !installed { GDPortableVaultFiles.removeIfIdentical(keys.keymap, at: context.keymap) } }
+        if FileManager.default.fileExists(atPath: context.keymap.path) {
+            guard try GDPortableVaultFiles.read(context.keymap) == keys.keymap else {
+                throw GDPortableVaultFailure(message: "A different keymap already exists. Import will not replace it.")
+            }
+        } else {
+            try GDPortableVaultFiles.create(keys.keymap, at: context.keymap)
+            created = true
+        }
+        try await validatePortableKeymap(secret: keys.storageSecret, keymap: context.keymap, bytes: keys.keymap)
+        guard linked, subject == context.subject, receiverID == context.receiver,
+              try GDPortableVaultFiles.read(context.keymap) == keys.keymap else {
+            throw GDPortableVaultFailure(message: "The account or keymap changed. Import was cancelled.")
+        }
+        // Add only: even another process creating a credential cannot be overwritten.
+        if existingSecret == nil {
+            var query = Self.keychainQuery(service: storageService, account: account)
+            query[kSecValueData] = Data(keys.storageSecret.utf8)
+            query[kSecAttrAccessible] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+            guard SecItemAdd(query as CFDictionary, nil) == errSecSuccess else {
+                throw GDPortableVaultFailure(message: "The storage credential already exists or Keychain could not save it. Existing keys were preserved.")
+            }
+        }
+        installed = true
     }
 
     private func apply(_ set: GDRXTokenSet, receiver: String) throws {
@@ -293,7 +385,8 @@ private struct GDRXTokenSet {
     }
 
     func connect() {
-        guard !busy else { return }
+        guard !busy, !portableVaultBusy else { return }
+        guard !GDWorkspaceMounts.shared.hasMounts else { status = "Unmount all workspace drives before changing Red-XAI accounts. Refresh drive status if needed."; return }
         busy = true; state = .connecting; status = "Starting Red-XAI approval…"; approvalCode = ""
         Task {
             defer { busy = false }
@@ -334,7 +427,6 @@ private struct GDRXTokenSet {
                     requiresAppSignIn: false, sessionStorage: "os-credential-store")
                 try saveProfileCreating(p)
                 try apply(set, receiver: receiver)
-                _ = try storageCredential()
                 approvalCode = ""
                 await refreshWorkspaces()
             } catch {
@@ -363,7 +455,9 @@ private struct GDRXTokenSet {
     }
 
     func logout() {
+        guard !portableVaultBusy else { status = "Finish the portable vault operation before disconnecting."; return }
         guard !busy else { return }
+        guard !GDWorkspaceMounts.shared.hasMounts else { status = "Unmount all workspace drives before disconnecting. Open files and macOS filesystem caches remain bound to this account."; return }
         let oldSubject = subject
         let oldRefresh = try? loadRefresh(subject: oldSubject)
         Self.keychainDelete(service: authService, account: Self.authAccount(issuer: issuer.absoluteString, subject: oldSubject))
@@ -464,7 +558,24 @@ private struct GDRXTokenSet {
               (1...24).contains(destination.workers) else {
             throw GDTransferError(message: requireWrite ? "Choose an active MachineNote with a storage plan before uploading." : "Choose a MachineNote owned by this account before restoring files.", status: requireWrite ? 402 : 403)
         }
+        let expectedSubject = subject, expectedReceiver = receiverID
+        let account = Self.storageAccount(issuer: issuer.absoluteString, subject: expectedSubject)
+        let existingSecret = try Self.keychainRead(service: storageService, account: account)
+        let hasKeymap = keymapURL.map { FileManager.default.fileExists(atPath: $0.path) } ?? false
+        if existingSecret == nil || !hasKeymap {
+            // A fresh device must import the original keys before touching an
+            // existing encrypted account. New keys are safe only for an empty account.
+            let state = try await serviceRequest(path: "/v1/receivers/me")
+            guard state["id"] as? String == expectedReceiver,
+                  let used = state["usedBytes"] as? NSNumber, CFGetTypeID(used) != CFBooleanGetTypeID(), used.doubleValue == 0,
+                  let items = state["libraryItems"] as? NSNumber, CFGetTypeID(items) != CFBooleanGetTypeID(), items.doubleValue == 0 else {
+                throw GDTransferError(message: "Import the portable vault from the device that uploaded these files before using this account's encrypted storage.", status: 0)
+            }
+        }
         let token = try await accessToken()
+        guard linked, !portableVaultBusy, subject == expectedSubject, receiverID == expectedReceiver else {
+            throw GDTransferError(message: "The Red-XAI account changed. Refresh before retrying.", status: 401)
+        }
         let secret = try storageCredential()
         guard let keymapURL else { throw GDTransferError(message: "Red-XAI keymap path is unavailable.", status: 0) }
         let workers = destination.workers
@@ -473,6 +584,8 @@ private struct GDRXTokenSet {
             "workspaceId": workspaceID,
             "workers": workers,
             "bearerToken": token,
+            "authSubject": subject,
+            "authRequireWrite": requireWrite,
             "receiverId": receiverID,
             "storageSecret": secret,
             "keymapPath": keymapURL.path,
@@ -480,6 +593,85 @@ private struct GDRXTokenSet {
             "constrained": constrained
         ]
         return try JSONSerialization.data(withJSONObject: payload)
+    }
+
+    func workerRenewalAuthorization(_ value: [String: Any]) throws ->
+        (receiver: String, workspace: String, renew: @Sendable (Bool) async throws -> String) {
+        guard linked, value["authSubject"] as? String == subject,
+              value["receiverId"] as? String == receiverID,
+              let workspace = value["workspaceId"] as? String,
+              let token = value["bearerToken"] as? String,
+              let requireWrite = value["authRequireWrite"] as? Bool else {
+            throw GDTransferError(message: "The helper's Red-XAI account changed. Refresh before retrying.", status: 401)
+        }
+        let expectedSubject = subject, expectedReceiver = receiverID
+        let lease = GDWorkerRenewalLease(token)
+        return (expectedReceiver, workspace, { @MainActor [weak self] force in
+            guard let self, self.linked, self.subject == expectedSubject, self.receiverID == expectedReceiver,
+                  (requireWrite ? self.uploadProjects : self.readableProjects).flatMap({ $0.buckets }).contains(where: { $0.id == workspace }) else {
+                throw GDTransferError(message: "The helper's account or MachineNote authorization changed.", status: 401)
+            }
+            // Reuse a token already renewed by another native request. Concurrent
+            // refreshes otherwise share accessToken's existing single-flight task.
+            let renewed = try await self.accessToken(forceRefresh: force && self.tokens?.access == lease.token)
+            guard self.linked, self.subject == expectedSubject, self.receiverID == expectedReceiver else {
+                throw GDTransferError(message: "The Red-XAI account changed during renewal.", status: 401)
+            }
+            lease.token = renewed
+            return renewed
+        })
+    }
+
+    func serviceRequest(path: String, method: String = "GET", json: [String: Any]? = nil) async throws -> [String: Any] {
+        guard linked, !subject.isEmpty, path.hasPrefix("/"),
+              let relative = URLComponents(string: path), relative.scheme == nil, relative.host == nil,
+              relative.fragment == nil, !relative.path.contains("%"), !relative.path.contains("\\"),
+              !relative.path.contains(".."), !path.unicodeScalars.contains(where: { $0.value < 32 }),
+              ["/v1/receivers/", "/v1/integrations/", "/provider/v1/"].contains(where: { relative.path.hasPrefix($0) })
+                || relative.path == "/v1/integrations",
+              ["GET", "POST", "PUT", "PATCH", "DELETE"].contains(method) else {
+            throw GDTransferError(message: "Invalid Red-XAI service endpoint.", status: 400)
+        }
+        let expectedSubject = subject, expectedReceiver = receiverID
+        var components = URLComponents(url: cloudAPI, resolvingAgainstBaseURL: false)!
+        components.path = relative.path; components.queryItems = relative.queryItems
+        guard let url = components.url, url.scheme == "https", url.host == cloudAPI.host, url.port == nil else {
+            throw GDTransferError(message: "Unsafe Red-XAI service endpoint.", status: 400)
+        }
+        let transport = URLSession(configuration: .ephemeral, delegate: GDMachineNotesRedirectDelegate(), delegateQueue: nil)
+        defer { transport.invalidateAndCancel() }
+        for attempt in 0...1 {
+            guard linked, subject == expectedSubject, receiverID == expectedReceiver else {
+                throw GDTransferError(message: "The Red-XAI account changed.", status: 401)
+            }
+            let token = try await accessToken(forceRefresh: attempt == 1)
+            var request = URLRequest(url: url); request.httpMethod = method; request.timeoutInterval = 30
+            request.cachePolicy = .reloadIgnoringLocalCacheData
+            request.setValue("Bearer " + token, forHTTPHeaderField: "Authorization")
+            request.setValue("application/json", forHTTPHeaderField: "Accept")
+            request.setValue("identity", forHTTPHeaderField: "Accept-Encoding")
+            if let json {
+                request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+                request.httpBody = try JSONSerialization.data(withJSONObject: json)
+                guard (request.httpBody?.count ?? 0) <= 1024 * 1024 else {
+                    throw GDTransferError(message: "Red-XAI service request is too large.", status: 400)
+                }
+            }
+            let (data, response) = try await transport.data(for: request)
+            guard linked, subject == expectedSubject, receiverID == expectedReceiver else {
+                throw GDTransferError(message: "The Red-XAI account changed.", status: 401)
+            }
+            guard let http = response as? HTTPURLResponse, http.url == url, data.count <= 4 * 1024 * 1024 else {
+                throw GDTransferError(message: "Invalid Red-XAI service response.", status: 0)
+            }
+            if http.statusCode == 401 && attempt == 0 { continue }
+            guard (200..<300).contains(http.statusCode) else {
+                throw GDTransferError(message: "Red-XAI service request failed (HTTP \(http.statusCode)).", status: http.statusCode)
+            }
+            if data.isEmpty { return [:] }
+            return try jsonObject(data)
+        }
+        throw GDTransferError(message: "Reconnect the Red-XAI app session.", status: 401)
     }
 
     func machineNotesInventory(allAccounts: Bool = false, cursor: String? = nil) async throws -> GDMachineNotesInventoryPage {

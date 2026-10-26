@@ -14,7 +14,7 @@ final class GDUpdateActivity: ObservableObject {
     private var entries: [ObjectIdentifier: Entry] = [:]
     private weak var maintenanceOwner: AnyObject?
     private var backgroundInspections: Set<UUID> = []
-    private let persistentFlags: Set<String> = ["mounted", "runningApps"]
+    private let persistentFlags: Set<String> = ["mounted", "runningApps", "workspaceMounts"]
 
     private func changed() {
         DispatchQueue.main.async { [weak self] in self?.revision &+= 1 }

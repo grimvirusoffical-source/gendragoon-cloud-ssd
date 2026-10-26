@@ -925,7 +925,7 @@ private struct PlansPanel: View {
             HStack {
                 VStack(alignment: .leading, spacing: 5) {
                     Text("YOUR SPACE. YOUR GAME LIBRARY.").font(.system(size: 19,weight:.heavy,design:.rounded))
-                    Text("Private storage per account · 10 GiB free local cache reserve · restore apps anytime")
+                    Text("Private storage per account · 10 GB free space recommended · restore apps anytime")
                         .font(.system(size: 11)).foregroundStyle(.gray)
                 }
                 Spacer()

@@ -722,6 +722,33 @@ final class UploadWorkspaceModel: ObservableObject {
         mutate(["enqueue", "--offload", offload ? "true" : "false"],
                externalBusy: externalBusy, startAfterSuccess: true)
     }
+    /// A companion selection is its own immutable job. Retained selections,
+    /// folder targets and the native offload checkbox are never repurposed.
+    func enqueueCompanion(_ urls: [URL], destination: UploadDestination) async throws -> String {
+        guard !controlsLocked(externalBusy: false), isAuthorized(destination),
+              let revision = snapshot?.revision, !urls.isEmpty, urls.count <= 64,
+              urls.allSatisfy({ $0.isFileURL && $0.path.hasPrefix("/") }) else {
+            throw UploadFailure("Wait for current work, then choose an available MachineNote and local sources.")
+        }
+        isMutationPending = true; updateBusyGate()
+        defer { isMutationPending = false; updateBusyGate() }
+        try sourceAccess.remember(urls)
+        let paths = String(decoding: try JSONEncoder().encode(urls.map(\.path)), as: UTF8.self)
+        let target = String(decoding: try JSONEncoder().encode(destination), as: UTF8.self)
+        let known = Set(snapshot?.jobs.map(\.id) ?? [])
+        let response = try await call(["enqueue-selection", "--paths-json", paths, "--destination-json", target,
+                                       "--expected-revision", String(revision)])
+        apply(response.state)
+        guard response.ok, let job = response.state?.jobs.first(where: { !known.contains($0.id) && $0.state == "queued" }) else {
+            throw UploadFailure(response.message ?? "The companion upload was not queued. Existing selections were retained.")
+        }
+        // Start after the mutation lease has ended, using the normal durable worker.
+        Task { @MainActor [weak self] in
+            await Task.yield()
+            self?.startQueuedUploads(externalBusy: false)
+        }
+        return job.id
+    }
     private func mutate(_ arguments: [String], externalBusy: Bool, startAfterSuccess: Bool = false) {
         guard !controlsLocked(externalBusy: externalBusy), let revision = snapshot?.revision else { return }
         isMutationPending = true
@@ -804,13 +831,14 @@ final class UploadWorkspaceModel: ObservableObject {
             privateInput = nil
         }
         let helperArguments = arguments + (privateInput == nil ? [] : ["--performance-stdin"])
+        let authChannel = try GDWorkerAuthChannel.make(privateInput)
         let response = try await Task.detached(priority: worker ? .utility : .userInitiated) {
             // Await mutation completion: killing its parent can leave a bounded
             // Configure Cloud child running and committing the chosen context.
             try UploadHelperProcess.run(
                 arguments: ["python3", helper.path] + helperArguments,
                 timeout: (worker || isMutation) ? nil : 120,
-                standardInput: privateInput
+                standardInput: privateInput, authChannel: authChannel
             )
         }.value
         guard !response.ok || response.state != nil else {
@@ -828,7 +856,9 @@ struct UploadFailure: Error, LocalizedError, Identifiable {
 }
 private enum UploadHelperProcess {
     /// File-backed capture cannot deadlock on full pipes. All waits occur off-main.
-    static func run(arguments: [String], timeout: Double?, standardInput: Data? = nil) throws -> UploadEnvelope {
+    static func run(arguments: [String], timeout: Double?, standardInput: Data? = nil,
+                    authChannel: GDWorkerAuthChannel? = nil) throws -> UploadEnvelope {
+        defer { authChannel?.close() }
         guard (standardInput?.count ?? 0) <= 32 * 1024 else { throw UploadFailure("Private helper input exceeded its safety limit.") }
         let manager = FileManager.default
         let directory = manager.temporaryDirectory.appendingPathComponent("gendragoon-upload-\(UUID().uuidString)", isDirectory: true)
@@ -847,14 +877,17 @@ private enum UploadHelperProcess {
         guard let python = GDRuntime.pythonURL else { throw UploadFailure("A supported Python 3 runtime is unavailable. Run the GenDragoon installer.") }
         process.executableURL = python
         GDRuntime.configurePython(process, arguments: arguments.first == "python3" ? Array(arguments.dropFirst()) : arguments)
-        let input = standardInput == nil ? nil : Pipe()
-        if let input { process.standardInput = input } else { process.standardInput = FileHandle.nullDevice }
+        let input = standardInput == nil || authChannel != nil ? nil : Pipe()
+        if let authChannel { authChannel.attach(to: process) }
+        else if let input { process.standardInput = input }
+        else { process.standardInput = FileHandle.nullDevice }
         process.standardOutput = output
         process.standardError = errors
         let completed = DispatchSemaphore(value: 0)
         process.terminationHandler = { _ in completed.signal() }
         try process.run()
-        if let input, let standardInput {
+        if let authChannel { try authChannel.start() }
+        else if let input, let standardInput {
             try input.fileHandleForWriting.write(contentsOf: standardInput)
             try input.fileHandleForWriting.close()
         }

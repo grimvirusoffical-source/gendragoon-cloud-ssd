@@ -10,6 +10,11 @@ on:
   pull_request:
     paths: ['native/**', 'macos/**', 'fixtures/**', '.github/workflows/native-validation.yml']
   workflow_dispatch:
+    inputs:
+      include_ios:
+        description: 'Run iOS only after all other requested clients are finished and submitted'
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -41,6 +46,10 @@ jobs:
       - run: python -m unittest discover -s native/Tests -p test_smoke_macos_budget.py
       - name: Verify private live upload telemetry and streamed byte accounting
         run: python -B -m unittest discover -s native/Tests -p test_upload_progress.py
+      - name: Verify bounded retries, credential renewal and private failure records
+        run: python -B -m unittest discover -s native/Tests -p test_transfer_reliability.py
+      - name: Verify read-only workspace drives and private extension transport
+        run: python -B -m unittest native.Tests.test_workspace_mount native.Tests.test_native_bridge native.Tests.test_extension_packages
       - run: python -m unittest discover -s native/Tests -p test_library_metadata.py
         env:
           PYTHONPATH: native/Resources
@@ -78,6 +87,11 @@ jobs:
         run: node -e "require('./native/Backend/test_helpers/transfer_fixture')"
       - name: Test native lifecycle, archive security and the real v3 transfer router
         run: python -m unittest discover -s native/Desktop/tests -p test_desktop.py -v
+      - name: Install the Windows native pipe and ACL API
+        if: runner.os == 'Windows'
+        run: python -B -m pip install pywin32==312
+      - name: Verify actual same-user companion IPC and access restrictions
+        run: python -B -m unittest discover -s native/Desktop/tests -p test_companion_server.py -v
 
   backend:
     runs-on: ubuntu-latest
@@ -95,7 +109,16 @@ jobs:
       - run: npm ci --ignore-scripts
       - run: npm test
       - name: Verify Red-XAI subscription billing, workspace deletion and enforced transfer tiers
-        run: node --test ../RedXCloud/test/control-server.test.cjs ../RedXCloud/test/workspace-lifecycle.test.cjs ../RedXCloud/test/control-receiver.integration.test.cjs ../RedXCloud/test/machine-notes.test.cjs ../RedXCloud/test/library-tree.test.cjs
+        run: node --test --test-concurrency=2 ../RedXCloud/test/*.test.cjs
+      - name: Verify text-only peer sessions and browser/editor clients
+        run: node --test ../Collaboration/tests/*.test.cjs ../Extensions/tests/*.test.cjs
+      - name: Package Chrome, Edge, Firefox, Opera and VS Code extensions
+        run: python3 -B ../Extensions/package_extensions.py --output ../../build/extensions
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: GenDragoon-extension-candidates
+          path: build/extensions
+          if-no-files-found: error
       - run: npm audit --omit=dev --audit-level=high
       - run: python3 -m unittest discover -p 'test_*.py'
 
@@ -117,30 +140,51 @@ jobs:
         run: python3 -B -m unittest native.Tests.test_integrated_update_activity native.Tests.test_integrated_transfer_budget -v
       - name: Exercise actual Swift helper completion, failure, timeout and caller cancellation
         run: python3 -B -m unittest native.Tests.test_integrated_native_helper -v
+      - name: Exercise real inherited-socket credential renewal across nested helpers
+        run: python3 -B -m unittest native.Tests.test_auth_channel -v
+      - name: Exercise the actual private Swift companion listener and concurrent framed requests
+        run: python3 -B -m unittest native.Tests.test_companion_ipc -v
+      - name: Verify portable vault encryption, account binding and safe key import
+        run: python3 -B -m unittest native.Tests.test_portable_vault -v
 
   android:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6
         with:
           distribution: temurin
           java-version: '17'
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: '3.13'
+      - uses: android-actions/setup-android@be39fa834029ff78f1a44aa3bb0819b8fc2bd8fd # v4.0.4
+        with:
+          packages: 'platform-tools platforms;android-36 build-tools;35.0.0'
       - uses: gradle/actions/setup-gradle@07d1f8453baaff67fb503883367f8b13e6158a54 # v6
         with:
           gradle-version: '8.13'
-      - name: Compile Android and run its configured unit tests
-        run: gradle :app:assembleDebug :app:testDebugUnitTest --no-daemon --console=plain --stacktrace
+      - name: Validate the pinned compiled-only runtime and owner archive adapter
+        run: |
+          python3.13 -B sync_runtime.py
+          python3.13 -B -m unittest discover -s tests -p 'test_*.py' -v
+        working-directory: native/Mobile/Android
+      - name: Compile Android and run lint and unit tests
+        run: gradle :app:assembleDebug :app:assembleRelease :app:bundleRelease :app:lint :app:testDebugUnitTest --no-daemon --console=plain --stacktrace
         working-directory: native/Mobile/Android
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
-          name: Android-debug-candidate
-          path: native/Mobile/Android/app/build/outputs/apk/debug/*.apk
+          name: Android-unsigned-candidates-and-validation
+          path: |
+            native/Mobile/Android/app/build/outputs/apk/**/*.apk
+            native/Mobile/Android/app/build/outputs/bundle/**/*.aab
+            native/Mobile/Android/app/build/reports/
           if-no-files-found: error
           retention-days: 7
 
   ios:
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.include_ios }}
     runs-on: macos-latest
     timeout-minutes: 40
     steps:

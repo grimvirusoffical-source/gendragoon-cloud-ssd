@@ -43,6 +43,9 @@ MAX_TREE_ENTRIES = 2000
 MAX_FINGERPRINT_ENTRIES = 1000000
 HELPER_TIMEOUT = 6 * 60 * 60
 RESOURCE_DIR = Path(__file__).absolute().parent
+if str(RESOURCE_DIR) not in sys.path:
+    sys.path.insert(0, str(RESOURCE_DIR))
+from gendragoon_transfer_errors import MESSAGES as FAILURE_MESSAGES, validate_failure
 SOURCE_KINDS = {"app", "folder", "file"}
 JOB_STATES = {"queued", "running", "succeeded", "failed"}
 MAX_PROGRESS_BYTES = 16 * 1024
@@ -58,8 +61,9 @@ PROGRESS_STAGES = {"preparing": (0, .02), "snapshot": (.02, .08), "snapshotting"
 
 
 class WorkspaceError(RuntimeError):
-    def __init__(self, code, message, state=None):
+    def __init__(self, code, message, state=None, failure=None):
         self.code, self.message, self.state = code, message, state
+        self.failure = validate_failure(failure)
         super().__init__(message)
 
 
@@ -431,12 +435,20 @@ def unchanged(source):
         raise WorkspaceError("source_changed", "A source changed after selection; remove it and select it again")
 
 
-def enqueue(expected_revision, offload, home=None):
+def enqueue(expected_revision, offload, home=None, *, explicit_selection=None, explicit_destination=None):
     if type(offload) is not bool:
         raise WorkspaceError("invalid_option", "Offload must be explicitly true or false")
     state = read_state(home)
     require_revision(state, expected_revision)
     require_idle(state)
+    if explicit_selection is not None:
+        if offload or not isinstance(explicit_selection,list) or not 1<=len(explicit_selection)<=64 or any(not isinstance(p,str) for p in explicit_selection):
+            raise WorkspaceError("invalid_source", "Choose at most 64 explicit local sources; companion offload is disabled")
+        if not isinstance(explicit_destination,dict) or set(explicit_destination)!={"project","bucket","remote","prefix"}:
+            raise WorkspaceError("invalid_destination", "Choose an authorized MachineNote")
+        state=copy.deepcopy(state)
+        state["destination"]=destination_record(**explicit_destination)
+        state["sources"]=[selected_source(path) for path in dict.fromkeys(explicit_selection)]
     if state["destination"] is None:
         raise WorkspaceError("destination_required", "Choose a project and bucket before uploading", state)
     if not state["sources"]:
@@ -464,11 +476,11 @@ def enqueue(expected_revision, offload, home=None):
         if len(current["jobs"]) >= MAX_JOBS:
             raise WorkspaceError("workspace_full", "The upload queue/history is full; existing jobs were retained")
         now = time.time()
-        job = {"id": uuid.uuid4().hex, "state": "queued", "destination": copy.deepcopy(current["destination"]),
-               "sources": copy.deepcopy(current["sources"]), "offload": offload,
+        job = {"id": uuid.uuid4().hex, "state": "queued", "destination": copy.deepcopy(state["destination"]),
+               "sources": copy.deepcopy(state["sources"]), "offload": offload,
                "items": [{"source_id": source["id"], "state": "pending", "key": None,
-                          "offloaded": None, "message": "Waiting to upload"} for source in current["sources"]],
-               "completed_items": 0, "total_items": len(current["sources"]),
+                          "offloaded": None, "message": "Waiting to upload"} for source in state["sources"]],
+               "completed_items": 0, "total_items": len(state["sources"]),
                "created_at": now, "updated_at": now, "error": None}
         current["jobs"].append(job)
         return commit(descriptor, current), job["id"]
@@ -622,6 +634,11 @@ def child_result(command, maintenance_fd=None):
         options["pass_fds"] = (maintenance_fd,)
     credential = _performance_input
     if credential is not None and len(command)>2 and Path(command[2]).name == "gendragoon_library.py":
+        import gendragoon_auth_broker
+        current_credential=gendragoon_auth_broker.attach(json.loads(credential))
+        credential=json.dumps(current_credential,separators=(",", ":")).encode()
+        inherited = gendragoon_auth_broker.inherited_fds(current_credential)
+        options["pass_fds"] = tuple(dict.fromkeys((*options.get("pass_fds", ()), *inherited)))
         command = [*command, "--performance-stdin"]
         options.pop("stdin")
         options["input"] = credential.decode("utf8")
@@ -638,6 +655,9 @@ def child_result(command, maintenance_fd=None):
                     and value.get("message") == "Quit this application before offloading it"):
                 raise WorkspaceError("source_in_use",
                     "Quit the selected application before moving it to Trash, or turn off Move originals to Trash to upload a backup while keeping it on this Mac.")
+            failure=validate_failure(value.get("failure")) if isinstance(value,dict) and value.get("ok") is False else None
+            if failure:
+                raise WorkspaceError(failure["code"],FAILURE_MESSAGES[failure["code"]],failure=failure)
             raise ValueError("helper did not complete")
         if not isinstance(value, dict) or value.get("ok") is not True:
             raise ValueError("helper did not return success")
@@ -791,6 +811,10 @@ def run_next(home=None):
             def failed(current, state):
                 current["state"] = "failed"
                 current["error"] = error.code
+                failure=error.failure or validate_failure({"code":error.code}) or {"code":"helper_failed"}
+                phase=current.get("progress",{}).get("phase","preparing")
+                if phase not in PROGRESS_PHASES:phase="preparing"
+                current["failure"]={**failure,"phase":phase,"at":int(time.time())}
                 for item in current["items"]:
                     if item["state"] == "running":
                         item.update(state="failed", message=error.message)
@@ -883,7 +907,10 @@ def main(argv=None):
     clear = sub.add_parser("clear-sources")
     queue = sub.add_parser("enqueue")
     queue.add_argument("--offload", choices=("true", "false"), required=True)
-    for command in (destination, add, remove, clear, queue, cancel):
+    companion = sub.add_parser("enqueue-selection")
+    companion.add_argument("--paths-json", required=True)
+    companion.add_argument("--destination-json", required=True)
+    for command in (destination, add, remove, clear, queue, cancel, companion):
         command.add_argument("--expected-revision", type=int, required=True)
     args = parser.parse_args(argv)
     if getattr(args, "performance_stdin", False):
@@ -910,6 +937,9 @@ def main(argv=None):
             state = clear_sources(args.expected_revision)
         elif args.action == "enqueue":
             state, extra["job_id"] = enqueue(args.expected_revision, args.offload == "true")
+        elif args.action == "enqueue-selection":
+            state, extra["job_id"] = enqueue(args.expected_revision, False,
+                explicit_selection=strict_json(args.paths_json), explicit_destination=strict_json(args.destination_json))
         else:
             state, extra["job_id"] = run_next()
         emit({"ok": True, "state": state, **extra})

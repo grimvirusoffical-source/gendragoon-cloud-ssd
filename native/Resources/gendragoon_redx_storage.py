@@ -12,6 +12,8 @@ sys.dont_write_bytecode = True
 os.environ["PYTHONDONTWRITEBYTECODE"] = "1"
 
 import hashlib
+import http.client
+import math
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from functools import lru_cache
@@ -27,6 +29,8 @@ import urllib.error
 import urllib.request
 import zlib
 import gendragoon_progress as progress
+import gendragoon_auth_broker as auth_broker
+from gendragoon_transfer_errors import TransferError
 
 RESOURCE = Path(__file__).resolve().parent
 DEV_VENDOR = RESOURCE.parent / "vendor" / "Red-SecretsXAI"
@@ -76,10 +80,8 @@ INDEX_SCHEMA = "gendragoon.chunk-index/v2"
 METADATA_SCHEMA = "gendragoon.metadata-stream/v1"
 
 
-class RedXStorageError(RuntimeError):
-    def __init__(self, message, status=None):
-        super().__init__(message)
-        self.status = status
+class RedXStorageError(TransferError):
+    pass
 
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -160,6 +162,7 @@ class RedXReceiver:
         self.workspace = config["workspaceId"]
         self.receiver = config["receiverId"]
         self.token = config["bearerToken"]
+        self.auth = auth_broker.client_for(config)
         self.secret = config["storageSecret"]
         self.keymap = Path(config["keymapPath"]).absolute()
         self.keymap.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -176,7 +179,6 @@ class RedXReceiver:
 
     def _request(self, route, method="GET", data=None, headers=None, limit=JSON_LIMIT, expected=(200,)):
         request_headers = {
-            "Authorization": "Bearer " + self.token,
             "Accept": "application/json",
             "Accept-Encoding": "identity",
             "User-Agent": "GenDragoon-Native/0.18",
@@ -185,8 +187,13 @@ class RedXReceiver:
             request_headers.update(headers)
         tracked = progress.enabled() and "/blobs/" in route and method in ("GET", "PUT")
         body = _ProgressBody(data) if tracked and method == "PUT" and isinstance(data, bytes) else data
-        request = urllib.request.Request(self._url(route), data=body, method=method, headers=request_headers)
+        retryable = method == "GET" or method == "PUT" and bool(re.fullmatch(
+            r"/v1/receivers/me/workspaces/[a-f0-9]{32}/(?:blobs|objects)/[a-f0-9]{32}", route))
+        renewed = False
         for attempt in range(6):
+            token = self.auth.token() if self.auth else self.token
+            request_headers["Authorization"] = "Bearer " + token
+            request = urllib.request.Request(self._url(route), data=body, method=method, headers=request_headers)
             network_token = progress.network_begin() if tracked else None
             try:
                 with self.opener.open(request, timeout=90) as response:
@@ -212,7 +219,16 @@ class RedXReceiver:
                 code = int(error.code)
                 retry_after = error.headers.get("Retry-After") if error.headers else None
                 error.close()
-                if code == 429 and attempt < 5:
+                if code == 401 and self.auth and not renewed and attempt < 5:
+                    if network_token is not None:
+                        progress.network_end(network_token); network_token = None
+                    try:
+                        self.auth.renew(token)
+                    except auth_broker.BrokerError:
+                        raise RedXStorageError("Native session renewal failed",401,"session_renewal_failed") from None
+                    renewed = True
+                    continue
+                if (code == 429 or retryable and code in (408,425,500,502,503,504)) and attempt < 5:
                     if network_token is not None:
                         progress.network_end(network_token)
                         network_token = None
@@ -220,6 +236,7 @@ class RedXReceiver:
                         delay = float(retry_after) if retry_after is not None else .2 * 2 ** attempt
                     except (TypeError, ValueError):
                         delay = .2 * 2 ** attempt
+                    if not math.isfinite(delay):delay = .2 * 2 ** attempt
                     time.sleep(min(3.0, max(.2, delay)))
                     continue
                 messages = {401: "Red-XAI app session expired or was logged out",
@@ -227,8 +244,16 @@ class RedXReceiver:
                             429: "Red-XAI transfer allowance is busy; retry resumes verified chunks",
                             507: "Red-XAI cloud storage quota is full"}
                 raise RedXStorageError(messages.get(code, "Receiver rejected the operation (HTTP %d)" % code), code) from None
-            except (urllib.error.URLError, TimeoutError, ssl.SSLError) as error:
-                raise RedXStorageError("Red-XAI Receiver is temporarily unreachable; retry resumes verified chunks") from error
+            except (urllib.error.URLError, TimeoutError, OSError, http.client.HTTPException) as error:
+                reason = error.reason if isinstance(error, urllib.error.URLError) else error
+                certificate_failure = isinstance(reason, ssl.SSLCertVerificationError)
+                if retryable and not certificate_failure and attempt < 5:
+                    if network_token is not None:
+                        progress.network_end(network_token); network_token = None
+                    time.sleep(min(3.0,.2 * 2 ** attempt))
+                    continue
+                raise RedXStorageError("Red-XAI Receiver is temporarily unreachable; retry resumes verified chunks",
+                                       code="transport_unavailable") from None
             finally:
                 if network_token is not None:
                     progress.network_end(network_token)
@@ -479,7 +504,7 @@ def _parallel_chunks(client, codec, workers, values, operation):
         for value in values:
             yield operation(codec, value)
         return
-    codecs = deque([codec] + [codec.worker(RedXReceiver(client.config)) for _ in range(workers - 1)])
+    codecs = deque([codec] + [codec.worker(type(client)(client.config)) for _ in range(workers - 1)])
     local = threading.local()
     assignment = threading.Lock()
     def initialize():
@@ -560,8 +585,8 @@ def _load_pages(client, codec, pages, _depth=0, _seen=None):
     return out
 
 
-def upload_archive(config, archive, key, name, kind, archive_layout, archive_sha, source_manifest, parent_key=None):
-    client = RedXReceiver(config)
+def upload_archive(config, archive, key, name, kind, archive_layout, archive_sha, source_manifest, parent_key=None, client_factory=None):
+    client = (client_factory or RedXReceiver)(config)
     workers = client.verified_workers(write=True)
     archive = Path(archive)
     if not archive.is_file() or archive.is_symlink():
@@ -670,8 +695,8 @@ def _root_for_item(client, codec, item):
     return root, manifest_id
 
 
-def download_archive(config, item, destination):
-    client = RedXReceiver(config)
+def download_archive(config, item, destination, client_factory=None):
+    client = (client_factory or RedXReceiver)(config)
     workers = client.verified_workers()
     expected_bytes = item.get("archiveBytes")
     progress.phase("readback", total_bytes=expected_bytes if type(expected_bytes) is int and expected_bytes > 0 else 0,

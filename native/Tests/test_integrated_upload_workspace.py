@@ -81,6 +81,23 @@ class UploadWorkspaceTests(unittest.TestCase):
         self.assertNotIn("credential", data)
         self.assertNotIn("api_key", data)
 
+    def test_companion_queue_keeps_native_selection_and_destination_unchanged(self):
+        original=self.source("retained.app.zip")
+        explicit=self.source("explicit.txt")
+        state=self.select()
+        state=workspace.add_sources([str(original)],state["revision"],self.home)
+        result,job_id=workspace.enqueue(state["revision"],False,self.home,
+            explicit_selection=[str(explicit)],explicit_destination=SECOND)
+        self.assertEqual(result["sources"],state["sources"])
+        self.assertEqual(result["destination"],FIRST)
+        job=next(j for j in result["jobs"] if j["id"]==job_id)
+        self.assertEqual(job["destination"],SECOND)
+        self.assertEqual([s["path"] for s in job["sources"]],[str(explicit)])
+        self.assertFalse(job["offload"])
+        with self.assertRaises(workspace.WorkspaceError):
+            workspace.enqueue(result["revision"],True,self.home,
+                explicit_selection=[str(explicit)],explicit_destination=SECOND)
+
     def test_app_bundle_is_atomic_and_quick_entries_are_present(self):
         app = self.sources / "Game.app"
         (app / "Contents").mkdir(parents=True)
@@ -582,6 +599,7 @@ except w.WorkspaceError as e:print(json.dumps({'ok':False,'error':e.code}))
         bundle.mkdir()
         copied = bundle / SCRIPT.name
         shutil.copyfile(SCRIPT, copied)
+        shutil.copyfile(SCRIPT.parent / "gendragoon_transfer_errors.py", bundle / "gendragoon_transfer_errors.py")
         (bundle / "gendragoon_connect.py").write_text('''
 import argparse,json,sys
 import gendragoon_upload_workspace as w

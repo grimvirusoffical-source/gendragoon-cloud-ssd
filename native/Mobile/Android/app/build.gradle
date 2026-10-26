@@ -1,23 +1,51 @@
-plugins { id 'com.android.application'; id 'com.google.gms.google-services' }
+plugins { id 'com.android.application'; id 'com.chaquo.python' }
+def compiledRuntime = System.getenv('GENDRAGOON_ANDROID_RUNTIME') ?: rootProject.file('runtime/gendragoon-android-runtime-9235941b431b.zip').path
+def useCompiledRuntime = file(compiledRuntime).isFile()
 android {
  namespace 'app.gendragoon.cloudssd.mobile'
  compileSdk 36
- defaultConfig { applicationId 'app.gendragoon.cloudssd.mobile'; minSdk 26; targetSdk 36; versionCode 20; versionName '0.17.0'; testInstrumentationRunner 'androidx.test.runner.AndroidJUnitRunner' }
+ ndkVersion '28.2.13676358'
+ defaultConfig { applicationId 'app.gendragoon.cloudssd.mobile'; minSdk 28; targetSdk 36; versionCode 36; versionName '0.22.0'; testInstrumentationRunner 'androidx.test.runner.AndroidJUnitRunner'
+  ndk { abiFilters 'arm64-v8a', 'x86_64' }
+  if (!useCompiledRuntime) { externalNativeBuild { cmake { targets 'rsx'; arguments '-DRSX_SHARED=ON', '-DRSX_FUZZ=OFF', '-DANDROID_SUPPORT_FLEXIBLE_PAGE_SIZES=ON' } } }
+ }
+ if (!useCompiledRuntime) { externalNativeBuild { cmake { path file('../CMakeLists.txt'); version '3.22.1' } } }
+ packaging { jniLibs { useLegacyPackaging true } }
+ sourceSets { main { assets.srcDirs += ['build/generated/teamsAssets', 'build/generated/licenses']; jniLibs.srcDirs += ['build/generated/jniLibs'] }; test { resources.srcDirs += ['build/generated/testResources'] }; androidTest { assets.srcDirs += ['build/generated/androidTestAssets'] } }
  compileOptions { coreLibraryDesugaringEnabled true; sourceCompatibility JavaVersion.VERSION_17; targetCompatibility JavaVersion.VERSION_17 }
  buildTypes { release { minifyEnabled false } }
  lint { abortOnError true; error 'NewApi' }
 }
+chaquopy {
+ defaultConfig {
+  version '3.13'
+  pip { install 'numpy==1.26.2'; install 'Pillow==11.0.0' }
+  extractPackages 'redxai', 'redsecretsxai'
+ }
+ sourceSets { main { srcDirs = ['src/main/python', 'build/generated/python'] }; debug { srcDirs = ['src/debug/python'] } }
+}
+tasks.register('syncGenDragoonRuntime', Exec) {
+ workingDir rootProject.projectDir
+ commandLine(System.getenv('PYTHON') ?: 'python3.13', '-B', 'sync_runtime.py')
+ inputs.dir('../../../Resources')
+ inputs.file('../sync_runtime.py')
+ if (useCompiledRuntime) { inputs.file(compiledRuntime) } else { inputs.dir('../../../vendor/Red-SecretsXAI/redxai'); inputs.dir('../../../vendor/Red-SecretsXAI/redsecretsxai') }
+ inputs.dir('../../../Collaboration')
+ outputs.dir('build/generated/python')
+ outputs.dir('build/generated/teamsAssets')
+}
+tasks.matching { it.name.startsWith('generate') && it.name.contains('Python') || it.name == 'preBuild' }.configureEach { dependsOn 'syncGenDragoonRuntime' }
 dependencies {
  coreLibraryDesugaring 'com.android.tools:desugar_jdk_libs:2.1.5'
- implementation platform('com.google.firebase:firebase-bom:35.0.0')
- implementation 'com.google.firebase:firebase-auth'
  implementation 'androidx.appcompat:appcompat:1.7.1'
  implementation 'androidx.core:core:1.13.0'
  implementation 'androidx.activity:activity:1.10.1'
- implementation 'androidx.credentials:credentials:1.3.0'
- implementation 'androidx.credentials:credentials-play-services-auth:1.3.0'
- implementation 'com.google.android.libraries.identity.googleid:googleid:1.1.1'
  implementation 'com.google.android.material:material:1.13.0'
  implementation 'androidx.work:work-runtime:2.10.1'
+ implementation 'androidx.documentfile:documentfile:1.1.0'
+ implementation 'androidx.webkit:webkit:1.14.0'
  testImplementation 'junit:junit:4.13.2'
+ testImplementation 'org.json:json:20250517'
+ androidTestImplementation 'androidx.test:runner:1.6.2'
+ androidTestImplementation 'androidx.test.ext:junit:1.2.1'
 }

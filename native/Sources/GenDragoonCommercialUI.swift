@@ -5,6 +5,8 @@ private enum GDPage: String, CaseIterable {
     case home = "Home"
     case cloud = "Files"
     case applications = "Applications"
+    case teams = "Teams"
+    case integrations = "Integrations"
     case plans = "MachineNotes"
     case storage = "Storage"
     case performance = "Performance"
@@ -14,6 +16,8 @@ private enum GDPage: String, CaseIterable {
         case .home: return "house.fill"
         case .cloud: return "externaldrive.fill.badge.wifi"
         case .applications: return "app.badge.fill"
+        case .teams: return "person.3.fill"
+        case .integrations: return "point.3.connected.trianglepath.dotted"
         case .plans: return "square.stack.3d.up.fill"
         case .storage: return "externaldrive.fill"
         case .performance: return "bolt.fill"
@@ -80,6 +84,7 @@ private struct GDPrimary: View {
             ScrollView {
                 VStack(alignment:.leading,spacing:20) {
                     GenDragoonCompactUpdateStatus()
+                    GDDiskSpaceNotice()
                     if subscriptions.accountVerified && !subscriptions.adFree,let top=ads.top {
                         GenDragoonAdView(item:top)
                     }
@@ -87,6 +92,8 @@ private struct GDPrimary: View {
                     case .home: homePage
                     case .cloud: cloudPage
                     case .applications: applicationsPage
+                    case .teams: GDDevTeamsView()
+                    case .integrations: GDIntegrationsView()
                     case .plans: plansPage
                     case .storage: storagePage
                     case .performance: performancePage
@@ -101,6 +108,7 @@ private struct GDPrimary: View {
         .preferredColorScheme(.dark)
         .frame(minWidth:950,minHeight:720)
         .task {
+            GDCompanion.shared.start()
             if redXSession.linked {
                 subscriptions.refresh(redXSession)
                 await native.start()
@@ -109,6 +117,7 @@ private struct GDPrimary: View {
         .onChange(of:page) { _,_ in
             if redXSession.linked { subscriptions.refresh(redXSession) }
         }
+        .onReceive(NotificationCenter.default.publisher(for: .init("GDIntegrationURLReceived"))) { _ in page = .integrations }
         .onChange(of:subscriptions.adFree) { _,adFree in
             ads.refresh(isAdFree:adFree,allowFetch:subscriptions.accountVerified)
         }
@@ -203,7 +212,7 @@ private struct GDPrimary: View {
                 GDPanel {
                     Label("Smart streaming",systemImage:"bolt.fill")
                         .foregroundStyle(gdPurple).font(.system(size:12,weight:.semibold))
-                    Text("10 GiB free-space reserve").font(.system(size:17,weight:.bold))
+                    Text("10 GB free space recommended").font(.system(size:17,weight:.bold))
                     Text("Compatible app bundles can stream from the mount; other apps need a local copy.")
                         .font(.system(size:11)).foregroundStyle(gdSecondary)
                     GDPrimary(title:"Go to My Cloud",icon:"externaldrive") {page = .cloud}
@@ -248,7 +257,7 @@ private struct GDPrimary: View {
     }
     private var performancePage: some View {
         VStack(alignment:.leading,spacing:20) {
-            GDHeading(kicker:"PERFORMANCE",title:"Tune your transfer workload.",subtitle:"GenDragoon keeps a 10 GiB local free-space reserve while staging verified cloud content.")
+            GDHeading(kicker:"PERFORMANCE",title:"Tune your transfer workload.",subtitle:"Keep 10 GB free for comfortable operation. GenDragoon checks the actual staging space required for each transfer.")
             if redXSession.linked {
                 GDPanel {
                     Label("Red-XAI encrypted transfers",systemImage:"bolt.shield.fill").font(.headline)
@@ -265,6 +274,7 @@ private struct GDPrimary: View {
             GDHeading(kicker:"FILES & FOLDERS",title:"Everything, in its place.",subtitle:"Choose a MachineNote, upload files or complete folders, and restore a verified copy when you need it.")
             if redXSession.linked {
                 GDNativeWorkspaceView(native:native,content:.files)
+                GDWorkspaceMountsPanel()
             }
         }
     }
@@ -324,6 +334,8 @@ private struct GDPrimary: View {
                 GDRXSubscriptionsPanel(focus:.ads)
             }
             GenDragoonAutomaticUpdateStatus()
+            GDCompanionPanel()
+            GDPortableVaultPanel()
             GDPanel {
                 AccountResetSection(isBusy: native.maintenanceBusy,
                     acquireExclusiveOperation: { native.acquireReset() },

@@ -494,7 +494,7 @@ class AutoUpdateTests(unittest.TestCase):
             return shutil._ntuple_diskusage(10 ** 12, 0, 0 if Path(path) == self.app.parent else 10 ** 12)
         with self.mac(), mock.patch.object(updater, "sufficient_space", wraps=check_space), \
                 mock.patch.object(updater.shutil, "disk_usage", side_effect=disk_usage), \
-                self.assertRaisesRegex(RuntimeError, "preserve 10 GiB"):
+                self.assertRaisesRegex(RuntimeError, "insufficient local space"):
             updater.install_worker(relaunch=True)
         self.assert_original()
         self.assertFalse(any(command[0] == "/usr/bin/ditto" for command in self.calls))

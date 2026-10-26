@@ -89,6 +89,12 @@ ASSERTIONS = '''
         precondition(delegate.applicationShouldTerminate(app) == .terminateCancel)
         gate.set(cloud,key:"mounted",active:false)
         precondition(delegate.applicationShouldTerminate(app) == .terminateNow)
+        gate.set(cloud,key:"workspaceMounts",active:true)
+        precondition(gate.canStart(),"An existing independent workspace mount must permit another ordinary operation")
+        precondition(gate.isBusyForUpdate(),"An independent workspace mount cannot be quiesced as the primary mount")
+        precondition(!gate.beginUpdateMaintenance(owner:updater))
+        precondition(delegate.applicationShouldTerminate(app) == .terminateCancel)
+        gate.set(cloud,key:"workspaceMounts",active:false)
         // Maintenance prevents new polling without interrupting an existing
         // reader. Both real leases must drain before the worker can begin.
         let first=gate.beginBackgroundInspection()!,second=gate.beginBackgroundInspection()!

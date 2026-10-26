@@ -335,7 +335,7 @@ actor GDTransferClient {
         #if os(iOS)
         let reserve:Int64=512*1024*1024
         #else
-        let reserve:Int64=10*1024*1024*1024
+        let reserve:Int64=64*1024*1024
         #endif
         guard free>=budget.reservedDownloadBytes-done+reserve else {throw GDTransferError(message:"Not enough local cache space to restore the active files safely.",status:0)}
         let handle=try openDownload(target);defer{try? handle.close()}

@@ -311,6 +311,14 @@ struct GenDragoonStartupRoot:View {
         }
         .frame(minWidth:780,minHeight:660)
         .preferredColorScheme(.dark)
+        .onOpenURL { url in
+            guard url.scheme == "gendragoon" else { return }
+            if url.host == "connect" { GDIntegrationsModel.shared.receiveConnectURL(url) }
+            else if url.host == "redx-callback" { GDIntegrationsModel.shared.receiveRedXCallback(url) }
+            if ["connect", "redx-callback"].contains(url.host ?? "") {
+                NotificationCenter.default.post(name: .init("GDIntegrationURLReceived"), object: nil)
+            }
+        }
         .onAppear {
             if !redXStandalonePreview {
                 GDUpdateCoordinator.shared.start()

@@ -37,8 +37,8 @@ class NativeHelperTests(unittest.TestCase):
         production = production[production.index("enum GDRuntime {"):
                                 production.index("@MainActor private final class GDNativeUploadSignal:")]
         source = cls.root / "HelperRegression.swift"
-        source.write_text("import Foundation\nimport Darwin\n" + production + HARNESS)
-        compiled = subprocess.run(["/usr/bin/xcrun", "swiftc", "-parse-as-library", str(source),
+        source.write_text("import Foundation\nimport Darwin\n" + production + AUTH_FACADE + HARNESS)
+        compiled = subprocess.run(["/usr/bin/xcrun", "swiftc", "-parse-as-library", str(source), str(NATIVE / "Sources/GDWorkerAuthChannel.swift"),
                                    "-o", str(cls.binary)], capture_output=True, text=True, timeout=60)
         if compiled.returncode:
             raise AssertionError("Actual Swift helper fixture did not compile:\n" + compiled.stderr[-8000:])
@@ -64,6 +64,15 @@ class NativeHelperTests(unittest.TestCase):
     def test_caller_cancellation_does_not_abandon_helper_or_clear_busy_early(self):
         self.run_case("cancellation")
 
+
+AUTH_FACADE = r'''
+@MainActor final class GDRedXAIAuthSession {
+    static let shared = GDRedXAIAuthSession()
+    func workerRenewalAuthorization(_ value:[String:Any]) throws -> (receiver:String,workspace:String,renew:@Sendable (Bool) async throws -> String) {
+        fatalError("No production account is used by the helper lifecycle fixture")
+    }
+}
+'''
 
 HELPER = r'''
 import json

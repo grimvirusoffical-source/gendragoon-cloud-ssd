@@ -14,6 +14,8 @@ library=fixtures.library
 class TreeTests(unittest.TestCase):
     def setUp(self):
         self.fixture=fixtures.LibraryTests(methodName="runTest");self.fixture.setUp();self.addCleanup(self.fixture.tearDown)
+        self.addCleanup(patch.stopall)
+        patch.object(library.shutil,"disk_usage",return_value=SimpleNamespace(free=1024**4)).start()
         self.note="1"*32;self.parent="a"*18;self.nested="b"*18;self.file="c"*18;self.empty="d"*18
         self.config={"workspaceId":self.note}
         self.snapshot={"revision":8,"items":[

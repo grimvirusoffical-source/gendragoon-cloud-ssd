@@ -14,8 +14,8 @@ import shutil
 import subprocess
 import sys
 
-VERSION="0.21.0"
-BUILD="35"
+VERSION="0.22.0"
+BUILD="36"
 ROOT=Path(__file__).resolve().parent
 NAME="GenDragoon Cloud SSD.app"
 IDENTITY="Developer ID Application: Joshua Franklin (NZPU8H843J)"
@@ -158,6 +158,13 @@ def build(base,output):
     for source in (ROOT/"Resources").iterdir():
         if source.is_file() and source.suffix in (".py",".js",".json",".txt",".html",".css"):
             shutil.copy2(source,resources/source.name)
+    teams_resources=resources/"GenDragoonTeams"
+    if teams_resources.exists():shutil.rmtree(teams_resources)
+    teams_resources.mkdir(mode=0o755)
+    for name in ("index.html","teams.css","teams-ui.js","dev-peer.js"):
+        source=ROOT/"Collaboration"/name
+        if source.is_symlink() or not source.is_file():raise RuntimeError("Missing Teams interface resource: "+name)
+        shutil.copy2(source,teams_resources/name)
     stage_app_icon(resources,output)
     registry=ROOT/"Backend/performance_profiles.json"
     if registry.is_symlink() or not registry.is_file():raise RuntimeError("Missing canonical performance profile registry")
@@ -179,6 +186,8 @@ def build(base,output):
          "-o",binary,*swift],timeout=900)
     info.update(CFBundleShortVersionString=VERSION,CFBundleVersion=BUILD,LSMinimumSystemVersion="14.0",
         CFBundleIconFile="GenDragoonAppIcon.icns")
+    info["CFBundleURLTypes"]=[{"CFBundleURLName":"app.gendragoon.cloudssd.integration",
+        "CFBundleURLSchemes":["gendragoon"],"CFBundleTypeRole":"Editor"}]
     (app/"Contents/Info.plist").write_bytes(plistlib.dumps(info))
     entitlements=output/"node-entitlements.plist"
     entitlements.write_bytes(plistlib.dumps({"com.apple.security.cs.allow-jit":True,

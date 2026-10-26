@@ -41,14 +41,37 @@ function fakeStripe(){
 }
 const tokenA='rxca_'+ 'A'.repeat(43),tokenOwner='rxca_'+ 'O'.repeat(43);
 function fakeFetch(url,opts){const owner=opts?.headers?.authorization==='Bearer '+tokenOwner;return Promise.resolve(new Response(JSON.stringify({protocol:'redx-site-session-v1',client_id:'gendragoon',scope:'gendragoon.receiver',sub:owner?'owner-sub':'user-sub',email:owner?'support@infected-nation.com':'user@example.com',email_verified:true}),{status:200,headers:{'content-type':'application/json'}}));}
-async function fixture({owner=false,existing={},stripeOverride,deleteWorkspace}={}){
+async function fixture({owner=false,existing={},stripeOverride,deleteWorkspace,internalEntitlementToken}={}){
  const store=new MemoryStore(),stripe=stripeOverride===undefined?fakeStripe():stripeOverride,deleted=[];
- const c=await createControl({issuer:'https://red-xai.com',store,receiverStore:new ReceiverStore(existing),stripe,fetchImpl:fakeFetch,publicBase:'https://api.red-xai.com/gendragoon',deleteWorkspace:deleteWorkspace|| (async({project})=>deleted.push(project.id))});
+ const c=await createControl({issuer:'https://red-xai.com',store,receiverStore:new ReceiverStore(existing),stripe,fetchImpl:fakeFetch,publicBase:'https://api.red-xai.com/gendragoon',internalEntitlementToken,deleteWorkspace:deleteWorkspace|| (async({project})=>deleted.push(project.id))});
  const root=await c.listen(),token=owner?tokenOwner:tokenA;
  const call=async(path,{method='GET',body}={})=>{const r=await fetch(root+path,{method,headers:{authorization:'Bearer '+token,...(body?{'content-type':'application/json'}:{})},body:body?JSON.stringify(body):undefined});return {status:r.status,body:await r.json()};};
- return {c,store,stripe,deleted,call};
+ return {c,store,stripe,deleted,call,root};
 }
 function getState(f){return f.store.get([...f.store.map.keys()][0])}
+
+async function internalProof(f,workspaceId,authorization='Bearer '+'I'.repeat(43)){
+ const owner=[...f.store.map.keys()][0],subject=(await getState(f)).ownerBenefits?'owner-sub':'user-sub';
+ const r=await fetch(f.root+'/internal/receiver-entitlements',{method:'POST',headers:{authorization,'content-type':'application/json'},body:JSON.stringify({owner,issuer:'https://red-xai.com',subject,workspaceId})});
+ return {status:r.status,body:await r.json()};
+}
+test('internal storage delegation requires independent service auth and never migrates owner authority',async t=>{
+ const f=await fixture({owner:true,internalEntitlementToken:'I'.repeat(43)});t.after(()=>f.c.close());
+ const created=await f.call('/v2/projects',{method:'POST',body:{name:'Delegated note'}}),id=created.body.project.id;
+ assert.equal((await internalProof(f,id,'Bearer '+tokenOwner)).status,401);
+ const r=await internalProof(f,id);assert.equal(r.status,200);assert.equal(r.body.workspace.id,id);assert.equal(r.body.workspace.quotaBytes,6_000_000_000_000);
+ assert.equal('ownerAdmin' in r.body,false);assert.equal((await getState(f)).ownerBenefits,true);
+ assert.equal((await internalProof(f,'f'.repeat(32))).status,404);
+ const owner=[...f.store.map.keys()][0];await f.store.change(owner,s=>{s.projects[id].status='deleting';});
+ assert.equal((await internalProof(f,id)).status,404);
+});
+test('internal paid storage proof reconciles canceled subscriptions without a user bearer',async t=>{
+ const f=await fixture({internalEntitlementToken:'I'.repeat(43)});t.after(()=>f.c.close());
+ const p=await createAndPayPlans(f,'Delegated paid note','boost');
+ f.stripe._subs.get(p.subscriptionId).status='canceled';
+ const r=await internalProof(f,p.id);assert.equal(r.status,200);assert.equal(r.body.workspace.active,false);assert.equal(r.body.workspace.readOnly,true);assert.equal(r.body.workspace.workers,0);
+ assert.equal(r.body.workspace.quotaBytes,0);
+});
 
 test('first workspace waives only the $5 fee and still requires storage + performance selection',async t=>{
  const f=await fixture();t.after(()=>f.c.close());

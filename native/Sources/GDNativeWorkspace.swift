@@ -41,7 +41,7 @@ enum GDRuntime {
 enum GDNativeMessage {
     static func safe(_ value: String) -> String {
         var result = String(value.prefix(1500))
-        for pattern in [#"(?i)bearer\s+\S+"#, #"(?:gdsk_|sk_live_|sk_test_|rk_live_|rk_test_)[A-Za-z0-9_-]+"#, #"eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+"#] {
+        for pattern in [#"(?i)bearer\s+\S+"#, #"(?:gdsk_|sk_live_|sk_test_|rk_live_|rk_test_|gdpk_|gdpg_|gdpc_|gdt1_|rx_live_|rxca_|rxcr_)[A-Za-z0-9_.-]+"#, #"eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+"#] {
             result = result.replacingOccurrences(of: pattern, with: "[redacted]", options: .regularExpression)
         }
         return result
@@ -61,7 +61,9 @@ enum GDNativeHelper {
               let script = Bundle.main.url(forResource: resource, withExtension: "py") else {
             throw GDNativeFailure(message: "The installed app is missing its helper or supported Python runtime. Run the installer to repair it.")
         }
+        let authChannel = try await GDWorkerAuthChannel.make(standardInput)
         return try await Task.detached(priority: .userInitiated) {
+            defer { authChannel?.close() }
             let fm = FileManager.default
             let directory = fm.temporaryDirectory.appendingPathComponent("gendragoon-native-" + UUID().uuidString, isDirectory: true)
             try fm.createDirectory(at: directory, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
@@ -78,16 +80,21 @@ enum GDNativeHelper {
             let process = Process()
             process.executableURL = python
             GDRuntime.configurePython(process, arguments: [script.path] + arguments)
-            let input = standardInput == nil ? nil : Pipe()
-            if let input { process.standardInput = input } else { process.standardInput = FileHandle.nullDevice }
+            let input = standardInput == nil || authChannel != nil ? nil : Pipe()
+            if let authChannel { authChannel.attach(to: process) }
+            else if let input { process.standardInput = input }
+            else { process.standardInput = FileHandle.nullDevice }
             process.standardOutput = output
             process.standardError = errors
             try process.run()
-            if let input, let standardInput {
+            if let authChannel { try authChannel.start() }
+            else if let input, let standardInput {
                 try input.fileHandleForWriting.write(contentsOf: standardInput)
                 try input.fileHandleForWriting.close()
             }
-            let deadline = Date().addingTimeInterval(timeout)
+            let writing = resource == "gendragoon_library" && ["upload", "organize"].contains(arguments.first ?? "")
+                || resource == "gendragoon_redx_pack" && ["upload-source", "put", "mkdir", "delete"].contains(arguments.first ?? "")
+            let deadline = writing ? Date.distantFuture : Date().addingTimeInterval(timeout)
             while process.isRunning {
                 if Date() >= deadline {
                     process.terminate()
@@ -282,7 +289,7 @@ enum GDNativeHelper {
             DisclosureGroup("Managed local cache") {
                 VStack(alignment: .leading, spacing: 12) {
                     Label("Encrypted MachineNotes on your Red-XAI server", systemImage: "lock.shield.fill")
-                    Text("Files and applications are decrypted into a verified local cache when you download or launch them. GenDragoon preserves at least 10 GiB of local free space before staging content and retains caches that changed or are still in use.")
+                    Text("Files and applications are decrypted into a verified local cache when you download or launch them. Keeping 10 GB free is recommended; GenDragoon checks the actual space needed and retains caches that changed or are still in use.")
                         .font(.caption).foregroundStyle(.secondary)
                     if cloud.mounted {
                         HStack {

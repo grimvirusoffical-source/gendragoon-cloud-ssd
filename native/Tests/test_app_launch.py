@@ -53,6 +53,9 @@ class AppLaunchTests(unittest.TestCase):
         self.handles = self.add_patch(launch, "open_files", return_value=[])
         self.commands = self.add_patch(library, "run", return_value='{"ok":true}')
         self.add_patch(library, "is_running", return_value=False)
+        # Lifecycle fixtures must not depend on the developer machine's free
+        # space. Dedicated low-space cases override this same dependency.
+        self.add_patch(library.shutil, "disk_usage", return_value=shutil._ntuple_diskusage(200*1024**3,100*1024**3,100*1024**3))
         self.add_patch(library, "reply")
         self.spawn = self.add_patch(launch.subprocess, "Popen", side_effect=AssertionError("Unexpected real process"))
         self.signals = self.add_patch(launch.os, "kill", side_effect=AssertionError("Unexpected real signal"))
@@ -587,10 +590,12 @@ class AppLaunchTests(unittest.TestCase):
                     launch.local_cache_preflight(data, app)
         self.assertFalse(app.exists())
 
-    def test_full_copy_keeps_ten_gib_free_in_addition_to_cache(self):
+    def test_small_copy_is_allowed_below_ten_gib_but_actual_staging_must_fit(self):
         _, app = self.fixture(cache=False)
-        with patch.object(library.shutil, "disk_usage", return_value=Mock(free=10 * 1024 ** 3)):
-            with self.assertRaisesRegex(RuntimeError, "10 GiB"):
+        with patch.object(library.shutil, "disk_usage", return_value=Mock(free=1024 ** 3)):
+            launch.local_cache_preflight({"manifest": [{"size": 1024}]}, app)
+        with patch.object(library.shutil, "disk_usage", return_value=Mock(free=1024)):
+            with self.assertRaisesRegex(RuntimeError, "local space"):
                 launch.local_cache_preflight({"manifest": [{"size": 1024}]}, app)
         self.assertFalse(app.exists())
         self.assert_original_intact()

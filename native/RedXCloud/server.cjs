@@ -11,6 +11,9 @@ const {promisify} = require('node:util');
 const {createOidcVerifier} = require('../Backend/accounts/oidc');
 const {RedXState, CloudError, digest, origin} = require('./redx-state.cjs');
 const libraryTree = require('./library-tree.cjs');
+const {createDevTeams} = require('./dev-teams.cjs');
+const {createIntegrations} = require('./integrations.cjs');
+const {createInternalEntitlementClient} = require('./internal-entitlements.cjs');
 const exec = promisify(execFile);
 const MAX_BYTES = 8 * 1024 * 1024;
 const MAX_QUOTA = 8 * 1024**4;
@@ -42,6 +45,13 @@ async function createCloud(config) {
   const lock = path.join(root, '.writer-lock');
   await fs.mkdir(lock, {mode: 0o700}); // refuse two writers or an unreconciled crash
   const store = config.store || new RedXState({url: config.redxURL, key: config.redxKey, db: config.redxDB, dev: config.dev, local: config.redxLocal === true});
+  const devTeams = createDevTeams({store,...config.teamOptions});
+  const authorizeWorkspace = config.authorizeWorkspace || createInternalEntitlementClient({
+    url:config.internalEntitlementURL || process.env.GENDRAGOON_INTEGRATION_ENTITLEMENTS_URL,
+    token:config.internalEntitlementToken || process.env.GENDRAGOON_CONTROL_INTERNAL_TOKEN,issuer,
+    fetchImpl:config.internalEntitlementFetch || fetch,
+  });
+  const integrations = createIntegrations({store,authorizeWorkspace,...config.integrationOptions});
   const fetchImpl = config.fetchImpl || fetch;
   const secureFetch = async (url, opts = {}) => {
     if (new URL(url).origin !== issuer) throw new CloudError('issuer_endpoint_invalid', 503);
@@ -105,7 +115,7 @@ async function createCloud(config) {
         email = typeof user.email === 'string' ? user.email.trim().toLowerCase() : '';
       }
     } catch(e) { if (e instanceof CloudError) throw e; throw new CloudError('invalid_or_inactive_session', 401); }
-    return {owner: digest(JSON.stringify(['red-xai-receiver/v1', issuer, subject])), bearer: header, ownerAdmin:email === OWNER_EMAIL};
+    return {owner: digest(JSON.stringify(['red-xai-receiver/v1', issuer, subject])), bearer: header, ownerAdmin:email === OWNER_EMAIL,issuer,subject};
   }
   async function readJSONFile(file, max = 64 * 1024) {
     const stat = await fs.lstat(file);
@@ -243,6 +253,20 @@ async function createCloud(config) {
     });
     return state;
   }
+  async function syncIntegrationEntitlement(identity,state) {
+    // A delegated key has one independently verified note proof. Applying the
+    // regular account snapshot would deactivate unrelated notes omitted here.
+    const proof=identity.entitlement,id=identity.workspaceId;
+    if(!proof||proof.id!==id||proof.quotaBytes>MAX_QUOTA)throw new CloudError('entitlement_response_invalid',503);
+    return store.change(identity.owner,s=>{
+      const ws=s.workspaces?.[id];
+      if(!ws||s.workspaceDeletions?.[id]||s.deletedWorkspaces?.[id])throw new CloudError('not_found',404);
+      Object.assign(ws,{active:proof.active,readOnly:proof.readOnly,quotaBytes:proof.quotaBytes,workers:proof.workers,
+        status:typeof proof.status==='string'?proof.status:ws.status});
+      const entitled=Object.values(s.workspaces||{}).filter(w=>w.billingManaged===true).reduce((n,w)=>n+(Number.isSafeInteger(w.quotaBytes)?w.quotaBytes:0),0);
+      s.quota=Math.max(s.used,entitled,1);
+    });
+  }
   function publicState(s) {
     const workspaces = Object.values(s.workspaces || {}).filter(w => !s.workspaceDeletions?.[w.id] && !s.deletedWorkspaces?.[w.id] && (!entitlementURL || w.billingManaged === true));
     const entitledQuota = entitlementURL ? workspaces.reduce((n,w) => n + (Number.isSafeInteger(w.quotaBytes) ? w.quotaBytes : 0), 0) : s.quota;
@@ -321,15 +345,21 @@ async function createCloud(config) {
       if (host !== '127.0.0.1:' + server.address().port || req.headers.origin) throw new CloudError('invalid_origin', 403);
       const u = new URL(req.url, 'http://' + host);
       const adminNotes = req.method === 'GET' && u.pathname === '/v1/receivers/admin/machine-notes';
-      if (u.search && !adminNotes || /%|\\|\.\./.test(req.url)) throw new CloudError('invalid_path', 400);
+      const devTeamRoute = devTeams.matches(u.pathname);
+      const integrationRoute = integrations.matches(u.pathname);
+      const publicIntegrationRoute = integrations.matchesPublic?.(u.pathname) === true;
+      if (u.search && !adminNotes && !devTeamRoute && !integrationRoute && !publicIntegrationRoute || /%|\\|\.\./.test(req.url)) throw new CloudError('invalid_path', 400);
       if (req.method === 'GET' && ['/healthz','/v1/receivers/healthz'].includes(u.pathname)) return json(res, 200, {service: 'Red-XAI-Reiceivers', developmentOnly, productionReady, authProvider});
-      const identity = await identify(req), owner = identity.owner;
+      if (publicIntegrationRoute) { const response = await integrations.handlePublic(req,u); return json(res,response.status,response.body); }
+      const identity = integrations.isAPIKey(req) ? await integrations.authenticateAPIKey(req,u.pathname) : await identify(req), owner = identity.owner;
+      if (integrationRoute) { const response = await integrations.handle(req,u,identity); return json(res,response.status,response.body); }
+      if (devTeamRoute) { const response = await devTeams.handle(req,u,identity); return json(res,response.status,response.body); }
       if (adminNotes) return json(res, 200, await adminMachineNotes(identity, u));
       const workspaceDelete = /^\/v1\/receivers\/me\/workspaces\/([a-f0-9]{32})$/.exec(u.pathname);
       const internalDelete = req.method === 'DELETE' && workspaceDelete && signedWorkspaceDelete(req, owner, workspaceDelete[1]);
       // The control plane calls this route while deleting its billing record;
       // requesting its entitlements again would create a recursive operation.
-      const entitlement = internalDelete ? null : await entitlementState(identity);
+      const entitlement = internalDelete || identity.apiKey ? null : await entitlementState(identity);
       const base = '/v1/receivers/me';
       if (u.pathname === base && req.method === 'PUT') {
         let state = await store.ensure(owner, quota);
@@ -340,8 +370,8 @@ async function createCloud(config) {
       let state = await store.get(owner);
       if (!state && internalDelete) state = await store.ensure(owner, quota);
       if (!state) throw new CloudError('receiver_not_found', 404);
-      state = await syncEntitlements(owner, state, entitlement);
-      if (u.pathname === base && req.method === 'GET') return json(res, 200, publicState(state));
+      state = identity.apiKey ? await syncIntegrationEntitlement(identity,state) : await syncEntitlements(owner,state,entitlement);
+      if (u.pathname === base && req.method === 'GET') return json(res, 200, integrations.filterState(publicState(state),identity));
       if (u.pathname === base + '/machine-notes' && req.method === 'GET') return json(res, 200, {
         schema:1,scope:'own',ownerAdmin:identity.ownerAdmin,receiverId:owner,storageEngine:'redx',storageFormat:'redsecretsxai-png-v1',machineNotes:machineNotes(state),
       });
@@ -426,6 +456,7 @@ async function createCloud(config) {
         let body;try{body=JSON.parse((await read(req,32*1024)).toString());}catch{throw new CloudError('bad_json',400);}
         const workspace=body?.workspace;
         if(!ID.test(workspace||''))throw new CloudError('library_workspace_invalid',400);
+        integrations.assertWorkspace(identity,workspace);
         releaseWorkspace=(await beginWorkspaceOperation(owner,workspace)).release;
         let result;
         state=await store.change(owner,s=>{writableWorkspace(s,workspace);result=libraryTree.apply(s,workspace,body);});
@@ -443,6 +474,7 @@ async function createCloud(config) {
             || !['app','folder','file'].includes(kind) || !ID.test(workspace || '') || !ID.test(manifestId || '')
             || !Number.isSafeInteger(body.archiveBytes) || body.archiveBytes < 0 || body.archiveBytes > MAX_QUOTA
             || !SHA256.test(body.archiveSha256 || '')) throw new CloudError('library_metadata_invalid', 400);
+        integrations.assertWorkspace(identity,workspace);
         releaseWorkspace = (await beginWorkspaceOperation(owner, workspace)).release;
         writableWorkspace(await store.get(owner), workspace);
         if (!state.workspaces[workspace]) throw new CloudError('not_found', 404);
@@ -472,6 +504,7 @@ async function createCloud(config) {
         const key = libraryMatch[1];
         const item = state.library?.[key];
         if (!item) throw new CloudError('not_found', 404);
+        integrations.assertWorkspace(identity,item.workspace);
         releaseWorkspace = (await beginWorkspaceOperation(owner, item.workspace)).release;
         state = await store.change(owner, s => {writableWorkspace(s,item.workspace);s.library ||= {}; if (!s.library[key]) throw new CloudError('not_found', 404);
           if(Object.values(s.library).some(child=>child.parentKey===key))throw new CloudError('library_folder_not_empty',409);

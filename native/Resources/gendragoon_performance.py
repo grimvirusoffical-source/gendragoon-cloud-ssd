@@ -83,7 +83,14 @@ def configure_from_stdin(stream=None):
     _active, _input = for_workers(), None
     # The bounded read also rejects huge or newline-injected Authorization values.
     stream = stream or sys.stdin.buffer
-    raw = stream.read(INPUT_LIMIT + 1)
+    # Native socket stdin stays open for renewal; legacy pipe/BytesIO input
+    # retains the strict EOF-bounded JSON contract.
+    import stat
+    try:
+        socket_input = stat.S_ISSOCK(os.fstat(stream.fileno()).st_mode)
+    except (AttributeError, OSError, ValueError):
+        socket_input = False
+    raw = stream.readline(INPUT_LIMIT + 1) if socket_input else stream.read(INPUT_LIMIT + 1)
     try:
         if len(raw) > INPUT_LIMIT:
             raise ValueError("Performance request too large")
@@ -99,6 +106,8 @@ def configure_from_stdin(stream=None):
                     or not isinstance(keymap,str) or not Path(keymap).is_absolute() or "\x00" in keymap
                     or api != "https://api.red-xai.com" or type(constrained) is not bool):
                 raise ValueError("Invalid Red-XAI private worker input")
+            import gendragoon_auth_broker
+            value=gendragoon_auth_broker.attach(value)
             _input=json.dumps(value,separators=(",", ":")).encode()
             _active=for_workers(constrained=constrained)
             from gendragoon_redx_storage import RedXReceiver
@@ -135,6 +144,11 @@ def configure_from_stdin(stream=None):
 
 
 def forwarded_input():
+    if _input is not None:
+        value=json.loads(_input)
+        if value.get("authBroker") is not None:
+            import gendragoon_auth_broker
+            return json.dumps(gendragoon_auth_broker.attach(value),separators=(",", ":")).encode()
     return _input
 
 
@@ -161,10 +175,17 @@ def stream_arguments(profile=None):
             "--vfs-read-chunk-streams=" + str(p["streamReaders"])]
 
 
-def preload_arguments(profile=None):
+def preload_arguments(profile=None, app_bytes=None):
     p = profile or current()
-    args = ["--budget-mb", str(max(1, p["preloadMiB"])),
-            "--seconds", str(p["preloadSeconds"]), "--workers", str(p["preloadWorkers"])]
+    # The verified tier still bounds concurrency. Larger bundles can spend more
+    # of that tier's cache on startup reads, while data saver remains a full opt-out.
+    factor = 1
+    if type(app_bytes) is int and app_bytes >= 512 * 1024 ** 2:
+        factor = 4 if app_bytes >= 2 * 1024 ** 3 else 2
+    budget = min(512, max(1, p["preloadMiB"]) * factor)
+    seconds = min(8.0, p["preloadSeconds"] * factor)
+    args = ["--budget-mb", str(budget),
+            "--seconds", str(seconds), "--workers", str(p["preloadWorkers"])]
     if p["constrained"]:
         args.append("--constrained")
     return args

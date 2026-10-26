@@ -6,8 +6,9 @@ const os=require('node:os');
 const path=require('node:path');
 const net=require('node:net');
 const crypto=require('node:crypto');
-const {createBridge}=require('../../../../red-xai-accounts/bridge/site-session/server.cjs');
-const {RedXAISiteAuth}=require('../../../../red-xai-installers/npm/vendor/redx-site-session.cjs');
+const available=require('node:fs').existsSync(path.resolve(__dirname,'../../../../red-xai-accounts/bridge/site-session/server.cjs'))&&require('node:fs').existsSync(path.resolve(__dirname,'../../../../red-xai-installers/npm/vendor/redx-site-session.cjs'));
+const {createBridge}=available?require('../../../../red-xai-accounts/bridge/site-session/server.cjs'):{};
+const {RedXAISiteAuth}=available?require('../../../../red-xai-installers/npm/vendor/redx-site-session.cjs'):{};
 const {createCloud}=require('../server.cjs');
 const native='rxs1.'+'c'.repeat(22)+'.'+'d'.repeat(43);
 async function freePort(){const s=net.createServer();await new Promise(r=>s.listen(0,'127.0.0.1',r));const p=s.address().port;await new Promise(r=>s.close(r));return p;}
@@ -24,7 +25,7 @@ async function approve(origin,url){
  const a=await fetch(origin+'/redxai-connect/approve',{method:'POST',headers:{origin,'content-type':'application/json',cookie:'redx_session='+native+'; '+browser},body:JSON.stringify({request,csrf:c.csrf})});
  assert.equal(a.status,200);
 }
-test('existing red-xai.com app grant owns one Receiver, survives browser sign-out, and revokes on app logout',{timeout:20000},async t=>{
+test('existing red-xai.com app grant owns one Receiver, survives browser sign-out, and revokes on app logout',{timeout:60000,skip:!available?'Requires the documented sibling Accounts and installer repositories':false},async t=>{
  const port=await freePort(),origin='http://127.0.0.1:'+port,sub='existing-site-account-id';
  let active=true;
  const bridge=createBridge({publicOrigin:origin,testMode:true,fetchImpl:async()=>new Response(JSON.stringify(active?{account:{id:sub,email_verified:true,username:'same-user'}}:{error:'signed_out'}),{status:active?200:401,headers:{'content-type':'application/json'}})});
@@ -32,7 +33,8 @@ test('existing red-xai.com app grant owns one Receiver, survives browser sign-ou
  const root=await fs.mkdtemp(path.join(await fs.realpath(os.tmpdir()),'site-receiver-'));
  const cloud=await createCloud({issuer:origin,dev:true,authProvider:'redx-site-session',store:new Store(),root});
  const api=await cloud.listen();
- t.after(async()=>{await cloud.close();await fs.rm(root,{recursive:true,force:true});await bridge.close();});
+ t.after(async()=>{cloud.server.closeIdleConnections?.();await cloud.close();await fs.rm(root,{recursive:true,force:true});await bridge.close();});
+ t.signal.addEventListener('abort',()=>{cloud.server.closeAllConnections?.();bridge.server.closeAllConnections?.();},{once:true});
  const auth=new RedXAISiteAuth({origin,development:true,timeoutMs:12000,openBrowser:url=>approve(origin,url)});
  const user=await auth.loginWithBrowser();assert.equal(user.sub,sub);
  const token=await auth.accessToken();

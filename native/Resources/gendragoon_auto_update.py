@@ -49,7 +49,7 @@ MAX_ARCHIVE=2*1024**3
 MAX_UNPACKED=5*1024**3
 MAX_ENTRIES=40000
 AGENT="GenDragoonSSD-Updater/0.16"
-MIN_FREE=10*1024**3
+MIN_FREE=64*1024**2
 CTX=ssl.create_default_context(cafile="/etc/ssl/cert.pem") if Path("/etc/ssl/cert.pem").exists() else ssl.create_default_context()
 ZIP_PREFIX="GenDragoon-Cloud-SSD-Mac-"
 TAG=re.compile(r"^v([0-9]+)\.([0-9]+)\.([0-9]+)$")
@@ -114,7 +114,7 @@ def update_lock(timeout=180):
 
 def sufficient_space(extra,location=None):
     if shutil.disk_usage(ROOT if location is None else location).free<MIN_FREE+extra:
-        raise RuntimeError("Update postponed to preserve 10 GiB of free local storage.")
+        raise RuntimeError("Update postponed: insufficient local space for the measured update staging and filesystem work.")
 
 def write_status(status,**kwargs):
     safe_root()

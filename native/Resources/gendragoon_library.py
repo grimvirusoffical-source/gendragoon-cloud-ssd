@@ -26,7 +26,12 @@ DEFAULT_ROOT="gen-dragoon-ssd"
 ARCHIVE_DIR="GenDragoon-App-Library"
 STREAM_MIN_BYTES=512*1024**2
 def reply(**v): print(json.dumps(dict(ok=True,**v)),flush=True)
-def fail(e): print(json.dumps(dict(ok=False,message=str(e)[-650:])),flush=True);sys.exit(1)
+def fail(e):
+    from gendragoon_transfer_errors import failure_for, MESSAGES
+    failure=failure_for(e)
+    value=dict(ok=False,message=MESSAGES[failure["code"]] if failure else str(e)[-650:])
+    if failure:value["failure"]=failure
+    print(json.dumps(value),flush=True);sys.exit(1)
 def run(cmd,timeout=1800):
     if str(cmd[0])==str(RCLONE) and any(str(x) in {"copy", "copyto", "check"} for x in cmd[1:]):
         cmd=[cmd[0],*performance.rclone_arguments(),*cmd[1:]]
@@ -446,9 +451,11 @@ def verify_restored(path,manifest):
     return verified
 def require_space(extra,root=None):
     free=shutil.disk_usage(root or CACHE).free
-    reserve=10*1024**3
-    if extra<0 or free<reserve+extra:
-        raise RuntimeError("Not enough local space for a verified restore while retaining 10 GiB free. Original and cloud copies were preserved.")
+    # 10 GB is guidance, not an admission threshold. The caller measures its
+    # staging requirement; leave a small bounded allowance for filesystem work.
+    margin=max(64*1024**2,min(512*1024**2,max(0,extra)//20))
+    if extra<0 or free<margin+extra:
+        raise RuntimeError("Not enough local space for this operation's verified staging copy. Original and cloud copies were preserved.")
 
 # Darwin copyfile.h: metadata only, AppleDouble serialization, exclusive output,
 # and no following source/destination symlinks. No data-fork copy is requested.

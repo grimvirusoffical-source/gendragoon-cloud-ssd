@@ -459,8 +459,13 @@ def launch(key, project, bucket, remote, keep_cache=False):
             save(record)
             compatible(path)
         try:
+            # Use the already verified manifest size, rather than traversing a
+            # potentially remote bundle merely to decide how much to preload.
+            app_bytes = data.get("rawBytes") or data.get("sizeBytes") or data.get("archiveBytes")
+            preload_args = lib.performance.preload_arguments(app_bytes=app_bytes)
+            preload_timeout = float(preload_args[preload_args.index("--seconds") + 1]) + 2.5
             result = lib.run([sys.executable, "-B", RESOURCE / "gendragoon_preload.py", "--app", path,
-                              *lib.performance.preload_arguments()], timeout=5)
+                              *preload_args], timeout=preload_timeout)
             record["preload"] = json.loads(result)
         except Exception:
             record["preload"] = {"ok": False, "message": "Preload unavailable; normal launch continues"}

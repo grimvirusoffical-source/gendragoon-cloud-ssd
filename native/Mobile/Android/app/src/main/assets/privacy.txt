@@ -1,24 +1,14 @@
-GENDRAGOONSSD — PRIVACY POLICY (PRE-RELEASE)
-Last revised: October 14, 2026
+GenDragoon Android data-use notice — 0.22.0 development candidate
+Updated October 26, 2026
 
-Operator contact: grimvirusoffical@gmail.com. This preliminary policy describes the current development application. Before accepting paying customers, the operator must publish and legally review the final Terms and Privacy Policy.
+Red-XAI sign-in opens the official browser approval page. Passwords are entered on Red-XAI only. The app keeps short-lived access credentials in memory and protects its refresh credential with Android Keystore encryption. Disconnect revokes the session where available; it preserves private vault keys, local transfer records and server content.
 
-1. SIGN-IN DATA. When you choose Google Sign-In, Firebase Authentication processes the authentication. GenDragoon receives a verified Firebase user identifier, email and short-lived identity token. The desktop sign-in session is kept in app memory, not embedded in the app package. Your Google password is never entered into GenDragoon.
+MachineNotes are stored on the GenDragoon server. The server receives account identity, MachineNote metadata, item names and other metadata needed to operate the service, encrypted visual-carrier PNG objects, billing entitlements, and request/security records. Uploads and restores are initiated by the local owner. Original selected files are retained. Android does not use Google/Firebase authentication or Google Cloud storage. The distribution platform and operating system may process their own diagnostic data independently.
 
-2. TERMS RECORDS. We store your Firebase user ID as the path to your own Terms-acceptance record. Your accepted Terms version, your two affirmative acknowledgments, and the server-generated acceptance time are stored in Cloud Firestore. Firestore security rules prevent other ordinary users from reading or editing these records.
+Private storage secrets and encrypted private keymaps stay on this device unless you explicitly export an encrypted portable vault. Export contains encryption material, not account refresh/access credentials. Account sign-in cannot recover lost client encryption keys. An exported vault uses its own passphrase and is bound to the same Red-XAI account. Protect both the vault and passphrase.
 
-3. WORKSPACES. Project names, plan selections and local workspace drafts are saved on your device, separated by your verified Google account ID. Future paid workspaces may record quota, subscription and transfer usage on a secure backend.
+Developer Teams exchange account-scoped usernames, membership, invitations, presence, signaling and chat metadata/text. Team membership grants no file, decryption-key or storage authority. Relayed chat is retained for seven days. Direct WebRTC peers may receive the network-address information required for a direct connection. This interface exposes no peer file-transfer or upload commands.
 
-4. STORAGE CONTENT. Existing personal-cloud connections remain separate from Firebase login. Customer cloud files will require independently scoped authorization when managed storage is launched. Uploaded content may include personal files chosen by the user. We will document retention and access procedures before activating managed storage.
+Storage subscriptions are managed outside this Android consumption-only interface. Android does not collect payment-card details or launch Stripe checkout. Existing active paid entitlements are checked by the service.
 
-5. PAYMENTS. When paid subscriptions become available, Stripe will process payment information. GenDragoon will handle billing identifiers and subscription status; it does not need your full card number.
-
-6. PROCESSORS AND DISCLOSURE. Firebase/Google Cloud and Stripe may process necessary data under their respective terms. We may disclose information when legally required or necessary to protect customers and investigate abuse, using documented access controls.
-
-7. SECURITY AND LIMITATIONS. We use authentication, role-based access, transport encryption and provider-managed storage encryption where supported. No system guarantees perfect anonymity or zero risk. Local apps may be inspectable on your own device.
-
-8. ACCOUNT CONTROLS. You can sign out without accepting Terms. Requests for access, correction, deletion or privacy questions can be sent to the contact address above. Certain records may be retained as necessary for accounting, fraud prevention or lawful obligations.
-
-9. UPDATES. Material changes to the policies may require renewed consent. An updated version and change date will be displayed within the app.
-
-END OF PRIVACY POLICY.
+This candidate is not a completed Play Store submission. Store data-safety declarations, account-deletion access, signed release/device checks and a final published policy remain release gates. This notice describes the implemented client; it does not replace the account service's applicable terms and privacy policy.

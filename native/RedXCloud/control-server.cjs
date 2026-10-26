@@ -3,6 +3,7 @@ const http=require('node:http');
 const crypto=require('node:crypto');
 const {ControlState}=require('./control-state.cjs');
 const {RedXState,CloudError,digest,origin}=require('./redx-state.cjs');
+const {createInternalEntitlements}=require('./internal-entitlements.cjs');
 const {STORAGE,PERFORMANCE:PAID_PERFORMANCE}=require('../Backend/catalog.js');
 // Receiver subscriptions support a genuinely free one-worker option. Keep the
 // legacy Firebase paid-price catalog unchanged (there is no Stripe Free price).
@@ -317,11 +318,32 @@ async function createControl(config){
    removeAds:{oneTimeCents:REMOVE_ADS_CENTS},owner:{email:OWNER_EMAIL,allPlansIncluded:true,lifetime:true}};
  const accountLocks=new Map();
  async function serial(owner,fn){const before=accountLocks.get(owner)||Promise.resolve();let release;const gate=new Promise(r=>{release=r;});const tail=before.catch(()=>{}).then(()=>gate);accountLocks.set(owner,tail);await before.catch(()=>{});try{return await fn();}finally{release();if(accountLocks.get(owner)===tail)accountLocks.delete(owner);}}
+ const integrationProofs=new Map();
+ const internalEntitlements=createInternalEntitlements({token:config.internalEntitlementToken,issuer,resolve:async(identity,workspaceId)=>serial(identity.owner,async()=>{
+   let s=await store.get(identity.owner);const p=s?.projects?.[workspaceId];
+   const receiver=await receiverStore.get(identity.owner);
+   if(!p||p.status==='deleting'||receiver?.workspaceDeletions?.[workspaceId]||receiver?.deletedWorkspaces?.[workspaceId])return null;
+   // API keys delegate existing account storage. They never establish fresh
+   // verified-owner/admin authority or create/migrate an account's benefits.
+   if(!(s.ownerBenefits===true&&p.owner===true)){
+     if(p.owner===true||s.ownerBenefits===true)throw new CloudError('entitlement_state_invalid',503);
+     const key=identity.owner+':'+workspaceId,prior=integrationProofs.get(key);
+     if(!prior||Date.now()-prior>10000){
+       await reconcileProject({owner:identity.owner,sub:identity.subject},p,s);
+       integrationProofs.set(key,Date.now());
+       if(integrationProofs.size>10000)integrationProofs.delete(integrationProofs.keys().next().value);
+     }
+     s=await store.get(identity.owner);
+   }
+   const q=s?.projects?.[workspaceId];if(!q||q.status==='deleting')return null;
+   return {id:workspaceId,active:q.active===true,readOnly:q.readOnly===true,quotaBytes:q.quotaBytes||0,workers:q.workers||0,checkedAtMs:Date.now()};
+ })});
  const server=http.createServer(async(req,res)=>{
    try{
      const host=req.headers.host||'',u=new URL(req.url,'http://'+host);if(req.headers.origin)throw new CloudError('invalid_origin',403);
      const legacyPath=u.pathname==='/gendragoon'?'/':u.pathname.startsWith('/gendragoon/')?u.pathname.slice('/gendragoon'.length):u.pathname;
      const pathname=legacyPath.replace(/^\/v2\/machinenotes(?=\/|$)/,'/v2/projects');
+     if(await internalEntitlements(req,res,pathname))return;
      if(req.method==='GET'&&pathname==='/healthz')return send(res,200,{service:'gendragoon-control',redx:true,billing:billingReady});
      if(req.method==='GET'&&pathname==='/v2/pricing')return send(res,200,pricing);
      if(req.method==='GET'&&['/billing/success','/billing/cancel','/billing/return'].includes(pathname)){res.writeHead(200,{'content-type':'text/html; charset=utf-8','cache-control':'no-store','x-content-type-options':'nosniff'});return res.end('<!doctype html><meta charset="utf-8"><title>GenDragoon</title><body style="font-family:system-ui;background:#0b0912;color:#eee;padding:48px"><h1>GenDragoon billing</h1><p>Return to GenDragoon Cloud SSD. The app will verify your current entitlement with the server.</p></body>');}
@@ -345,6 +367,6 @@ async function createControl(config){
 if(require.main===module){
  const Stripe=require('stripe'),secret=process.env.STRIPE_SECRET_KEY||'';
  const stripe=/^(sk|rk)_(live|test)_[A-Za-z0-9]+$/.test(secret)?new Stripe(secret,{apiVersion:'2026-09-30.endive',maxNetworkRetries:2,timeout:25000}):null;
- createControl({issuer:process.env.REDXAI_ISSUER||'https://red-xai.com',redxURL:process.env.REDX_URL,redxKey:process.env.REDX_RECEIVERS_KEY,redxDB:process.env.REDX_RECEIVERS_DB||'gendragoon_receivers',redxLocal:process.env.REDX_LOCAL_LOOPBACK==='1',publicBase:process.env.GENDRAGOON_PUBLIC_BASE||'https://api.red-xai.com/gendragoon',stripe}).then(async c=>{await c.listen(Number(process.env.GENDRAGOON_CONTROL_PORT||17778));});
+ createControl({issuer:process.env.REDXAI_ISSUER||'https://red-xai.com',redxURL:process.env.REDX_URL,redxKey:process.env.REDX_RECEIVERS_KEY,redxDB:process.env.REDX_RECEIVERS_DB||'gendragoon_receivers',redxLocal:process.env.REDX_LOCAL_LOOPBACK==='1',publicBase:process.env.GENDRAGOON_PUBLIC_BASE||'https://api.red-xai.com/gendragoon',internalEntitlementToken:process.env.GENDRAGOON_CONTROL_INTERNAL_TOKEN,stripe}).then(async c=>{await c.listen(Number(process.env.GENDRAGOON_CONTROL_PORT||17778));});
 }
 module.exports={createControl,WORKSPACE_MONTHLY_CENTS,OWNER_EMAIL,pricing:()=>({STORAGE,PERFORMANCE})};
