@@ -72,6 +72,24 @@ def stage_redsecrets_runtime(resources,output):
     run([sys.executable,"-B","-c",code],timeout=60,env=env)
     return native/"librsx.dylib"
 
+def stage_app_icon(resources,output):
+    source=ROOT/"Resources/GenDragoonAppIcon.svg"
+    if not source.is_file() or source.is_symlink():
+        raise RuntimeError("Missing GenDragoon app icon artwork")
+    preview=output/"icon-preview";preview.mkdir()
+    run(["/usr/bin/qlmanage","-t","-s","1024","-o",preview,source],timeout=60)
+    pngs=list(preview.glob("*.png"))
+    if len(pngs)!=1:raise RuntimeError("App icon preview renderer did not produce one PNG")
+    iconset=output/"GenDragoonAppIcon.iconset";iconset.mkdir()
+    for size in (16,32,128,256,512):
+        run(["/usr/bin/sips","-z",str(size),str(size),pngs[0],"--out",iconset/f"icon_{size}x{size}.png"])
+        double=size*2
+        run(["/usr/bin/sips","-z",str(double),str(double),pngs[0],"--out",iconset/f"icon_{size}x{size}@2x.png"])
+    target=resources/"GenDragoonAppIcon.icns"
+    run(["/usr/bin/iconutil","-c","icns",iconset,"-o",target])
+    if not target.is_file():raise RuntimeError("App icon conversion did not produce GenDragoonAppIcon.icns")
+    return target
+
 def remove_python_caches(app):
     """Prune only the new staging copy, never a symlink target or the base bundle."""
     if app.is_symlink() or not app.is_dir():
@@ -100,6 +118,7 @@ def build(base,output):
     for source in (ROOT/"Resources").iterdir():
         if source.is_file() and source.suffix in (".py",".js",".json",".txt",".html",".css"):
             shutil.copy2(source,resources/source.name)
+    stage_app_icon(resources,output)
     registry=ROOT/"Backend/performance_profiles.json"
     if registry.is_symlink() or not registry.is_file():raise RuntimeError("Missing canonical performance profile registry")
     shutil.copy2(registry,resources/"gendragoon_performance_profiles.json")
@@ -112,7 +131,8 @@ def build(base,output):
     run(["/usr/bin/xcrun","swiftc","-parse-as-library","-O","-sdk",swift_sdk(),
          "-target","arm64-apple-macosx14.0","-framework","SwiftUI","-framework","AppKit",
          "-o",binary,*swift],timeout=900)
-    info.update(CFBundleShortVersionString=VERSION,CFBundleVersion=BUILD,LSMinimumSystemVersion="14.0")
+    info.update(CFBundleShortVersionString=VERSION,CFBundleVersion=BUILD,LSMinimumSystemVersion="14.0",
+        CFBundleIconFile="GenDragoonAppIcon.icns")
     (app/"Contents/Info.plist").write_bytes(plistlib.dumps(info))
     entitlements=output/"node-entitlements.plist"
     entitlements.write_bytes(plistlib.dumps({"com.apple.security.cs.allow-jit":True,
