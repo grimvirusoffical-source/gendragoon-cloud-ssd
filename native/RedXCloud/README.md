@@ -79,13 +79,16 @@ authenticated owner entitlements and an isolated transfer/deletion round trip.
 
 Fast tests use temporary account state and fake billing without customer charges:
 
-    node --test native/RedXCloud/test/control-server.test.cjs native/RedXCloud/test/workspace-lifecycle.test.cjs native/RedXCloud/test/site-session-receiver.test.cjs
+    node --test native/RedXCloud/test/control-server.test.cjs native/RedXCloud/test/workspace-lifecycle.test.cjs native/RedXCloud/test/control-receiver.integration.test.cjs
     python3 -B -m unittest discover -s native/Tests -p 'test_redx_*.py'
 
 Real integration tests require local redxd, redxai-accounts, librsx and a Python
 environment with Pillow under REDX_INTEGRATION_ROOT/tools:
 
     REDX_INTEGRATION_ROOT=/absolute/path/to/integration node --test native/RedXCloud/test/roundtrip.test.cjs native/RedXCloud/test/blob-library.test.cjs
+
+The site-session-receiver suite additionally requires the sibling
+red-xai-accounts and red-xai-installers source repositories.
 
 Fixtures bind IPv4 loopback and use temporary accounts/files. They must never
 use the production account database. Native CI also runs isolated billing and
