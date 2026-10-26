@@ -2,6 +2,10 @@ name: Actual Windows workspace drive acceptance
 
 on:
   workflow_dispatch:
+  pull_request:
+    paths:
+      - 'native/Desktop/**'
+      - '.github/workflows/windows-drive-acceptance.yml'
 
 permissions:
   contents: read
