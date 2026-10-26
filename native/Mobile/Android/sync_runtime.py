@@ -17,7 +17,7 @@ NATIVE = ROOT.parents[1]
 VENDOR = NATIVE / "vendor/Red-SecretsXAI"
 HELPERS = ("gendragoon_redx_storage.py", "gendragoon_progress.py", "gendragoon_auth_broker.py", "gendragoon_transfer_errors.py")
 PACKAGED_RUNTIME = ROOT / "runtime/gendragoon-android-runtime-9235941b431b.zip"
-PACKAGED_RUNTIME_SHA256 = "a9807f48747017a742e18ad4b6dce10a7d8bb22b93f5a4b5bf94ee39bc2aceaf"
+PACKAGED_RUNTIME_SHA256 = "47883fd5535bae569c7fe7bb9cfac2092fa8ab2ec83c4c39e4fd5e9c363ffa2f"
 
 
 def unpack_runtime(bundle, expected_sha, expected_commit, generated):
@@ -57,6 +57,13 @@ def unpack_runtime(bundle, expected_sha, expected_commit, generated):
                 loads=[struct.unpack_from("<IIQQQQQQ",data,offset+i*size) for i in range(count) if struct.unpack_from("<I",data,offset+i*size)[0]==1]
                 if not loads or any(header[7]<16384 or (header[2]-header[3])%16384 for header in loads):
                     raise RuntimeError("Compiled native runtime is not aligned for Android 16 KiB pages")
+                sections=struct.unpack_from('<Q',data,40)[0];section_size,section_count,string_index=struct.unpack_from('<HHH',data,58)
+                if section_size<64 or not 0<=string_index<section_count or sections+section_size*section_count>len(data):
+                    raise RuntimeError('Shipping ELF section headers are invalid')
+                headers=[struct.unpack_from('<IIQQQQIIQQ',data,sections+i*section_size)for i in range(section_count)]
+                strings=headers[string_index];section_names=data[strings[4]:strings[4]+strings[5]]
+                if any(section_names[header[0]:].split(b'\0',1)[0].startswith(b'.debug')for header in headers):
+                    raise RuntimeError('Shipping native libraries must exclude private debug information')
             target = generated / name
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes(data)

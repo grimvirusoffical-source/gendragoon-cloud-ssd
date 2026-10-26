@@ -30,10 +30,11 @@ class CompanionServer:
 
     @staticmethod
     def _directory(path):
-        path.mkdir(mode=0o700, parents=True, exist_ok=True)
         if sys.platform == "win32":
-            from gendragoon_platform_ipc import secure_file
-            secure_file(path)
+            from gendragoon_platform_ipc import create_private_directory
+            create_private_directory(path)
+        else:
+            path.mkdir(mode=0o700, parents=True, exist_ok=True)
         bridge.private_path(path, directory=True)
 
     def start(self):
@@ -67,7 +68,11 @@ class CompanionServer:
                 self.listener.close(); self.listener = None; raise
             self.info = {"schema": 1, "socketPath": str(target), "protocol": bridge.PROTOCOL}
         temporary = self.locator.with_suffix(".new")
-        descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
+        if sys.platform == "win32":
+            from gendragoon_platform_ipc import create_private_file
+            descriptor = create_private_file(temporary)
+        else:
+            descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
         with os.fdopen(descriptor, "w", encoding="utf-8") as output:
             json.dump(self.info, output); output.flush(); os.fsync(output.fileno())
         if sys.platform == "win32":

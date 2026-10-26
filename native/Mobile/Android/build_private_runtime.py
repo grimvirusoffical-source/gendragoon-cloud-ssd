@@ -17,6 +17,19 @@ ROOT = Path(__file__).resolve().parent
 ABIS = ("arm64-v8a", "x86_64")
 
 
+def elf_section(data, name):
+    import struct
+    offset=struct.unpack_from('<Q',data,40)[0]
+    size,count,index=struct.unpack_from('<HHH',data,58)
+    if size<64 or not 0<=index<count or offset+size*count>len(data):raise RuntimeError('Invalid shipping ELF section table')
+    headers=[struct.unpack_from('<IIQQQQIIQQ',data,offset+i*size)for i in range(count)]
+    strings=headers[index];names=data[strings[4]:strings[4]+strings[5]]
+    for header in headers:
+        observed=names[header[0]:].split(b'\0',1)[0].decode('ascii')
+        if observed==name:return data[header[4]:header[4]+header[5]]
+    return None
+
+
 def compile_python(vendor, output):
     if sys.version_info[:2] != (3, 13):
         raise RuntimeError("Compiled Android runtime packages require Python 3.13")
@@ -72,6 +85,12 @@ def build(vendor, ndk, output, cmake="cmake", compiled_python=None, ninja=None):
         destination = runtime / "jniLibs" / abi / "librsx.so"
         destination.parent.mkdir(parents=True)
         shutil.copyfile(library, destination)
+        strip_tools=list((ndk/'toolchains/llvm/prebuilt').glob('*/bin/llvm-strip'))+list((ndk/'toolchains/llvm/prebuilt').glob('*/bin/llvm-strip.exe'))
+        if len(strip_tools)!=1:raise RuntimeError('The official NDK llvm-strip tool is required for shipping copies')
+        original_text=elf_section(destination.read_bytes(),'.text')
+        subprocess.run([str(strip_tools[0]),'--strip-unneeded',str(destination)],check=True)
+        if not original_text or original_text!=elf_section(destination.read_bytes(),'.text') or elf_section(destination.read_bytes(),'.debug_info')is not None:
+            raise RuntimeError('Shipping debug removal changed executable code or left private debug information')
     notices = runtime / "licenses"
     notices.mkdir()
     for name in ("LICENSE", "NOTICE"):

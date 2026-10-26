@@ -411,7 +411,8 @@ class Codec:
         if not plain or len(plain) > CHUNK:
             raise RedXStorageError("Encrypted visual cloud chunk exceeds 64 KiB")
         progress.activity("encoding", during=("encoding", "uploading"))
-        with tempfile.TemporaryDirectory(prefix="gd-rsx-") as td:
+        factory = getattr(self.client, "temporary_directory", tempfile.TemporaryDirectory)
+        with factory(prefix="gd-rsx-") as td:
             source = Path(td) / "plain"
             encrypted = Path(td) / "sealed"
             source.write_bytes(plain)
@@ -440,7 +441,8 @@ class Codec:
                     blob = decode_image(png)
             except ValueError as exc:
                 raise RedXStorageError("Encrypted visual barcode is invalid") from exc
-        with tempfile.TemporaryDirectory(prefix="gd-rsx-open-") as td:
+        factory = getattr(self.client, "temporary_directory", tempfile.TemporaryDirectory)
+        with factory(prefix="gd-rsx-open-") as td:
             sealed = Path(td) / "sealed"
             output = Path(td) / "plain"
             sealed.write_bytes(blob)
@@ -729,6 +731,9 @@ def download_archive(config, item, destination, client_factory=None):
                 os.fsync(output.fileno())
             if total != root["archiveBytes"] or hasher.hexdigest() != root["archiveSha256"]:
                 raise RedXStorageError("Restored archive failed full SHA-256 verification")
+            protect = getattr(client, "protect_download", None)
+            if protect is not None:
+                protect(temp)
             os.replace(temp, destination)
         finally:
             if temp.exists():

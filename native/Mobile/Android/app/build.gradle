@@ -33,8 +33,16 @@ tasks.register('syncGenDragoonRuntime', Exec) {
  inputs.dir('../../../Collaboration')
  outputs.dir('build/generated/python')
  outputs.dir('build/generated/teamsAssets')
+ outputs.dir('build/generated/licenses')
+ outputs.dir('build/generated/jniLibs')
+ outputs.dir('build/generated/testResources')
+ outputs.dir('build/generated/androidTestAssets')
 }
-tasks.matching { it.name.startsWith('generate') && it.name.contains('Python') || it.name == 'preBuild' }.configureEach { dependsOn 'syncGenDragoonRuntime' }
+tasks.matching {
+ it.name != 'syncGenDragoonRuntime' && (it.name.contains('Python') || it.name == 'preBuild' ||
+  (it.name.startsWith('merge') && (it.name.endsWith('Assets') || it.name.endsWith('JniLibFolders'))) ||
+  (it.name.startsWith('process') && it.name.endsWith('JavaRes')))
+}.configureEach { dependsOn 'syncGenDragoonRuntime' }
 dependencies {
  coreLibraryDesugaring 'com.android.tools:desugar_jdk_libs:2.1.5'
  implementation 'androidx.appcompat:appcompat:1.7.1'

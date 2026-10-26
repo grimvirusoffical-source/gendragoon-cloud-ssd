@@ -25,6 +25,10 @@ struct GDIntegrationKeySummary: Identifiable {
     let scopes: [String]
     let expires: String
     let active: Bool
+    var detail: String {
+        let expiry = active ? "Expires " + String(expires.prefix(10)) : "Inactive"
+        return [service, scopes.joined(separator: ", "), expiry].joined(separator: " · ")
+    }
     init?(_ value: [String: Any]) {
         guard let id = value["id"] as? String, id.range(of: "^[a-f0-9]{16}$", options: .regularExpression) != nil,
               let name = value["name"] as? String, let service = value["service"] as? String,
@@ -516,7 +520,10 @@ private enum GDBYOKeychain {
                 }.disabled(!model.canStart || workspace.isEmpty || keyName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 ForEach(model.keys) { key in
                     HStack {
-                        VStack(alignment: .leading) { Text(key.name).font(.headline); Text(key.service + " · " + key.scopes.joined(separator: ", ") + " · " + (key.active ? "Expires " + String(key.expires.prefix(10)) : "Inactive")).font(.caption).foregroundStyle(.secondary) }
+                        VStack(alignment: .leading) {
+                            Text(key.name).font(.headline)
+                            Text(key.detail).font(.caption).foregroundStyle(.secondary)
+                        }
                         Spacer(); if key.active { Button("Revoke") { pendingRevoke = key }.disabled(!model.canStart) }
                     }
                 }

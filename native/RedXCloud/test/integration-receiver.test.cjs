@@ -47,6 +47,27 @@ test('revocation is checked on the next request and read-only scopes cannot muta
  assert.equal((await f.call(f.session,'/v1/integrations/keys/'+issued.id,'DELETE')).status,200);
  assert.equal((await f.call(issued.apiKey,'/v1/receivers/me')).status,401);
 });
+test('a library DELETE rechecks the current workspace when its account CAS callback is retried',async t=>{
+ const f=await fixture(t),issued=await f.key(),key='d'.repeat(18);
+ f.store.state.library[key]={key,workspace:one,name:'Original',kind:'file'};
+ const change=f.store.change.bind(f.store);let replayed=false;
+ f.store.change=async(id,update)=>{
+  const candidate=structuredClone(f.store.state);update(candidate);
+  if(!replayed&&f.store.state.library[key]&&!candidate.library[key]){
+   // The first CAS loses to a replacement in another note. RedXState invokes
+   // the callback again with fresh state, rather than committing the old copy.
+   replayed=true;
+   f.store.state.library[key]={key,workspace:two,name:'Concurrent replacement',kind:'file'};
+   f.store.state.revision++;
+  }
+  return change(id,update);
+ };
+ const response=await f.call(issued.apiKey,'/v1/receivers/me/library/'+key,'DELETE');
+ assert.equal(replayed,true);assert.equal(response.status,409);
+ assert.equal(response.body.error,'library_item_conflict');
+ assert.equal(f.store.state.library[key].workspace,two);
+ assert.equal(f.store.state.library[key].name,'Concurrent replacement');
+});
 test('missing or stale trusted billing proof fails closed without mutating other notes',async t=>{
  const f=await fixture(t),issued=await f.key(),before=structuredClone(f.store.state);
  f.proof.active=false;f.proof.readOnly=true;f.proof.quotaBytes=0;f.proof.workers=0;

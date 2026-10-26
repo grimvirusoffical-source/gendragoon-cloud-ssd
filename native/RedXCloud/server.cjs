@@ -506,7 +506,12 @@ async function createCloud(config) {
         if (!item) throw new CloudError('not_found', 404);
         integrations.assertWorkspace(identity,item.workspace);
         releaseWorkspace = (await beginWorkspaceOperation(owner, item.workspace)).release;
-        state = await store.change(owner, s => {writableWorkspace(s,item.workspace);s.library ||= {}; if (!s.library[key]) throw new CloudError('not_found', 404);
+        state = await store.change(owner, s => {
+          const current=s.library?.[key];
+          if(!current)throw new CloudError('not_found',404);
+          if(current.workspace!==item.workspace)throw new CloudError('library_item_conflict',409);
+          integrations.assertWorkspace(identity,current.workspace);
+          writableWorkspace(s,current.workspace);
           if(Object.values(s.library).some(child=>child.parentKey===key))throw new CloudError('library_folder_not_empty',409);
           delete s.library[key];libraryTree.bump(s,item.workspace);});
         return json(res, 200, {ok: true, key});

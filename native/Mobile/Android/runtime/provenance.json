@@ -4,8 +4,8 @@
     "x86_64"
   ],
   "artifact": "gendragoon-android-runtime-9235941b431b.zip",
-  "buildScriptSHA256": "0be3cf0853098739afd83c8226018b333d0c994df873c018db537ef024b3727c",
-  "bytes": 2934676,
+  "buildScriptSHA256": "df4964de1affbfe062f4e0e94ecf6f1de7ee2ee994db64cd1089292c023e2337",
+  "bytes": 777660,
   "contents": {
     "licenseFiles": 4,
     "manifestFiles": 1,
@@ -16,12 +16,12 @@
   "coreABI": 2,
   "files": {
     "jniLibs/arm64-v8a/librsx.so": {
-      "bytes": 4957384,
-      "sha256": "1356c5a0efc4df8e42b40ef726149a53dda6aa0b7576c7566705fbef42baa404"
+      "bytes": 500712,
+      "sha256": "635df55d7b1a6ba514fa6240ac2e80492da278d7712f646698852d77c4c7c4b4"
     },
     "jniLibs/x86_64/librsx.so": {
-      "bytes": 4668400,
-      "sha256": "d856f27285a0d7f21924dc2e2f39bc737ba28561dafca9f817a7d9838e513945"
+      "bytes": 510576,
+      "sha256": "fc9b0d76301ff2c722a0e773a625479da8b0b2bb7e4280d4a9b232c0d5fb583e"
     },
     "licenses/Android-NDK-r28c-LLVM-NOTICE.txt": {
       "bytes": 130424,
@@ -180,7 +180,24 @@
     "previousArtifactSHA256": "a22b03d605a36e465a8c7ef1e6fb571e5755ed4a76bfd63dab394db5372a559f"
   },
   "schema": 1,
-  "sha256": "a9807f48747017a742e18ad4b6dce10a7d8bb22b93f5a4b5bf94ee39bc2aceaf",
+  "sha256": "47883fd5535bae569c7fe7bb9cfac2092fa8ab2ec83c4c39e4fd5e9c363ffa2f",
+  "shippingDebugRemoval": {
+    "libraries": {
+      "arm64-v8a": {
+        "bytes": 500712,
+        "sha256": "635df55d7b1a6ba514fa6240ac2e80492da278d7712f646698852d77c4c7c4b4"
+      },
+      "x86_64": {
+        "bytes": 510576,
+        "sha256": "fc9b0d76301ff2c722a0e773a625479da8b0b2bb7e4280d4a9b232c0d5fb583e"
+      }
+    },
+    "previousArtifactSHA256": "a9807f48747017a742e18ad4b6dce10a7d8bb22b93f5a4b5bf94ee39bc2aceaf",
+    "privateBuildPathsPresent": false,
+    "privateDebugSectionsPresent": false,
+    "textSectionsByteIdentical": true,
+    "tool": "official NDK r28c llvm-strip --strip-unneeded"
+  },
   "toolchains": {
     "cmake": {
       "sha256": "73565c72355c6652e9db149249af36bcab44d9d478c5546fd926e69ad6b43640",

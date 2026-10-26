@@ -9,6 +9,7 @@ import json
 import re
 import shutil
 import stat
+import uuid
 from pathlib import Path
 
 HOST = "com.redxai.gendragoon"
@@ -48,26 +49,36 @@ def private_directory(path):
         if current.is_symlink():
             raise ValueError("Native-host directories must not contain symbolic links")
         current = current.parent
-    path.mkdir(parents=True, exist_ok=True, mode=0o700)
-    info = path.lstat()
     if sys.platform=="win32":
-        from gendragoon_platform_ipc import secure_file
-        secure_file(path)
-    elif not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid():
-        raise ValueError("Native-host directories must belong to the current local user")
+        from gendragoon_platform_ipc import create_private_directory
+        create_private_directory(path)
+    else:
+        path.mkdir(parents=True, exist_ok=True, mode=0o700)
+        info = path.lstat()
+        if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid():
+            raise ValueError("Native-host directories must belong to the current local user")
     os.chmod(path, 0o700)
 
 
 def private_write(path, data, executable=False):
     if path.is_symlink():
         raise ValueError("Native-host files must not be symbolic links")
+    if sys.platform=="win32":
+        from gendragoon_platform_ipc import create_private_file,verify_private
+        if path.exists():verify_private(path)
+        temporary=path.with_name('.install-'+uuid.uuid4().hex)
+        try:
+            with os.fdopen(create_private_file(temporary),'wb') as output:
+                output.write(data.encode('utf-8') if isinstance(data,str) else data)
+                output.flush();os.fsync(output.fileno())
+            verify_private(temporary)
+            os.replace(temporary,path)
+        finally:temporary.unlink(missing_ok=True)
+        return
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0), 0o700 if executable else 0o600)
     with os.fdopen(fd, "w", encoding="utf-8") as handle:
         handle.write(data)
     os.chmod(path, 0o700 if executable else 0o600)
-    if sys.platform=="win32":
-        from gendragoon_platform_ipc import secure_file
-        secure_file(path)
 
 
 def install(*, platform, home, helper, python, browser_ids, firefox=False, vscode=False,host_executable=None):
@@ -128,7 +139,7 @@ def install_windows(*,home,browser_ids,firefox,vscode,executable):
     if wrapper.exists():
         if wrapper.is_symlink():raise ValueError("The installed native host cannot be a link")
         verify_private(wrapper)
-    if source.resolve()!=wrapper.resolve():shutil.copyfile(source,wrapper)
+    if source.resolve()!=wrapper.resolve():private_write(wrapper,source.read_bytes(),executable=True)
     secure_file(wrapper)
     origins=["chrome-extension://"+value+"/" for value in browser_ids.values() if value]
     private_write(directory/'config.json',json.dumps({'schema':1,'allowedOrigins':sorted(set(origins+([FIREFOX_ID] if firefox else []))),**({'vscodeExtensionId':'redxai.gendragoon'} if vscode else {})},indent=2)+'\n')

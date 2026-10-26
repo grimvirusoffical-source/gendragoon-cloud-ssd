@@ -37,14 +37,37 @@ def pipe_name():
     return "\\\\.\\pipe\\GenDragoon-" + hashlib.sha256(sid.encode("ascii")).hexdigest()[:24] + "-Companion-v1"
 
 
-def security_attributes():
+def security_attributes(*, directory=False):
     types, _, _, _, _, _, security = modules()
     sid = security.ConvertSidToStringSid(user_sid())
     descriptor = security.ConvertStringSecurityDescriptorToSecurityDescriptor(
-        "O:" + sid + "D:P(A;;GA;;;" + sid + ")", 1)
+        "O:" + sid + "D:P(A;" + ("OICI" if directory else "") + ";GA;;;" + sid + ")", 1)
     attributes = types.SECURITY_ATTRIBUTES()
     attributes.SECURITY_DESCRIPTOR = descriptor
     return attributes
+
+
+def create_private_directory(path: Path):
+    """Set the current SID as owner atomically, including elevated processes."""
+    path = Path(path)
+    if not path.exists() and not path.is_symlink():
+        if not path.parent.exists():
+            create_private_directory(path.parent)
+        _, _, _, _, file, _, _ = modules()
+        file.CreateDirectory(str(path), security_attributes(directory=True))
+    if not path.is_dir():
+        raise OSError("The companion directory has an invalid type.")
+    secure_file(path)
+    verify_private(path)
+
+
+def create_private_file(path: Path):
+    """Return a new binary file descriptor without inheriting a public ACL."""
+    import msvcrt
+    _, _, con, _, file, _, _ = modules()
+    handle = file.CreateFile(str(path), con.GENERIC_READ | con.GENERIC_WRITE,
+        con.FILE_SHARE_READ, security_attributes(), con.CREATE_NEW, con.FILE_ATTRIBUTE_NORMAL, None)
+    return msvcrt.open_osfhandle(handle.Detach(), os.O_RDWR | os.O_BINARY)
 
 
 def secure_file(path: Path):

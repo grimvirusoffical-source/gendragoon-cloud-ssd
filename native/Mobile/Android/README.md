@@ -20,7 +20,7 @@ Disconnect revokes/clears the account session where available and retains vault 
 The public repository includes `runtime/gendragoon-android-runtime-9235941b431b.zip`: two compiled `librsx.so` files, Python 3.13 bytecode, Apache and official NDK/LLVM license/notice files and a per-file SHA manifest. It contains no private C++ or Python source. Exact SHA-256:
 
 ```
-a9807f48747017a742e18ad4b6dce10a7d8bb22b93f5a4b5bf94ee39bc2aceaf
+47883fd5535bae569c7fe7bb9cfac2092fa8ab2ec83c4c39e4fd5e9c363ffa2f
 ```
 
 `sync_runtime.py` binds that input to superproject vendor gitlink `9235941b431bc1c23c34286b82052f845121592f`, ABI 2, Python 3.13 bytecode magic, both ELF architectures, 16 KiB load alignment, per-member hashes and a strict compiled-only path allowlist. It never fetches or rewrites the private encryption source. Raw private source must not be added to this public repository, CI artifacts or archives. A manually substituted runtime requires both `GENDRAGOON_ANDROID_RUNTIME` and `GENDRAGOON_ANDROID_RUNTIME_SHA256`; a missing/mismatched pin fails closed.

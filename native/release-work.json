@@ -58,9 +58,10 @@
     "backend": "67 passed,6 optional external/runtime tests skipped in broad local suite; exact RottenApple Go pairing and genuine RedX/C++ app restore verified separately",
     "portableVault": "MacCryptoKit/CommonCrypto, Pythoncryptography and actualJDK17JCE vectors agree; tamper/account/password/import-safety negatives pass",
     "desktopCompanion": "4 actualUnixRPC tests passed onMac; Windowsnamedpipe+ACL runtime tests pending CI",
-    "android": "Compiled2.88MB runtime verified, arm64/x86_64 16KiBLOAD alignment, source7Python tests pass. APK, emulator and store validation pending.",
-    "androidRuntimeSha256": "a9807f48747017a742e18ad4b6dce10a7d8bb22b93f5a4b5bf94ee39bc2aceaf",
-    "androidRuntimeBytes": 2934676
+    "android": "Compiled-only runtime stripped and verified, arm64/x86_64 16 KiB LOAD alignment, 10 Python tests pass. First Gradle build exposed missing generated-source task dependency, now corrected. APK/device validation pending; exact official OpenBLAS/gfortran wheels still have 4 KiB alignment and block release.",
+    "androidRuntimeSha256": "47883fd5535bae569c7fe7bb9cfac2092fa8ab2ec83c4c39e4fd5e9c363ffa2f",
+    "androidRuntimeBytes": 777660,
+    "firstCI": "Backend and Linux desktop jobs passed. Mac compiler expression timeout and packaging fixture omission corrected. Windows default elevated owner exposed; atomic current-user SID creation added. Android Gradle dependency corrected. Next CI pending."
   },
   "limitations": [
     "RottenApple current caller pairs successfully but its storageBind returns unavailable before network; complete file binding requires changes outside this authorized repository.",

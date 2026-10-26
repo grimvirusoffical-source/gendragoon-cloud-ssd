@@ -20,13 +20,15 @@ class CompanionServerTests(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.root=Path(self.temp.name).resolve()
         self.base=self.root/'base';config=self.base/'NativeMessaging'
-        config.mkdir(mode=0o700,parents=True);self.base.chmod(0o700)
         self.config=config/'config.json'
-        self.config.write_text(json.dumps({'schema':1,'allowedOrigins':[bridge.FIREFOX_ID],'vscodeExtensionId':bridge.VSCODE_ID}))
-        self.config.chmod(0o600)
+        encoded=json.dumps({'schema':1,'allowedOrigins':[bridge.FIREFOX_ID],'vscodeExtensionId':bridge.VSCODE_ID})
         if sys.platform=='win32':
-            from gendragoon_platform_ipc import secure_file
-            for path in [self.base,config,self.config]:secure_file(path)
+            from gendragoon_platform_ipc import create_private_directory,create_private_file
+            create_private_directory(config)
+            with os.fdopen(create_private_file(self.config),'w') as output:output.write(encoded)
+        else:
+            config.mkdir(mode=0o700,parents=True);self.base.chmod(0o700)
+            self.config.write_text(encoded);self.config.chmod(0o600)
         self.seen=[]
         def dispatch(request,done):
             self.seen.append(request)
@@ -74,10 +76,12 @@ class CompanionServerTests(unittest.TestCase):
 @unittest.skipUnless(sys.platform=='win32','Windows ACL and named-pipe runtime')
 class WindowsSecurityTests(unittest.TestCase):
     def test_public_acl_is_rejected_and_private_acl_is_verified(self):
-        from gendragoon_platform_ipc import secure_file,verify_private,modules
+        from gendragoon_platform_ipc import create_private_file,verify_private,modules
         *_,security=modules()
         with tempfile.TemporaryDirectory() as td:
-            path=Path(td)/'private.json';path.write_text('{}');secure_file(path);verify_private(path)
+            path=Path(td)/'private.json'
+            with os.fdopen(create_private_file(path),'w') as output:output.write('{}')
+            verify_private(path)
             descriptor=security.GetFileSecurity(str(path),security.DACL_SECURITY_INFORMATION)
             acl=descriptor.GetSecurityDescriptorDacl()
             everyone=security.ConvertStringSidToSid('S-1-1-0')
