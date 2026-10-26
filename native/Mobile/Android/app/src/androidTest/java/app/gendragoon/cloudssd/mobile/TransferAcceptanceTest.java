@@ -132,6 +132,35 @@ public final class TransferAcceptanceTest {
     }
     @Test public void unsafeCollidingAndExcessivelyDeepSelectionsAreRetained()throws Exception{
         for(String mode:new String[]{"collision","unicode-collision","bad-name","depth"})failedBeforeBackend(mode);
+        // Keep the platform private-root alias accepted while refusing a linked job leaf.
+        OneTimeWorkRequest linked=request(uploadData(fixture("single"),false));
+        java.nio.file.Path privateRoot=context.getFilesDir().getCanonicalFile().toPath();
+        java.nio.file.Path target=Files.createTempDirectory(privateRoot,"owned-stage-leaf-refusal-");
+        android.system.Os.chmod(target.toString(),0700);
+        java.nio.file.Path sentinel=target.resolve("sentinel.bin");
+        byte[] retained="Owned stage-leaf refusal sentinel".getBytes(java.nio.charset.StandardCharsets.US_ASCII);
+        Files.write(sentinel,retained,java.nio.file.StandardOpenOption.CREATE_NEW,java.nio.file.StandardOpenOption.WRITE);
+        android.system.Os.chmod(sentinel.toString(),0600);
+        java.nio.file.Path stage=privateRoot.resolve("redx-jobs").resolve(linked.getId().toString());
+        assertTrue("Earlier owned failed selections establish the job root",Files.isDirectory(stage.getParent(),java.nio.file.LinkOption.NOFOLLOW_LINKS));
+        assertFalse(Files.exists(stage,java.nio.file.LinkOption.NOFOLLOW_LINKS));
+        Files.createSymbolicLink(stage,target);
+        android.system.StructStat beforeLink=android.system.Os.lstat(stage.toString()),beforeTarget=android.system.Os.lstat(target.toString()),beforeSentinel=android.system.Os.lstat(sentinel.toString());
+        java.nio.file.Path retainedLink=Files.readSymbolicLink(stage);
+        int receiverEntries=application.backend.receiverEntries.get(),uploadEntries=application.backend.uploadEntries.get(),downloadEntries=application.backend.downloadEntries.get();
+        assertNull(application.backend.lastPrepared.get());
+        manager.enqueue(linked).getResult().get(10,TimeUnit.SECONDS);
+        WorkInfo result=finished(linked.getId());
+        assertEquals("Linked staging leaf must fail; "+workerDiagnostic(linked.getId(),result),WorkInfo.State.FAILED,result.getState());
+        assertEquals(receiverEntries,application.backend.receiverEntries.get());assertEquals(uploadEntries,application.backend.uploadEntries.get());assertEquals(downloadEntries,application.backend.downloadEntries.get());assertNull(application.backend.lastPrepared.get());
+        assertTrue(Files.isSymbolicLink(stage));assertEquals(retainedLink,Files.readSymbolicLink(stage));
+        android.system.StructStat afterLink=android.system.Os.lstat(stage.toString()),afterTarget=android.system.Os.lstat(target.toString()),afterSentinel=android.system.Os.lstat(sentinel.toString());
+        assertEquals(beforeLink.st_dev,afterLink.st_dev);assertEquals(beforeLink.st_ino,afterLink.st_ino);assertEquals(beforeLink.st_mode,afterLink.st_mode);assertEquals(beforeLink.st_uid,afterLink.st_uid);assertEquals(beforeLink.st_gid,afterLink.st_gid);
+        assertEquals(beforeTarget.st_dev,afterTarget.st_dev);assertEquals(beforeTarget.st_ino,afterTarget.st_ino);assertEquals(beforeTarget.st_mode,afterTarget.st_mode);assertEquals(beforeTarget.st_uid,afterTarget.st_uid);assertEquals(beforeTarget.st_gid,afterTarget.st_gid);assertEquals(beforeTarget.st_mtime,afterTarget.st_mtime);
+        assertArrayEquals(new String[]{"sentinel.bin"},target.toFile().list());
+        assertEquals(beforeSentinel.st_dev,afterSentinel.st_dev);assertEquals(beforeSentinel.st_ino,afterSentinel.st_ino);assertEquals(beforeSentinel.st_mode,afterSentinel.st_mode);assertEquals(beforeSentinel.st_uid,afterSentinel.st_uid);assertEquals(beforeSentinel.st_gid,afterSentinel.st_gid);assertEquals(beforeSentinel.st_size,afterSentinel.st_size);assertEquals(beforeSentinel.st_mtime,afterSentinel.st_mtime);
+        assertArrayEquals(retained,Files.readAllBytes(sentinel));
+        // Retain this exact link and target with failed owned jobs; no global-root cleanup.
     }
     @Test public void completeNestedAndEmptyFoldersRoundtripThroughActualWorker()throws Exception{
         for(String mode:new String[]{"folder","empty"}){
