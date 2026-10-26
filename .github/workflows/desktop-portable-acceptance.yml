@@ -38,3 +38,12 @@ jobs:
           & "${{ runner.temp }}/gendragoon-python-utf8/python.exe" -B -m unittest discover -s native/Desktop/tests -p test_machinenotes.py -v
         env:
           GD_DESKTOP_RUNTIME: ${{ runner.temp }}/gendragoon-desktop
+      - name: Repeat the genuine encrypted portable launch fixture ten times
+        run: |
+          for ($launchAttempt = 1; $launchAttempt -le 10; $launchAttempt++) {
+            Write-Host "Encrypted portable launch repeat $launchAttempt/10"
+            & "${{ runner.temp }}/gendragoon-python-utf8/python.exe" -B -c "import sys,unittest; sys.path.insert(0,'native/Desktop/tests'); unittest.main(module=None,argv=['unittest','test_machinenotes.ActualCodecTests.test_actual_encrypted_current_machinenotes_portable_native_archive_launch'],verbosity=2)"
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+        env:
+          GD_DESKTOP_RUNTIME: ${{ runner.temp }}/gendragoon-desktop
