@@ -94,7 +94,9 @@ class LibraryTests(unittest.TestCase):
 
     def test_file_folder_and_atomic_app_roundtrip_preserves_manifest(self):
         for kind in ("file","folder","app"):
-            with self.subTest(kind=kind):
+            # This fixture deliberately models Mac archive restoration, even
+            # when its fake transport and filesystem run on a Linux CI host.
+            with self.subTest(kind=kind), patch.object(library.device_origin,"current_platform",return_value="macos"):
                 source=self.source(kind);before=library.snapshot(source)
                 result=self.upload(source)
                 self.assertTrue(result["verified"]);self.assertFalse(result["offloaded"])
