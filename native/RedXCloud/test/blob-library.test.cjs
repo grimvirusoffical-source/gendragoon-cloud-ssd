@@ -100,6 +100,47 @@ test('scalable compact-PNG blobs and library index use real RedX + account isola
  assert.equal((await call(a.access_token,'PUT',legacyRoute,smallPNG,{'content-type':'image/png','content-length':String(smallPNG.length),'x-content-sha256':digest(smallPNG)})).status,201);
  assert.equal((await call(a.access_token,'GET',legacyRoute)).status,200);
 
+ // New MachineNote chunks use the real visual barcode profile. Preserve the
+ // compact cases above as backwards-compatibility coverage, then prove a
+ // pixel-encoded carrier passes the actual HTTP validator and decrypts.
+ const visualOriginal=crypto.randomBytes(64*1024),visualId=crypto.randomBytes(16).toString('hex');
+ const visualPlain=path.join(td,'visual-original.bin'),compactSmall=path.join(td,'visual-compact-fixture.png');
+ const visualPNG=path.join(td,'visual-carrier.png'),visualDownloaded=path.join(td,'visual-downloaded.png'),visualRestored=path.join(td,'visual-restored.bin');
+ await fs.writeFile(visualPlain,visualOriginal);
+ const codecEnvironment={...process.env,PYTHONPATH:path.join(root,'Red-SecretsXAI'),RSX_LIB:path.join(s.base,'tools/rsx-build',process.platform==='darwin'?'librsx.dylib':'librsx.so')};
+ async function python(args,input){
+  await new Promise((ok,bad)=>{
+   const p=spawn(path.join(s.base,'tools/venv/bin/python'),args,{stdio:['pipe','pipe','pipe'],env:codecEnvironment});
+   let err='';p.stderr.on('data',x=>err+=x);p.on('error',bad);p.on('close',c=>c===0?ok():bad(new Error('visual carrier fixture '+c+' '+err.slice(0,200))));p.stdin.end(input);
+  });
+ }
+ await python([codec],JSON.stringify({operation:'seal',source:visualPlain,output:compactSmall,password:'fixture password 123456789',
+  keymap,receiver:receiver.id,workspace:wkId,object_id:visualId}));
+ await python(['-c',[
+  'from pathlib import Path',
+  'import sys',
+  'from redsecretsxai import encode_image, decode_image, decode_storage_image',
+  'blob=decode_storage_image(Path(sys.argv[1]).read_bytes())',
+  'png=encode_image(blob,module=3,bits=3,noise=0,verify=True,chaff=True,skeleton=True,border=True,deterministic=True)',
+  'assert decode_image(png)==blob',
+  'Path(sys.argv[2]).write_bytes(png)',
+ ].join('\n'),compactSmall,visualPNG]);
+ const visualCarrier=await fs.readFile(visualPNG);
+ assert.ok(visualCarrier.length<8*1024*1024);
+ assert.ok(visualCarrier.readUInt32BE(16)*visualCarrier.readUInt32BE(20)<=4_000_000);
+ const chunkTypes=[];for(let offset=8;offset<visualCarrier.length;){const length=visualCarrier.readUInt32BE(offset);chunkTypes.push(visualCarrier.toString('ascii',offset+4,offset+8));offset+=length+12;}
+ assert.ok(!chunkTypes.includes('rxAI'),'visual carrier must not carry its ciphertext in the compact rxAI chunk');
+ const visualRoute='/v1/receivers/me/workspaces/'+wkId+'/blobs/'+visualId;
+ r=await call(a.access_token,'PUT',visualRoute,visualCarrier,{'content-type':'image/png','content-length':String(visualCarrier.length),'x-content-sha256':digest(visualCarrier)});
+ assert.equal(r.status,201);assert.equal(r.json.status,'ready');
+ const visualResponse=await call(a.access_token,'GET',visualRoute);
+ assert.equal(visualResponse.status,200);assert.equal(digest(visualResponse.raw),digest(visualCarrier));
+ await fs.writeFile(visualDownloaded,visualResponse.raw);
+ await python([codec],JSON.stringify({operation:'restore',source:visualDownloaded,output:visualRestored,password:'fixture password 123456789',
+  keymap,receiver:receiver.id,workspace:wkId,object_id:visualId}));
+ assert.deepEqual(await fs.readFile(visualRestored),visualOriginal);
+ assert.equal((await call(b.access_token,'GET',visualRoute)).status,404);
+
  // Explicit scalable-blob deletion frees exactly its reserved carrier bytes.
  const beforeDelete=(await call(a.access_token,'GET','/v1/receivers/me')).json.usedBytes;
  const deleted=await call(a.access_token,'DELETE',route);

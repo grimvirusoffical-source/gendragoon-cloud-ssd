@@ -371,6 +371,24 @@ def clear_sources(expected_revision, home=None):
         return commit(descriptor, state)
 
 
+def cancel_job(identifier, expected_revision, home=None):
+    """Cancel only a not-yet-started job; never touch its sources or remote data."""
+    with locked_state(home) as (descriptor, state):
+        require_revision(state, expected_revision)
+        require_idle(state)
+        job = next((value for value in state["jobs"] if value["id"] == identifier), None)
+        if job is None or job["state"] != "queued":
+            raise WorkspaceError("job_not_queued", "Only a queued upload can be cancelled", state)
+        job["state"] = "failed"
+        job["error"] = "Cancelled before upload. Original files were retained."
+        job["updated_at"] = time.time()
+        for item in job["items"]:
+            item["state"] = "failed"
+            item["message"] = job["error"]
+            item["offloaded"] = False
+        return commit(descriptor, state)
+
+
 def unchanged(source):
     try:
         path = source_path(source["path"])
@@ -695,10 +713,12 @@ def main(argv=None):
     add.add_argument("--paths-json", required=True)
     remove = sub.add_parser("remove-source")
     remove.add_argument("--id", required=True)
+    cancel = sub.add_parser("cancel-job")
+    cancel.add_argument("--id", required=True)
     clear = sub.add_parser("clear-sources")
     queue = sub.add_parser("enqueue")
     queue.add_argument("--offload", choices=("true", "false"), required=True)
-    for command in (destination, add, remove, clear, queue):
+    for command in (destination, add, remove, clear, queue, cancel):
         command.add_argument("--expected-revision", type=int, required=True)
     args = parser.parse_args(argv)
     if getattr(args, "performance_stdin", False):
@@ -719,6 +739,8 @@ def main(argv=None):
             state = add_sources(strict_json(args.paths_json), args.expected_revision)
         elif args.action == "remove-source":
             state = remove_source(args.id, args.expected_revision)
+        elif args.action == "cancel-job":
+            state = cancel_job(args.id, args.expected_revision)
         elif args.action == "clear-sources":
             state = clear_sources(args.expected_revision)
         elif args.action == "enqueue":

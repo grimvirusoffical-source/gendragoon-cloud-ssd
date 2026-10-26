@@ -528,6 +528,10 @@ struct GDManagedAppSession: Identifiable {
         folder = destination.bucket + (destination.prefix.isEmpty ? "" : "/" + destination.prefix)
         if changed { apps = [] }
     }
+    func clearDestination() {
+        projectID = nil; bucket = nil; remote = ""; folder = ""; apps = []
+        message = "Choose an available MachineNote to load your encrypted library."
+    }
     func session(for key: String) -> GDManagedAppSession? {
         sessions.first { $0.key == key && $0.active } ?? sessions.last { $0.key == key }
     }
@@ -540,7 +544,7 @@ struct GDManagedAppSession: Identifiable {
                 let input: Data?
                 if remote == "redxai", ["list", "upload", "restore", "launch"].contains(action) {
                     guard let bucket else { throw GDTransferError(message: "Choose a Red-XAI workspace first.", status: 400) }
-                    input = try await GDRedXAIAuthSession.shared.privateWorkerInput(workspaceID: bucket, constrained: false)
+                    input = try await GDRedXAIAuthSession.shared.privateWorkerInput(workspaceID: bucket, constrained: false, requireWrite: action == "upload")
                 } else if ["upload", "restore", "launch"].contains(action) {
                     input = await GDNativePerformance.shared.helperInput()
                 } else {
@@ -604,7 +608,7 @@ struct GDManagedAppSession: Identifiable {
                         let input: Data?
                         if self.remote == "redxai" {
                             guard let bucket = self.bucket else { throw GDTransferError(message: "Choose a Red-XAI workspace first.", status: 400) }
-                            input = try await GDRedXAIAuthSession.shared.privateWorkerInput(workspaceID: bucket, constrained: false)
+                            input = try await GDRedXAIAuthSession.shared.privateWorkerInput(workspaceID: bucket, constrained: false, requireWrite: true)
                         } else {
                             input = await GDNativePerformance.shared.helperInput()
                         }

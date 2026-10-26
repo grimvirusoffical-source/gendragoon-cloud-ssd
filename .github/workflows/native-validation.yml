@@ -91,7 +91,7 @@ jobs:
       - run: npm ci --ignore-scripts
       - run: npm test
       - name: Verify Red-XAI subscription billing, workspace deletion and enforced transfer tiers
-        run: node --test ../RedXCloud/test/control-server.test.cjs ../RedXCloud/test/workspace-lifecycle.test.cjs ../RedXCloud/test/control-receiver.integration.test.cjs
+        run: node --test ../RedXCloud/test/control-server.test.cjs ../RedXCloud/test/workspace-lifecycle.test.cjs ../RedXCloud/test/control-receiver.integration.test.cjs ../RedXCloud/test/machine-notes.test.cjs
       - run: npm audit --omit=dev --audit-level=high
       - run: python3 -m unittest discover -p 'test_*.py'
 

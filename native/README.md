@@ -5,14 +5,23 @@ The previous `GenDragoonFreeCloud.swift` is kept under `Legacy`; the current app
 
 ## macOS application behavior
 
-The signed-in native workspace owns one persistent upload selection. Google
-Cloud discovery verifies the actual project ID and the bucket's owning project
-number before committing the selected project, bucket, remote, and prefix.
-The top selector, upload tree, and upload panel use that committed state. An
-account lacking account-wide discovery permission can retain an explicitly
-verified destination. Legacy 16- and 18-character app keys keep their original
-cache paths and are adopted only into a matching verified workspace.
+The signed-in macOS app offers only MachineNotes on the Red-XAI server. Its
+persistent upload selection is populated from the authenticated Receiver's
+active MachineNotes, with no Google project or bucket discovery. A saved
+legacy provider destination remains preserved locally but cannot run an upload;
+select an available MachineNote instead. Queued legacy uploads can be cancelled
+without touching source files or remote objects. The selected MachineNote is
+shared by the upload tree and library, and queued jobs retain their own frozen
+MachineNote context.
 
+Users can list only their own MachineNotes. The verified service owner can list
+all account and library metadata through a separately authorized server API;
+the server rechecks the verified owner email for every request. This inventory
+does not provide other users' encryption secrets or decrypted archive contents.
+The client integrates the pinned Red-SecretsXAI public encryption and visual
+barcode APIs without modifying its repository. Existing compact PNG archives
+remain readable. New barcode carriers have storage overhead, and quotas count
+the actual encoded bytes stored on the server.
 The upload tree makes Applications a first-class source, alongside individual
 files and complete folders. A macOS `.app` is treated as one application bundle.
 The optional removal checkbox is off by default. Removal requires an immutable
@@ -57,7 +66,7 @@ idle app. Replacement keeps a rollback copy and checks the restarted process.
 
 ## Build and installation
 
-Requirements: Apple Silicon Mac, macOS 14+, Xcode, a supported Python runtime,
+Requirements: Apple Silicon Mac, macOS 14+, Xcode, Python 3.13,
 and a valid existing GenDragoon bundle containing the vendor rclone/Node
 executables and artwork. The build never replaces that base bundle.
 
@@ -66,7 +75,9 @@ python3 native/build_macos.py --output /path/to/fresh-build-directory
 ```
 
 All `Sources/*.swift` are compiled. Resource helpers come from this checkout.
-The script signs with the existing Developer ID identity. Private signing keys
+The build bundles the visual codec's pinned NumPy and Pillow wheels for the
+matching Python ABI and signs their native extensions. The script signs with
+the existing Developer ID identity. Private signing keys
 and owner API credentials are not copied into the app or repository.
 
 Refresh the copied vendor Node runtime in the stopped staging bundle before

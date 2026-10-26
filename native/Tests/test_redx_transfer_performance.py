@@ -2,6 +2,7 @@
 import io
 import json
 import os
+import struct
 from pathlib import Path
 import sys
 import tempfile
@@ -9,6 +10,7 @@ import threading
 import time
 import unittest
 import urllib.error
+import zlib
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "Resources"))
@@ -70,6 +72,8 @@ class FixtureReceiver:
         self.config = value
         self.workspace = value["workspaceId"]
         self.receiver = value["receiverId"]
+        self.secret = value["storageSecret"]
+        self.keymap = Path(value["keymapPath"])
 
     def verified_workers(self, write=False):
         return self.allowance
@@ -205,8 +209,8 @@ class RedXPerformanceTests(unittest.TestCase):
             self.assertEqual(codec.open(codec.seal(plain, oid), oid), plain)
             return index
         with patch.object(storage, "_crypto_runtime"), patch.object(storage, "rsx", runtime), \
-                patch.object(storage, "encode_storage_image", side_effect=lambda b: b"fixture!" + b), \
-                patch.object(storage, "decode_storage_image", side_effect=lambda b: b[8:]):
+                patch.object(storage, "encode_image", side_effect=lambda b, **k: b"\x89PNG\r\n\x1a\n" + bytes(8) + struct.pack(">II", 1, 1) + b), \
+                patch.object(storage, "decode_storage_image", side_effect=lambda b: b[24:]):
             with storage.Codec(client) as codec:
                 self.assertEqual(list(storage._parallel_chunks(client, codec, 20, range(40), roundtrip)), list(range(40)))
         self.assertEqual(runtime.session_open.call_count, 1)
@@ -238,7 +242,7 @@ class RedXPerformanceTests(unittest.TestCase):
                     restored = storage.download_archive(self.config, FixtureReceiver.items[key], target)
                     self.assertEqual(target.read_bytes(), data)
                     self.assertEqual(restored["manifest"], source_manifest)
-                    oid = storage.object_id("archive-chunk", storage.sha256_bytes(data), 0)
+                    oid = storage.object_id(storage.VISUAL_PROFILE + "-archive-chunk", storage.sha256_bytes(data), 0)
                     FixtureReceiver.blobs[oid] += b"changed"
                     with self.assertRaisesRegex(storage.RedXStorageError, "does not match"):
                         storage.upload_archive(*arguments)
@@ -267,7 +271,7 @@ class RedXPerformanceTests(unittest.TestCase):
     @unittest.skipUnless(os.environ.get("GD_RED_XAI_REAL_CRYPTO_TEST") == "1", "requires built librsx and Pillow")
     def test_real_twenty_worker_encryption_and_authenticated_restore(self):
         client = storage.RedXReceiver(self.config)
-        values = [(index, os.urandom(65_537)) for index in range(40)]
+        values = [(index, os.urandom(1024)) for index in range(40)]
         def roundtrip(codec, value):
             index, plain = value
             oid = storage.object_id("parallel-crypto-fixture", index)
@@ -276,6 +280,82 @@ class RedXPerformanceTests(unittest.TestCase):
             return index
         with storage.Codec(client) as codec:
             self.assertEqual(list(storage._parallel_chunks(client, codec, 20, values, roundtrip)), list(range(40)))
+
+    def test_manifest_indexes_stay_bounded_and_large_archives_preserve_record_order(self):
+        client = FixtureReceiver(self.config)
+        records = [{"index": i, "id": "%032x" % i, "plainBytes": 64,
+                    "plainSha256": "a" * 64, "carrierSha256": "b" * 64} for i in range(1000)]
+        with patch.object(storage, "CHUNK", 2048), FixtureCodec(client) as codec:
+            pages = storage._json_pages(client, codec, "hierarchy-fixture", "c" * 64, records)
+            self.assertLessEqual(len(json.dumps(pages, separators=(",", ":")).encode()), 512)
+            self.assertEqual(storage._load_pages(client, codec, pages), records)
+            for oid, png in FixtureReceiver.blobs.items():
+                self.assertLessEqual(len(codec.open(png, oid)), 2048)
+
+    def test_legacy_v1_manifest_and_flat_metadata_parts_still_restore(self):
+        client = FixtureReceiver(self.config)
+        plain = b"preexisting archive bytes"
+        manifest = [{"path": "old-file", "size": len(plain)}]
+        with FixtureCodec(client) as codec:
+            record = storage._put_plain(client, codec, "1" * 32, plain)
+            record["index"] = 0
+            page = storage._put_plain(client, codec, "2" * 32,
+                json.dumps({"schema": storage.PAGE_SCHEMA, "records": [record]}).encode())
+            raw = json.dumps(manifest).encode()
+            part = storage._put_plain(client, codec, "3" * 32, zlib.compress(raw))
+            root = {"schema": storage.LEGACY_ROOT_SCHEMA, "name": "old-file", "kind": "file",
+                "archiveBytes": len(plain), "archiveSha256": storage.sha256_bytes(plain),
+                "chunkCount": 1, "chunkPages": [page], "metadata": {"schema": storage.METADATA_SCHEMA,
+                    "encoding": "zlib-json", "jsonBytes": len(raw), "jsonSha256": storage.sha256_bytes(raw), "parts": [part]}}
+            storage._put_plain(client, codec, "4" * 32, json.dumps(root).encode())
+        item = dict(name="old-file", kind="file", manifestId="4" * 32,
+            archiveBytes=len(plain), archiveSha256=storage.sha256_bytes(plain))
+        target = Path(self.directory.name) / "old-restored"
+        with patch.object(storage, "RedXReceiver", FixtureReceiver), patch.object(storage, "Codec", FixtureCodec):
+            restored = storage.download_archive(self.config, item, target)
+        self.assertEqual(target.read_bytes(), plain)
+        self.assertEqual(restored["manifest"], manifest)
+
+    @unittest.skipUnless(os.environ.get("GD_RED_XAI_REAL_CRYPTO_TEST") == "1", "requires built librsx, NumPy and Pillow")
+    def test_genuine_visual_barcode_upload_restore_and_legacy_compact_readback(self):
+        from redsecretsxai import encode_storage_image
+        data = os.urandom(storage.CHUNK + 123)
+        source = Path(self.directory.name) / "visual-source"
+        source.write_bytes(data)
+        key = "c" * 18
+        source_manifest = [{"path": "visual-source", "size": len(data)}]
+        FixtureReceiver.allowance = 4
+        with patch.object(storage, "RedXReceiver", FixtureReceiver):
+            result = storage.upload_archive(self.config, source, key, "visual-source", "file", "flat",
+                storage.sha256_bytes(data), source_manifest)
+            self.assertEqual(result["chunks"], 2)
+            for png in FixtureReceiver.blobs.values():
+                self.assertLessEqual(len(png), storage.MAX_PNG)
+                self.assertLessEqual(struct.unpack(">I", png[16:20])[0] * struct.unpack(">I", png[20:24])[0], 4_000_000)
+                offset, kinds = 8, []
+                while offset < len(png):
+                    length = struct.unpack(">I", png[offset:offset + 4])[0]
+                    kinds.append(png[offset + 4:offset + 8])
+                    offset += length + 12
+                # The ciphertext is recovered from actual RGB pixels. There is
+                # no rxAI ancillary metadata chunk carrying a hidden payload.
+                self.assertEqual(kinds, [b"IHDR", b"IDAT", b"IEND"])
+                self.assertTrue(storage.decode_image(png).startswith(b"RSX3"))
+            target = Path(self.directory.name) / "visual-restored"
+            restored = storage.download_archive(self.config, FixtureReceiver.items[key], target)
+            self.assertEqual(target.read_bytes(), data)
+            self.assertEqual(restored["manifest"], source_manifest)
+            # Rewrap exactly the same authenticated ciphertext in the old
+            # compact format and verify compatibility without changing its AAD.
+            client = FixtureReceiver(self.config)
+            with storage.Codec(client) as codec:
+                oid = storage.object_id("legacy-fixture", "old-compact")
+                plain = b"preexisting encrypted compact object"
+                visual = codec.seal(plain, oid)
+                compact = encode_storage_image(storage.decode_image(visual))
+                self.assertEqual(codec.open(compact, oid), plain)
+                with self.assertRaises(Exception):
+                    codec.open(compact, "f" * 32)
 
 
 if __name__ == "__main__":

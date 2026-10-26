@@ -38,6 +38,7 @@ private struct GDRXTokenSet {
     @Published private(set) var linked = false
     @Published private(set) var busy = false
     @Published private(set) var uploadProjects: [UploadCloudProject] = []
+    @Published private(set) var readableProjects: [UploadCloudProject] = []
     @Published private(set) var quotaBytes: Int64 = 0
     @Published private(set) var usedBytes: Int64 = 0
 
@@ -367,7 +368,7 @@ private struct GDRXTokenSet {
         let oldRefresh = try? loadRefresh(subject: oldSubject)
         Self.keychainDelete(service: authService, account: Self.authAccount(issuer: issuer.absoluteString, subject: oldSubject))
         tokens = nil; linked = false; subject = ""; email = ""; receiverID = ""; state = .disconnected
-        uploadProjects = []; quotaBytes = 0; usedBytes = 0
+        uploadProjects = []; readableProjects = []; quotaBytes = 0; usedBytes = 0
         status = "GenDragoon Red-XAI app session cleared. Your website session remains signed in."
         if let oldRefresh {
             Task { _ = try? await request(issuer, path: "redxai-connect/revoke", method: "POST", json: ["token": oldRefresh]) }
@@ -380,39 +381,48 @@ private struct GDRXTokenSet {
               object["storageFormat"] as? String == "redsecretsxai-png-v1",
               let quota = object["quotaBytes"] as? NSNumber,
               let used = object["usedBytes"] as? NSNumber,
-              let workspaces = object["workspaces"] as? [[String: Any]] else {
-            throw GDTransferError(message: "Red-XAI Receiver workspace response failed validation.", status: 0)
+              let workspaces = (object["machineNotes"] ?? object["workspaces"]) as? [[String: Any]] else {
+            throw GDTransferError(message: "Red-XAI MachineNotes response failed validation.", status: 0)
         }
         var buckets: [UploadCloudBucket] = []
+        var readableBuckets: [UploadCloudBucket] = []
         for workspace in workspaces {
-            if workspace["active"] as? Bool == false || workspace["readOnly"] as? Bool == true { continue }
             guard let id = workspace["id"] as? String,
                   id.range(of: "^[a-f0-9]{32}$", options: .regularExpression) != nil,
-                  let rawName = workspace["name"] as? String else { continue }
+                  let rawName = workspace["name"] as? String,
+                  let active = workspace["active"] as? Bool,
+                  let readOnly = workspace["readOnly"] as? Bool else { continue }
             let name = rawName.trimmingCharacters(in: .whitespacesAndNewlines)
-            let workers = (workspace["workers"] as? NSNumber)?.intValue ?? 1
-            guard !name.isEmpty, name.count <= 80, (1...24).contains(workers) else { continue }
-            buckets.append(UploadCloudBucket(id: id, displayName: name, remote: "redxai", prefix: "Library", workers: workers))
+            guard let workerCount = workspace["workers"] as? NSNumber else { continue }
+            let workers = workerCount.intValue
+            guard !name.isEmpty, name.count <= 80, (0...24).contains(workers), workerCount.doubleValue == Double(workers) else { continue }
+            let writable = active && !readOnly && workers > 0
+            readableBuckets.append(UploadCloudBucket(id: id, displayName: name, remote: "redxai", prefix: "Library", workers: writable ? workers : 1))
+            if writable { buckets.append(UploadCloudBucket(id: id, displayName: name, remote: "redxai", prefix: "Library", workers: workers)) }
         }
         buckets.sort { $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending }
+        readableBuckets.sort { $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending }
         uploadProjects = buckets.isEmpty ? [] : [
-            UploadCloudProject(id: "redxai", displayName: "Red-XAI Encrypted Cloud", buckets: buckets)
+            UploadCloudProject(id: "redxai", displayName: "MachineNotes", buckets: buckets)
+        ]
+        readableProjects = readableBuckets.isEmpty ? [] : [
+            UploadCloudProject(id: "redxai", displayName: "MachineNotes", buckets: readableBuckets)
         ]
         quotaBytes = quota.int64Value
         usedBytes = used.int64Value
     }
 
     func refreshWorkspaces() async {
-        guard linked else { uploadProjects = []; quotaBytes = 0; usedBytes = 0; return }
+        guard linked else { uploadProjects = []; readableProjects = []; quotaBytes = 0; usedBytes = 0; return }
         do {
             let token = try await accessToken()
             let (data, response) = try await request(cloudAPI, path: "v1/receivers/me", bearer: token)
             guard response.statusCode == 200 else {
-                throw GDTransferError(message: "Could not load Red-XAI workspaces.", status: response.statusCode)
+                throw GDTransferError(message: "Could not load Red-XAI MachineNotes.", status: response.statusCode)
             }
             try applyReceiverState(data)
         } catch {
-            status = "Red-XAI workspace refresh needs attention: " + error.localizedDescription
+            status = "Red-XAI MachineNotes refresh needs attention: " + error.localizedDescription
         }
     }
 
@@ -421,38 +431,43 @@ private struct GDRXTokenSet {
         let name = rawName.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !name.isEmpty, name.count <= 80,
               name.rangeOfCharacter(from: .controlCharacters) == nil else {
-            throw GDTransferError(message: "Workspace name must contain 1–80 printable characters.", status: 400)
+            throw GDTransferError(message: "MachineNote name must contain 1–80 printable characters.", status: 400)
         }
         let identifier = Self.hex(try Self.random(16))
         let token = try await accessToken()
         let (data, response) = try await request(cloudAPI, path: "v1/receivers/me/workspaces",
             method: "POST", json: ["name": name], bearer: token, headers: ["Idempotency-Key": identifier])
         guard response.statusCode == 201 || response.statusCode == 200 else {
-            throw GDTransferError(message: "Red-XAI workspace creation failed.", status: response.statusCode)
+            throw GDTransferError(message: "Red-XAI MachineNote creation failed.", status: response.statusCode)
         }
         let object = try jsonObject(data)
         guard object["id"] as? String == identifier else {
-            throw GDTransferError(message: "Red-XAI workspace identity check failed.", status: 0)
+            throw GDTransferError(message: "Red-XAI MachineNote identity check failed.", status: 0)
         }
         await refreshWorkspaces()
     }
 
     var usageSummary: String {
-        guard quotaBytes > 0 else { return linked ? "Choose and activate a workspace storage plan to begin." : "Receiver quota is loading…" }
+        guard quotaBytes > 0 else { return linked ? "Choose and activate a MachineNote storage plan to begin." : "Storage quota is loading…" }
         let formatter = ByteCountFormatter()
         formatter.countStyle = .file
         return formatter.string(fromByteCount: usedBytes) + " used of " + formatter.string(fromByteCount: quotaBytes)
     }
 
-    func privateWorkerInput(workspaceID: String, constrained: Bool) async throws -> Data {
+    func privateWorkerInput(workspaceID: String, constrained: Bool, requireWrite: Bool = false) async throws -> Data {
         guard workspaceID.range(of: "^[a-f0-9]{32}$", options: .regularExpression) != nil,
               receiverID.range(of: "^[a-f0-9]{64}$", options: .regularExpression) != nil else {
-            throw GDTransferError(message: "Choose a valid Red-XAI workspace.", status: 400)
+            throw GDTransferError(message: "Choose a valid Red-XAI MachineNote.", status: 400)
+        }
+        let authorized = requireWrite ? uploadProjects : readableProjects
+        guard let destination = authorized.flatMap({ $0.buckets }).first(where: { $0.id == workspaceID }),
+              (1...24).contains(destination.workers) else {
+            throw GDTransferError(message: requireWrite ? "Choose an active MachineNote with a storage plan before uploading." : "Choose a MachineNote owned by this account before restoring files.", status: requireWrite ? 402 : 403)
         }
         let token = try await accessToken()
         let secret = try storageCredential()
         guard let keymapURL else { throw GDTransferError(message: "Red-XAI keymap path is unavailable.", status: 0) }
-        let workers = uploadProjects.first?.buckets.first(where: { $0.id == workspaceID })?.workers ?? 1
+        let workers = destination.workers
         let payload: [String: Any] = [
             "provider": "redxai",
             "workspaceId": workspaceID,
@@ -465,5 +480,70 @@ private struct GDRXTokenSet {
             "constrained": constrained
         ]
         return try JSONSerialization.data(withJSONObject: payload)
+    }
+
+    func machineNotesInventory(allAccounts: Bool = false, cursor: String? = nil) async throws -> GDMachineNotesInventoryPage {
+        guard linked, !subject.isEmpty, receiverID.range(of: "^[a-f0-9]{64}$", options: .regularExpression) != nil else {
+            throw GDTransferError(message: "Connect Red-XAI to view MachineNotes.", status: 401)
+        }
+        if let cursor {
+            guard allAccounts, cursor.range(of: "^[0-9]{1,16}$", options: .regularExpression) != nil,
+                  let value = UInt64(cursor), value <= 0x000F_FFFF_FFFF_FFFF else {
+                throw GDTransferError(message: "MachineNotes page cursor is invalid.", status: 400)
+            }
+        }
+        let expectedSubject = subject, expectedReceiver = receiverID
+        let transport = URLSession(configuration: .ephemeral, delegate: GDMachineNotesRedirectDelegate(), delegateQueue: nil)
+        defer { transport.invalidateAndCancel() }
+
+        func page(all: Bool, cursor: String?) async throws -> GDMachineNotesInventoryPage {
+            let path = all ? "v1/receivers/admin/machine-notes" : "v1/receivers/me/machine-notes"
+            let endpoint = cloudAPI.appendingPathComponent(path)
+            guard var parts = URLComponents(url: endpoint, resolvingAgainstBaseURL: false),
+                  parts.scheme == "https", parts.host == "api.red-xai.com", parts.port == nil,
+                  parts.user == nil, parts.password == nil, parts.fragment == nil,
+                  parts.path == "/" + path else {
+                throw GDTransferError(message: "MachineNotes service configuration is invalid.", status: 0)
+            }
+            if all {
+                parts.queryItems = [URLQueryItem(name: "limit", value: "20")]
+                if let cursor { parts.queryItems?.append(URLQueryItem(name: "cursor", value: cursor)) }
+            }
+            guard let url = parts.url else { throw GDTransferError(message: "MachineNotes endpoint is invalid.", status: 0) }
+            for attempt in 0...1 {
+                let token = try await accessToken(forceRefresh: attempt == 1)
+                var request = URLRequest(url: url)
+                request.httpMethod = "GET"
+                request.timeoutInterval = 60
+                request.cachePolicy = .reloadIgnoringLocalCacheData
+                request.setValue("application/json", forHTTPHeaderField: "Accept")
+                request.setValue("identity", forHTTPHeaderField: "Accept-Encoding")
+                request.setValue("Bearer " + token, forHTTPHeaderField: "Authorization")
+                let (data, response) = try await transport.data(for: request)
+                guard linked, subject == expectedSubject, receiverID == expectedReceiver else {
+                    throw GDTransferError(message: "The Red-XAI account changed. Refresh MachineNotes.", status: 401)
+                }
+                guard let http = response as? HTTPURLResponse, http.url == url else {
+                    throw GDTransferError(message: "MachineNotes returned an unexpected response.", status: 0)
+                }
+                if http.statusCode == 401 && attempt == 0 { continue }
+                guard http.statusCode == 200 else {
+                    let message = http.statusCode == 403 ? "Owner access to the account inventory is unavailable." : "MachineNotes could not be loaded."
+                    throw GDTransferError(message: message, status: http.statusCode)
+                }
+                guard data.count <= 8 * 1024 * 1024 else {
+                    throw GDTransferError(message: "MachineNotes returned too much inventory data.", status: 0)
+                }
+                let result = try JSONDecoder().decode(GDMachineNotesInventoryPage.self, from: data)
+                try result.validate(allAccounts: all, receiverID: expectedReceiver)
+                return result
+            }
+            throw GDTransferError(message: "Red-XAI approval expired. Connect again to view MachineNotes.", status: 401)
+        }
+
+        let own = try await page(all: false, cursor: nil)
+        guard allAccounts else { return own }
+        guard own.ownerAdmin else { throw GDTransferError(message: "Owner access is required to view all accounts.", status: 403) }
+        return try await page(all: true, cursor: cursor)
     }
 }

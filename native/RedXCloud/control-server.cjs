@@ -18,7 +18,27 @@ const CATALOG=require('../Backend/stripe_live_catalog.json');
 const PRICE_IDS=CATALOG.priceIds||{};
 const MAX_BODY=32*1024;
 
-const send=(res,status,body,headers={})=>{res.writeHead(status,{'content-type':'application/json','cache-control':'no-store','x-content-type-options':'nosniff',...headers});res.end(JSON.stringify(body));};
+// MachineNote is the product name for an existing workspace. Wire aliases are
+// additive; ledger fields, Stripe metadata and encrypted workspace context keep
+// their original names so installed clients and existing data remain usable.
+function machineNoteResponse(body){
+ const out={...body};
+ if(body.project)out.machineNote=body.project;
+ if(body.projects)out.machineNotes=body.projects;
+ if(Number.isInteger(body.projectLimit))out.machineNoteLimit=body.projectLimit;
+ if(Number.isInteger(body.usedProjectSlots))out.usedMachineNoteSlots=body.usedProjectSlots;
+ return out;
+}
+const send=(res,status,body,headers={})=>{res.writeHead(status,{'content-type':'application/json','cache-control':'no-store','x-content-type-options':'nosniff',...headers});res.end(JSON.stringify(machineNoteResponse(body)));};
+const MACHINE_NOTE_MESSAGES={
+ workspace_name_invalid:'MachineNote names must contain 3–80 printable characters.',
+ project_limit_reached:'Your account has reached its MachineNote limit.',
+ project_not_found:'MachineNote not found.',
+ plans_required:'Choose storage and performance plans for this MachineNote before continuing checkout.',
+ confirm_name_required:'Type the exact MachineNote name to confirm deletion.',
+ workspace_delete_unavailable:'MachineNote deletion is temporarily unavailable.',
+ workspace_delete_failed:'MachineNote deletion could not finish. Retry to complete the operation.'
+};
 async function readJSON(req,max=MAX_BODY){let n=0,chunks=[];for await(const c of req){n+=c.length;if(n>max)throw new CloudError('body_too_large',413);chunks.push(c);}try{return JSON.parse(Buffer.concat(chunks).toString('utf8')||'{}');}catch{throw new CloudError('bad_json',400);}}
 function cleanName(value){const n=String(value||'').trim().replace(/\s+/g,' ');if(n.length<3||n.length>80||/[\x00-\x1f]/.test(n))throw new CloudError('workspace_name_invalid',400);return n;}
 function price(key){const id=PRICE_IDS[key];if(typeof id!=='string'||!/^price_[A-Za-z0-9]+$/.test(id))throw new CloudError('price_unavailable',503);return id;}
@@ -87,7 +107,7 @@ async function createControl(config){
    const projects={};
    existing.forEach((w,index)=>{
      const id=ID.test(w.id||'')?w.id:crypto.randomBytes(16).toString('hex');
-     projects[id]={id,name:cleanName(w.name||('Workspace '+(index+1))),createdMs:Date.now()+index,
+     projects[id]={id,name:cleanName(w.name||('MachineNote '+(index+1))),createdMs:Date.now()+index,
        feeWaived:owner||index===0,owner,storageTier:owner?'6TB':null,performanceTier:owner?'max':null,
        interval:owner?'year':null,quotaBytes:owner?6_000_000_000_000:0,workers:owner?20:0,
        active:owner,readOnly:!owner,status:owner?'active':'plan_required',subscriptionStatus:owner?'owner':null};
@@ -146,14 +166,14 @@ async function createControl(config){
    const customer=await ensureCustomer(identity,s),kind=workspace?'workspace_fee':'workspace_plans',meta=metadata(identity,p,kind);
    // Checkout cannot create mixed month/year subscriptions. The workspace fee
    // therefore has its own monthly Checkout, independent of the plan interval.
-   const items=workspace?[{price_data:{currency:'usd',unit_amount:WORKSPACE_MONTHLY_CENTS,recurring:{interval:'month'},product_data:{name:'GenDragoon Workspace'}},quantity:1}]:recurringPriceIds(p).map(id=>({price:id,quantity:1}));
+   const items=workspace?[{price_data:{currency:'usd',unit_amount:WORKSPACE_MONTHLY_CENTS,recurring:{interval:'month'},product_data:{name:'GenDragoon MachineNote'}},quantity:1}]:recurringPriceIds(p).map(id=>({price:id,quantity:1}));
    const session=await stripe.checkout.sessions.create({mode:'subscription',customer,client_reference_id:p.id,line_items:items,
      metadata:meta,subscription_data:{metadata:meta},success_url:publicBase+'/billing/success?session_id={CHECKOUT_SESSION_ID}',cancel_url:publicBase+'/billing/cancel'},
      {idempotencyKey:'gd-rx-'+kind+'-'+identity.owner+'-'+p.id+'-'+p.storageTier+'-'+p.performanceTier+'-'+p.interval+'-'+(p[generationKey]||0)});
    s=await store.change(identity.owner,x=>{const q=x.projects[p.id];q[sessionKey]=session.id;q.status=workspace?'workspace_fee_required':'pending_payment';});
    return {url:session.url,projectId:p.id,project:publicProject(s.projects[p.id]),checkoutStage:workspace?'workspace_fee':'plans',
      workspaceMonthlyCents:p.feeWaived?0:WORKSPACE_MONTHLY_CENTS,recurringCents:recurringCents(p),recurringInterval:p.interval,
-     message:workspace?'Approve the separate $5/month workspace subscription.':'Storage and performance bill together. Additional workspaces also require a separate $5/month workspace checkout.'};
+     message:workspace?'Approve the separate $5/month MachineNote subscription.':'Storage and performance bill together. Additional MachineNotes also require a separate $5/month MachineNote checkout.'};
  }
  async function reconcileProject(identity,p,s){
    if(p.owner)return;
@@ -291,7 +311,7 @@ async function createControl(config){
  }
  async function portal(identity,s){if(!billingReady||!s.stripeCustomerId)throw new CloudError('billing_account_not_found',404);return stripe.billingPortal.sessions.create({customer:s.stripeCustomerId,return_url:publicBase+'/billing/return'});}
  const pricing={currency:'usd',catalogVersion:4,free:{workspaceMonthlyCents:0,performanceTier:'free',performanceMonthlyCents:0,workers:1},
-   projects:{firstWorkspaceFeeWaived:true,additionalWorkspaceMonthlyCents:WORKSPACE_MONTHLY_CENTS,defaultLimit:10,qualifiedLimit:20,qualificationLabel:'2 TB storage and Turbo (8 workers) or higher on the same active project'},
+   projects:{firstWorkspaceFeeWaived:true,additionalWorkspaceMonthlyCents:WORKSPACE_MONTHLY_CENTS,firstMachineNoteFeeWaived:true,additionalMachineNoteMonthlyCents:WORKSPACE_MONTHLY_CENTS,defaultLimit:10,qualifiedLimit:20,qualificationLabel:'2 TB storage and Turbo (8 workers) or higher on the same active MachineNote'},
    storage:Object.fromEntries(Object.entries(STORAGE).map(([k,v])=>[k,{gb:v.gb,monthlyCents:v.standard,yearlyCents:v.standard*10}])),
    performance:Object.fromEntries(Object.entries(PERFORMANCE).map(([k,v])=>[k,{workers:v.workers,monthlyCents:v.cents,yearlyCents:v.cents*10}])),
    removeAds:{oneTimeCents:REMOVE_ADS_CENTS},owner:{email:OWNER_EMAIL,allPlansIncluded:true,lifetime:true}};
@@ -300,7 +320,8 @@ async function createControl(config){
  const server=http.createServer(async(req,res)=>{
    try{
      const host=req.headers.host||'',u=new URL(req.url,'http://'+host);if(req.headers.origin)throw new CloudError('invalid_origin',403);
-     const pathname=u.pathname==='/gendragoon'?'/':u.pathname.startsWith('/gendragoon/')?u.pathname.slice('/gendragoon'.length):u.pathname;
+     const legacyPath=u.pathname==='/gendragoon'?'/':u.pathname.startsWith('/gendragoon/')?u.pathname.slice('/gendragoon'.length):u.pathname;
+     const pathname=legacyPath.replace(/^\/v2\/machinenotes(?=\/|$)/,'/v2/projects');
      if(req.method==='GET'&&pathname==='/healthz')return send(res,200,{service:'gendragoon-control',redx:true,billing:billingReady});
      if(req.method==='GET'&&pathname==='/v2/pricing')return send(res,200,pricing);
      if(req.method==='GET'&&['/billing/success','/billing/cancel','/billing/return'].includes(pathname)){res.writeHead(200,{'content-type':'text/html; charset=utf-8','cache-control':'no-store','x-content-type-options':'nosniff'});return res.end('<!doctype html><meta charset="utf-8"><title>GenDragoon</title><body style="font-family:system-ui;background:#0b0912;color:#eee;padding:48px"><h1>GenDragoon billing</h1><p>Return to GenDragoon Cloud SSD. The app will verify your current entitlement with the server.</p></body>');}
@@ -316,7 +337,7 @@ async function createControl(config){
      if(req.method==='POST'&&pathname==='/v2/billing/portal'){const x=await portal(identity,s);return send(res,200,{url:x.url});}
      throw new CloudError('not_found',404);
      });
-   }catch(e){if(!res.headersSent)send(res,e instanceof CloudError?e.status:503,{error:e instanceof CloudError?e.code:'service_unavailable'});else res.destroy();}
+   }catch(e){if(!res.headersSent){const code=e instanceof CloudError?e.code:'service_unavailable';send(res,e instanceof CloudError?e.status:503,{error:code,...(MACHINE_NOTE_MESSAGES[code]?{message:MACHINE_NOTE_MESSAGES[code]}:{})});}else res.destroy();}
  });
  server.requestTimeout=60000;server.headersTimeout=10000;server.maxHeadersCount=30;
  return {server,store,async listen(port=0){await new Promise((ok,no)=>{server.once('error',no);server.listen(port,'127.0.0.1',ok)});return 'http://127.0.0.1:'+server.address().port;},async close(){await new Promise(r=>server.close(r));}};

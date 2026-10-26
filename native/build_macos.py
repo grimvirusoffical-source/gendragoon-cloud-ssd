@@ -6,6 +6,7 @@ All first-party Swift and resource source comes from this checkout. Release
 publication additionally requires successful tests, notarization and stapling.
 """
 import argparse
+import json
 import os
 from pathlib import Path
 import plistlib
@@ -13,12 +14,17 @@ import shutil
 import subprocess
 import sys
 
-VERSION="0.20.1"
-BUILD="32"
+VERSION="0.20.2"
+BUILD="33"
 ROOT=Path(__file__).resolve().parent
 NAME="GenDragoon Cloud SSD.app"
 IDENTITY="Developer ID Application: Joshua Franklin (NZPU8H843J)"
 RED_SECRETS_COMMIT="9235941b431bc1c23c34286b82052f845121592f"
+VISUAL_PYTHON="3.13"
+VISUAL_DEPENDENCIES={"numpy":"2.5.4","Pillow":"13.0.0"}
+VISUAL_MODULES=("storage_image", "_image", "rs", "decode_math", "chaff", "look",
+    "stencil_decode", "glyphs", "pyramid", "chromatic", "operators", "ct_sample",
+    "confidence_map", "capacity", "damage_recover", "geom_sync")
 
 def run(args,timeout=600,env=None):
     result=subprocess.run([str(x) for x in args],capture_output=True,text=True,timeout=timeout,env=env)
@@ -34,6 +40,27 @@ def swift_sdk():
     if not sdk.is_dir():
         raise RuntimeError("No usable macOS SDK found for the native Swift build")
     return sdk
+
+def stage_visual_dependencies(resources):
+    candidates=[os.environ.get("GD_VISUAL_PYTHON"),
+        "/Library/Frameworks/Python.framework/Versions/3.13/bin/python3", sys.executable]
+    python=None
+    for candidate in candidates:
+        if not candidate or not Path(candidate).is_file():continue
+        try:
+            identity=json.loads(run([candidate,"-B","-c",
+                "import sys,platform,json;print(json.dumps({'version':'.'.join(map(str,sys.version_info[:2])),'architecture':platform.machine()}))"]).strip())
+        except Exception:continue
+        if identity=={"version":VISUAL_PYTHON,"architecture":"arm64"}:
+            python=candidate;break
+    if python is None:raise RuntimeError("Visual barcode build requires an arm64 Python 3.13 interpreter (GD_VISUAL_PYTHON)")
+    run([python,"-B","-m","pip","install","--disable-pip-version-check","--no-deps",
+        "--only-binary=:all:","--no-compile","--no-cache-dir","--upgrade","--target",resources,
+        *[name+"=="+version for name,version in VISUAL_DEPENDENCIES.items()]],timeout=300)
+    (resources/"gendragoon_python_runtime.json").write_text(json.dumps({"schema":1,
+        "pythonMajorMinor":VISUAL_PYTHON,"architecture":"arm64",
+        "dependencies":VISUAL_DEPENDENCIES},indent=2)+"\n")
+    return python
 
 def stage_redsecrets_runtime(resources,output):
     vendor=ROOT/"vendor/Red-SecretsXAI"
@@ -61,15 +88,21 @@ def stage_redsecrets_runtime(resources,output):
         destination.mkdir(mode=0o755)
         shutil.copy2(runtime/package/"__init__.py",destination/"__init__.py")
     shutil.copy2(vendor/"redxai/_librsx.py",resources/"redxai/_librsx.py")
-    shutil.copy2(vendor/"redsecretsxai/storage_image.py",resources/"redsecretsxai/storage_image.py")
+    for module in VISUAL_MODULES:
+        shutil.copy2(vendor/"redsecretsxai"/(module+".py"),resources/"redsecretsxai"/(module+".py"))
     native=resources/"redxai/_native";native.mkdir(mode=0o755)
     shutil.copy2(dylib,native/"librsx.dylib")
     shutil.copy2(vendor/"LICENSE",resources/"Red-SecretsXAI-LICENSE.txt")
+    python=stage_visual_dependencies(resources)
     env=os.environ.copy();env["PYTHONDONTWRITEBYTECODE"]="1";env["PYTHONPATH"]=str(resources)
-    code=("from redxai import _librsx; from redsecretsxai import encode_storage_image,decode_storage_image;"
+    code=("import tempfile,numpy,PIL;from redxai import _librsx;"
+          "from redsecretsxai import encode_image,decode_image,encode_storage_image,decode_storage_image;"
+          "assert numpy.__version__=='2.5.4' and PIL.__version__=='13.0.0';"
           "assert _librsx.available() and _librsx.abi_version()==2;"
-          "p=encode_storage_image(b'RSX3'+b'x'*1024);assert decode_storage_image(p).startswith(b'RSX3')")
-    run([sys.executable,"-B","-c",code],timeout=60,env=env)
+          "p=encode_image(b'RSX3'+b'x'*1024,module=3,bits=3,noise=0,deterministic=True);"
+          "assert decode_image(p)==b'RSX3'+b'x'*1024;"
+          "assert decode_storage_image(encode_storage_image(b'RSX3'+b'x'*1024))==b'RSX3'+b'x'*1024")
+    run([python,"-B","-c",code],timeout=90,env=env)
     return native/"librsx.dylib"
 
 def stage_app_icon(resources,output):
@@ -110,6 +143,13 @@ def build(base,output):
     output.mkdir(parents=True,exist_ok=True)
     app=output/NAME
     if app.exists() or app.is_symlink():raise RuntimeError("Output bundle already exists; use a fresh build folder")
+    # Import-test native dependencies before creating or modifying any .app.
+    # Loading extensions beneath a copied bundle with an obsolete resource seal
+    # is rejected by macOS policy; the completed bundle is signed below and
+    # receives its final runtime smoke check after notarization.
+    staged_runtime=output/"redsecrets-runtime"
+    staged_runtime.mkdir(mode=0o755)
+    stage_redsecrets_runtime(staged_runtime,output)
     run(["/bin/cp","-cR",base,app])
     resources=app/"Contents/Resources"
     for directory in (app,app/"Contents",resources,app/"Contents/MacOS"):
@@ -122,7 +162,13 @@ def build(base,output):
     registry=ROOT/"Backend/performance_profiles.json"
     if registry.is_symlink() or not registry.is_file():raise RuntimeError("Missing canonical performance profile registry")
     shutil.copy2(registry,resources/"gendragoon_performance_profiles.json")
-    rsx_dylib=stage_redsecrets_runtime(resources,output)
+    for item in staged_runtime.iterdir():
+        target=resources/item.name
+        if target.exists() or target.is_symlink():
+            if target.is_dir() and not target.is_symlink():shutil.rmtree(target)
+            else:target.unlink()
+        if item.is_dir():shutil.copytree(item,target)
+        else:shutil.copy2(item,target)
     from package_macos import require_runtime_resources
     require_runtime_resources(app)
     for retired in ("gendragoon_updates.py","release-repo.json"):(resources/retired).unlink(missing_ok=True)
@@ -147,7 +193,12 @@ def build(base,output):
         command=["/usr/bin/codesign","--force","--options","runtime","--timestamp","--sign",IDENTITY]
         if name=="gendragoon_node":command += ["--entitlements",entitlements]
         run([*command,helper])
-    run(["/usr/bin/codesign","--force","--options","runtime","--timestamp","--sign",IDENTITY,rsx_dylib])
+    # The visual carrier's binary NumPy/Pillow wheels are signed as nested code,
+    # together with the pinned crypto library, before sealing the app bundle.
+    native_code=sorted((p for p in resources.rglob("*") if p.is_file() and not p.is_symlink()
+        and p.suffix in (".dylib",".so")),key=lambda p:(p.suffix!=".dylib",str(p)))
+    for helper in native_code:
+        run(["/usr/bin/codesign","--force","--options","runtime","--timestamp","--sign",IDENTITY,helper])
     run(["/usr/bin/codesign","--force","--options","runtime","--timestamp","--sign",IDENTITY,app])
     run(["/usr/bin/codesign","--verify","--deep","--strict",app])
     print("Signed staged build:",app,flush=True)

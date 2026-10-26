@@ -141,6 +141,29 @@ class UploadWorkspaceTests(unittest.TestCase):
         self.assertEqual(command[command.index("--folder") + 1], "bucket-one/apps/custom")
         self.assertNotIn("gen-dragoon-ssd", command)
 
+    def test_cancel_legacy_queued_upload_preserves_sources_and_other_jobs(self):
+        original = self.source()
+        queued, job_id = self.prepare([original], offload=True)
+        second = self.select(SECOND)
+        second, other_id = workspace.enqueue(second["revision"], False, self.home)
+        with self.assertRaises(workspace.WorkspaceError) as stale:
+            workspace.cancel_job(job_id, queued["revision"], self.home)
+        self.assertEqual(stale.exception.code, "revision_conflict")
+        result = workspace.cancel_job(job_id, second["revision"], self.home)
+        self.assertEqual(original.read_bytes(), b"fixture source")
+        self.assertEqual(result["sources"], second["sources"])
+        self.assertEqual(result["jobs"][0]["state"], "failed")
+        self.assertFalse(result["jobs"][0]["items"][0]["offloaded"])
+        self.assertEqual(result["jobs"][1]["id"], other_id)
+        self.assertEqual(result["jobs"][1]["state"], "queued")
+        with self.fake_library() as child:
+            final, completed = workspace.run_next(self.home)
+        self.assertEqual(completed, other_id)
+        self.assertEqual(final["jobs"][0]["state"], "failed")
+        self.assertEqual(child.call_count, 1)
+        with self.assertRaises(workspace.WorkspaceError):
+            workspace.cancel_job(other_id, final["revision"], self.home)
+
     def test_source_change_before_enqueue_is_rejected_without_job(self):
         source = self.source()
         state = self.select()

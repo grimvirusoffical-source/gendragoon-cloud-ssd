@@ -202,3 +202,30 @@ test('plan editor recovers a canceled storage subscription by selecting a fresh 
  r=await f.call('/v2/projects/'+p.id+'/checkout',{method:'POST',body:{}});assert.equal(r.status,200);p=(await getState(f)).projects[p.id];f.stripe.complete(p.checkoutSessionId);
  r=await f.call('/v2/projects');assert.equal(r.body.projects[0].active,true);assert.equal(r.body.projects[0].quotaBytes,1e12);assert.equal(r.body.projects[0].workers,8);
 });
+
+test('MachineNotes routes and JSON aliases preserve the same legacy IDs, ledger and checkout metadata',async t=>{
+ const f=await fixture();t.after(()=>f.c.close());
+ const created=await f.call('/v2/machinenotes',{method:'POST',body:{name:'My MachineNote',storageTier:'200GB',performanceTier:'free',interval:'year'}});
+ assert.equal(created.status,201);assert.deepEqual(created.body.machineNote,created.body.project);const id=created.body.machineNote.id;
+ let s=await getState(f);assert.ok(s.projects[id]);assert.equal(s.machineNotes,undefined);const csid=s.projects[id].checkoutSessionId;
+ assert.equal(f.stripe._sessions.get(csid).metadata.projectId,id);assert.equal(f.stripe._sessions.get(csid).metadata.kind,'workspace_plans');
+ const alias=await f.call('/gendragoon/v2/machinenotes'),legacy=await f.call('/v2/projects');
+ assert.equal(alias.status,200);assert.deepEqual(alias.body.machineNotes,alias.body.projects);assert.deepEqual(alias.body.projects,legacy.body.projects);assert.equal(alias.body.machineNoteLimit,alias.body.projectLimit);
+ const resumed=await f.call('/v2/machinenotes/'+id+'/checkout',{method:'POST',body:{}});assert.equal(resumed.status,200);assert.equal(resumed.body.resumed,true);assert.deepEqual(resumed.body.machineNote,resumed.body.project);assert.equal(f.stripe._sessions.size,1);
+ const changed=await f.call('/v2/machinenotes/'+id+'/plan',{method:'PUT',body:{storageTier:'1TB',performanceTier:'turbo',interval:'month'}});assert.equal(changed.status,200);assert.deepEqual(changed.body.machineNote,changed.body.project);assert.equal(changed.body.machineNote.id,id);
+ s=await getState(f);assert.equal(s.projects[id].storageTier,'1TB');assert.equal(f.stripe._sessions.get(csid).status,'expired');
+ const wrong=await f.call('/v2/machinenotes/'+id,{method:'DELETE',body:{confirmName:'Wrong'}});assert.equal(wrong.status,409);assert.equal(wrong.body.error,'confirm_name_required');assert.match(wrong.body.message,/MachineNote/);
+ const deleted=await f.call('/v2/machinenotes/'+id,{method:'DELETE',body:{confirmName:'My MachineNote'}});assert.equal(deleted.status,200);assert.deepEqual(f.deleted,[id]);assert.equal((await getState(f)).projects[id],undefined);
+});
+
+test('MachineNote pricing and slot aliases retain all legacy policy fields',async t=>{
+ const f=await fixture();t.after(()=>f.c.close());const r=await f.call('/v2/pricing');
+ assert.equal(r.status,200);assert.deepEqual(r.body.machineNotes,r.body.projects);assert.equal(r.body.machineNotes.firstMachineNoteFeeWaived,true);assert.equal(r.body.machineNotes.additionalMachineNoteMonthlyCents,500);assert.equal(r.body.projects.firstWorkspaceFeeWaived,true);assert.equal(r.body.projects.additionalWorkspaceMonthlyCents,500);
+ const account=await f.call('/v2/account');assert.equal(account.body.machineNoteLimit,account.body.projectLimit);assert.equal(account.body.usedMachineNoteSlots,account.body.usedProjectSlots);
+ const invalid=await f.call('/v2/machinenotes-extra',{method:'POST',body:{name:'Invalid',storageTier:'100GB',performanceTier:'free'}});assert.equal(invalid.status,404);assert.equal(Object.keys((await getState(f)).projects).length,0);
+});
+
+test('owner MachineNote alias checkout stays complimentary and returns both object names',async t=>{
+ const f=await fixture({owner:true,stripeOverride:null});t.after(()=>f.c.close());const r=await f.call('/v2/machinenotes',{method:'POST',body:{name:'Owner MachineNote'}});assert.equal(r.status,201);assert.deepEqual(r.body.machineNote,r.body.project);
+ const checkout=await f.call('/v2/machinenotes/'+r.body.machineNote.id+'/checkout',{method:'POST',body:{}});assert.equal(checkout.status,200);assert.equal(checkout.body.complimentary,true);assert.deepEqual(checkout.body.machineNote,checkout.body.project);
+});

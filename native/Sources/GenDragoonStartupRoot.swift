@@ -270,20 +270,13 @@ struct GenDragoonStartupRoot:View {
     private var redXStandalonePreview: Bool {
         Bundle.main.object(forInfoDictionaryKey: "GDRXPreviewMode") as? Bool == true
     }
-    private var googleReady: Bool { session.stage == .ready }
-    private var eitherReady: Bool { googleReady || redX.linked }
 
     var body:some View {
         Group {
             if redXStandalonePreview {
                 RedXCloudPreview(close: {})
-            } else if eitherReady {
+            } else if redX.linked {
                 MainView().environmentObject(session).environmentObject(redX)
-            } else if session.stage == .terms {
-                GenDragoonTermsGate(authenticatedEmail:session.email,
-                    termsVersion:GDLoginSession.termsVersion,
-                    status:session.status,isBusy:session.busy,
-                    completion:{session.acceptTerms()},logout:{session.logout()})
             } else {
                 ZStack {
                     Color(red:0.055,green:0.048,blue:0.092).ignoresSafeArea()
@@ -291,10 +284,10 @@ struct GenDragoonStartupRoot:View {
                         Image(systemName:"externaldrive.fill.badge.wifi").font(.system(size:53))
                             .foregroundStyle(.purple)
                         Text("GenDragoonSSD").font(.system(size:34,weight:.heavy,design:.rounded))
-                        Text("Choose how you want to connect").font(.system(size:20,weight:.semibold))
-                        Text("Use your existing Red-XAI account for encrypted managed cloud storage, or keep using Google/Firebase and your existing cloud providers. Both can be connected on the same Mac.")
+                        Text("Connect your Red-XAI account").font(.system(size:20,weight:.semibold))
+                        Text("Keep files, folders and applications in encrypted MachineNotes on the Red-XAI server. Sign in once through the app or REDXAI Auth-CLI.")
                             .font(.system(size:13)).foregroundStyle(.gray).multilineTextAlignment(.center)
-                        if session.stage == .waiting || session.stage == .verifying || redX.busy {
+                        if redX.busy {
                             ProgressView().controlSize(.large)
                         }
                         VStack(spacing:8) {
@@ -309,12 +302,7 @@ struct GenDragoonStartupRoot:View {
                             Button("Continue with Red-XAI") { redX.connect() }
                                 .disabled(redX.busy)
                                 .buttonStyle(.borderedProminent).tint(.purple).controlSize(.large)
-                            Button("Continue with Google") {session.login()}
-                                .disabled(session.stage == .waiting || session.stage == .verifying)
-                                .buttonStyle(.bordered).controlSize(.large)
                         }
-                        Text(session.status).font(.system(size:11)).foregroundStyle(.orange)
-                            .multilineTextAlignment(.center)
                         Text("Red-XAI uses the same approval as REDXAI Auth-CLI and remembers it in macOS Keychain. GenDragoon never asks for your website password.")
                             .font(.system(size:10)).foregroundStyle(.gray).multilineTextAlignment(.center)
                     }.frame(maxWidth:520).padding(40)

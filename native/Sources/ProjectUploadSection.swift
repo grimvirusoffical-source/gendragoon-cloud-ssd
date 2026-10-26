@@ -4,7 +4,7 @@ import Dispatch
 import Foundation
 import SwiftUI
 
-/// Populate these values from the authenticated CloudModel, never a default project.
+/// Populate these values only from the authenticated Red-XAI MachineNotes response.
 public struct UploadCloudProject: Identifiable, Hashable, Sendable {
     public let id: String
     public let displayName: String
@@ -67,22 +67,22 @@ struct ProjectUploadSection: View {
     }
 
     private var destinationPicker: some View {
-        GroupBox("Google Cloud destination") {
+        GroupBox("MachineNote on your Red-XAI server") {
             VStack(alignment: .leading, spacing: 8) {
-                Picker("Project / bucket", selection: Binding(
+                Picker("MachineNote", selection: Binding(
                     get: { workspace.snapshot?.destination },
                     set: { destination in
                         if let destination { workspace.select(destination, externalBusy: externalBusy) }
                     }
                 )) {
-                    Text("Choose a project and bucket").tag(Optional<UploadDestination>.none).disabled(true)
+                    Text("Choose a MachineNote").tag(Optional<UploadDestination>.none).disabled(true)
                     if let saved = workspace.snapshot?.destination, !workspace.destinationIsListed {
-                        Text(workspace.destinationAvailable ? saved.label : "Unavailable: \(saved.label)")
+                        Text("Choose an available MachineNote")
                             .tag(Optional(saved)).disabled(true)
                     }
-                    ForEach(workspace.projects) { project in
+                    ForEach(workspace.readableProjects) { project in
                         ForEach(project.buckets) { bucket in
-                            Text("\(project.displayName) / \(bucket.displayName)")
+                            Text(bucket.displayName + (workspace.isAuthorized(UploadDestination(project: project.id, bucket: bucket.id, remote: bucket.remote, prefix: bucket.prefix)) ? "" : " · Read only"))
                                 .tag(Optional(UploadDestination(project: project.id, bucket: bucket.id,
                                                                remote: bucket.remote, prefix: bucket.prefix)))
                         }
@@ -91,13 +91,13 @@ struct ProjectUploadSection: View {
                 .disabled(workspace.controlsLocked(externalBusy: externalBusy))
                 destinationBadge
                 if workspace.snapshot?.destination != nil && !workspace.destinationAvailable {
-                    Text("The saved destination is unavailable in the current authorized cloud choices. It stays selected; refresh access or choose another destination before uploading.")
+                    Text(workspace.snapshot?.destination.map(workspace.isReadable) == true ? "This MachineNote is read only. You can download existing files; activate its storage plan to upload." : "Choose an available MachineNote before uploading. Previous provider destinations cannot be used here.")
                         .font(.caption).foregroundStyle(.red)
                 } else if workspace.projects.isEmpty && !workspace.destinationAvailable {
-                    Text("No authorized cloud destinations are available. Connect Google Cloud and refresh its projects and buckets.")
+                    Text("No active MachineNotes are available. Create one in MachineNotes, then refresh this list.")
                         .font(.caption).foregroundStyle(.secondary)
                 }
-                Button("Refresh cloud projects and upload state") {
+                Button("Refresh MachineNotes and upload state") {
                     Task { await workspace.refreshChoices(using: onRefreshCloudChoices) }
                 }
                 .disabled(workspace.isMutationPending || workspace.isRefreshingChoices)
@@ -235,7 +235,13 @@ struct ProjectUploadSection: View {
                             Spacer()
                             Text("\(job.completedItems) / \(job.totalItems) items").font(.caption)
                         }
-                        Text(job.destination.label).font(.caption).foregroundStyle(.secondary)
+                        HStack {
+                            Text(workspace.displayLabel(for: job.destination)).font(.caption).foregroundStyle(.secondary)
+                            if job.state == "queued" {
+                                Button("Cancel queued upload") { workspace.cancelQueued(jobID: job.id, externalBusy: externalBusy) }
+                                    .disabled(workspace.controlsLocked(externalBusy: externalBusy))
+                            }
+                        }
                         if job.totalItems > 0 {
                             ProgressView(value: Double(job.completedItems), total: Double(job.totalItems))
                         }
@@ -264,15 +270,15 @@ struct ProjectUploadSection: View {
                             .font(.caption).foregroundStyle(.secondary)
                     }.padding(.vertical, 6)
                 }
-                Text("Progress updates when each item finishes. Uploads cannot be cancelled from this screen.")
+                Text("Progress updates when each item finishes. Queued uploads can be cancelled before they start. Running uploads finish verification.")
                     .font(.caption).foregroundStyle(.secondary)
             }.frame(maxWidth: .infinity, alignment: .leading)
         }
     }
 
     @ViewBuilder private var destinationBadge: some View {
-        if let destination = workspace.snapshot?.destination {
-            Label(destination.label, systemImage: "externaldrive.badge.icloud").font(.caption).textSelection(.enabled)
+        if workspace.snapshot?.destination != nil {
+            Label(workspace.displayLabel(for: workspace.snapshot?.destination), systemImage: "lock.shield").font(.caption).textSelection(.enabled)
         } else {
             Text("No upload destination selected.").font(.caption).foregroundStyle(.secondary)
         }
@@ -372,6 +378,7 @@ struct UploadEnvelope: Decodable, Sendable {
 @MainActor
 final class UploadWorkspaceModel: ObservableObject {
     @Published private(set) var projects: [UploadCloudProject]
+    @Published private(set) var readableProjects: [UploadCloudProject] = []
     @Published private(set) var snapshot: UploadWorkspaceSnapshot?
     @Published private(set) var tree: UploadTree?
     @Published private(set) var quickEntries: [UploadTreeNode] = []
@@ -402,26 +409,46 @@ final class UploadWorkspaceModel: ObservableObject {
     var hasQueuedJobs: Bool { snapshot?.jobs.contains { $0.state == "queued" } == true }
     var destinationIsListed: Bool {
         guard let saved = snapshot?.destination else { return false }
-        return projects.contains { project in
+        return readableProjects.contains { project in
             project.id == saved.project && project.buckets.contains { bucket in
                 bucket.id == saved.bucket && bucket.remote == saved.remote && bucket.prefix == saved.prefix
             }
         }
     }
-    var destinationAvailable: Bool {
-        guard let destination = snapshot?.destination else { return false }
-        if verifiedDestination == destination { return true }
+    func isAuthorized(_ destination: UploadDestination) -> Bool {
+        guard destination.remote == "redxai", destination.project == "redxai" else { return false }
         return projects.contains { project in
             project.id == destination.project && project.buckets.contains { bucket in
                 bucket.id == destination.bucket && bucket.remote == destination.remote && bucket.prefix == destination.prefix
             }
         }
     }
+    func isReadable(_ destination: UploadDestination) -> Bool {
+        guard destination.remote == "redxai", destination.project == "redxai" else { return false }
+        return readableProjects.contains { project in
+            project.id == destination.project && project.buckets.contains { bucket in
+                bucket.id == destination.bucket && bucket.remote == destination.remote && bucket.prefix == destination.prefix
+            }
+        }
+    }
+    func replaceReadableProjects(_ projects: [UploadCloudProject]) {
+        readableProjects = projects.filter { $0.id == "redxai" }
+    }
+    func displayLabel(for destination: UploadDestination?) -> String {
+        guard let destination, destination.remote == "redxai" else { return "Choose a MachineNote" }
+        let note = readableProjects.first(where: { $0.id == destination.project })?.buckets.first(where: { $0.id == destination.bucket })
+        return note.map { "MachineNotes / " + $0.displayName } ?? "MachineNote unavailable"
+    }
+    var destinationAvailable: Bool {
+        guard let destination = snapshot?.destination else { return false }
+        return isAuthorized(destination)
+    }
     func controlsLocked(externalBusy: Bool) -> Bool {
         snapshot == nil || externalBusy || !GDUpdateActivity.shared.canStart(excluding: self) || isMutationPending || workerPending || hasRunningJob || pickerPending
     }
     func replaceProjects(_ projects: [UploadCloudProject]) {
-        self.projects = projects
+        self.projects = projects.filter { $0.id == "redxai" }
+        if let verifiedDestination, !isAuthorized(verifiedDestination) { self.verifiedDestination = nil }
         // The persisted destination is deliberately never changed here.
     }
     func refreshChoices(using refreshCloud: @MainActor () async -> Void) async {
@@ -479,8 +506,12 @@ final class UploadWorkspaceModel: ObservableObject {
         }
     }
     func select(_ destination: UploadDestination, externalBusy: Bool) {
+        guard isReadable(destination) else { failure = UploadFailure("Choose an available MachineNote."); return }
         mutate(["select-destination", "--project", destination.project, "--bucket", destination.bucket,
                 "--remote", destination.remote, "--prefix", destination.prefix], externalBusy: externalBusy)
+    }
+    func cancelQueued(jobID: String, externalBusy: Bool) {
+        mutate(["cancel-job", "--id", jobID], externalBusy: externalBusy)
     }
     func remove(sourceID: String, externalBusy: Bool) {
         mutate(["remove-source", "--id", sourceID], externalBusy: externalBusy)
@@ -536,7 +567,7 @@ final class UploadWorkspaceModel: ObservableObject {
     }
     func enqueueAndStart(externalBusy: Bool) {
         guard destinationAvailable else {
-            failure = UploadFailure("Choose an available authorized project and bucket before uploading.")
+            failure = UploadFailure("Choose an available MachineNote before uploading.")
             return
         }
         mutate(["enqueue", "--offload", offload ? "true" : "false"],
@@ -610,14 +641,16 @@ final class UploadWorkspaceModel: ObservableObject {
               FileManager.default.isReadableFile(atPath: helper.path) else {
             throw UploadFailure("The upload workspace helper is missing from this app build.")
         }
-        let isMutation = ["select-destination", "add-sources", "remove-source", "clear-sources", "enqueue"]
+        let isMutation = ["select-destination", "add-sources", "remove-source", "clear-sources", "enqueue", "cancel-job"]
             .contains(arguments.first ?? "")
         let privateInput: Data?
-        if arguments.first == "run-next", let destination = snapshot?.destination, destination.remote == "redxai" {
-            privateInput = try? await GDRedXAIAuthSession.shared.privateWorkerInput(
-                workspaceID: destination.bucket, constrained: false)
-        } else if arguments.first == "run-next" {
-            privateInput = await GDNativePerformance.shared.helperInput()
+        if arguments.first == "run-next" {
+            guard let destination = snapshot?.jobs.first(where: { $0.state == "queued" })?.destination,
+                  isAuthorized(destination) else {
+                throw UploadFailure("A queued upload targets a previous provider or unavailable MachineNote. Cancel that queued upload, then select an available MachineNote.")
+            }
+            privateInput = try await GDRedXAIAuthSession.shared.privateWorkerInput(
+                workspaceID: destination.bucket, constrained: false, requireWrite: true)
         } else {
             privateInput = nil
         }

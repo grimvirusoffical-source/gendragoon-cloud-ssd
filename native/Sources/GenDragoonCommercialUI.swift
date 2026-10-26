@@ -5,7 +5,7 @@ private enum GDPage: String, CaseIterable {
     case home = "Home"
     case cloud = "Files"
     case applications = "Applications"
-    case plans = "Workspace plans"
+    case plans = "MachineNotes"
     case storage = "Storage"
     case performance = "Performance"
     case account = "Account"
@@ -21,29 +21,6 @@ private enum GDPage: String, CaseIterable {
         }
     }
 }
-private struct GDTier: Identifiable {
-    let id: String
-    let capacity: String
-    let gigabytes: Int
-    let monthly: Double
-    let workers: Int
-    let category: String
-    var yearly: Double { (monthly * 10 * 100).rounded() / 100 }
-    var monthlyEffectiveAnnual: Double { yearly / 12 }
-}
-private let gdTiers: [GDTier] = [
-    .init(id:"100GB",capacity:"100 GB",gigabytes:100,monthly:7.99,workers:2,category:"Starter"),
-    .init(id:"200GB",capacity:"200 GB",gigabytes:200,monthly:11.99,workers:2,category:"Essential"),
-    .init(id:"300GB",capacity:"300 GB",gigabytes:300,monthly:15.99,workers:2,category:"Plus"),
-    .init(id:"500GB",capacity:"500 GB",gigabytes:500,monthly:24.99,workers:2,category:"Creator"),
-    .init(id:"1TB",capacity:"1 TB",gigabytes:1000,monthly:44.99,workers:4,category:"Popular"),
-    .init(id:"2TB",capacity:"2 TB",gigabytes:2000,monthly:89.99,workers:8,category:"Power"),
-    .init(id:"3TB",capacity:"3 TB",gigabytes:3000,monthly:129.99,workers:12,category:"Pro"),
-    .init(id:"4TB",capacity:"4 TB",gigabytes:4000,monthly:169.99,workers:16,category:"Ultra"),
-    .init(id:"5TB",capacity:"5 TB",gigabytes:5000,monthly:209.99,workers:20,category:"Studio"),
-    .init(id:"6TB",capacity:"6 TB",gigabytes:6000,monthly:249.99,workers:24,category:"Ultimate")
-]
-private func gdMoney(_ value: Double) -> String { String(format:"$%.2f", value) }
 let gdPurple = Color(red:0.61,green:0.42,blue:0.98)
 private let gdSecondary = Color.white.opacity(0.62)
 private let gdSurface = Color.white.opacity(0.055)
@@ -89,17 +66,12 @@ private struct GDPrimary: View {
 }
 
 @MainActor struct MainView:View {
-    @EnvironmentObject private var loginSession: GDLoginSession
     @EnvironmentObject private var redXSession: GDRedXAIAuthSession
     @StateObject private var ads = GenDragoonAdsModel()
     @StateObject private var native = GDNativeWorkspace.shared
-    @StateObject private var customer = GDFreeCustomerModel()
+    @StateObject private var subscriptions = GDRXSubscriptionModel()
     @ObservedObject private var activity = GDUpdateActivity.shared
     @State private var page:GDPage = .cloud
-    @State private var redXWorkspaceName = "My Cloud"
-    @AppStorage("gd.commercial.preview.welcomeSeen") private var welcomeSeen = false
-    private var googleReady: Bool { loginSession.stage == .ready && !loginSession.userID.isEmpty }
-    private var nativeReady: Bool { redXSession.linked || loginSession.isOwner }
 
     var body:some View {
         HStack(spacing:0) {
@@ -108,7 +80,7 @@ private struct GDPrimary: View {
             ScrollView {
                 VStack(alignment:.leading,spacing:20) {
                     GenDragoonCompactUpdateStatus()
-                    if loginSession.adStatusKnown && !loginSession.isAdFree,let top=ads.top {
+                    if subscriptions.accountVerified && !subscriptions.adFree,let top=ads.top {
                         GenDragoonAdView(item:top)
                     }
                     switch page {
@@ -128,33 +100,32 @@ private struct GDPrimary: View {
         .background(Color(red:0.055,green:0.048,blue:0.092).ignoresSafeArea())
         .preferredColorScheme(.dark)
         .frame(minWidth:950,minHeight:720)
-        .onAppear {
-            if loginSession.stage == .ready {
-                ads.refresh(isAdFree:loginSession.isAdFree,allowFetch:loginSession.adStatusKnown)
-                customer.connect(loginSession)
+        .task {
+            if redXSession.linked {
+                subscriptions.refresh(redXSession)
+                await native.start()
             }
         }
-        .task { if loginSession.isOwner || redXSession.linked { await native.start() } }
-        .onChange(of:page) {_,_ in
-            if loginSession.stage == .ready {
-                loginSession.checkAdEntitlement()
-                ads.refresh(isAdFree:loginSession.isAdFree,allowFetch:loginSession.adStatusKnown)
+        .onChange(of:page) { _,_ in
+            if redXSession.linked { subscriptions.refresh(redXSession) }
+        }
+        .onChange(of:subscriptions.adFree) { _,adFree in
+            ads.refresh(isAdFree:adFree,allowFetch:subscriptions.accountVerified)
+        }
+        .onChange(of:subscriptions.accountVerified) { _,known in
+            ads.refresh(isAdFree:subscriptions.adFree,allowFetch:known)
+        }
+        .onChange(of:redXSession.linked) { _,linked in
+            if linked {
+                subscriptions.refresh(redXSession)
+                Task { await native.start(); await native.refreshCloudChoices() }
             }
-        }
-        .onChange(of:loginSession.isAdFree) {_,newValue in ads.refresh(isAdFree:newValue)}
-        .onChange(of:loginSession.adStatusKnown) {_,known in
-            if known {ads.refresh(isAdFree:loginSession.isAdFree)}
-        }
-        .onChange(of:loginSession.userID) {_,_ in if googleReady { customer.connect(loginSession) } }
-        .onChange(of:redXSession.linked) {_,linked in
-            if linked { Task { await native.start(); await native.refreshCloudChoices() } }
-        }
-        .onReceive(NotificationCenter.default.publisher(for:GDProjectPreferences.selectionChanged)) {
-            if loginSession.stage == .ready { customer.selectionChanged($0) }
         }
         .onReceive(NotificationCenter.default.publisher(for:NSApplication.didBecomeActiveNotification)) { _ in
-            if loginSession.stage == .ready { customer.refresh(); loginSession.checkAdEntitlement() }
-            if redXSession.linked { Task { await redXSession.refreshWorkspaces() } }
+            if redXSession.linked {
+                subscriptions.refresh(redXSession)
+                Task { await redXSession.refreshWorkspaces() }
+            }
         }
     }
     private var sidebar:some View {
@@ -185,7 +156,7 @@ private struct GDPrimary: View {
                 }.buttonStyle(.plain)
             }
             Spacer()
-            if loginSession.adStatusKnown && !loginSession.isAdFree,let side=ads.side {
+            if subscriptions.accountVerified && !subscriptions.adFree,let side=ads.side {
                 GenDragoonAdView(item:side,compact:true)
             }
             Text("GenDragoon v\(Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "—") · macOS").font(.system(size:10,design:.monospaced))
@@ -212,13 +183,13 @@ private struct GDPrimary: View {
             }
             .padding(28).frame(maxWidth:.infinity,alignment:.leading)
             .background(LinearGradient(colors:[Color(red:0.34,green:0.20,blue:0.68),Color(red:0.13,green:0.10,blue:0.27)],startPoint:.topLeading,endPoint:.bottomTrailing),in:RoundedRectangle(cornerRadius:21))
-            GDHeading(kicker:"GET STARTED",title:"Your setup, in three simple steps",subtitle:"Choose a storage option, connect your account, and open the cloud library.")
+            GDHeading(kicker:"GET STARTED",title:"Your setup, in three simple steps",subtitle:"Create a MachineNote, choose its plans, and open your encrypted library.")
             GDPanel {
-                onboardingStep(1,"Your private workspace","Your first Red-XAI workspace has no workspace fee. Choose storage and Free or paid performance to start.","My Cloud","cloud.fill") { page = .cloud }
+                onboardingStep(1,"Your private MachineNotes","Your first MachineNote has no MachineNote fee. Choose storage and Free or paid performance to start.","MachineNotes","cloud.fill") { page = .plans }
                 Divider()
-                onboardingStep(2,"API integrations","Manage your private, scoped API keys for server applications.","API Keys","key.fill") { page = .account }
+                onboardingStep(2,"Storage and performance","Choose storage capacity and transfer concurrency for each MachineNote.","Plans","slider.horizontal.3") { page = .plans }
                 Divider()
-                onboardingStep(3,"Mac app library","For compatible Mac bundles, selectively preload into the local cache.","My Cloud","bolt.fill") {page = .cloud}
+                onboardingStep(3,"Mac app library","For compatible Mac bundles, selectively preload into the local cache.","Applications","bolt.fill") {page = .applications}
             }
             HStack(spacing:12) {
                 GDPanel {
@@ -258,29 +229,21 @@ private struct GDPrimary: View {
     }
     private var plansPage:some View {
         VStack(alignment:.leading,spacing:20) {
-            GDHeading(kicker:"WORKSPACE PLANS",title:"Storage that matches how you work.",subtitle:"Red-XAI managed storage and Google/custom-provider plans can coexist on the same Mac.")
+            GDHeading(kicker:"MACHINENOTES",title:"Storage that matches how you work.",subtitle:"Encrypted files, folders and applications on the Red-XAI server, organized in your MachineNotes.")
             if redXSession.linked {
                 redXStoragePanel
                 GDRXSubscriptionsPanel(focus:.plans)
-            }
-            if loginSession.stage == .ready {
-                GDPanel {
-                    Label("Google / custom-provider plans",systemImage:"square.stack.3d.up.fill").font(.headline)
-                    Text("Legacy Google/Firebase projects stay available separately. Red-XAI hosted storage is billed and enforced by the Kamatera control plane.")
-                        .font(.caption).foregroundStyle(gdSecondary)
-                }
-                GenDragoonStripePurchases(focus:"standard")
+                GDPanel { GDMachineNotesInventoryPanel() }
             }
         }
     }
     private var storagePage: some View {
         VStack(alignment:.leading,spacing:20) {
-            GDHeading(kicker:"STORAGE",title:"Your cloud space.",subtitle:"Manage encrypted Red-XAI Receiver workspaces or review Google/custom-provider storage plans.")
+            GDHeading(kicker:"STORAGE",title:"Your cloud space.",subtitle:"Choose the server storage capacity for each encrypted MachineNote.")
             if redXSession.linked {
                 redXStoragePanel
                 GDRXSubscriptionsPanel(focus:.storage)
             }
-            if loginSession.stage == .ready { GenDragoonStripePurchases(focus:"standard") }
         }
     }
     private var performancePage: some View {
@@ -289,58 +252,51 @@ private struct GDPrimary: View {
             if redXSession.linked {
                 GDPanel {
                     Label("Red-XAI encrypted transfers",systemImage:"bolt.shield.fill").font(.headline)
-                    Text("Large archives use resumable 4 MiB encrypted PNG chunks. Verified chunks are reused after an interruption instead of starting over.")
+                    Text("Archives use resumable encrypted red-X barcode PNG chunks. Verified chunks are reused after an interruption instead of starting over. Storage usage includes the encoded images.")
                         .font(.caption).foregroundStyle(gdSecondary)
                     Text(redXSession.usageSummary).font(.caption.monospaced()).foregroundStyle(.secondary)
                 }
             }
             if redXSession.linked { GDRXSubscriptionsPanel(focus:.performance) }
-            if loginSession.stage == .ready { GenDragoonStripePurchases(focus:"performance") }
         }
     }
     private var cloudPage:some View {
         VStack(alignment:.leading,spacing:20) {
-            GDHeading(kicker:"FILES & FOLDERS",title:"Everything, in its place.",subtitle:"Choose your project, upload any files or complete folders, and download a verified copy when you need it.")
-            if redXSession.linked || loginSession.isOwner {
+            GDHeading(kicker:"FILES & FOLDERS",title:"Everything, in its place.",subtitle:"Choose a MachineNote, upload files or complete folders, and restore a verified copy when you need it.")
+            if redXSession.linked {
                 GDNativeWorkspaceView(native:native,content:.files)
-            }
-            if loginSession.stage == .ready {
-                GenDragoonFreeCloudPanel(customer:customer,content:.files,onStorage:{page = .storage})
             }
         }
     }
     private var applicationsPage:some View {
         VStack(alignment:.leading,spacing:20) {
             GDHeading(kicker:"APPLICATIONS",title:"Your applications. Room to create.",subtitle:"Keep complete applications in cloud storage, restore them when needed, and launch compatible Mac apps from a verified managed library.")
-            if redXSession.linked || loginSession.isOwner {
+            if redXSession.linked {
                 GDNativeWorkspaceView(native:native,content:.applications)
-            }
-            if loginSession.stage == .ready {
-                GenDragoonFreeCloudPanel(customer:customer,content:.applications,showProjectControls:false,onStorage:{page = .storage})
             }
         }
     }
     private var redXStoragePanel: some View {
         GDPanel {
-            Label("Red-XAI encrypted Receiver",systemImage:"lock.shield.fill")
+            Label("MachineNotes · Encrypted server storage",systemImage:"lock.shield.fill")
                 .font(.system(size:16,weight:.bold)).foregroundStyle(.green)
             Text(redXSession.usageSummary).font(.system(size:12,design:.monospaced)).foregroundStyle(gdSecondary)
             Text(redXSession.email.isEmpty ? redXSession.subject : redXSession.email)
                 .font(.system(size:12,weight:.semibold)).textSelection(.enabled)
             HStack {
-                Button("Create Workspace / Choose Plans") { page = .plans }
+                Button("Create MachineNote / Choose Plans") { page = .plans }
                     .buttonStyle(.borderedProminent).tint(gdPurple)
                 Button("Refresh") { Task { await redXSession.refreshWorkspaces(); await native.refreshCloudChoices() } }
             }
-            Text("Workspace #1 has no workspace fee forever, but still needs a storage plan and a performance choice. Workspace #2+ adds $5/month each. Free performance uses 1 worker; paid tiers increase verified transfer/preload concurrency.")
+            Text("MachineNote #1 has no MachineNote fee forever, but still needs storage and a performance choice. Each additional MachineNote adds $5/month. Free performance uses 1 worker; paid tiers increase transfer and preload concurrency.")
                 .font(.caption).foregroundStyle(.secondary)
-            Text("\(redXSession.uploadProjects.first?.buckets.count ?? 0) Red-XAI workspace(s) available in the Files / Applications destination picker.")
+            Text("\(redXSession.uploadProjects.first?.buckets.count ?? 0) MachineNotes available in the Files / Applications destination picker.")
                 .font(.caption).foregroundStyle(.secondary)
         }
     }
     private var accountPage:some View {
         VStack(alignment:.leading,spacing:20) {
-            GDHeading(kicker:"ACCOUNT & SECURITY",title:"Your GenDragoon connections",subtitle:"Red-XAI and Google can be connected independently on the same Mac.")
+            GDHeading(kicker:"ACCOUNT & SECURITY",title:"Your Red-XAI account",subtitle:"One account for your encrypted server storage and MachineNote subscriptions.")
             if redXSession.linked {
                 GDPanel {
                     Label("Red-XAI account connected",systemImage:"checkmark.shield.fill")
@@ -362,36 +318,6 @@ private struct GDPrimary: View {
                     Text(redXSession.status).font(.system(size:12)).foregroundStyle(gdSecondary)
                     Button("Connect Red-XAI") { redXSession.connect() }
                         .buttonStyle(.borderedProminent).tint(gdPurple).disabled(redXSession.busy)
-                }
-            }
-            if loginSession.stage == .ready {
-                GDPanel {
-                    Label("Google account verified",systemImage:"checkmark.shield.fill")
-                        .font(.system(size:16,weight:.bold)).foregroundStyle(.green)
-                    Text(loginSession.email).font(.system(size:14,weight:.semibold))
-                    Text("Authenticated by Firebase project gendragoonssd. Terms acceptance is verified from your private Firestore document.")
-                        .font(.system(size:12)).foregroundStyle(gdSecondary)
-                    Button("Sign out of Google / GenDragoon") {loginSession.logout()}
-                        .buttonStyle(.bordered).tint(.orange)
-                        .disabled(activity.hasActiveOperations || activity.isMaintenancePending)
-                }
-                GDPanel {
-                    Label("Remove Ads · one-time purchase",systemImage:"megaphone.slash.fill")
-                        .font(.system(size:16,weight:.bold))
-                    Text("$4.99 once · Remove top and sidebar sponsored placements from your Google account permanently.")
-                        .font(.system(size:12)).foregroundStyle(gdSecondary)
-                    Text(loginSession.isAdFree ? "Ad-free entitlement active" : "Use the checkout panel to activate ad-free access.")
-                        .font(.system(size:12)).foregroundStyle(loginSession.isAdFree ? .green : .orange)
-                }
-                GenDragoonStripePurchases(focus:"ads")
-                GenDragoonAPIKeysPanel()
-            } else {
-                GDPanel {
-                    Label("Google / Firebase",systemImage:"g.circle")
-                        .font(.system(size:16,weight:.bold))
-                    Text("Optional. Connect Google to keep using the existing Firebase project features, Google/custom-provider workspaces, ad entitlement, and provider-specific billing.")
-                        .font(.system(size:12)).foregroundStyle(gdSecondary)
-                    Button("Connect Google") { loginSession.login() }.buttonStyle(.bordered)
                 }
             }
             if redXSession.linked {

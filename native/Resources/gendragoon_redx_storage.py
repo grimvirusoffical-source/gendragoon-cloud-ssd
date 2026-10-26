@@ -2,18 +2,20 @@
 """Encrypted Red-XAI Receiver transport for the native GenDragoon library.
 
 Credentials arrive only through the parent helper's private stdin envelope.
-File/folder/app archives are split into deterministic 4 MiB plaintext chunks,
-encrypted by the pinned Red-SecretsXAI C++ core, wrapped in compact red-X PNG
-carriers and stored through the account-owned Receiver.
+File/folder/app archives use bounded visual red-X barcode chunks encrypted by
+the pinned Red-SecretsXAI C++ core. Previously stored compact PNG objects remain
+readable. The image carrier transports ciphertext; AEAD authenticates it.
 """
 import hashlib
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
+from functools import lru_cache
 import json
 import os
 from pathlib import Path
 import re
 import ssl
+import struct
 import tempfile
 import threading
 import time
@@ -29,25 +31,33 @@ if DEV_VENDOR.is_dir():
     import sys
     sys.path.insert(0, str(DEV_VENDOR))
 
-rsx = encode_storage_image = decode_storage_image = StorageImageError = None
+rsx = encode_image = decode_image = decode_storage_image = StorageImageError = None
 
 def _crypto_runtime():
-    global rsx, encode_storage_image, decode_storage_image, StorageImageError
+    global rsx, encode_image, decode_image, decode_storage_image, StorageImageError
     if rsx is None:
         from redxai import _librsx as _rsx
         from redsecretsxai import (
-            encode_storage_image as _encode_storage_image,
+            encode_image as _encode_image,
+            decode_image as _decode_image,
             decode_storage_image as _decode_storage_image,
             StorageImageError as _StorageImageError,
         )
         rsx = _rsx
-        encode_storage_image = _encode_storage_image
+        encode_image = _encode_image
+        decode_image = _decode_image
         decode_storage_image = _decode_storage_image
         StorageImageError = _StorageImageError
-    return rsx, encode_storage_image, decode_storage_image, StorageImageError
+    return rsx, encode_image, decode_image, decode_storage_image, StorageImageError
 
 API = "https://api.red-xai.com"
-CHUNK = 4 * 1024 * 1024
+CHUNK = 64 * 1024
+VISUAL_PROFILE = "redx-visual-v3-m3-b3-64k"
+VISUAL_PARAMETERS = dict(module=3, bits=3, noise=0, verify=True, chaff=True,
+                         skeleton=True, border=True, deterministic=True)
+# NumPy image work has a larger raster footprint than the encrypted chunk.
+# Keep one raster operation in flight while tier-controlled HTTP runs in parallel.
+_IMAGE_WORK = threading.BoundedSemaphore(1)
 MAX_PNG = 8 * 1024 * 1024
 JSON_LIMIT = 4 * 1024 * 1024
 ID = re.compile(r"[a-f0-9]{32}\Z")
@@ -56,8 +66,10 @@ RECEIVER = re.compile(r"[a-f0-9]{64}\Z")
 TOKEN = re.compile(r"rxca_[A-Za-z0-9_-]{43}\Z")
 SECRET = re.compile(r"[A-Za-z0-9_-]{32,128}\Z")
 SHA = re.compile(r"[a-f0-9]{64}\Z")
-ROOT_SCHEMA = "gendragoon.library-manifest/v1"
+LEGACY_ROOT_SCHEMA = "gendragoon.library-manifest/v1"
+ROOT_SCHEMA = "gendragoon.library-manifest/v2"
 PAGE_SCHEMA = "gendragoon.chunk-page/v1"
+INDEX_SCHEMA = "gendragoon.chunk-index/v2"
 METADATA_SCHEMA = "gendragoon.metadata-stream/v1"
 
 
@@ -72,6 +84,7 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
         raise RedXStorageError("Red-XAI Receiver redirects are not permitted")
 
 
+@lru_cache(maxsize=1)
 def tls_context():
     roots = Path("/etc/ssl/cert.pem")
     return ssl.create_default_context(cafile=str(roots)) if roots.is_file() else ssl.create_default_context()
@@ -303,7 +316,7 @@ class Codec:
     def seal(self, plain, object_id_value):
         plain = bytes(plain)
         if not plain or len(plain) > CHUNK:
-            raise RedXStorageError("Encrypted cloud chunk exceeds 4 MiB")
+            raise RedXStorageError("Encrypted visual cloud chunk exceeds 64 KiB")
         with tempfile.TemporaryDirectory(prefix="gd-rsx-") as td:
             source = Path(td) / "plain"
             encrypted = Path(td) / "sealed"
@@ -312,16 +325,27 @@ class Codec:
                 rsx.encrypt_file(self._session, str(source), out_path=str(encrypted),
                                  aad=aad(self.client.receiver, self.client.workspace, object_id_value))
             blob = encrypted.read_bytes()
-        png = encode_storage_image(blob)
-        if len(png) > MAX_PNG or decode_storage_image(png) != blob:
-            raise RedXStorageError("Compact encrypted PNG self-verification failed")
+        try:
+            with _IMAGE_WORK:
+                png = encode_image(blob, **VISUAL_PARAMETERS)
+        except ValueError as error:
+            raise RedXStorageError("Red-X visual barcode encoding failed") from error
+        if len(png) < 24 or len(png) > MAX_PNG or png[:8] != b"\x89PNG\r\n\x1a\n":
+            raise RedXStorageError("Red-X visual barcode exceeds the Receiver transport limit")
+        width, height = struct.unpack(">II", png[16:24])
+        if width * height > 4_000_000:
+            raise RedXStorageError("Red-X visual barcode exceeds the Receiver raster limit")
         return png
 
     def open(self, png, object_id_value):
         try:
             blob = decode_storage_image(png)
-        except StorageImageError as exc:
-            raise RedXStorageError("Encrypted storage PNG is invalid") from exc
+        except StorageImageError:
+            try:
+                with _IMAGE_WORK:
+                    blob = decode_image(png)
+            except ValueError as exc:
+                raise RedXStorageError("Encrypted visual barcode is invalid") from exc
         with tempfile.TemporaryDirectory(prefix="gd-rsx-open-") as td:
             sealed = Path(td) / "sealed"
             output = Path(td) / "plain"
@@ -410,23 +434,53 @@ def _parallel_chunks(client, codec, workers, values, operation):
 
 
 def _json_pages(client, codec, domain, archive_sha, records, page_size=512):
-    pages = []
-    for page_index in range(0, len(records), page_size):
-        group = records[page_index:page_index + page_size]
-        value = json.dumps({"schema": PAGE_SCHEMA, "records": group}, separators=(",", ":")).encode()
-        oid = object_id(domain, archive_sha, page_index // page_size)
-        pages.append(_put_plain(client, codec, oid, value))
+    def write_groups(values, schema, key, level):
+        pages, group = [], []
+        def raw(items):
+            return json.dumps({"schema": schema, key: items}, separators=(",", ":")).encode()
+        def publish(items):
+            value = raw(items)
+            oid = object_id(domain, VISUAL_PROFILE, archive_sha, level, len(pages), sha256_bytes(value))
+            pages.append(_put_plain(client, codec, oid, value))
+        for record in values:
+            if group and (len(group) >= page_size or len(raw(group + [record])) > CHUNK):
+                publish(group)
+                group = []
+            group.append(record)
+            if len(raw(group)) > CHUNK:
+                raise RedXStorageError("Encrypted manifest record exceeds its barcode limit")
+        if group:
+            publish(group)
+        return pages
+    pages = write_groups(records, PAGE_SCHEMA, "records", 0)
+    # Each root index gets at most one quarter of its barcode's capacity, leaving
+    # room for metadata and future fields even for very large archive manifests.
+    level = 1
+    while len(json.dumps(pages, separators=(",", ":")).encode()) > CHUNK // 4:
+        pages = write_groups(pages, INDEX_SCHEMA, "pages", level)
+        level += 1
+        if level > 8:
+            raise RedXStorageError("Encrypted manifest index exceeds its safety limit")
     return pages
 
 
-def _load_pages(client, codec, pages):
+def _load_pages(client, codec, pages, _depth=0, _seen=None):
+    if _depth > 8 or not isinstance(pages, list):
+        raise RedXStorageError("Encrypted manifest index is invalid")
+    seen = set() if _seen is None else _seen
     out = []
     for record in pages:
+        if not isinstance(record, dict) or record.get("id") in seen:
+            raise RedXStorageError("Encrypted manifest index repeats a page")
+        seen.add(record.get("id"))
         raw = _get_plain(client, codec, record)
         try:
             value = json.loads(raw)
         except Exception as exc:
             raise RedXStorageError("Encrypted manifest page is invalid") from exc
+        if isinstance(value, dict) and value.get("schema") == INDEX_SCHEMA:
+            out.extend(_load_pages(client, codec, value.get("pages"), _depth + 1, seen))
+            continue
         if not isinstance(value, dict) or value.get("schema") != PAGE_SCHEMA or not isinstance(value.get("records"), list):
             raise RedXStorageError("Encrypted manifest page is invalid")
         out.extend(value["records"])
@@ -446,7 +500,7 @@ def upload_archive(config, archive, key, name, kind, archive_layout, archive_sha
                 yield index, plain
         def upload(codec, value):
             index, plain = value
-            oid = object_id("archive-chunk", archive_sha, index)
+            oid = object_id(VISUAL_PROFILE + "-archive-chunk", archive_sha, index)
             record = _put_plain(codec.client, codec, oid, plain)
             record["index"] = index
             return record
@@ -456,7 +510,7 @@ def upload_archive(config, archive, key, name, kind, archive_layout, archive_sha
         if not chunks:
             raise RedXStorageError("Refusing to upload an empty archive")
 
-        chunk_pages = _json_pages(client, codec, "archive-page", archive_sha, chunks)
+        chunk_pages = _json_pages(client, codec, VISUAL_PROFILE + "-archive-page", archive_sha, chunks)
 
         metadata_raw = json.dumps(source_manifest, separators=(",", ":"), ensure_ascii=False).encode()
         metadata_sha = sha256_bytes(metadata_raw)
@@ -464,11 +518,14 @@ def upload_archive(config, archive, key, name, kind, archive_layout, archive_sha
         metadata_parts = []
         for offset in range(0, len(compressed), CHUNK):
             part = compressed[offset:offset + CHUNK]
-            oid = object_id("metadata", archive_sha, offset // CHUNK)
+            oid = object_id(VISUAL_PROFILE + "-metadata", archive_sha, metadata_sha, offset // CHUNK)
             metadata_parts.append(_put_plain(client, codec, oid, part))
+        metadata_pages = _json_pages(client, codec, VISUAL_PROFILE + "-metadata-page", archive_sha, metadata_parts)
 
         root = {
             "schema": ROOT_SCHEMA,
+            "storageProfile": VISUAL_PROFILE,
+            "chunkBytes": CHUNK,
             "key": key,
             "name": name,
             "kind": kind,
@@ -482,13 +539,13 @@ def upload_archive(config, archive, key, name, kind, archive_layout, archive_sha
                 "encoding": "zlib-json",
                 "jsonBytes": len(metadata_raw),
                 "jsonSha256": metadata_sha,
-                "parts": metadata_parts,
+                "partPages": metadata_pages,
             },
         }
         root_raw = json.dumps(root, separators=(",", ":"), ensure_ascii=False).encode()
         if len(root_raw) > CHUNK:
             raise RedXStorageError("Encrypted root manifest is too large")
-        manifest_id = object_id("root-manifest", archive_sha, key)
+        manifest_id = object_id(VISUAL_PROFILE + "-root-manifest", archive_sha, key)
         root_record = _put_plain(client, codec, manifest_id, root_raw)
         registered = client.register(key, {
             "name": name,
@@ -514,7 +571,7 @@ def _root_for_item(client, codec, item):
         root = json.loads(root_raw)
     except Exception as exc:
         raise RedXStorageError("Encrypted library manifest is invalid") from exc
-    if (not isinstance(root, dict) or root.get("schema") != ROOT_SCHEMA
+    if (not isinstance(root, dict) or root.get("schema") not in (ROOT_SCHEMA, LEGACY_ROOT_SCHEMA)
             or root.get("name") != item.get("name") or root.get("kind") != item.get("kind")
             or root.get("archiveBytes") != item.get("archiveBytes")
             or root.get("archiveSha256") != item.get("archiveSha256")
@@ -559,7 +616,7 @@ def download_archive(config, item, destination):
                 temp.unlink()
 
         meta = root["metadata"]
-        parts = meta.get("parts")
+        parts = (_load_pages(client, codec, meta["partPages"]) if "partPages" in meta else meta.get("parts"))
         if meta.get("schema") != METADATA_SCHEMA or meta.get("encoding") != "zlib-json" or not isinstance(parts, list):
             raise RedXStorageError("Encrypted metadata manifest is invalid")
         compressed = b"".join(_get_plain(client, codec, record) for record in parts)

@@ -16,6 +16,7 @@ const MAX_QUOTA = 8 * 1024**4;
 const ID = /^[a-f0-9]{32}$/;
 const LIBRARY_KEY = /^[a-f0-9]{18}$/;
 const SHA256 = /^[a-f0-9]{64}$/;
+const OWNER_EMAIL = 'support@infected-nation.com';
 const json = (res, status, data) => { res.writeHead(status, {'content-type': 'application/json', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff'}); res.end(JSON.stringify(data)); };
 async function read(req, max) {
   const chunks = []; let n = 0;
@@ -77,7 +78,7 @@ async function createCloud(config) {
   async function identify(req) {
     const header = req.headers.authorization || '';
     if (!/^Bearer [A-Za-z0-9_.-]{1,16000}$/.test(header)) throw new CloudError('login_required', 401);
-    let subject;
+    let subject, email = '';
     try {
       if (authProvider === 'redx-site-session') {
         if (!/^Bearer rxca_[A-Za-z0-9_-]{43}$/.test(header)) throw new CloudError('invalid_or_inactive_session', 401);
@@ -88,6 +89,7 @@ async function createCloud(config) {
             user.scope !== 'gendragoon.receiver' || typeof user.sub !== 'string' || !user.sub ||
             user.email_verified !== true) throw new CloudError('account_setup_required', 403);
         subject = user.sub;
+        email = typeof user.email === 'string' ? user.email.trim().toLowerCase() : '';
       } else {
         const token = header.slice(7);
         const claims = await verifier.verify(token);
@@ -95,13 +97,14 @@ async function createCloud(config) {
         if (!info.ok) throw new Error('inactive');
         const user = await responseJSON(info);
         if (user.sub !== claims.sub) throw new Error('subject');
-        if (!user.email_verified || !['13to17', '18plus'].includes(user.age_band) ||
+        if (user.email_verified !== true || !['13to17', '18plus'].includes(user.age_band) ||
             (config.requiredTos && user.app_tos_version !== config.requiredTos) ||
             user.twofactor_state === 'pending') throw new CloudError('account_setup_required', 403);
         subject = claims.sub;
+        email = typeof user.email === 'string' ? user.email.trim().toLowerCase() : '';
       }
     } catch(e) { if (e instanceof CloudError) throw e; throw new CloudError('invalid_or_inactive_session', 401); }
-    return {owner: digest(JSON.stringify(['red-xai-receiver/v1', issuer, subject])), bearer: header};
+    return {owner: digest(JSON.stringify(['red-xai-receiver/v1', issuer, subject])), bearer: header, ownerAdmin:email === OWNER_EMAIL};
   }
   async function readJSONFile(file, max = 64 * 1024) {
     const stat = await fs.lstat(file);
@@ -216,6 +219,7 @@ async function createCloud(config) {
     state = await store.change(owner, s => {
       s.projectLimit = entitlement.projectLimit;
       s.ownerBenefits = entitlement.ownerBenefits === true;
+      s.entitlementsCheckedMs = Date.now();
       for (const [id, existing] of Object.entries(s.workspaces || {})) {
         if (existing.billingManaged === true && !byId.has(id)) Object.assign(existing, {active:false, readOnly:true, quotaBytes:0, workers:0});
       }
@@ -242,8 +246,61 @@ async function createCloud(config) {
     const workspaces = Object.values(s.workspaces || {}).filter(w => !s.workspaceDeletions?.[w.id] && !s.deletedWorkspaces?.[w.id] && (!entitlementURL || w.billingManaged === true));
     const entitledQuota = entitlementURL ? workspaces.reduce((n,w) => n + (Number.isSafeInteger(w.quotaBytes) ? w.quotaBytes : 0), 0) : s.quota;
     return {id: s.id, state: 'ready', developmentOnly, storageFormat: 'redsecretsxai-png-v1', quotaBytes: entitledQuota,
-      usedBytes: s.used, projectLimit:s.projectLimit || 10, ownerBenefits:s.ownerBenefits === true, workspaces,
+      usedBytes: s.used, projectLimit:s.projectLimit || 10, ownerBenefits:s.ownerBenefits === true, workspaces, machineNotes:workspaces,
       objects: Object.values(s.objects || {}).filter(o => o.status === 'ready'), libraryItems: Object.keys(s.library || {}).length};
+  }
+  function machineNotes(s) {
+    const whole = n => Number.isSafeInteger(n) && n >= 0 ? n : 0;
+    const notes = [], ids = new Set([...Object.keys(s.control?.projects || {}), ...Object.keys(s.workspaces || {})]);
+    for (const id of ids) {
+      if (!ID.test(id) || s.workspaceDeletions?.[id] || s.deletedWorkspaces?.[id]) continue;
+      const workspace = s.workspaces?.[id], project = s.control?.projects?.[id], plan = project || workspace;
+      if (!plan || typeof plan.name !== 'string') continue;
+      const library = Object.values(s.library || {}).filter(item => item.workspace === id);
+      const legacyUsed = Object.values(s.objects || {}).filter(item => item.workspace === id).reduce((n,item) => n + whole(item.bytes), 0);
+      const usedBytes = whole(workspace?.usedBytes) + Math.max(0, legacyUsed - whole(workspace?.legacyUsedBytes));
+      const items = library.slice(0, 50).map(item => ({
+        name:typeof item.name === 'string' ? item.name.slice(0,255) : '',
+        kind:['app','folder','file'].includes(item.kind) ? item.kind : null,
+        archiveBytes:whole(item.archiveBytes),generation:whole(item.generation),updatedMs:whole(item.updatedMs),
+      }));
+      notes.push({id,receiverId:s.id,name:plan.name.slice(0,80),status:typeof plan.status === 'string' ? plan.status : 'ready',
+        active:plan.active === true,readOnly:plan.readOnly === true,quotaBytes:whole(plan.quotaBytes),usedBytes,
+        workers:whole(plan.workers),storageTier:typeof plan.storageTier === 'string' ? plan.storageTier : null,
+        performanceTier:typeof plan.performanceTier === 'string' ? plan.performanceTier : null,
+        subscriptionStatus:typeof project?.subscriptionStatus === 'string' ? project.subscriptionStatus : null,
+        feeWaived:project?.feeWaived === true,workspaceMonthlyCents:project ? (project.feeWaived ? 0 : 500) : null,
+        createdMs:whole(plan.createdMs),entitlementsCheckedMs:whole(s.entitlementsCheckedMs),
+        libraryItemCount:library.length,libraryItems:items,libraryItemsTruncated:library.length > items.length});
+    }
+    return notes.sort((a,b) => a.createdMs - b.createdMs || a.id.localeCompare(b.id));
+  }
+  async function adminMachineNotes(identity, u) {
+    if (!identity.ownerAdmin) throw new CloudError('owner_access_required', 403);
+    if ([...u.searchParams.keys()].some(k => !['limit','cursor'].includes(k)) ||
+        u.searchParams.getAll('limit').length > 1 || u.searchParams.getAll('cursor').length > 1) throw new CloudError('invalid_pagination', 400);
+    const rawLimit = u.searchParams.get('limit') || '20', cursor = u.searchParams.get('cursor') || '0';
+    if (!/^[0-9]{1,2}$/.test(rawLimit) || !/^[0-9]{1,16}$/.test(cursor)) throw new CloudError('invalid_pagination', 400);
+    const limit = Number(rawLimit), after = Number(cursor);
+    if (limit < 1 || limit > 20 || !Number.isSafeInteger(after) || after < 0 || after > 0xfffffffffffff) throw new CloudError('invalid_pagination', 400);
+    const result = await store.call('POST', 'bx', {
+      q:'{Get[]} = "receivers.red-xai.db":Receiver[ID > $after] -> [ID, Owner], Sort = ID, Limit = $limit',
+      params:{after,limit:limit + 1},
+    });
+    if (JSON.stringify(result.columns) !== '["ID","Owner"]' || !Array.isArray(result.rows) || result.rows.length > limit + 1) throw new CloudError('metadata_invalid', 503);
+    let previous = after;
+    for (const row of result.rows) {
+      if (!Array.isArray(row) || row.length !== 2 || !Number.isSafeInteger(row[0]) || row[0] <= previous || row[0] > 0xfffffffffffff ||
+          typeof row[1] !== 'string' || !SHA256.test(row[1]) || Number.parseInt(row[1].slice(0,13),16) !== row[0]) throw new CloudError('metadata_invalid', 503);
+      previous = row[0];
+    }
+    const page = result.rows.slice(0,limit), notes = [];
+    for (let offset = 0; offset < page.length; offset += 4) {
+      const states = await Promise.all(page.slice(offset,offset + 4).map(([,owner]) => store.get(owner)));
+      for (const state of states) if (state) notes.push(...machineNotes(state));
+    }
+    return {schema:1,scope:'all',ownerAdmin:true,storageEngine:'redx',storageFormat:'redsecretsxai-png-v1',machineNotes:notes,
+      receiversScanned:page.length,nextCursor:result.rows.length > limit ? String(page.at(-1)[0]) : null};
   }
   async function existing(file, entry) {
     try {
@@ -262,9 +319,11 @@ async function createCloud(config) {
       const host = req.headers.host;
       if (host !== '127.0.0.1:' + server.address().port || req.headers.origin) throw new CloudError('invalid_origin', 403);
       const u = new URL(req.url, 'http://' + host);
-      if (u.search || /%|\\|\.\./.test(req.url)) throw new CloudError('invalid_path', 400);
+      const adminNotes = req.method === 'GET' && u.pathname === '/v1/receivers/admin/machine-notes';
+      if (u.search && !adminNotes || /%|\\|\.\./.test(req.url)) throw new CloudError('invalid_path', 400);
       if (req.method === 'GET' && ['/healthz','/v1/receivers/healthz'].includes(u.pathname)) return json(res, 200, {service: 'Red-XAI-Reiceivers', developmentOnly, productionReady, authProvider});
       const identity = await identify(req), owner = identity.owner;
+      if (adminNotes) return json(res, 200, await adminMachineNotes(identity, u));
       const workspaceDelete = /^\/v1\/receivers\/me\/workspaces\/([a-f0-9]{32})$/.exec(u.pathname);
       const internalDelete = req.method === 'DELETE' && workspaceDelete && signedWorkspaceDelete(req, owner, workspaceDelete[1]);
       // The control plane calls this route while deleting its billing record;
@@ -282,6 +341,9 @@ async function createCloud(config) {
       if (!state) throw new CloudError('receiver_not_found', 404);
       state = await syncEntitlements(owner, state, entitlement);
       if (u.pathname === base && req.method === 'GET') return json(res, 200, publicState(state));
+      if (u.pathname === base + '/machine-notes' && req.method === 'GET') return json(res, 200, {
+        schema:1,scope:'own',ownerAdmin:identity.ownerAdmin,receiverId:owner,storageEngine:'redx',storageFormat:'redsecretsxai-png-v1',machineNotes:machineNotes(state),
+      });
       if (u.pathname === base + '/workspaces' && req.method === 'POST') {
         if (entitlementURL) throw new CloudError('create_project_through_billing', 409);
         const id = req.headers['idempotency-key'];

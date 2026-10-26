@@ -22,7 +22,12 @@ REQUIRED_RESOURCES=("gendragoon_update_restart.py", "gendragoon_auto_update.py",
     "gendragoon_upload_workspace.py", "gendragoon_performance.py", "gendragoon_redx_storage.py",
     "gendragoon_performance_profiles.json", "gendragoon_project_files.py")
 RED_SECRETS_RESOURCES=("redxai/__init__.py","redxai/_librsx.py","redxai/_native/librsx.dylib",
-    "redsecretsxai/__init__.py","redsecretsxai/storage_image.py","Red-SecretsXAI-LICENSE.txt")
+    "redsecretsxai/__init__.py","redsecretsxai/storage_image.py","Red-SecretsXAI-LICENSE.txt",
+    "gendragoon_python_runtime.json", "numpy/__init__.py", "PIL/__init__.py",
+    *["redsecretsxai/" + name + ".py" for name in (
+        "_image", "rs", "decode_math", "chaff", "look", "stencil_decode", "glyphs",
+        "pyramid", "chromatic", "operators", "ct_sample", "confidence_map", "capacity",
+        "damage_recover", "geom_sync")])
 
 def require_runtime_resources(app):
     resources=app/"Contents/Resources"
