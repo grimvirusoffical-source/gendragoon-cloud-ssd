@@ -27,6 +27,14 @@ test('disposable Firefox manifest allows only the fixed package ID and removes o
 });
 test('Firefox registration refuses non-CI, outside root hosts, symlinks and changed manifests',async t=>{
  const f=await hostFixture(t);await assert.rejects(registerFirefoxHost(f.root,f.binary,{...f.options,environment:{...f.options.environment,GITHUB_ACTIONS:'false'}}));await assert.rejects(registerFirefoxHost(f.root,path.join(f.home,'other'),f.options));
+ const outside=path.join(f.temp,'outside-host');await fs.writeFile(outside,'outside fixture host',{mode:0o700});await assert.rejects(registerFirefoxHost(f.root,f.root+'/../outside-host',f.options),/canonical/);await assert.rejects(registerFirefoxHost(f.root,outside,f.options),/inside/);
+ await fs.symlink(f.temp,path.join(f.root,'linked-parent'));await assert.rejects(registerFirefoxHost(f.root,path.join(f.root,'linked-parent/outside-host'),f.options),/linked host parent/);
  await fs.symlink(f.root,path.join(f.home,'.mozilla'));await assert.rejects(registerFirefoxHost(f.root,f.binary,f.options));await fs.unlink(path.join(f.home,'.mozilla'));
  const registration=await registerFirefoxHost(f.root,f.binary,f.options);await fs.writeFile(registration.target,'changed');await assert.rejects(registration.close(),/changed/);assert.equal(await fs.readFile(registration.target,'utf8'),'changed');
+});
+test('failed exclusive manifest setup removes its own partial inode and preserves independently changed content',async t=>{
+ const f=await hostFixture(t),target=path.join(f.home,'.mozilla/native-messaging-hosts/com.redxai.gendragoon.json');
+ await assert.rejects(registerFirefoxHost(f.root,f.binary,{...f.options,writeManifest:async(handle,data)=>{await handle.writeFile(data.slice(0,25));throw new Error('Synthetic partial write failure');}}),/partial write failure/);await assert.rejects(fs.lstat(target),{code:'ENOENT'});
+ const successful=await registerFirefoxHost(f.root,f.binary,f.options);await successful.close();
+ await assert.rejects(registerFirefoxHost(f.root,f.binary,{...f.options,writeManifest:async handle=>{await handle.writeFile('independently changed');throw new Error('Synthetic changed content');}}),/changed content/);assert.equal(await fs.readFile(target,'utf8'),'independently changed');
 });

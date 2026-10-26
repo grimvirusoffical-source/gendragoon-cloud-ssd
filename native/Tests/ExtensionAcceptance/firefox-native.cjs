@@ -39,19 +39,24 @@ async function connectBidi(url,{WebSocketImpl=globalThis.WebSocket,timeout=15000
 }
 async function freePort(){const server=net.createServer();await new Promise((resolve,reject)=>{server.once('error',reject);server.listen(0,'127.0.0.1',resolve);});const port=server.address().port;await new Promise(resolve=>server.close(resolve));return port;}
 async function ownedDirectory(directory,{create=false,created=[]}={}){let stat;try{stat=await fs.lstat(directory);}catch(error){if(error.code!=='ENOENT'||!create)throw error;await fs.mkdir(directory,{mode:0o700});created.push(directory);stat=await fs.lstat(directory);}assert.ok(stat.isDirectory()&&!stat.isSymbolicLink()&&stat.uid===process.getuid()&&(stat.mode&0o022)===0,'Firefox fixture registration requires owned non-writable directories');}
-async function registerFirefoxHost(root,binary,{environment=process.env,platform=process.platform}={}){
+async function registerFirefoxHost(root,binary,{environment=process.env,platform=process.platform,writeManifest=(handle,data)=>handle.writeFile(data)}={}){
  assert.equal(platform,'linux');assert.equal(environment.GITHUB_ACTIONS,'true');
  const runner=await fs.realpath(environment.RUNNER_TEMP);assert.ok(root.startsWith(runner+path.sep));
- assert.equal(await fs.realpath(root),root);assert.ok(binary.startsWith(root+path.sep));const host=await fs.lstat(binary);assert.ok(host.isFile()&&!host.isSymbolicLink()&&host.uid===process.getuid()&&(host.mode&0o077)===0,'Register only the private owned fixture host');
+ assert.equal(await fs.realpath(root),root);assert.equal(path.resolve(binary),binary,'Require a canonical fixture host path');assert.equal(await fs.realpath(binary),binary,'Do not traverse a linked host parent');const relative=path.relative(root,binary);assert.ok(relative&&relative!=='..'&&!relative.startsWith('..'+path.sep)&&!path.isAbsolute(relative),'Register only a host inside the private fixture root');const host=await fs.lstat(binary);assert.ok(host.isFile()&&!host.isSymbolicLink()&&host.uid===process.getuid()&&(host.mode&0o077)===0,'Register only the private owned fixture host');
  const home=path.resolve(environment.HOME||'');assert.ok(path.isAbsolute(environment.HOME||'')&&home!=='/');assert.equal(await fs.realpath(home),home,'Never follow a different Firefox home');await ownedDirectory(home);
- const created=[],directory=path.join(home,'.mozilla/native-messaging-hosts');let target,data,handle;
+ const created=[],directory=path.join(home,'.mozilla/native-messaging-hosts');let target,data,handle,createdStat;
  try{await ownedDirectory(path.join(home,'.mozilla'),{create:true,created});await ownedDirectory(directory,{create:true,created});target=path.join(directory,HOST_NAME+'.json');
   data=JSON.stringify({name:HOST_NAME,description:'Disposable GenDragoon Firefox acceptance fixture',path:binary,type:'stdio',allowed_extensions:[FIREFOX_ID]});
-  handle=await fs.open(target,'wx',0o600);await handle.writeFile(data);await handle.close();handle=null;const stat=await fs.lstat(target);
+  handle=await fs.open(target,'wx',0o600);createdStat=await handle.stat();await writeManifest(handle,data);await handle.close();handle=null;const stat=await fs.lstat(target);
   let expected=data;
   async function unchanged(){const current=await fs.lstat(target);assert.ok(current.isFile()&&!current.isSymbolicLink()&&current.uid===process.getuid()&&current.ino===stat.ino,'Do not change/remove a replaced Firefox host manifest');assert.equal(await fs.readFile(target,'utf8'),expected,'Do not change/remove a changed Firefox host manifest');}
   return {target,data,async setAllowedExtensions(allowed){assert.ok(Array.isArray(allowed)&&allowed.length===1&&[FIREFOX_ID,NEGATIVE_ID].includes(allowed[0]));await unchanged();const next=JSON.stringify({...JSON.parse(data),allowed_extensions:allowed});await fs.writeFile(target,next,{flag:'r+'});await fs.truncate(target,Buffer.byteLength(next));expected=next;},async close(){await unchanged();await fs.unlink(target);for(const dir of [...created].reverse())try{await fs.rmdir(dir);}catch(error){if(error.code!=='ENOTEMPTY'&&error.code!=='ENOENT')throw error;}}};
- }catch(error){if(handle)await handle.close();for(const dir of [...created].reverse())try{await fs.rmdir(dir);}catch{}throw error;}
+ }catch(error){if(handle)try{await handle.close();}catch{}
+  // A partial write can fail before a cleanup object is returned. Remove only
+  // this invocation's owned inode containing an exact prefix of its own data.
+  // EEXIST, replaced files and independently changed content remain untouched.
+  if(createdStat&&target)try{const current=await fs.lstat(target);if(current.isFile()&&!current.isSymbolicLink()&&current.uid===process.getuid()&&current.nlink===1&&current.ino===createdStat.ino&&current.dev===createdStat.dev){const contents=await fs.readFile(target),expected=Buffer.from(data);if(contents.length<=expected.length&&contents.equals(expected.subarray(0,contents.length))){const last=await fs.lstat(target);if(last.ino===createdStat.ino&&last.dev===createdStat.dev&&last.nlink===1)await fs.unlink(target);}}}catch{}
+  for(const dir of [...created].reverse())try{await fs.rmdir(dir);}catch{}throw error;}
 }
 async function firefoxNativeTest({root,directory,archive,firefoxBinary,webExt,webExtVersion,python,helpers}){
  const {startCompanion,stopChild,atomicJSON,events,report,checksum}=helpers;
