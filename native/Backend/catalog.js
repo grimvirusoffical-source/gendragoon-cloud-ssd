@@ -15,7 +15,7 @@ const STORAGE = Object.freeze({
   "6TB": {gb:6000, bundle:24999, standard:20000}
 });
 const PERFORMANCE=Object.freeze({
-  free:{cents:0,workers:1}, lite:{cents:300,workers:2}, boost:{cents:600,workers:4},
+  lite:{cents:300,workers:2}, boost:{cents:600,workers:4},
   turbo:{cents:900,workers:8}, ultra:{cents:1400,workers:12},
   max:{cents:1900,workers:20}
 });
