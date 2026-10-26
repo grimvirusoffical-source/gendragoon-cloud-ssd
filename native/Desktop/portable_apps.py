@@ -103,7 +103,7 @@ def _read(path):
         # the leaf itself rather than following a replacement reparse point.
         handle=win32file.CreateFile(str(path),win32con.GENERIC_READ,
             win32con.FILE_SHARE_READ|win32con.FILE_SHARE_WRITE|win32con.FILE_SHARE_DELETE,
-            None,win32con.OPEN_EXISTING,win32con.FILE_FLAG_OPEN_REPARSE_POINT,None)
+            None,win32con.OPEN_EXISTING,win32file.FILE_FLAG_OPEN_REPARSE_POINT,None)
         raw=handle.Detach()
         try:fd=msvcrt.open_osfhandle(raw,os.O_RDONLY|os.O_BINARY|os.O_NOINHERIT)
         except BaseException:win32api.CloseHandle(raw);raise
