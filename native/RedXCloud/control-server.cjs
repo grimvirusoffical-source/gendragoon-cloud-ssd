@@ -3,7 +3,8 @@ const http=require('node:http');
 const crypto=require('node:crypto');
 const {ControlState}=require('./control-state.cjs');
 const {RedXState,CloudError,digest,origin}=require('./redx-state.cjs');
-const {STORAGE,PERFORMANCE}=require('../Backend/catalog.js');
+const {STORAGE,PERFORMANCE:PAID_PERFORMANCE}=require('../Backend/catalog.js');
+const PERFORMANCE=Object.freeze({free:{cents:0,workers:1},...PAID_PERFORMANCE});
 
 const OWNER_EMAIL='support@infected-nation.com';
 const WORKSPACE_MONTHLY_CENTS=500;
