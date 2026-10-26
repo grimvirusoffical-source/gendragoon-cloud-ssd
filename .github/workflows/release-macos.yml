@@ -1,5 +1,3 @@
-[Reading 89 lines from start (total: 89 lines, 0 remaining)]
-
 # MANUAL ONLY. Never runs on push, pull request or schedule. Nothing here uploads to the App Store or publishes a release.
 name: Mac build (manual)
 
@@ -94,4 +92,3 @@ jobs:
           if-no-files-found: warn
           retention-days: 7
 
-[executed on device: XLR1-Mac.local (bff18bc4-2575-4bdc-abbb-cd3c9fda10a0)]
