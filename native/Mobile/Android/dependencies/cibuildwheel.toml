@@ -8,6 +8,7 @@ build-verbosity = 1
 
 [tool.cibuildwheel.config-settings]
 setup-args = [
+  "--cross-file={project}/native/Mobile/Android/dependencies/android64-cross.ini",
   "-Dblas=none", "-Dlapack=none", "-Dallow-noblas=true", "-Duse-ilp64=false",
   "-Dc_link_args=['-Wl,-z,max-page-size=16384']",
   "-Dcpp_link_args=['-Wl,-z,max-page-size=16384']",

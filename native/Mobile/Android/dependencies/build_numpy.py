@@ -68,7 +68,7 @@ def build(work,abi):
     project=work/'source'/('numpy-'+VERSION)
     output=work/'wheelhouse';output.mkdir()
     env=os.environ.copy();env.update(CIBW_BUILD='cp313-android_'+abi,ANDROID_API_LEVEL='28',CIBW_CACHE_PATH=str(work/'cache'))
-    subprocess.run([sys.executable,'-m','cibuildwheel',str(project),'--platform','android','--archs',abi,'--config-file',str(ROOT/'cibuildwheel.toml'),'--output-dir',str(output)],env=env,check=True,timeout=3600)
+    subprocess.run([sys.executable,'-m','cibuildwheel',str(project),'--platform','android','--archs',abi,'--config-file',str(ROOT/'cibuildwheel.toml'),'--output-dir',str(output)],env=env,cwd=ROOT.parents[3],check=True,timeout=3600)
     wheels=list(output.glob('numpy-'+VERSION+'-cp313-cp313-android_*_'+abi+'.whl'))
     if len(wheels)!=1:raise RuntimeError('Expected exactly one architecture-bound NumPy candidate')
     result={'schema':1,'numpyVersion':VERSION,'pythonVersion':'3.13','abi':abi,'sourceURL':SOURCE_URL,'sourceSHA256':SOURCE_SHA256,'cibuildwheelVersion':CIBW,'configSHA256':hashlib.sha256((ROOT/'cibuildwheel.toml').read_bytes()).hexdigest(),'candidate':verify_wheel(wheels[0],abi)}
