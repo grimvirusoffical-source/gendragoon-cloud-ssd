@@ -14,8 +14,8 @@ import shutil
 import subprocess
 import sys
 
-VERSION="0.20.3"
-BUILD="34"
+VERSION="0.21.0"
+BUILD="35"
 ROOT=Path(__file__).resolve().parent
 NAME="GenDragoon Cloud SSD.app"
 IDENTITY="Developer ID Application: Joshua Franklin (NZPU8H843J)"
@@ -174,7 +174,7 @@ def build(base,output):
     for retired in ("gendragoon_updates.py","release-repo.json"):(resources/retired).unlink(missing_ok=True)
     binary=app/"Contents/MacOS/GenDragoon Cloud SSD"
     swift=sorted((ROOT/"Sources").glob("*.swift"))
-    run(["/usr/bin/xcrun","swiftc","-parse-as-library","-O","-sdk",swift_sdk(),
+    run(["/usr/bin/xcrun","swiftc","-parse-as-library","-O","-whole-module-optimization","-sdk",swift_sdk(),
          "-target","arm64-apple-macosx14.0","-framework","SwiftUI","-framework","AppKit",
          "-o",binary,*swift],timeout=900)
     info.update(CFBundleShortVersionString=VERSION,CFBundleVersion=BUILD,LSMinimumSystemVersion="14.0",

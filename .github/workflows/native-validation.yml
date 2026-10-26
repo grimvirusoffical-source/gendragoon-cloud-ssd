@@ -39,9 +39,13 @@ jobs:
       - name: Verify complete project archives, restore checks and original-file safeguards
         run: python -B -m unittest discover -s native/Tests -p test_project_files.py
       - run: python -m unittest discover -s native/Tests -p test_smoke_macos_budget.py
+      - name: Verify private live upload telemetry and streamed byte accounting
+        run: python -B -m unittest discover -s native/Tests -p test_upload_progress.py
       - run: python -m unittest discover -s native/Tests -p test_library_metadata.py
         env:
           PYTHONPATH: native/Resources
+      - name: Verify virtual folders and immutable archive identity during restore
+        run: python -B -m unittest discover -s native/Tests -p test_library_tree.py
       - name: Verify read-only Darwin filesystem inventory and failure handling
         run: python -m unittest discover -s native/Tests -p test_darwin_mount_inventory.py
       - run: python native/Tests/stress_native.py
@@ -91,7 +95,7 @@ jobs:
       - run: npm ci --ignore-scripts
       - run: npm test
       - name: Verify Red-XAI subscription billing, workspace deletion and enforced transfer tiers
-        run: node --test ../RedXCloud/test/control-server.test.cjs ../RedXCloud/test/workspace-lifecycle.test.cjs ../RedXCloud/test/control-receiver.integration.test.cjs ../RedXCloud/test/machine-notes.test.cjs
+        run: node --test ../RedXCloud/test/control-server.test.cjs ../RedXCloud/test/workspace-lifecycle.test.cjs ../RedXCloud/test/control-receiver.integration.test.cjs ../RedXCloud/test/machine-notes.test.cjs ../RedXCloud/test/library-tree.test.cjs
       - run: npm audit --omit=dev --audit-level=high
       - run: python3 -m unittest discover -p 'test_*.py'
 

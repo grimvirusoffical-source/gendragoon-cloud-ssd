@@ -12,7 +12,33 @@ legacy provider destination remains preserved locally but cannot run an upload;
 select an available MachineNote instead. Queued legacy uploads can be cancelled
 without touching source files or remote objects. The selected MachineNote is
 shared by the upload tree and library, and queued jobs retain their own frozen
-MachineNote context.
+MachineNote context, including the chosen library folder for each source.
+
+The common **Select Apps, Files or Folders** picker accepts multiple complete
+application bundles, arbitrary files and folders together. Picker selections,
+Finder drops and clipboard file URLs go directly into the selection; **Upload**
+starts the batch without an intermediate add-to-tree action. The optional local
+browser selects items with checkboxes. Offload remains off by default.
+
+The storage browser is a native macOS outline with multiple selection, nested
+library folders, drag/drop move, Option-drag copy, contextual menus, and
+Command-C/X/V, Return-to-rename and Delete shortcuts. Folder creation, rename,
+move, copy and deletion use authenticated, atomic, revision-checked Receiver
+operations. Sibling collisions and folder cycles are rejected; stale views
+refresh rather than overwriting concurrent changes. Copies preserve immutable
+archive identity and encryption associated data. Operations stay inside one
+MachineNote. A complete uploaded folder remains a folder backup; library folders
+organize those backups. Deleting library entries retains shared encrypted
+archive objects and does not reclaim their storage quota.
+
+Upload progress is persisted by the worker and refreshed while its child runs.
+It reports a monotonic 0–100 work estimate, actual encoded network byte/object
+counts, current preparation/encoding/transfer/readback/verification activity,
+and observed ETA estimates when enough progress has been measured. Background
+and Show/Hide progress controls change presentation; the upload continues while
+the app stays open. The tier comparison estimates the network time saved versus
+serial requests from observed request durations; it excludes encoding and
+verification and is not a guarantee of speed or a billing entitlement source.
 
 Users can list only their own MachineNotes. The verified service owner can list
 all account and library metadata through a separately authorized server API;

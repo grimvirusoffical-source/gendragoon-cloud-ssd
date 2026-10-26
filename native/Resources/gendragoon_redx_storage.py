@@ -6,12 +6,16 @@ File/folder/app archives use bounded visual red-X barcode chunks encrypted by
 the pinned Red-SecretsXAI C++ core. Previously stored compact PNG objects remain
 readable. The image carrier transports ciphertext; AEAD authenticates it.
 """
+import os
+import sys
+sys.dont_write_bytecode = True
+os.environ["PYTHONDONTWRITEBYTECODE"] = "1"
+
 import hashlib
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from functools import lru_cache
 import json
-import os
 from pathlib import Path
 import re
 import ssl
@@ -22,8 +26,7 @@ import time
 import urllib.error
 import urllib.request
 import zlib
-
-os.environ["PYTHONDONTWRITEBYTECODE"] = "1"
+import gendragoon_progress as progress
 
 RESOURCE = Path(__file__).resolve().parent
 DEV_VENDOR = RESOURCE.parent / "vendor" / "Red-SecretsXAI"
@@ -82,6 +85,22 @@ class RedXStorageError(RuntimeError):
 class NoRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, request, fp, code, message, headers, url):
         raise RedXStorageError("Red-XAI Receiver redirects are not permitted")
+
+
+class _ProgressBody:
+    """A repeatable HTTP body; count a block after the socket write returns.
+
+    Content-Length remains explicit, so urllib does not switch to chunked HTTP.
+    A fresh iterator on each 429 retry preserves exactly the original bytes.
+    """
+    def __init__(self, data):
+        self.data = data
+
+    def __iter__(self):
+        for offset in range(0, len(self.data), 64 * 1024):
+            part = self.data[offset:offset + 64 * 1024]
+            yield part
+            progress.network_bytes("upload", len(part))
 
 
 @lru_cache(maxsize=1)
@@ -164,22 +183,39 @@ class RedXReceiver:
         }
         if headers:
             request_headers.update(headers)
-        request = urllib.request.Request(self._url(route), data=data, method=method, headers=request_headers)
+        tracked = progress.enabled() and "/blobs/" in route and method in ("GET", "PUT")
+        body = _ProgressBody(data) if tracked and method == "PUT" and isinstance(data, bytes) else data
+        request = urllib.request.Request(self._url(route), data=body, method=method, headers=request_headers)
         for attempt in range(6):
+            network_token = progress.network_begin() if tracked else None
             try:
                 with self.opener.open(request, timeout=90) as response:
                     if response.status not in expected:
                         raise RedXStorageError("Receiver rejected the operation (HTTP %d)" % response.status,
                                                response.status)
-                    body = response.read(limit + 1)
-                    if len(body) > limit:
+                    if tracked and method == "GET":
+                        parts, received = [], 0
+                        while received <= limit:
+                            part = response.read(min(64 * 1024, limit + 1 - received))
+                            if not part:
+                                break
+                            parts.append(part)
+                            received += len(part)
+                            progress.network_bytes("download", len(part))
+                        raw = b"".join(parts)
+                    else:
+                        raw = response.read(limit + 1)
+                    if len(raw) > limit:
                         raise RedXStorageError("Receiver response exceeded its safety limit")
-                    return response.status, dict(response.headers), body
+                    return response.status, dict(response.headers), raw
             except urllib.error.HTTPError as error:
                 code = int(error.code)
                 retry_after = error.headers.get("Retry-After") if error.headers else None
                 error.close()
                 if code == 429 and attempt < 5:
+                    if network_token is not None:
+                        progress.network_end(network_token)
+                        network_token = None
                     try:
                         delay = float(retry_after) if retry_after is not None else .2 * 2 ** attempt
                     except (TypeError, ValueError):
@@ -193,6 +229,9 @@ class RedXReceiver:
                 raise RedXStorageError(messages.get(code, "Receiver rejected the operation (HTTP %d)" % code), code) from None
             except (urllib.error.URLError, TimeoutError, ssl.SSLError) as error:
                 raise RedXStorageError("Red-XAI Receiver is temporarily unreachable; retry resumes verified chunks") from error
+            finally:
+                if network_token is not None:
+                    progress.network_end(network_token)
 
     def json(self, route, method="GET", value=None, expected=(200,)):
         data = None if value is None else json.dumps(value, separators=(",", ":")).encode()
@@ -271,6 +310,35 @@ class RedXReceiver:
             raise RedXStorageError("Receiver library response was invalid")
         return items
 
+    def library_snapshot(self):
+        result = self.json("/v1/receivers/me/workspaces/%s/library" % self.workspace)
+        if (type(result.get("revision")) is not int or result["revision"] < 0
+                or not isinstance(result.get("items"), list)):
+            raise RedXStorageError("Receiver library snapshot is invalid")
+        _validate_library_items(result["items"])
+        if any(item["workspace"] != self.workspace for item in result["items"]):
+            raise RedXStorageError("Receiver library snapshot belongs to another MachineNote")
+        return result
+
+    def organize(self, operation, keys, parent_key=None, name=None, expected_revision=None):
+        self.verified_workers(write=True)
+        value = {"workspace": self.workspace, "operation": operation, "keys": keys,
+                 "parentKey": parent_key, "expectedRevision": expected_revision}
+        if name is not None:
+            value["name"] = name
+        try:
+            result = self.json("/v1/receivers/me/library/operations", "POST", value)
+            if type(result.get("revision")) is not int or not isinstance(result.get("items"), list):
+                raise RedXStorageError("Receiver library operation response is invalid")
+            _validate_library_items(result["items"])
+            if any(item["workspace"] != self.workspace for item in result["items"]):
+                raise RedXStorageError("Receiver library operation belongs to another MachineNote")
+            return result
+        except RedXStorageError as error:
+            if error.status == 409:
+                raise RedXStorageError("Library changed or the destination has a conflicting item. Refresh the folder and try again.", 409) from None
+            raise
+
     def register(self, key, item):
         if not KEY.fullmatch(key):
             raise RedXStorageError("Invalid library key")
@@ -317,6 +385,7 @@ class Codec:
         plain = bytes(plain)
         if not plain or len(plain) > CHUNK:
             raise RedXStorageError("Encrypted visual cloud chunk exceeds 64 KiB")
+        progress.activity("encoding", during=("encoding", "uploading"))
         with tempfile.TemporaryDirectory(prefix="gd-rsx-") as td:
             source = Path(td) / "plain"
             encrypted = Path(td) / "sealed"
@@ -356,7 +425,7 @@ class Codec:
             return output.read_bytes()
 
 
-def _put_plain(client, codec, object_id_value, plain):
+def _put_plain(client, codec, object_id_value, plain, on_encoded=None):
     # Encryption has random nonces. Re-encrypting an interrupted deterministic
     # object id would conflict with the immutable stored carrier, so authenticate
     # and compare any committed chunk before deciding to reuse it.
@@ -373,6 +442,9 @@ def _put_plain(client, codec, object_id_value, plain):
         if error.status != 404:
             raise
     png = codec.seal(plain, object_id_value)
+    if on_encoded is not None:
+        on_encoded(len(plain))
+    progress.activity("uploading", during=("encoding", "uploading"))
     try:
         record = client.put_png(object_id_value, png)
     except RedXStorageError as error:
@@ -390,6 +462,7 @@ def _get_plain(client, codec, record):
     png = client.get_png(object_id_value)
     if record.get("carrierSha256") and sha256_bytes(png) != record["carrierSha256"]:
         raise RedXStorageError("Encrypted carrier changed")
+    progress.activity("decoding", during=("readback", "decoding"))
     plain = codec.open(png, object_id_value)
     if record.get("plainBytes") != len(plain) or record.get("plainSha256") != sha256_bytes(plain):
         raise RedXStorageError("Decrypted chunk failed manifest integrity")
@@ -487,11 +560,16 @@ def _load_pages(client, codec, pages, _depth=0, _seen=None):
     return out
 
 
-def upload_archive(config, archive, key, name, kind, archive_layout, archive_sha, source_manifest):
+def upload_archive(config, archive, key, name, kind, archive_layout, archive_sha, source_manifest, parent_key=None):
     client = RedXReceiver(config)
     workers = client.verified_workers(write=True)
     archive = Path(archive)
-    if not archive.is_file() or archive.is_symlink() or sha256_file(archive) != archive_sha:
+    if not archive.is_file() or archive.is_symlink():
+        raise RedXStorageError("Prepared archive changed before encrypted upload")
+    archive_bytes = archive.stat().st_size
+    progress.phase("uploading", total_bytes=archive_bytes * 2, workers=workers,
+                   objects_done=0, objects_total=(archive_bytes + CHUNK - 1) // CHUNK)
+    if sha256_file(archive) != archive_sha:
         raise RedXStorageError("Prepared archive changed before encrypted upload")
     chunks = []
     with Codec(client) as codec, archive.open("rb") as stream:
@@ -501,7 +579,16 @@ def upload_archive(config, archive, key, name, kind, archive_layout, archive_sha
         def upload(codec, value):
             index, plain = value
             oid = object_id(VISUAL_PROFILE + "-archive-chunk", archive_sha, index)
-            record = _put_plain(codec.client, codec, oid, plain)
+            encoded = False
+            def encoded_part(count):
+                nonlocal encoded
+                encoded = True
+                progress.advance(count, encoded_bytes=count)
+            record = _put_plain(codec.client, codec, oid, plain, on_encoded=encoded_part)
+            if not encoded:
+                # A verified immutable chunk reuses completed encoding work.
+                progress.advance(len(plain))
+            progress.advance(len(plain), objects_done=1)
             record["index"] = index
             return record
         allowance = min(workers, max(1, (archive.stat().st_size + CHUNK - 1) // CHUNK))
@@ -510,6 +597,7 @@ def upload_archive(config, archive, key, name, kind, archive_layout, archive_sha
         if not chunks:
             raise RedXStorageError("Refusing to upload an empty archive")
 
+        progress.update(phase="publishing")
         chunk_pages = _json_pages(client, codec, VISUAL_PROFILE + "-archive-page", archive_sha, chunks)
 
         metadata_raw = json.dumps(source_manifest, separators=(",", ":"), ensure_ascii=False).encode()
@@ -554,6 +642,7 @@ def upload_archive(config, archive, key, name, kind, archive_layout, archive_sha
             "manifestId": manifest_id,
             "archiveBytes": archive.stat().st_size,
             "archiveSha256": archive_sha,
+            "parentKey": parent_key,
         })
         if registered.get("manifestId") != manifest_id or registered.get("name") != name:
             raise RedXStorageError("Receiver library registration mismatch")
@@ -584,6 +673,9 @@ def _root_for_item(client, codec, item):
 def download_archive(config, item, destination):
     client = RedXReceiver(config)
     workers = client.verified_workers()
+    expected_bytes = item.get("archiveBytes")
+    progress.phase("readback", total_bytes=expected_bytes if type(expected_bytes) is int and expected_bytes > 0 else 0,
+                   workers=workers, objects_done=0, objects_total=0)
     destination = Path(destination)
     if destination.exists() or destination.is_symlink():
         raise RedXStorageError("Restore target already exists")
@@ -595,6 +687,7 @@ def download_archive(config, item, destination):
             raise RedXStorageError("Encrypted archive chunk count mismatch")
         if any(not isinstance(record, dict) or record.get("index") != index for index, record in enumerate(chunks)):
             raise RedXStorageError("Encrypted archive chunk order is invalid")
+        progress.update(objects_total=len(chunks))
         hasher = hashlib.sha256()
         total = 0
         temp = destination.with_name("." + destination.name + ".partial")
@@ -606,6 +699,7 @@ def download_archive(config, item, destination):
                     output.write(plain)
                     hasher.update(plain)
                     total += len(plain)
+                    progress.advance(len(plain), objects_done=1)
                 output.flush()
                 os.fsync(output.fileno())
             if total != root["archiveBytes"] or hasher.hexdigest() != root["archiveSha256"]:
@@ -635,19 +729,30 @@ def download_archive(config, item, destination):
         return {"root": root, "manifest": manifest, "archive": str(destination)}
 
 
-def list_items(config):
-    client = RedXReceiver(config)
+def _validate_library_items(values):
     items = []
-    for value in client.library():
+    seen = set()
+    for value in values:
         if (not isinstance(value, dict) or not KEY.fullmatch(str(value.get("key") or ""))
                 or value.get("kind") not in ("app", "folder", "file")
                 or not isinstance(value.get("name"), str)
+                or value.get("parentKey") is not None and not KEY.fullmatch(str(value["parentKey"]))
+                or value.get("archiveKey") is not None and not KEY.fullmatch(str(value["archiveKey"]))
                 or not ID.fullmatch(str(value.get("workspace") or ""))
-                or not ID.fullmatch(str(value.get("manifestId") or ""))
-                or not SHA.fullmatch(str(value.get("archiveSha256") or ""))):
+                or (value.get("virtualFolder") is True and value.get("kind") != "folder")
+                or (value.get("virtualFolder") is not True and
+                    (not ID.fullmatch(str(value.get("manifestId") or ""))
+                     or not SHA.fullmatch(str(value.get("archiveSha256") or ""))))):
             raise RedXStorageError("Receiver library contains invalid metadata")
+        if value["key"] in seen:
+            raise RedXStorageError("Receiver library repeats an item")
+        seen.add(value["key"])
         items.append(value)
     return items
+
+
+def list_items(config):
+    return _validate_library_items(RedXReceiver(config).library())
 
 
 def find_item(config, key):

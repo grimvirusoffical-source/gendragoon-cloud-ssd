@@ -473,7 +473,14 @@ struct StoredApp: Decodable, Identifiable {
     let folder: String
     let kind: String?
     let format: String?
+    let displayName: String?
+    let parentKey: String?
+    let virtualFolder: Bool?
+    let archiveKey: String?
     var id: String { key }
+    var label: String { displayName ?? name }
+    var isFolder: Bool { kind == "folder" }
+    var isVirtualFolder: Bool { virtualFolder == true }
 }
 struct GDManagedAppSession: Identifiable {
     let key: String
@@ -499,6 +506,7 @@ struct GDManagedAppSession: Identifiable {
     @Published var folder: String = "" { didSet { if projectID == nil && oldValue != folder { apps = [] } } }
     @Published var remotes: [String] = []
     @Published var apps: [StoredApp] = []
+    @Published private(set) var libraryRevision: Int?
     @Published var message = "Choose a verified cloud destination to load its library."
     @Published var busy = false { didSet { GDUpdateActivity.shared.set(self, key: "library", active: busy) } }
     @Published var offloadOriginal = false
@@ -516,6 +524,12 @@ struct GDManagedAppSession: Identifiable {
     }
     deinit { monitor?.cancel() }
     var hasDestination: Bool { projectID != nil && bucket != nil && !remote.isEmpty }
+    var destinationIdentity: String { (projectID ?? "") + "/" + (bucket ?? "") + "/" + remote }
+    var canOrganize: Bool {
+        remote == "redxai" && libraryRevision != nil && GDRedXAIAuthSession.shared.uploadProjects.contains { project in
+            project.id == projectID && project.buckets.contains { $0.id == bucket }
+        }
+    }
     private var context: [String] {
         var values = ["--remote", remote]
         if let projectID, let bucket { values += ["--project", projectID, "--bucket", bucket] }
@@ -526,25 +540,25 @@ struct GDManagedAppSession: Identifiable {
         let changed = projectID != destination.project || bucket != destination.bucket || remote != destination.remote
         projectID = destination.project; bucket = destination.bucket; remote = destination.remote
         folder = destination.bucket + (destination.prefix.isEmpty ? "" : "/" + destination.prefix)
-        if changed { apps = [] }
+        if changed { apps = []; libraryRevision = nil }
     }
     func clearDestination() {
-        projectID = nil; bucket = nil; remote = ""; folder = ""; apps = []
+        projectID = nil; bucket = nil; remote = ""; folder = ""; apps = []; libraryRevision = nil
         message = "Choose an available MachineNote to load your encrypted library."
     }
     func session(for key: String) -> GDManagedAppSession? {
         sessions.first { $0.key == key && $0.active } ?? sessions.last { $0.key == key }
     }
-    private func invoke(_ args: [String], helper: String = "gendragoon_library", then: @escaping (Bool, [String: Any]) -> Void = { _, _ in }) {
+    private func invoke(_ args: [String], helper: String = "gendragoon_library", publishMessage: Bool = true, then: @escaping (Bool, [String: Any]) -> Void = { _, _ in }) {
         guard !busy, GDUpdateActivity.shared.canStart(excluding: self) else { return }
         busy = true
         Task {
             do {
                 let action = args.first ?? ""
                 let input: Data?
-                if remote == "redxai", ["list", "upload", "restore", "launch"].contains(action) {
+                if remote == "redxai", ["list", "upload", "restore", "launch", "organize"].contains(action) {
                     guard let bucket else { throw GDTransferError(message: "Choose a Red-XAI workspace first.", status: 400) }
-                    input = try await GDRedXAIAuthSession.shared.privateWorkerInput(workspaceID: bucket, constrained: false, requireWrite: action == "upload")
+                    input = try await GDRedXAIAuthSession.shared.privateWorkerInput(workspaceID: bucket, constrained: false, requireWrite: ["upload", "organize"].contains(action))
                 } else if ["upload", "restore", "launch"].contains(action) {
                     input = await GDNativePerformance.shared.helperInput()
                 } else {
@@ -552,14 +566,20 @@ struct GDManagedAppSession: Identifiable {
                 }
                 let result = try await GDNativeHelper.invoke(helper,
                     arguments: args + (input == nil ? [] : ["--performance-stdin"]), standardInput: input)
-                if let detail = result["message"] as? String { message = GDNativeMessage.safe(detail) }
+                if !publishMessage { /* Preserve the operation result during a snapshot refresh. */ }
+                else if let detail = result["message"] as? String { message = GDNativeMessage.safe(detail) }
                 else if helper == "gendragoon_app_launch", args.first == "launch" {
                     message = result["mode"] as? String == "streamed" ? "Application launched with optimized cloud preloading." : "Application launched from its verified managed local cache."
                 } else if args.first == "evict" { message = "Managed local cache removed; the cloud copy remains available." }
                 else { message = "Operation completed." }
                 busy = false
                 then(true, result)
-            } catch { busy = false; message = GDNativeMessage.safe(error.localizedDescription); then(false, [:]) }
+            } catch {
+                busy = false
+                let detail = GDNativeMessage.safe(error.localizedDescription)
+                message = publishMessage ? detail : GDNativeMessage.safe(message + " Refresh also needs attention: " + detail)
+                then(false, [:])
+            }
         }
     }
     func refresh() {
@@ -575,14 +595,38 @@ struct GDManagedAppSession: Identifiable {
             if !self.remote.isEmpty { self.loadApps() }
         }
     }
-    func loadApps() {
+    func loadApps(preservingMessage: Bool = false) {
         guard !remote.isEmpty else { return }
         let expected = context
-        invoke(["list"] + expected) { [weak self] ok, value in
+        invoke(["list"] + expected, publishMessage: !preservingMessage) { [weak self] ok, value in
             guard let self, ok, self.context == expected, let raw = value["items"],
                   let data = try? JSONSerialization.data(withJSONObject: raw),
                   let items = try? JSONDecoder().decode([StoredApp].self, from: data) else { return }
             self.apps = items
+            self.libraryRevision = (value["revision"] as? NSNumber)?.intValue
+        }
+    }
+    func organize(_ operation: String, keys: [String] = [], parentKey: String? = nil, name: String? = nil,
+                  then: @escaping (Bool) -> Void = { _ in }) {
+        guard canOrganize, let revision = libraryRevision else {
+            message = "Refresh an active MachineNote before changing its library."; then(false); return
+        }
+        guard let encoded = try? JSONSerialization.data(withJSONObject: keys),
+              let keysJSON = String(data: encoded, encoding: .utf8) else { return }
+        var args = ["organize", "--operation", operation, "--keys-json", keysJSON,
+                    "--expected-revision", String(revision)] + context
+        if let parentKey { args += ["--parent-key", parentKey] }
+        if let name { args += ["--name", name] }
+        let expected = context
+        invoke(args) { [weak self] ok, result in
+            guard let self, self.context == expected else { then(false); return }
+            if ok, let raw = result["items"], let data = try? JSONSerialization.data(withJSONObject: raw),
+               let items = try? JSONDecoder().decode([StoredApp].self, from: data) {
+                self.apps = items
+                self.libraryRevision = (result["revision"] as? NSNumber)?.intValue
+            }
+            then(ok)
+            if !ok { self.loadApps(preservingMessage: true) }
         }
     }
     func chooseApp() {
@@ -653,6 +697,32 @@ struct GDManagedAppSession: Identifiable {
     }
     func preload(_ app: StoredApp) { smartLaunch(app) }
     func restore(_ app: StoredApp) { invoke(["restore", "--key", app.key] + context) }
+    func performOnItems(_ action: String, items: [StoredApp]) {
+        guard ["restore", "evict"].contains(action), !items.isEmpty,
+              !busy, GDUpdateActivity.shared.canStart(excluding: self) else { return }
+        let expected = context, selectedRemote = remote, selectedBucket = bucket, managed = hasDestination
+        busy = true
+        Task {
+            var completed = 0, failed: [String] = []
+            for item in items {
+                guard context == expected else { break }
+                message = "\(action == "restore" ? "Downloading" : "Clearing local cache for") \(item.label) · \(completed + failed.count + 1) of \(items.count)…"
+                do {
+                    let input: Data?
+                    if action == "restore", selectedRemote == "redxai", let selectedBucket {
+                        input = try await GDRedXAIAuthSession.shared.privateWorkerInput(workspaceID: selectedBucket, constrained: false, requireWrite: false)
+                    } else { input = nil }
+                    guard context == expected else { break }
+                    let helper = action == "evict" && item.kind == "app" && managed ? "gendragoon_app_launch" : "gendragoon_library"
+                    _ = try await GDNativeHelper.invoke(helper, arguments: [action, "--key", item.key] + expected + (input == nil ? [] : ["--performance-stdin"]), standardInput: input)
+                    completed += 1
+                } catch { failed.append(item.label + ": " + GDNativeMessage.safe(error.localizedDescription)) }
+            }
+            busy = false
+            guard context == expected else { return }
+            message = "\(completed) of \(items.count) items completed." + (failed.isEmpty ? "" : " " + failed.prefix(3).joined(separator: " · "))
+        }
+    }
     func evict(_ app: StoredApp) {
         let helper = hasDestination && app.kind == "app" ? "gendragoon_app_launch" : "gendragoon_library"
         invoke(["evict", "--key", app.key] + context, helper: helper)

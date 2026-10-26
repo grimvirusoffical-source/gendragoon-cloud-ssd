@@ -104,7 +104,11 @@ def read(identifier):
     if entry.get("name") != data["name"] or entry.get("kind", "app") != "app":
         raise ValueError("Launch receipt no longer matches the cloud application")
     session_root = lib.safe_path(ROOT / identifier, directory=True)
-    expected = (lib.CACHE / data["key"] / data["name"] if data["mode"] == "managed-local"
+    cache_name = data.get("cacheName", data["name"])
+    lib.check_name(cache_name)
+    if not cache_name.lower().endswith(".app"):
+        raise ValueError("Invalid application cache name")
+    expected = (lib.CACHE / data["key"] / cache_name if data["mode"] == "managed-local"
                 else session_root / "mount" / data["name"])
     if data.get("cachePath") != str(expected):
         raise ValueError("Unsafe launch cache path")
@@ -402,7 +406,7 @@ def launch(key, project, bucket, remote, keep_cache=False):
     if sys.platform != "darwin":
         raise RuntimeError("macOS application launching requires macOS")
     if not project or not bucket:
-        raise ValueError("Choose and verify the Google Cloud project and bucket")
+        raise ValueError("Choose and verify the MachineNote destination")
     private_root()
     data = lib.selected_entry(key, project, bucket, remote)
     if data.get("kind", "app") != "app":
@@ -417,12 +421,16 @@ def launch(key, project, bucket, remote, keep_cache=False):
         raise RuntimeError("Another cloud application is still running or cleaning up. "
                            "Quit it and wait for its helpers before launching the next app. "
                            "No application was stopped and no cache was deleted.")
-    record = {"id": uuid.uuid4().hex, "key": key, "name": data["name"], "project": project,
+    cache_name = data.get("displayName") or data.get("cacheName") or data["name"]
+    lib.check_name(cache_name)
+    if not cache_name.lower().endswith(".app"):
+        raise ValueError("Application names must retain the .app extension before launching")
+    record = {"id": uuid.uuid4().hex, "key": key, "name": data["name"], "cacheName": cache_name, "project": project,
               "bucket": bucket, "remote": remote, "state": "preparing", "mode": "managed-local",
               "keepCache": bool(keep_cache), "createdAt": time.time(),
               "launcherPid": os.getpid(), "launcherIdentity": process_identity(os.getpid()),
               "performance": lib.performance.current(),
-              "cachePath": str(lib.CACHE / key / data["name"])}
+              "cachePath": str(lib.CACHE / key / cache_name)}
     if not record["launcherIdentity"]:
         raise RuntimeError("Launch process identity could not be verified")
     save(record)
@@ -430,11 +438,25 @@ def launch(key, project, bucket, remote, keep_cache=False):
     try:
         path = prepare_stream(data, record)
         if path is None:
-            record["cachePreflight"] = local_cache_preflight(data, Path(record["cachePath"]))
+            preflight_path = Path(record["cachePath"])
+            previous_name = data.get("cacheName") or data["name"]
+            lib.check_name(previous_name)
+            previous_path = lib.CACHE / key / previous_name
+            if not preflight_path.exists() and previous_path.exists():
+                preflight_path = previous_path
+            record["cachePreflight"] = local_cache_preflight(data, preflight_path)
             save(record)
             with contextlib.redirect_stdout(io.StringIO()):
-                lib.stage_item(key, False, project, bucket, remote)
-            path = Path(record["cachePath"])
+                staged = lib.stage_item(key, False, project, bucket, remote)
+            if not isinstance(staged, (str, Path)):
+                raise RuntimeError("Application staging did not return its verified cache path")
+            path = Path(staged)
+            if not path.is_absolute() or path.parent != lib.CACHE / key:
+                raise ValueError("Application staging returned an unsafe cache path")
+            lib.check_name(path.name)
+            lib.safe_path(path.parent, directory=True)
+            record.update(cachePath=str(path), cacheName=path.name)
+            save(record)
             compatible(path)
         try:
             result = lib.run([sys.executable, "-B", RESOURCE / "gendragoon_preload.py", "--app", path,
@@ -460,7 +482,7 @@ def launch(key, project, bucket, remote, keep_cache=False):
         pending = current["state"] == "launching"
         # A slow Launch Services request remains owned by the live watcher.
         # Never rewrite its receipt or unmount its application from this parent.
-        return {"key": key, "name": data["name"], "mode": current["mode"], "cachePath": current["cachePath"],
+        return {"key": key, "name": data.get("displayName") or data["name"], "mode": current["mode"], "cachePath": current["cachePath"],
                 "pid": current.get("pid", process.pid), "cleanup": "keep" if keep_cache else "on-exit",
                 "state": current["state"],
                 "message": ("Launch requested. macOS is still opening the application; inspect its session status."
@@ -550,7 +572,7 @@ def watch(identifier):
 
 def evict(key, project, bucket, remote):
     if not project or not bucket:
-        raise ValueError("Choose and verify the Google Cloud project and bucket")
+        raise ValueError("Choose and verify the MachineNote destination")
     entry = lib.selected_entry(key, project, bucket, remote)
     for data in sessions(project, bucket, remote)["sessions"]:
         if data["key"] != key:
@@ -562,7 +584,9 @@ def evict(key, project, bucket, remote):
         cleanup(record)
         record["state"] = "exited-cleaned"
         save(record)
-    local_path = lib.CACHE / key / entry["name"]
+    cache_name = entry.get("cacheName") or entry.get("displayName") or entry["name"]
+    lib.check_name(cache_name)
+    local_path = lib.CACHE / key / cache_name
     if local_path.exists() and cache_users(local_path):
         raise RuntimeError("Application resources are still open; managed cache retained")
     with contextlib.redirect_stdout(io.StringIO()):

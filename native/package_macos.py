@@ -19,7 +19,7 @@ ROOT=Path(__file__).resolve().parent
 
 REQUIRED_RESOURCES=("gendragoon_update_restart.py", "gendragoon_auto_update.py",
     "gendragoon_app_control.py", "gendragoon_app_launch.py", "gendragoon_library.py",
-    "gendragoon_upload_workspace.py", "gendragoon_performance.py", "gendragoon_redx_storage.py",
+    "gendragoon_upload_workspace.py", "gendragoon_performance.py", "gendragoon_redx_storage.py", "gendragoon_progress.py",
     "gendragoon_performance_profiles.json", "gendragoon_project_files.py")
 RED_SECRETS_RESOURCES=("redxai/__init__.py","redxai/_librsx.py","redxai/_native/librsx.dylib",
     "redsecretsxai/__init__.py","redsecretsxai/storage_image.py","Red-SecretsXAI-LICENSE.txt",

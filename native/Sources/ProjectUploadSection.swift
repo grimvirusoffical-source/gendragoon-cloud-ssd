@@ -40,6 +40,8 @@ struct ProjectUploadSection: View {
     private let onRefreshCloudChoices: @MainActor () async -> Void
     private let content: GDProjectContent?
     @ObservedObject private var workspace: UploadWorkspaceModel
+    @State private var showLocalBrowser = false
+    @State private var dropTarget = false
 
     init(workspace: UploadWorkspaceModel, externalBusy: Bool, content: GDProjectContent? = nil,
          onRefreshCloudChoices: @escaping @MainActor () async -> Void) {
@@ -53,7 +55,7 @@ struct ProjectUploadSection: View {
         VStack(alignment: .leading, spacing: 18) {
             destinationPicker
             sourcePicker
-            sourceTree
+            DisclosureGroup("Browse local folders", isExpanded: $showLocalBrowser) { sourceTree }
             uploadQueue
         }
         .task {
@@ -107,22 +109,21 @@ struct ProjectUploadSection: View {
     }
 
     private var sourcePicker: some View {
-        GroupBox(content == .applications ? "Select applications" : content == .files ? "Select files and complete folders" : "Applications, files, and folders") {
+        GroupBox("Select items, then Upload") {
             VStack(alignment: .leading, spacing: 10) {
                 HStack {
-                    if content != .files { Button("Add Applications…", systemImage: "app.badge") {
-                        workspace.chooseSources(startingAt: URL(fileURLWithPath: "/Applications", isDirectory: true),
-                                                externalBusy: externalBusy, content: .applications)
+                    Button("Select Apps, Files or Folders…", systemImage: "folder.badge.plus") {
+                        workspace.chooseSources(startingAt: content == .applications ? URL(fileURLWithPath: "/Applications", isDirectory: true) : nil,
+                                                externalBusy: externalBusy)
                     }.buttonStyle(.borderedProminent)
-                    Button("My Applications…") {
-                        workspace.chooseSources(startingAt: FileManager.default.homeDirectoryForCurrentUser
-                            .appendingPathComponent("Applications", isDirectory: true), externalBusy: externalBusy, content: .applications)
-                    } }
-                    if content != .applications { Button("Add Files or Folders…", systemImage: "plus") {
-                        workspace.chooseSources(startingAt: nil, externalBusy: externalBusy, content: .files)
-                    }.buttonStyle(.borderedProminent) }
+                    Button("Paste", systemImage: "doc.on.clipboard") { workspace.pasteSources(externalBusy: externalBusy) }
+                    if workspace.snapshot?.sources.isEmpty == false {
+                        Button("Clear selection") { workspace.clearSelection(externalBusy: externalBusy) }
+                    }
                 }.disabled(workspace.controlsLocked(externalBusy: externalBusy))
-                Text(content == .applications ? "Applications are selected as complete bundles. The managed library verifies the archive before launch or offload." : "Select any file type or a complete folder. Nested files, empty folders and Mac metadata are preserved.")
+                Text("Select multiple items together, drop them here, or paste files copied in Finder. Applications stay complete; folders include all nested contents and Mac metadata.")
+                    .font(.caption).foregroundStyle(.secondary)
+                Label("New selections: " + workspace.uploadTargetName, systemImage: "folder")
                     .font(.caption).foregroundStyle(.secondary)
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 8) {
@@ -133,6 +134,9 @@ struct ProjectUploadSection: View {
                                     Text(source.name)
                                     Text(source.path).font(.caption).foregroundStyle(.secondary)
                                         .lineLimit(1).truncationMode(.middle)
+                                    if source.parentKey != nil {
+                                        Text(workspace.parentLabel(for: source)).font(.caption2).foregroundStyle(.secondary)
+                                    }
                                 }
                                 Spacer()
                                 Button("Remove") { workspace.remove(sourceID: source.id, externalBusy: externalBusy) }
@@ -146,18 +150,24 @@ struct ProjectUploadSection: View {
                 }
             }.frame(maxWidth: .infinity, alignment: .leading)
         }
+        .overlay(RoundedRectangle(cornerRadius: 8).stroke(dropTarget ? Color.accentColor : .clear, lineWidth: 2))
+        .dropDestination(for: URL.self) { urls, _ in
+            guard !workspace.controlsLocked(externalBusy: externalBusy) else { return false }
+            workspace.addDroppedURLs(urls, content: nil, externalBusy: externalBusy, parentKey: workspace.uploadTargetParentKey)
+            return true
+        } isTargeted: { dropTarget = $0 }
     }
 
     private var sourceTree: some View {
-        GroupBox("Upload tree") {
+        GroupBox("Local files") {
             VStack(alignment: .leading, spacing: 8) {
                 HStack {
                     Button("Selected items") { Task { await workspace.browse(path: nil) } }
-                    if content != .files { ForEach(workspace.quickEntries) { entry in
+                    ForEach(workspace.quickEntries) { entry in
                         Button(entry.path == "/Applications" ? "Applications" : "My Applications") {
                             Task { await workspace.browse(path: entry.path) }
                         }
-                    } }
+                    }
                     if let path = workspace.tree?.path {
                         Button("Parent folder", systemImage: "arrow.up") {
                             Task { await workspace.browse(path: URL(fileURLWithPath: path).deletingLastPathComponent().path) }
@@ -170,10 +180,14 @@ struct ProjectUploadSection: View {
                     if tree.atomic { Label("Application bundle — uploaded as one item", systemImage: "app") }
                     ScrollView {
                         LazyVStack(alignment: .leading, spacing: 8) {
-                            ForEach(tree.children.filter { content == .files ? $0.kind != "app" : content == .applications ? $0.kind != "file" : true }) { node in
+                            ForEach(tree.children) { node in
                                 HStack {
-                                    Image(systemName: uploadIcon(node.kind))
-                                    Text(node.name)
+                                    Toggle(isOn: Binding(get: { workspace.includes(path: node.path) },
+                                                         set: { _ in workspace.toggleTreeNode(node, externalBusy: externalBusy) })) {
+                                        Label(node.name, systemImage: uploadIcon(node.kind))
+                                    }.toggleStyle(.checkbox)
+                                        .disabled(!node.selectable || node.symlink || workspace.controlsLocked(externalBusy: externalBusy)
+                                                  || (workspace.includes(path: node.path) && workspace.selectedSource(path: node.path) == nil))
                                     if node.kind == "app" { Text("Application").font(.caption).foregroundStyle(.secondary) }
                                     if node.symlink { Text("Link").font(.caption).foregroundStyle(.secondary) }
                                     Spacer()
@@ -181,15 +195,12 @@ struct ProjectUploadSection: View {
                                         Button("Browse") { Task { await workspace.browse(path: node.path) } }
                                             .disabled(workspace.isTreeLoading)
                                     }
-                                    Button("Add") { workspace.addTreeNode(node, externalBusy: externalBusy) }
-                                        .disabled(!node.selectable || workspace.controlsLocked(externalBusy: externalBusy))
-                                        .disabled(content == .applications && node.kind != "app")
                                 }
                             }
                         }
                     }.frame(maxHeight: 280)
                     if tree.truncated {
-                        Text("This folder contains more items than the preview limit. Add the folder to include its complete contents.")
+                        Text("This folder contains more items than the preview limit. Select the complete folder in the picker to include everything.")
                             .font(.caption).foregroundStyle(.secondary)
                     }
                 } else if workspace.isTreeLoading { ProgressView("Loading folder…") }
@@ -215,9 +226,10 @@ struct ProjectUploadSection: View {
                 Text("Leave unchecked to keep originals on this computer. Verification failures keep originals in place.")
                     .font(.caption).foregroundStyle(.secondary)
                 HStack {
-                    Button("Upload selected items", systemImage: "icloud.and.arrow.up") {
+                    Button("Upload", systemImage: "icloud.and.arrow.up") {
+                        workspace.progressVisible = true
                         workspace.enqueueAndStart(externalBusy: externalBusy)
-                    }.disabled(workspace.controlsLocked(externalBusy: externalBusy)
+                    }.buttonStyle(.borderedProminent).disabled(workspace.controlsLocked(externalBusy: externalBusy)
                                || workspace.snapshot?.sources.isEmpty != false || !workspace.destinationAvailable)
                     if workspace.hasQueuedJobs {
                         Button("Start queued uploads") { workspace.startQueuedUploads(externalBusy: externalBusy) }
@@ -225,8 +237,13 @@ struct ProjectUploadSection: View {
                     }
                     if workspace.workerPending || workspace.hasRunningJob {
                         ProgressView().controlSize(.small)
-                        Text("Preparing or uploading…").font(.caption)
+                        Button(workspace.progressVisible ? "Upload in background" : "Show progress") { workspace.progressVisible.toggle() }
+                        if workspace.progressVisible { Button("Hide progress") { workspace.progressVisible = false } }
                     }
+                }
+                if !workspace.progressVisible && (workspace.workerPending || workspace.hasRunningJob) {
+                    Text("Uploading in the background. You can browse other views; keep GenDragoon open until verification finishes.")
+                        .font(.caption).foregroundStyle(.secondary)
                 }
                 ForEach(workspace.snapshot?.jobs ?? []) { job in
                     VStack(alignment: .leading, spacing: 5) {
@@ -242,8 +259,8 @@ struct ProjectUploadSection: View {
                                     .disabled(workspace.controlsLocked(externalBusy: externalBusy))
                             }
                         }
-                        if job.totalItems > 0 {
-                            ProgressView(value: Double(job.completedItems), total: Double(job.totalItems))
+                        if workspace.progressVisible || job.state != "running", job.totalItems > 0 {
+                            uploadProgress(job)
                         }
                         DisclosureGroup("\(job.sources.count) source items") {
                             let items = Dictionary(job.items.map { ($0.sourceID, $0) }, uniquingKeysWith: { _, newer in newer })
@@ -270,10 +287,70 @@ struct ProjectUploadSection: View {
                             .font(.caption).foregroundStyle(.secondary)
                     }.padding(.vertical, 6)
                 }
-                Text("Progress updates when each item finishes. Queued uploads can be cancelled before they start. Running uploads finish verification.")
+                Text("Progress updates while uploads run. Hiding progress keeps the worker running. Queued uploads can be cancelled before they start.")
                     .font(.caption).foregroundStyle(.secondary)
             }.frame(maxWidth: .infinity, alignment: .leading)
         }
+    }
+
+    @ViewBuilder private func uploadProgress(_ job: UploadJob) -> some View {
+        let rawFraction = job.state == "succeeded" ? 1 : job.progress?.fraction ?? Double(job.completedItems) / Double(max(1, job.totalItems))
+        let fraction = rawFraction.isFinite ? min(1, max(0, rawFraction)) : 0
+        let percent = Int((fraction * 100).rounded(.down))
+        GeometryReader { geometry in
+            ZStack {
+                Capsule().fill(Color.secondary.opacity(0.2))
+                HStack(spacing: 0) {
+                    Capsule().fill(Color.purple).frame(width: geometry.size.width * fraction)
+                    Spacer(minLength: 0)
+                }
+                Text("\(percent) / 100").font(.caption.monospacedDigit().bold()).foregroundStyle(.primary)
+            }
+            .animation(.linear(duration: 0.5), value: fraction)
+        }.frame(height: 26)
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel("Upload progress")
+            .accessibilityValue("\(percent) percent")
+        HStack {
+            Text("\(percent)% · \(percent) / 100")
+            Spacer()
+            if job.state == "running" {
+                if let eta = job.progress?.overallETASeconds, eta.isFinite, eta >= 0 {
+                    Text("Est. total remaining: \(duration(eta))")
+                } else if let eta = job.progress?.etaSeconds, eta.isFinite, eta >= 0 {
+                    Text("About \(duration(eta)) left in this phase")
+                } else { Text("Estimating ETA…") }
+            }
+        }.font(.caption).foregroundStyle(.secondary)
+        Text(job.state == "succeeded" ? "Complete" : job.progress?.phaseLabel ?? (job.state == "queued" ? "Waiting" : "Preparing"))
+            .font(.caption).foregroundStyle(.secondary)
+        if let progress = job.progress {
+            if let total = progress.totalBytes, total.isFinite, total > 0 {
+                Text("\(byteCount(progress.completedBytes ?? 0)) / \(byteCount(total)) in this phase")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            if let objects = progress.objectsDone, let total = progress.objectsTotal {
+                Text("\(objects) / \(total) barcode objects transferred").font(.caption).foregroundStyle(.secondary)
+            }
+            if let sent = progress.uploadedBytes, sent.isFinite, sent > 0 {
+                Text("Sent \(byteCount(sent))" + ((progress.downloadedBytes ?? 0) > 0 ? " · Received \(byteCount(progress.downloadedBytes ?? 0))" : ""))
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            if let saved = progress.savedNetworkSeconds, saved.isFinite, saved >= 1, (progress.workers ?? 1) > 1 {
+                Text("Estimated network time saved with \(progress.workers ?? 1) workers: \(duration(saved)). Encoding and verification time are excluded.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    private func duration(_ seconds: Double) -> String {
+        guard seconds.isFinite else { return "Estimating…" }
+        if seconds > 31_536_000 { return "over a year" }
+        let value = max(0, Int(min(31_536_000, seconds).rounded(.up)))
+        return value < 60 ? "\(value)s" : value < 3600 ? "\((value + 59) / 60) min" : "\(value / 3600)h \((value % 3600) / 60)m"
+    }
+    private func byteCount(_ value: Double) -> String {
+        ByteCountFormatter.string(fromByteCount: Int64(value.isFinite ? min(9_000_000_000_000_000_000, max(0, value)) : 0), countStyle: .file)
     }
 
     @ViewBuilder private var destinationBadge: some View {
@@ -306,6 +383,46 @@ struct UploadSource: Decodable, Identifiable, Sendable {
     let path: String
     let name: String
     let kind: String
+    let parentKey: String?
+    enum CodingKeys: String, CodingKey { case id, path, name, kind; case parentKey = "parent_key" }
+}
+struct UploadProgress: Decodable, Sendable {
+    let fraction: Double
+    let phase: String
+    let completedBytes: Double?
+    let totalBytes: Double?
+    let etaSeconds: Double?
+    let overallETASeconds: Double?
+    let workers: Int?
+    let savedNetworkSeconds: Double?
+    let objectsDone: Int?
+    let objectsTotal: Int?
+    let uploadedBytes: Double?
+    let downloadedBytes: Double?
+    var phaseLabel: String {
+        switch phase {
+        case "preparing": return "Preparing"
+        case "snapshot", "snapshotting": return "Checking files"
+        case "archiving": return "Creating archive"
+        case "encoding": return "Encoding barcodes"
+        case "uploading": return "Uploading"
+        case "publishing": return "Saving archive index"
+        case "readback", "downloading": return "Downloading verification copy"
+        case "decoding": return "Decoding verification copy"
+        case "restoring": return "Restoring verification copy"
+        case "verifying": return "Verifying"
+        case "offloading": return "Moving verified originals to Trash"
+        case "complete": return "Complete"
+        default: return "Preparing"
+        }
+    }
+    enum CodingKeys: String, CodingKey {
+        case fraction, phase, workers
+        case completedBytes = "completed_bytes", totalBytes = "total_bytes", etaSeconds = "eta_seconds"
+        case overallETASeconds = "overall_eta_seconds"
+        case savedNetworkSeconds = "saved_network_seconds", objectsDone = "objects_done", objectsTotal = "objects_total"
+        case uploadedBytes = "uploaded_bytes", downloadedBytes = "downloaded_bytes"
+    }
 }
 struct UploadJobItem: Decodable, Sendable {
     let sourceID: String
@@ -324,8 +441,9 @@ struct UploadJob: Decodable, Identifiable, Sendable {
     let completedItems: Int
     let totalItems: Int
     let error: String?
+    let progress: UploadProgress?
     enum CodingKeys: String, CodingKey {
-        case id, state, destination, sources, offload, items, error
+        case id, state, destination, sources, offload, items, error, progress
         case completedItems = "completed_items"
         case totalItems = "total_items"
     }
@@ -389,6 +507,9 @@ final class UploadWorkspaceModel: ObservableObject {
     @Published private(set) var pickerPending = false
     @Published private(set) var verifiedDestination: UploadDestination?
     @Published var offload = false
+    @Published var progressVisible = true
+    @Published private(set) var uploadTargetParentKey: String?
+    @Published private(set) var uploadTargetName = "MachineNote root"
     @Published var failure: UploadFailure?
     private var treeEpoch: UInt64 = 0
     private var refreshEpoch: UInt64 = 0
@@ -396,6 +517,7 @@ final class UploadWorkspaceModel: ObservableObject {
     private var reportedBusy = false
     private let onBusyStateChange: @MainActor (Bool) -> Void
     private let sourceAccess: UploadSourceAccess
+    private var targetNames: [String: String] = [:]
 
     init(projects: [UploadCloudProject], requiresSecurityScopedAccess: Bool,
          onBusyStateChange: @escaping @MainActor (Bool) -> Void) {
@@ -516,12 +638,42 @@ final class UploadWorkspaceModel: ObservableObject {
     func remove(sourceID: String, externalBusy: Bool) {
         mutate(["remove-source", "--id", sourceID], externalBusy: externalBusy)
     }
+    func clearSelection(externalBusy: Bool) { mutate(["clear-sources"], externalBusy: externalBusy) }
+    func setUploadTarget(parentKey: String?, displayName: String? = nil) {
+        guard parentKey == nil || parentKey?.range(of: #"^[a-f0-9]{18}$"#, options: .regularExpression) != nil else { return }
+        uploadTargetParentKey = parentKey
+        uploadTargetName = parentKey == nil ? "MachineNote root" : displayName ?? "Selected cloud folder"
+        if let parentKey { targetNames[parentKey] = uploadTargetName }
+    }
+    func parentLabel(for source: UploadSource) -> String {
+        guard let parentKey = source.parentKey else { return "MachineNote root" }
+        return targetNames[parentKey] ?? "Folder saved with this selection"
+    }
+    func selectedSource(path: String) -> UploadSource? {
+        let canonical = URL(fileURLWithPath: path).resolvingSymlinksInPath().standardizedFileURL.path
+        return snapshot?.sources.first { $0.path == canonical }
+    }
+    func includes(path: String) -> Bool {
+        let canonical = URL(fileURLWithPath: path).resolvingSymlinksInPath().standardizedFileURL.path
+        return snapshot?.sources.contains { source in
+            source.path == canonical || (source.kind == "folder" && canonical.hasPrefix(source.path + "/"))
+        } == true
+    }
+    func toggleTreeNode(_ node: UploadTreeNode, externalBusy: Bool) {
+        if let source = selectedSource(path: node.path) { remove(sourceID: source.id, externalBusy: externalBusy) }
+        else { addTreeNode(node, externalBusy: externalBusy) }
+    }
+    func pasteSources(externalBusy: Bool) {
+        let urls = NSPasteboard.general.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL] ?? []
+        guard !urls.isEmpty else { failure = UploadFailure("Copy applications, files or folders in Finder, then choose Paste."); return }
+        addURLs(urls, externalBusy: externalBusy, parentKey: uploadTargetParentKey)
+    }
     func chooseSources(startingAt directory: URL?, externalBusy: Bool, content: GDProjectContent? = nil) {
         guard !controlsLocked(externalBusy: externalBusy) else { return }
         let panel = NSOpenPanel()
-        panel.title = "Add applications, files, or folders"
+        panel.title = "Select apps, files or folders"
         panel.message = "Select whole applications, any file type, or complete folders."
-        panel.prompt = "Add"
+        panel.prompt = "Select"
         panel.canChooseFiles = true
         panel.canChooseDirectories = true
         panel.allowsMultipleSelection = true
@@ -529,6 +681,7 @@ final class UploadWorkspaceModel: ObservableObject {
         panel.showsHiddenFiles = true
         panel.canCreateDirectories = false
         panel.directoryURL = directory
+        let selectedParentKey = uploadTargetParentKey
         // No extension/content-type restriction excludes application bundles.
         pickerPending = true
         updateBusyGate()
@@ -537,9 +690,7 @@ final class UploadWorkspaceModel: ObservableObject {
                 guard let self else { return }
                 self.pickerPending = false
                 if response == .OK {
-                    if content == .applications && !panel.urls.allSatisfy({ $0.pathExtension.lowercased() == "app" }) {
-                        self.failure = UploadFailure("Choose complete .app bundles here. Use Files for other files or folders.")
-                    } else { self.addURLs(panel.urls, externalBusy: false) }
+                    self.addURLs(panel.urls, externalBusy: false, parentKey: selectedParentKey)
                 }
                 self.updateBusyGate()
             }
@@ -547,22 +698,20 @@ final class UploadWorkspaceModel: ObservableObject {
     }
     func addTreeNode(_ node: UploadTreeNode, externalBusy: Bool) {
         guard node.selectable else { return }
-        addURLs([URL(fileURLWithPath: node.path)], externalBusy: externalBusy)
+        addURLs([URL(fileURLWithPath: node.path)], externalBusy: externalBusy, parentKey: uploadTargetParentKey)
     }
-    func addDroppedURLs(_ urls: [URL], content: GDProjectContent?, externalBusy: Bool) {
+    func addDroppedURLs(_ urls: [URL], content: GDProjectContent?, externalBusy: Bool, parentKey: String? = nil) {
         guard !urls.isEmpty, urls.allSatisfy({ $0.isFileURL }) else { return }
-        if content == .applications && !urls.allSatisfy({ $0.pathExtension.lowercased() == "app" }) {
-            failure = UploadFailure("Drop complete .app bundles in Applications. Use Files for other content.")
-            return
-        }
-        addURLs(urls, externalBusy: externalBusy)
+        addURLs(urls, externalBusy: externalBusy, parentKey: parentKey)
     }
-    private func addURLs(_ urls: [URL], externalBusy: Bool) {
+    private func addURLs(_ urls: [URL], externalBusy: Bool, parentKey: String?) {
         guard !controlsLocked(externalBusy: externalBusy) else { return }
         do {
             try sourceAccess.remember(urls)
             let json = String(decoding: try JSONEncoder().encode(urls.map { $0.standardizedFileURL.path }), as: UTF8.self)
-            mutate(["add-sources", "--paths-json", json], externalBusy: externalBusy)
+            var arguments = ["add-sources", "--paths-json", json]
+            if let parentKey { arguments += ["--parent-key", parentKey] }
+            mutate(arguments, externalBusy: externalBusy)
         } catch { failure = UploadFailure(error.localizedDescription) }
     }
     func enqueueAndStart(externalBusy: Bool) {
@@ -754,7 +903,7 @@ private final class UploadSourceAccess {
             // Keep the original scoped URL, but use that canonical lookup key.
             let path = canonicalPath(url)
             guard started || activeURLs[path] != nil else {
-                throw UploadFailure("Use Add Applications or Add Files or Folders to grant access to \(url.lastPathComponent).")
+                throw UploadFailure("Use Select Apps, Files or Folders to grant access to \(url.lastPathComponent).")
             }
             if started {
                 if activeURLs[path] == nil { activeURLs[path] = url }

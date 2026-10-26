@@ -31,6 +31,7 @@ class LibraryTests(unittest.TestCase):
         self.remote={};self.hook=None;self.bad_readback=False;self.bad_restore=False;self.restored=False
         self.fake_run=patch.object(library,"run",side_effect=self.fake_command);self.fake_run.start();self.patches.append(self.fake_run)
         item=patch.object(library,"is_running",return_value=False);item.start();self.patches.append(item)
+        item=patch.object(library,"cache_in_use",return_value=False);item.start();self.patches.append(item)
         self.trash=patch.object(library,"trash");self.mock_trash=self.trash.start();self.patches.append(self.trash)
         self.reply=patch.object(library,"reply");self.mock_reply=self.reply.start();self.patches.append(self.reply)
 

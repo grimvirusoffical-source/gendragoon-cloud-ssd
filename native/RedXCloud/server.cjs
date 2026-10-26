@@ -10,6 +10,7 @@ const {execFile} = require('node:child_process');
 const {promisify} = require('node:util');
 const {createOidcVerifier} = require('../Backend/accounts/oidc');
 const {RedXState, CloudError, digest, origin} = require('./redx-state.cjs');
+const libraryTree = require('./library-tree.cjs');
 const exec = promisify(execFile);
 const MAX_BYTES = 8 * 1024 * 1024;
 const MAX_QUOTA = 8 * 1024**4;
@@ -413,8 +414,25 @@ async function createCloud(config) {
         } finally { deletingWorkspaces.delete(key); }
       }
       const libraryBase = base + '/library';
+      const libraryView = item => ({...item,displayName:item.displayName||item.name,parentKey:item.parentKey||null,
+        virtualFolder:item.virtualFolder===true,archiveKey:item.archiveKey||item.key});
+      const scopedLibrary = /^\/v1\/receivers\/me\/workspaces\/([a-f0-9]{32})\/library$/.exec(u.pathname);
+      if (scopedLibrary && req.method === 'GET') {
+        const workspace=scopedLibrary[1];releaseWorkspace=(await beginWorkspaceOperation(owner,workspace)).release;
+        state=await store.get(owner);
+        return json(res,200,{revision:libraryTree.revision(state,workspace),items:Object.values(state.library||{}).filter(item=>item.workspace===workspace).map(libraryView)});
+      }
+      if (u.pathname === libraryBase + '/operations' && req.method === 'POST') {
+        let body;try{body=JSON.parse((await read(req,32*1024)).toString());}catch{throw new CloudError('bad_json',400);}
+        const workspace=body?.workspace;
+        if(!ID.test(workspace||''))throw new CloudError('library_workspace_invalid',400);
+        releaseWorkspace=(await beginWorkspaceOperation(owner,workspace)).release;
+        let result;
+        state=await store.change(owner,s=>{writableWorkspace(s,workspace);result=libraryTree.apply(s,workspace,body);});
+        return json(res,200,{...result,revision:libraryTree.revision(state,workspace),items:Object.values(state.library||{}).filter(item=>item.workspace===workspace).map(libraryView)});
+      }
       if (u.pathname === libraryBase && req.method === 'GET') {
-        return json(res, 200, {items: Object.values(state.library || {}).sort((a,b) => String(a.name).localeCompare(String(b.name)))});
+        return json(res, 200, {revisions:state.libraryRevisions||{},items:Object.values(state.library || {}).sort((a,b) => String(a.name).localeCompare(String(b.name))).map(libraryView)});
       }
       const libraryMatch = /^\/v1\/receivers\/me\/library\/([a-f0-9]{18})$/.exec(u.pathname);
       if (libraryMatch && req.method === 'PUT') {
@@ -435,13 +453,18 @@ async function createCloud(config) {
           writableWorkspace(s, workspace);
           s.library ||= {};
           const previous = s.library[key];
+          if(previous&&(previous.workspace!==workspace||previous.virtualFolder===true||previous.archiveKey&&previous.archiveKey!==key))throw new CloudError('library_item_conflict',409);
+          const parentKey=libraryTree.parent(s.library,workspace,body.parentKey===undefined?previous?.parentKey:body.parentKey);
+          if(libraryTree.collision(s.library,workspace,parentKey,previous?.displayName||name,key))throw new CloudError('library_name_collision',409);
           const generation = previous ? previous.generation + 1 : 1;
           const history = previous ? [...(previous.previous || []), {
             generation: previous.generation, manifestId: previous.manifestId, archiveBytes: previous.archiveBytes,
             archiveSha256: previous.archiveSha256, updatedMs: previous.updatedMs
           }].slice(-20) : [];
           s.library[key] = {key, name, kind, workspace, manifestId, archiveBytes: body.archiveBytes,
-            archiveSha256: body.archiveSha256, generation, updatedMs: now, previous: history};
+            archiveSha256: body.archiveSha256, generation, updatedMs: now, previous: history,
+            displayName:previous?.displayName||name,parentKey,virtualFolder:false,archiveKey:key};
+          libraryTree.bump(s,workspace);
         });
         return json(res, 200, state.library[key]);
       }
@@ -450,7 +473,9 @@ async function createCloud(config) {
         const item = state.library?.[key];
         if (!item) throw new CloudError('not_found', 404);
         releaseWorkspace = (await beginWorkspaceOperation(owner, item.workspace)).release;
-        state = await store.change(owner, s => {s.library ||= {}; if (!s.library[key]) throw new CloudError('not_found', 404); delete s.library[key];});
+        state = await store.change(owner, s => {writableWorkspace(s,item.workspace);s.library ||= {}; if (!s.library[key]) throw new CloudError('not_found', 404);
+          if(Object.values(s.library).some(child=>child.parentKey===key))throw new CloudError('library_folder_not_empty',409);
+          delete s.library[key];libraryTree.bump(s,item.workspace);});
         return json(res, 200, {ok: true, key});
       }
       const blobMatch = /^\/v1\/receivers\/me\/workspaces\/([a-f0-9]{32})\/blobs\/([a-f0-9]{32})$/.exec(u.pathname);
