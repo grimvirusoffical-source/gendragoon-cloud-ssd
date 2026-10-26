@@ -27,7 +27,8 @@ jobs:
         with:
           python-version: '3.13'
       - name: Install the reviewed desktop runtime and fixture dependencies
-        run: python -B -m pip install --only-binary=:all: -r native/Desktop/requirements.txt -r native/Desktop/requirements-build.txt
+        run: |
+          python -B -m pip install --only-binary=:all: -r native/Desktop/requirements.txt -r native/Desktop/requirements-build.txt
       - name: Stage the pinned compiled Windows codec without private source
         run: python -B native/Desktop/stage_runtime.py --destination "${{ runner.temp }}/gendragoon-desktop" --prebuilt native/Desktop/runtimes/windows-x86_64.zip
       - name: Create the application-owned UTF-8 interpreter
