@@ -73,14 +73,14 @@ def check_packaged_portable_broker(binary,runtime):
     sys.path.insert(0,str(runtime));sys.path.insert(0,str(runtime/"runtime"))
     sys.path.insert(0,str(Path(__file__).resolve().parent/"tests"))
     import portable_apps as apps
-    from test_machinenotes import compile_portable_fixture,prepare_native_fixture,wait_fixture
+    from test_machinenotes import compile_portable_fixture,prepare_native_fixture,wait_fixture,launch_native_fixture
     with tempfile.TemporaryDirectory(prefix="gd-packaged-app-check-") as temporary:
         directory=Path(temporary).resolve();native=compile_portable_fixture(directory)
         original_hash=hashlib.sha256(native.read_bytes()).hexdigest()
         manager=apps.PortableApps(directory/"cache");prepared=prepare_native_fixture(manager,native)
         try:
             with patch.object(apps,"_broker_command",lambda spec:[str(binary),"--portable-broker",str(spec)]):
-                manager.launch(prepared,native.name,approved=True)
+                launch_native_fixture(lambda:manager.launch(prepared,native.name,approved=True))
             wait_fixture(lambda:(prepared.payload/"child-heartbeat").exists())
             if sys.platform=="win32":
                 if (prepared.payload/"child-dll-directory").read_text()!="0":raise RuntimeError("The external app inherited the packaged Windows DLL directory.")

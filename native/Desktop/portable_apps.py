@@ -437,7 +437,13 @@ class PortableApps:
         # broker owns the process tree and persists its terminal receipt.
         deadline=time.monotonic()+10
         while time.monotonic()<deadline:
-            value=_read(lease)
+            try:value=_read(lease)
+            except PortableAppError as error:
+                if getattr(error,"diagnostic",None)!=dict(stage="record-open-identity",errorCode="record_identity_changed",errorType="PortableAppError"):raise
+                # A broker can atomically publish its receipt between stat
+                # and open. Discard that mismatched handle; the next bounded
+                # poll must pass every original check on a freshly opened one.
+                time.sleep(.025);continue
             if value["state"] in ("running","complete"):return value
             if value["state"] in ("failed-before-start","uncertain"):break
             if child.poll() is not None:break

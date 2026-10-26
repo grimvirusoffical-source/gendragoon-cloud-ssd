@@ -440,6 +440,72 @@ class CompiledRuntimeTests(unittest.TestCase):
             self.assertTrue(all(str(root) in p for p in result["manifests"]))
 
 class PortableAppFormatTests(unittest.TestCase):
+    def _handshake_fixture(self,directory):
+        manager=apps.PortableApps(Path(directory).resolve()/'cache');binding=apps.identity(OWNER,NOTE,item())
+        raw=bytearray(64);raw[:7]=b'\x7fELF\x02\x01\x01';struct.pack_into('<HH',raw,16,2,62);struct.pack_into('<Q',raw,24,0x400000)
+        records=[dict(path='.',type='file',size=len(raw),sha256=hashlib.sha256(raw).hexdigest(),executable=0o100)]
+        def restore(content):
+            payload=content/'generated-fixture';private.write_private(payload,raw);return payload,records
+        class PendingBroker:
+            def poll(self):return None
+        return manager,manager.prepare(binding,restore),bytes(raw),PendingBroker()
+    def test_launch_handshake_discards_changed_identity_then_reads_fresh_verified_receipt(self):
+        with tempfile.TemporaryDirectory() as td,patch.object(apps,'host',return_value=('linux','x86_64')):
+            manager,prepared,raw,broker=self._handshake_fixture(td);original=apps._open_record;opened=[];replaced=[]
+            def changed(path,**options):
+                if Path(path).name.startswith('lease-'):
+                    opened.append(Path(path))
+                    if not replaced:
+                        record=json.loads(Path(path).read_bytes());record.update(state='running',publication=2)
+                        apps._write(Path(path),record);replaced.append(Path(path))
+                return original(path,**options)
+            with patch.object(apps,'_open_record',changed),patch.object(apps.subprocess,'Popen',return_value=broker),patch.object(apps.time,'sleep') as pause:
+                receipt=manager.launch(prepared,'.',approved=True)
+            self.assertEqual(len(replaced),1);self.assertEqual(len(opened),2);pause.assert_called_once_with(.025)
+            self.assertEqual(receipt['state'],'running');self.assertEqual(receipt['publication'],2)
+            self.assertEqual(apps._read(replaced[0]),receipt);self.assertEqual(prepared.payload.read_bytes(),raw)
+    def test_launch_handshake_never_retries_unrecognized_corrupt_or_unsafe_records(self):
+        for fault in ('unrecognized-code','extra-diagnostic-field','corrupt-json','hardlinked-record'):
+            with self.subTest(fault=fault),tempfile.TemporaryDirectory() as td,patch.object(apps,'host',return_value=('linux','x86_64')):
+                manager,prepared,raw,broker=self._handshake_fixture(td);original=apps._read;reads=[];leases=[]
+                diagnostic=dict(stage='record-open-identity',errorCode='record_identity_changed',errorType='PortableAppError')
+                if fault=='unrecognized-code':diagnostic['errorCode']='unrecognized_fixture'
+                elif fault=='extra-diagnostic-field':diagnostic['extra']='fixture'
+                unknown=apps.PortableAppError('Unrecognized fixture error');unknown.diagnostic=diagnostic
+                def started(command,**options):
+                    spec=json.loads(Path(command[-1]).read_bytes());lease=Path(spec['lease']);leases.append(lease)
+                    if fault=='corrupt-json':private.write_private(lease,b'{',replace=True)
+                    elif fault=='hardlinked-record':os.link(lease,lease.with_name('generated-hardlink'))
+                    return broker
+                def read(path):
+                    if Path(path).name.startswith('lease-'):
+                        reads.append(Path(path))
+                        if fault in ('unrecognized-code','extra-diagnostic-field'):raise unknown
+                    return original(path)
+                expected=json.JSONDecodeError if fault=='corrupt-json' else apps.PortableAppError
+                with patch.object(apps,'_read',read),patch.object(apps.subprocess,'Popen',started),patch.object(apps.time,'sleep') as pause:
+                    with self.assertRaises(expected) as caught:manager.launch(prepared,'.',approved=True)
+                if fault in ('unrecognized-code','extra-diagnostic-field'):self.assertIs(caught.exception,unknown)
+                self.assertEqual(len(reads),1);pause.assert_not_called();self.assertTrue(leases[0].exists())
+                self.assertEqual(prepared.payload.read_bytes(),raw)
+                for uncertain_only in (False,True):
+                    with self.assertRaises(apps.PortableAppError):manager.assert_safe('change protected state',uncertain_only=uncertain_only)
+    def test_launch_handshake_persistent_identity_churn_reaches_deadline_and_retains_uncertainty(self):
+        with tempfile.TemporaryDirectory() as td,patch.object(apps,'host',return_value=('linux','x86_64')):
+            manager,prepared,raw,broker=self._handshake_fixture(td);original=apps._open_record;opened=[]
+            def changed(path,**options):
+                if Path(path).name.startswith('lease-'):
+                    opened.append(Path(path));record=json.loads(Path(path).read_bytes());record['publication']=len(opened)
+                    apps._write(Path(path),record)
+                return original(path,**options)
+            with patch.object(apps,'_open_record',changed),patch.object(apps.subprocess,'Popen',return_value=broker),patch.object(apps.time,'monotonic',side_effect=range(12)),patch.object(apps.time,'sleep') as pause:
+                with self.assertRaises(apps.PortableAppError) as caught:manager.launch(prepared,'.',approved=True)
+            self.assertEqual(caught.exception.diagnostic['leaseState'],'uncertain');self.assertGreaterEqual(len(opened),2);self.assertLessEqual(len(opened),10)
+            self.assertGreaterEqual(pause.call_count,1);self.assertLessEqual(pause.call_count,10)
+            self.assertEqual(len(set(opened)),1);self.assertEqual(apps._read(opened[0])['state'],'pending')
+            self.assertEqual(prepared.payload.read_bytes(),raw);self.assertTrue(opened[0].exists())
+            for uncertain_only in (False,True):
+                with self.assertRaises(apps.PortableAppError):manager.assert_safe('change protected state',uncertain_only=uncertain_only)
     def test_record_identity_mismatch_retains_rejection_and_only_fixed_diagnostics(self):
         with tempfile.TemporaryDirectory() as td:
             root=private.private_directory(Path(td).resolve()/'control');record=root/'lease-fixture.json';apps._write(record,dict(generation='old fixture'))
