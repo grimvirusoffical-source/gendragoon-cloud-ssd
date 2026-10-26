@@ -50,9 +50,10 @@ sign, publish, install, or submit them to an app store.
 - A single desktop coordinator protects writers. Profile, Jobs, keymap, staging,
   and restored files are private to the local user. Windows creates new paths with
   explicit current-user owner SID/private ACLs, including elevated processes.
-- The new workspace-drive source provides a **real read-only filesystem mount**
-  through an existing trusted rclone executable. The Files view has Mount, Open,
-  Unmount, and rclone-selection controls. Multiple MachineNotes have separate
+- The workspace-drive source provides a **real read-only filesystem mount**
+  through an existing trusted rclone executable on Linux. Windows requires the
+  separately distributed FLOSS GenDragoon Mount Host and WinFsp. The Files view
+  has Mount, Open, Unmount, and mount-helper selection controls. Multiple MachineNotes have separate
   account/note identities, caches, DAV credentials, and mount locations. The
   already verified `1c6a586` candidates predate this drive feature; a new candidate
   must pass its own platform checks before receiving a mount validation claim.
@@ -64,7 +65,8 @@ specific to the Mac client.
 
 ## Read-only workspace drives
 
-Windows needs an existing WinFsp installation; Linux needs existing permitted
+Windows needs an existing WinFsp installation and the independent
+`GenDragoonMountHost.exe`; Linux needs existing permitted
 `/dev/fuse` access and `fusermount3` or `fusermount`. GenDragoon installs no driver,
 changes no kernel permissions, and never labels a download folder as a drive.
 These prerequisites follow the [official rclone mount documentation](https://rclone.org/commands/rclone_mount/).
@@ -77,25 +79,43 @@ first file read; this is not sparse archive access. macOS apps, symbolic links,
 and extended attributes still need their original platform's restore client.
 PUT, MOVE, DELETE and other mutations are rejected; edit files through GenDragoon.
 
-The rclone child receives only temporary loopback credentials in its environment,
+The filesystem child receives only temporary loopback credentials in its environment,
 without an account token, refresh token, storage secret, or keymap path. Registry
 files contain mount/process identities and tool metadata only. Account switching,
 disconnect, key replacement, and Quit are blocked while any drive remains mounted,
 orphaned, preparing, or uncertain. Verified caches are retained after unmount.
 
-Linux uses normal `fusermount -u`, retaining a busy drive. Windows verifies its
-recorded volume through the opened handle and requires a successful exclusive
-[volume lock](https://learn.microsoft.com/en-us/windows/win32/api/winioctl/ni-winioctl-fsctl_lock_volume)
-before dismount/shutdown, holding that lock until the owned rclone process exits.
-Unsupported WinFsp controls fail closed and preserve the session. No force/lazy
-unmount or arbitrary process termination is provided.
+Linux uses normal `fusermount -u`, retaining a busy drive. The actual Windows
+driver test showed that WinFsp does not implement the exclusive volume-lock
+control required by the original rclone shutdown gate. That command-line path
+cannot create new Windows drives. Retained old sessions preserve their original
+fail-closed behavior. The new standalone host wraps unchanged pinned rclone and
+cgofuse with atomic native-operation admission and file/directory handle tracking
+through native Close, covering duplicate handles and mapped views. It must pass
+the dedicated real-driver tests before Windows drives are considered verified.
+No force/lazy unmount or arbitrary process termination is provided.
+
+The host is an independent open-source product under
+[`MountHost/LICENSE`](MountHost/LICENSE), with public dependency notices and its
+own source/build artifact. It contains no GenDragoon encryption runtime, account
+token, refresh token, keymap, or storage secret. It is not bundled into the
+separately licensed desktop app/codec package. The
+[WinFsp license exception](https://raw.githubusercontent.com/winfsp/winfsp/v2.1/License.txt)
+requires FLOSS licensing, visible attribution and no linking or distribution
+with proprietary software. Co-distribution with proprietary code needs a suitable
+commercial license or clarification from the rights holder. GenDragoon does not
+download or install the host or WinFsp on the user's computer.
 
 CI stages a hash-pinned official rclone executable only in the ephemeral runner,
 then tests real mount/read/busy refusal/normal unmount **if** that runner already
 has usable FUSE or WinFsp. The separate mount-capability report states `verified`,
 `prerequisite-unavailable`, or `failed`; a missing-driver skip is not evidence
-that a drive mounted. Windows driver compatibility remains unverified until its
-real mount gate passes. Product installation does not download this CI fixture.
+that a drive mounted. The dedicated Windows workflow uses only a disposable
+hosted runner, a checksum-pinned signed WinFsp installer, and the separately built
+public host. It requires actual file read, open/duplicate/mapping/directory busy
+refusal, concurrent open/unmount safety and normal unmount; a skip cannot pass.
+Windows driver compatibility remains unverified until that gate passes. Product
+installation does not download these CI fixtures.
 
 ## Current client installation
 

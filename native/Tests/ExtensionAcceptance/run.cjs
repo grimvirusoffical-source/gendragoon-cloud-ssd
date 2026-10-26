@@ -183,6 +183,10 @@ async function chromiumTest(root, directory, archive, tools, python, client = 'c
     await teams.waitForLoadState('domcontentloaded');
     assert.equal(await teams.title(), 'GenDragoon Teams');
     assert.equal(await teams.locator('h1').textContent(), 'Build together.');
+    await teams.locator('#community-version').filter({hasText: 'Version fixture-v1'}).waitFor();
+    assert.equal(await teams.locator('#community-rules li').textContent(), 'Synthetic account-free acceptance fixture.');
+    assert.equal(await teams.locator('#save-username').isDisabled(), true);
+    assert.equal(await teams.locator('#community-accept').isChecked(), false);
     await teams.close();
     await page.screenshot({path: path.join(root, 'reports/' + client + '-dashboard.png'), fullPage: true});
     await atomicJSON(path.join(root, 'consent.json'), {approved: false});
@@ -211,6 +215,7 @@ async function chromiumTest(root, directory, archive, tools, python, client = 'c
       readOnlyControls: true, metadataRenderedAsText: true, disallowedRoutesRejected: true,
       fixtureApprovalRevokedOnExistingConnection: true, exactOriginRemovalDeniesNewConnection: true,
       teamsPageLoaded: true, syntheticAccountFreeDispatch: true, realNativeConsentUITested: false, liveAccountOrUploadTest: false,
+      communityRulesRenderedAndParticipationDisabledUntilAcceptance: true,
       testedBrowser: client === 'chromium' ? 'Playwright bundled Chromium on Linux' : client === 'opera' ? 'Actual checksum-pinned official Opera extracted without installer on disposable Linux runner' : 'Actual installed stable ' + client + ' on disposable Linux runner',
       installationMethod: cdpInstall ? 'Experimental CDP Extensions.loadUnpacked in fresh CI profile' : 'Test-only --load-extension in fresh CI profile',
       signedStoreInstallationTested: false, normalUserApprovalTested: false, otherOperatingSystemsTested: false});

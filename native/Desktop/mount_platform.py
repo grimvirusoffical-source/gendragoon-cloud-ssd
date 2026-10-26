@@ -13,10 +13,17 @@ import stat
 import subprocess
 import sys
 import threading
+import urllib.error
 import urllib.request
 
 class PlatformMountError(RuntimeError):pass
 WINDOWS_FILESYSTEM_NAME="fuse-rclone"  # WinFsp prefixes rclone's FileSystemName with FUSE-.
+WINDOWS_HOST_FILESYSTEM_NAME="fuse-gdhost"  # WinFsp has a 15-character native name limit.
+HOST_VERSION=b"GenDragoon Mount Host 1.0.0"
+HOST_STARTUP_CODES=frozenset(("invalid_configuration","private_permissions_failed","dav_connect_failed","mount_failed","native_runtime_unavailable","control_failed"))
+
+def filesystem_name(record):
+    return WINDOWS_HOST_FILESYSTEM_NAME if record.get("tools",{}).get("backend")=="owned-host" else WINDOWS_FILESYSTEM_NAME
 
 STARTUP_REASONS=(
     (rb"cannot find (?:winfsp|fuse)|cannot load (?:winfsp|fuse)|failed to load.{0,80}(?:winfsp|fuse)","fuse_library_unavailable"),
@@ -56,16 +63,16 @@ def startup_failure(process):
     words=" ".join(getattr(process,"_gd_startup_words",[])[:24]) or "none"
     sizes=getattr(process,"_gd_output_sizes",{})
     counts="; stdout/stderr bytes: "+str(sizes.get("stdout",0))+"/"+str(sizes.get("stderr",0))
-    return PlatformMountError("The filesystem process exited before creating a drive (exit "+status+"; reasons: "+(", ".join(reasons) or "unclassified")+counts+"; technical words: "+words+"). Check the existing rclone and filesystem driver installation. No process was forcibly stopped.")
+    return PlatformMountError("The filesystem process exited before creating a drive (exit "+status+"; reasons: "+(", ".join(reasons) or "unclassified")+counts+"; technical words: "+words+"). Check the selected filesystem helper and driver installation. No process was forcibly stopped.")
 
 def trusted_binary(path):
     path=Path(path).absolute()
-    if path.is_symlink() or not path.is_file():raise PlatformMountError("Choose the real installed rclone executable, without a link or wrapper.")
+    if path.is_symlink() or not path.is_file():raise PlatformMountError("Choose the real installed filesystem helper, without a link or wrapper.")
     info=path.stat()
     if info.st_size>256*1024*1024:raise PlatformMountError("The selected executable exceeds its limit.")
     with path.open("rb") as source:header=source.read(4)
     if sys.platform=="win32":
-        if header[:2]!=b"MZ":raise PlatformMountError("Choose the installed Windows rclone.exe, not a script.")
+        if header[:2]!=b"MZ":raise PlatformMountError("Choose the installed Windows filesystem executable, not a script.")
         from gendragoon_platform_ipc import modules,user_sid
         security=modules()[-1];descriptor=security.GetFileSecurity(str(path),security.OWNER_SECURITY_INFORMATION|security.DACL_SECURITY_INFORMATION)
         trusted={security.ConvertSidToStringSid(user_sid()),"S-1-5-18","S-1-5-32-544"}
@@ -85,15 +92,21 @@ def trusted_binary(path):
 def prerequisites(rclone=None):
     if sys.platform!="win32" and not sys.platform.startswith("linux"):
         raise PlatformMountError("Desktop drives require Windows with WinFsp or Linux with FUSE.")
-    found=rclone or shutil.which("rclone")
+    found=rclone or shutil.which("GenDragoonMountHost.exe" if sys.platform=="win32" else "rclone")
+    if sys.platform=="win32" and not found:
+        raise PlatformMountError("Windows drives require the separately distributed open-source GenDragoon Mount Host and an existing WinFsp installation. The rclone command-line unmount path is unavailable because its busy-file safety gate did not pass.")
     if not found:raise PlatformMountError("Select an existing trusted rclone executable. GenDragoon does not install rclone or filesystem drivers.")
     binary=trusted_binary(found)
-    try:result=subprocess.run([binary,"version"],stdin=subprocess.DEVNULL,capture_output=True,timeout=10)
-    except (OSError,subprocess.TimeoutExpired):raise PlatformMountError("The selected executable could not run. Choose trusted rclone for this platform and architecture.") from None
+    try:result=subprocess.run([binary,"--version" if sys.platform=="win32" else "version"],stdin=subprocess.DEVNULL,capture_output=True,timeout=10)
+    except (OSError,subprocess.TimeoutExpired):raise PlatformMountError("The selected executable could not run. Choose the trusted filesystem helper for this platform and architecture.") from None
     version=re.match(rb"rclone v(\d+)\.(\d+)\.(\d+)(?:[-.\w]*)?(?:\r?\n|$)",result.stdout)
-    if result.returncode or not version or tuple(map(int,version.groups()))<(1,65,0):
+    if sys.platform=="win32":
+        if result.returncode or result.stdout.strip()!=HOST_VERSION:
+            raise PlatformMountError("Select the separately distributed GenDragoon Mount Host 1.0.0 executable. Ordinary rclone cannot safely close a busy Windows drive and remains disabled.")
+    elif result.returncode or not version or tuple(map(int,version.groups()))<(1,65,0):
         raise PlatformMountError("Use an existing rclone version 1.65 or newer.")
     tools={"rclone":binary,"sha256":hashlib.sha256(Path(binary).read_bytes()).hexdigest()}
+    if sys.platform=="win32":tools["backend"]="owned-host"
     if sys.platform=="win32":
         import winreg
         locations=[]
@@ -147,7 +160,7 @@ def _windows_volume(path):
 def capture_mount_identity(record):
     if sys.platform=="win32":
         actual=_windows_volume(record["mountPath"])
-        if not isinstance(actual,tuple) or actual[0]!=record["label"] or actual[1].casefold()!=WINDOWS_FILESYSTEM_NAME:raise PlatformMountError("The new Windows volume identity could not be confirmed.")
+        if not isinstance(actual,tuple) or actual[0]!=record["label"] or actual[1].casefold()!=filesystem_name(record):raise PlatformMountError("The new Windows volume identity could not be confirmed.")
         return {"volumeSerial":actual[2]}
     for line in Path("/proc/self/mountinfo").read_text().splitlines():
         fields=line.split();position=fields.index("-")
@@ -161,7 +174,7 @@ def mounted(record):
         actual=_windows_volume(path)
         if actual is False:return False
         if actual is None:return None
-        return True if actual[0]==record["label"] and actual[1].casefold()==WINDOWS_FILESYSTEM_NAME and record.get("volumeSerial",actual[2])==actual[2] else None
+        return True if actual[0]==record["label"] and actual[1].casefold()==filesystem_name(record) and record.get("volumeSerial",actual[2])==actual[2] else None
     if not os.path.ismount(path):return False
     try:
         for line in Path("/proc/self/mountinfo").read_text().splitlines():
@@ -178,7 +191,7 @@ def unrecorded_mounts(root,known):
         for letter in "DEFGHIJKLMNOPQRSTUVWXYZ":
             if not drives&(1<<(ord(letter)-65)):continue
             path=letter+":\\";actual=_windows_volume(path)
-            if isinstance(actual,tuple) and actual[0].startswith("GenDragoon-") and actual[1].casefold()==WINDOWS_FILESYSTEM_NAME and path not in known:return True
+            if isinstance(actual,tuple) and actual[0].startswith("GenDragoon-") and actual[1].casefold() in (WINDOWS_FILESYSTEM_NAME,WINDOWS_HOST_FILESYSTEM_NAME) and path not in known:return True
         return False
     if not sys.platform.startswith("linux"):return False
     try:
@@ -242,21 +255,41 @@ def start(tools,record,url,token,cache):
     allowed={"PATH","SYSTEMROOT","WINDIR","TEMP","TMP","HOME","USER","LOGNAME","LANG","LC_ALL","LOCALAPPDATA","APPDATA","USERPROFILE","PROGRAMFILES","PROGRAMFILES(X86)","PROGRAMW6432"}
     environment={k:v for k,v in os.environ.items() if k.upper() in allowed}
     password=secrets.token_urlsafe(32)
-    environment.update(RCLONE_WEBDAV_URL=url,RCLONE_WEBDAV_VENDOR="other",RCLONE_WEBDAV_BEARER_TOKEN=token,
-        RCLONE_RC_USER="GenDragoon",RCLONE_RC_PASS=password)
     # rclone compares Go's null-device spelling exactly before checking reserved
     # Windows paths. Python's lowercase "nul" is rejected; Go expects "NUL".
     null_config="NUL" if sys.platform=="win32" else os.devnull
     args=[tools["rclone"],"--config",null_config,"mount",":webdav:",record["mountPath"],"--read-only","--vfs-cache-mode=off",
         "--cache-dir",str(cache),"--dir-cache-time=0s","--attr-timeout=0s","--dir-perms=0500","--file-perms=0400",
         "--volname",record["label"],"--timeout=0","--rc","--rc-addr=127.0.0.1:0","--log-level=NOTICE","--log-format="]
-    if sys.platform=="win32":args.extend(("--option",_windows_file_security()))
+    if sys.platform=="win32":
+        if tools.get("backend")!="owned-host":raise PlatformMountError("The Windows rclone command-line mount path is disabled until a busy-safe host is verified.")
+        environment.update(GD_MOUNT_DAV_URL=url,GD_MOUNT_DAV_TOKEN=token,GD_MOUNT_CONTROL_TOKEN=password,
+            GD_MOUNT_FILE_SECURITY=_windows_file_security().removeprefix("FileSecurity="))
+        args=[tools["rclone"],"--mount-point",record["mountPath"].rstrip("\\"),"--volume-label",record["label"]]
+    else:
+        environment.update(RCLONE_WEBDAV_URL=url,RCLONE_WEBDAV_VENDOR="other",RCLONE_WEBDAV_BEARER_TOKEN=token,
+            RCLONE_RC_USER="GenDragoon",RCLONE_RC_PASS=password)
     flags={"creationflags":subprocess.CREATE_NO_WINDOW} if sys.platform=="win32" else {"start_new_session":True}
     process=subprocess.Popen(args,env=environment,stdin=subprocess.DEVNULL,stdout=subprocess.PIPE,stderr=subprocess.PIPE,**flags)
     process._gd_rc_password=password;process._gd_rc_url=None;process._gd_startup_reasons=[];process._gd_startup_words=[]
+    process._gd_host_control=password if tools.get("backend")=="owned-host" else None;process._gd_host_url=None
     process._gd_output_sizes={"stdout":0,"stderr":0};process._gd_diagnostic_lock=threading.Lock()
     def drain(stream,name):
         for line in iter(lambda:stream.readline(8192),b""):
+            if name=="stdout" and process._gd_host_control and len(line)<=4096:
+                try:
+                    ready=json.loads(line)
+                    if type(ready) is dict and type(ready.get("schema")) is int and ready.get("schema")==1 and ready.get("status")=="error" and ready.get("code") in HOST_STARTUP_CODES:
+                        with process._gd_diagnostic_lock:
+                            if ready["code"] not in process._gd_startup_reasons and len(process._gd_startup_reasons)<8:process._gd_startup_reasons.append(ready["code"])
+                    if (type(ready) is dict and type(ready.get("schema")) is int and ready.get("schema")==1 and ready.get("status")=="ready"
+                            and ready.get("mountPoint")==record["mountPath"].rstrip("\\")
+                            and type(ready.get("pid")) is int and ready.get("pid")==process.pid and ready.get("readOnly") is True
+                            and type(ready.get("controlURL")) is str
+                            and re.fullmatch(r"http://127\.0\.0\.1:([1-9][0-9]{0,4})",ready["controlURL"])
+                            and 1<=int(ready["controlURL"].rsplit(":",1)[1])<=65535):
+                        process._gd_host_url=ready["controlURL"]
+                except (ValueError,TypeError,AttributeError):pass
             match=re.search(rb"Serving remote control on (http://127\.0\.0\.1:[0-9]+/)",line)
             if match:process._gd_rc_url=match[1].decode("ascii")
             words=re.findall(rb"[a-z][a-z_]+",line.replace(b"\0",b"").lower())
@@ -273,6 +306,33 @@ def start(tools,record,url,token,cache):
         if stream is not None:
             reader=threading.Thread(target=drain,args=(stream,name),daemon=True);process._gd_diagnostic_readers.append(reader);reader.start()
     return process
+
+def ready(process):
+    return not getattr(process,"_gd_host_control",None) or bool(getattr(process,"_gd_host_url",None))
+
+def host_request(process,route,method="GET"):
+    """Only the exact owned process's ephemeral loopback control endpoint."""
+    url=getattr(process,"_gd_host_url",None);token=getattr(process,"_gd_host_control",None)
+    if not url or not token or (method,route) not in (("GET","/v1/status"),("POST","/v1/unmount")):
+        raise PlatformMountError("The private filesystem control channel is unavailable; its process was retained.")
+    class NoRedirect(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self,*_):return None
+    opener=urllib.request.build_opener(urllib.request.ProxyHandler({}),NoRedirect())
+    req=urllib.request.Request(url+route,method=method,data=b"{}" if method=="POST" else None,
+        headers={"Authorization":"Bearer "+token,"Content-Type":"application/json"})
+    try:
+        with opener.open(req,timeout=20) as response:
+            data=response.read(4097)
+            if response.status!=200 or len(data)>4096:raise ValueError()
+            value=json.loads(data)
+            if type(value) is not dict or value.get("schema")!=1:raise ValueError()
+            return value
+    except urllib.error.HTTPError as error:
+        status=error.code;error.close()
+        if status==409:raise PlatformMountError("The drive is in use. Close files, mapped views, and file-manager windows, then retry. The drive remains mounted.") from None
+        raise PlatformMountError("The filesystem host declined normal unmount; the session was retained.") from None
+    except (OSError,ValueError,urllib.error.URLError):
+        raise PlatformMountError("The private filesystem control request failed; the process was retained.") from None
 
 def _quit(process):
     url=getattr(process,"_gd_rc_url",None);password=getattr(process,"_gd_rc_password",None)
@@ -322,14 +382,26 @@ def unmount(record,process):
     if actual is None:raise PlatformMountError("The mounted volume identity is uncertain; it was retained for review.")
     if actual:
         if sys.platform=="win32":
-            with _windows_dismount(record):
-                if process.poll() is None:_quit(process)
+            if record.get("tools",{}).get("backend")=="owned-host":
+                result=host_request(process,"/v1/unmount","POST")
+                if result.get("status")!="unmounted" or result.get("mountPoint")!=record["mountPath"].rstrip("\\"):
+                    raise PlatformMountError("The filesystem host did not confirm normal unmount; the session was retained.")
                 try:process.wait(timeout=10)
-                except subprocess.TimeoutExpired:raise PlatformMountError("The locked filesystem process did not finish normal shutdown; the session was retained.") from None
+                except subprocess.TimeoutExpired:raise PlatformMountError("The filesystem host did not finish normal shutdown; the session was retained.") from None
+            else:
+                # Retained old rclone sessions keep their original, fail-closed
+                # path. They cannot enter the new host's private control channel.
+                with _windows_dismount(record):
+                    if process.poll() is None:_quit(process)
+                    try:process.wait(timeout=10)
+                    except subprocess.TimeoutExpired:raise PlatformMountError("The locked filesystem process did not finish normal shutdown; the session was retained.") from None
         else:
             helper=trusted_binary(record["tools"]["unmount"])
             result=subprocess.run([helper,"-u",record["mountPath"]],stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=15)
             if result.returncode:raise PlatformMountError("The drive is in use. Close files and file-manager windows, then retry. No forced unmount was attempted.")
+    if process.poll() is None and record.get("tools",{}).get("backend")=="owned-host":
+        # No RC, signal, or process termination fallback for owned hosts.
+        raise PlatformMountError("The filesystem host is still active and was retained.")
     if process.poll() is None:
         try:process.wait(timeout=2)
         except subprocess.TimeoutExpired:_quit(process)

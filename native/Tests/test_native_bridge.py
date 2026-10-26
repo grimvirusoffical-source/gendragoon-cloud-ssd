@@ -72,6 +72,25 @@ class NativeBridgeTests(unittest.TestCase):
             with self.subTest(data=data[:4]), self.assertRaises(bridge.BridgeError):
                 bridge.read_frame(io.BytesIO(data))
 
+    def test_community_moderation_transport_does_not_expand_storage_or_admin_routes(self):
+        team, peer = "a" * 32, "b" * 32
+        for verb, path in [("GET", "/v1/receivers/me/dev-community"),
+                           ("PUT", "/v1/receivers/me/dev-community"),
+                           ("GET", "/v1/receivers/me/dev-reports?limit=20"),
+                           ("PATCH", "/v1/receivers/me/dev-reports/" + peer),
+                           ("PUT", f"/v1/receivers/teams/{team}/blocks/{peer}"),
+                           ("DELETE", f"/v1/receivers/teams/{team}/blocks/{peer}"),
+                           ("POST", f"/v1/receivers/teams/{team}/reports"),
+                           ("GET", f"/v1/receivers/teams/{team}/reports/{peer}")]:
+            value = {"id": "c" * 32, "method": "request", "params": {"method": verb, "path": path}}
+            self.assertEqual(bridge.validate_request(value, self.client), value)
+        for path in ["/v1/receivers/admin/dev-reports", "/v1/receivers/me/dev-community/keys",
+                     f"/v1/receivers/teams/{team}/reports/{peer}/files",
+                     "/v1/receivers/me/dev-reports?token=secret", "/v1/receivers/me/dev-reports/../library",
+                     "/v1/receivers/me/dev-reports/%61", "/v2/account/deletion"]:
+            with self.subTest(path=path), self.assertRaises(bridge.BridgeError):
+                bridge.validate_request({"id": "d" * 32, "method": "request", "params": {"method": "GET", "path": path}}, self.client)
+
     @unittest.skipUnless(hasattr(socket, "AF_UNIX"), "Unix transport")
     def test_actual_unix_socket_injects_launch_identity_and_returns_verified_response(self):
         endpoint = self.root / "rpc.sock"

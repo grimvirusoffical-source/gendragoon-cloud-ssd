@@ -156,14 +156,14 @@ import SwiftUI
         for key in UserDefaults.standard.dictionaryRepresentation().keys where key.hasPrefix("GDCompanionApproval.") { UserDefaults.standard.removeObject(forKey: key) }
         completed.removeAll(); status = "Extension approvals cleared. Future requests need your approval."
     }
-    private func allowedRoute(_ path: String, method: String) -> Bool {
+    static func allowedRoute(_ path: String, method: String) -> Bool {
         guard path.utf8.count <= 4096, !path.contains("\\"), !path.contains("#"), !path.contains("\r"), !path.contains("\n"),
               let parsed = URLComponents(string: path), parsed.scheme == nil, parsed.host == nil,
               !parsed.percentEncodedPath.contains("%"), !parsed.path.contains(".."),
               ["GET", "POST", "PUT", "PATCH", "DELETE"].contains(method) else { return false }
         let p = parsed.path
         let metadata = method == "GET" && (p == "/v1/receivers/me" || p.range(of: "^/v1/receivers/me/workspaces/[a-f0-9]{32}/library$", options: .regularExpression) != nil)
-        let teams = p.range(of: #"^/v1/receivers/(?:me/dev-(?:profile|teams)|me/workspaces/[a-f0-9]{32}/team|teams/(?:join|[a-f0-9]{32}(?:/(?:members|invites|messages|presence|signals|membership)(?:/[a-f0-9]{32})?)?))$"#, options: .regularExpression) != nil
+        let teams = p.range(of: #"^/v1/receivers/(?:me/dev-(?:profile|teams|community)|me/dev-reports(?:/[a-f0-9]{32})?|me/workspaces/[a-f0-9]{32}/team|teams/(?:join|[a-f0-9]{32}(?:/(?:members|invites|messages|presence|signals|membership|blocks|reports)(?:/[a-f0-9]{32})?)?))$"#, options: .regularExpression) != nil
         let queries = parsed.queryItems ?? []
         return (metadata || teams) && (teams || queries.isEmpty) && queries.allSatisfy { ["limit", "cursor"].contains($0.name) } && Set(queries.map(\.name)).count == queries.count
     }
@@ -188,7 +188,7 @@ import SwiftUI
             switch method {
             case "request":
                 guard Set(params.keys).isSubset(of: ["path", "method", "body"]), let path = params["path"] as? String,
-                      let verb = params["method"] as? String, allowedRoute(path, method: verb),
+                      let verb = params["method"] as? String, Self.allowedRoute(path, method: verb),
                       params["body"] == nil || verb != "GET" && params["body"] is [String: Any] else { return failure("route_denied", "This route is outside the extension metadata and Teams interface.") }
                 result = try await auth.serviceRequest(path: path, method: verb, json: params["body"] as? [String: Any])
                 if path == "/v1/receivers/me" {

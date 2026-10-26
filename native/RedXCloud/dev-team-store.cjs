@@ -19,12 +19,21 @@ class DevTeamRecords{
   return row;
  }
  async get(logical){
-  const key=this.key(logical),id=this.address(key);
+  return this.getByKey(this.key(logical));
+ }
+ async getByKey(key){
+  if(typeof key!=='string'||!/^[a-f0-9]{64}$/.test(key))throw new CloudError('team_metadata_invalid',503);
+  const id=this.address(key);
   try{const result=await this.receiver.call('GET','path/'+encodeURIComponent(`${FILE}:${TABLE}[ID=${id}].State`));return this.validate(decode(result.value),key);}
   catch(e){if(e.status===404)return null;throw e;}
  }
  async write(logical,value,{scope,kind,position},prior=null){
-  const key=this.key(logical),id=this.address(key);
+  return this.writeByKey(this.key(logical),value,{scope,kind,position},prior);
+ }
+ async replace(prior,value){return this.writeByKey(prior.key,value,prior,prior);}
+ async writeByKey(key,value,{scope,kind,position},prior=null){
+  if(typeof key!=='string'||!/^[a-f0-9]{64}$/.test(key))throw new CloudError('team_metadata_invalid',503);
+  const id=this.address(key);
   if(!/^[a-f0-9]{32,64}$/.test(scope)||! /^[a-z_]{2,24}$/.test(kind))throw new CloudError('team_metadata_invalid',503);
   const row=this.validate({schema:1,key,revision:prior?prior.revision+1:0,scope,kind,position:position??id+1,value},key);
   const state=JSON.stringify(row);if(Buffer.byteLength(state)>MAX_RECORD)throw new CloudError('team_record_too_large',413);
@@ -45,6 +54,8 @@ class DevTeamRecords{
   for(const value of [activeAfter,expiredBefore])if(value!==undefined&&(!Number.isSafeInteger(value)||value<0))throw new CloudError('invalid_pagination',400);
   const expiration=activeAfter!==undefined?', ExpiresAtMs > $active':expiredBefore!==undefined?', ExpiresAtMs > 0, ExpiresAtMs <= $expired':'';
   const result=await this.receiver.call('POST','bx',{q:`{Get[]} = "${FILE}":${TABLE}[Scope=$scope, Kind=$kind, Position > $after${expiration}] -> [ID, Position, State], Sort = Position, Limit = $limit`,params:{scope,kind,after,limit:limit+1,...(activeAfter!==undefined?{active:activeAfter}:{}),...(expiredBefore!==undefined?{expired:expiredBefore}:{})}});
+  // RedX emits no projected columns when a valid filter matches no rows.
+  if(Array.isArray(result.columns)&&result.columns.length===0&&Array.isArray(result.rows)&&result.rows.length===0)return {rows:[],after:null};
   if(JSON.stringify(result.columns)!=='["ID","Position","State"]'||!Array.isArray(result.rows)||result.rows.length>limit+1)throw new CloudError('team_metadata_invalid',503);
   let previous=after;
   const rows=result.rows.map(tuple=>{

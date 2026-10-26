@@ -51,3 +51,8 @@ test('abandoned ICE negotiations expire and release a direct connection slot',as
  await new Promise(resolve=>setTimeout(resolve,30));assert.equal(session.peers.size,0);
  await session.handleSignal({from:'c',connectionId:'c'.repeat(32),kind:'ice',payload:{candidate:null}});session.shutdown();
 });
+test('blocking or a failed fresh peer lease closes an existing connection before another text send',async()=>{
+ const f=fixture();await f.session.connect('b');const channel=f.session.peers.get('b').channel;await f.session.send('b','before block');
+ f.session.authorizePeer=async()=>({peerId:'b',username:'verified-user',directAvailable:false});await assert.rejects(f.session.send('b','blocked'));assert.equal(f.session.peers.size,0);assert.equal(channel.readyState,'closed');assert.equal(channel.sent.length,1);
+ const g=fixture();await g.session.connect('b');const entry=g.session.peers.get('b');g.session.authorizePeer=async()=>{throw new Error('404 fixture lease');};await assert.rejects(g.session.receive(entry,JSON.stringify(packet('must not display'))));assert.equal(g.messages.length,0);assert.equal(g.session.peers.size,0);
+});

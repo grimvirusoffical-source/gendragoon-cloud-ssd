@@ -10,6 +10,7 @@ const {IntegrationMetadata}=require('../integrations.cjs');
 const {AccountDeletionRecords}=require('../account-deletion-records.cjs');
 const {initialJob,settleAccountBilling,signedHeaders,createDeletionClient,createAccountDeletion}=require('../account-deletion.cjs');
 const {peerID}=require('../dev-teams.cjs');
+const {POLICY}=require('../dev-community.cjs');
 const issuer='https://red-xai.com',key='disposable-account-deletion-service-key',wid='a'.repeat(32),bobWid='b'.repeat(32),idem='1'.repeat(32);
 const account=subject=>digest(JSON.stringify(['red-xai-receiver/v1',issuer,subject]));
 const token=subject=>'rxca_'+digest(subject).slice(0,43);
@@ -118,6 +119,7 @@ test('signed internal deletion actions reject user-only, stale, forged and wrong
 });
 async function metadataFixture(f){
  const request=(who,route,method='GET',body)=>f.call(f.receiverURL,route,method,body,who);
+ for(const who of ['alice','bob'])assert.equal((await request(who,'/v1/receivers/me/dev-community','PUT',{version:POLICY.version,accepted:true})).status,200);
  for(const who of ['alice','bob'])assert.equal((await request(who,'/v1/receivers/me/dev-profile','PUT',{username:who==='alice'?'DeleteAlice':'KeepBob'})).status,200);
  const a=(await request('alice',`/v1/receivers/me/workspaces/${wid}/team`,'POST',{})).body.team;
  const b=(await request('bob',`/v1/receivers/me/workspaces/${bobWid}/team`,'POST',{})).body.team;
@@ -238,6 +240,35 @@ test('exact State CAS preserves a username re-claimed by another account after a
  const old=await records.write(logical,{account:alice},meta);await records.remove(old);
  const replacement=await records.write(logical,{account:bob},meta);assert.equal(replacement.revision,old.revision,'this is the revision-reset ABA case');
  await assert.rejects(records.remove(old),e=>e.code==='concurrent_update');assert.equal((await records.get(logical)).value.account,bob);
+});
+test('bounded deletion removes moderation references to the exact account and preserves independent peer evidence',async()=>{
+ const ledger=new Ledger(),records=new DevTeamRecords(ledger),cleanup=new AccountDeletionRecords(ledger),removed=[],kept=[];
+ const kinds=['block','report','report_state','report_index','report_review','message_ref'];
+ for(const kind of kinds){
+  for(const [suffix,fields]of [['target',{account:bob,targetAccount:alice,owner:bob}],['team-owner',{account:bob,targetAccount:bob,owner:alice}],['reporter',{account:alice,targetAccount:bob,owner:bob}]]){
+   const logical=`moderation-delete:${kind}:${suffix}`;await records.write(logical,{...fields,content:'dispose exact-account fixture'},{scope:wid,kind});removed.push(logical);
+  }
+  const logical=`moderation-keep:${kind}`;await records.write(logical,{account:bob,targetAccount:bob,owner:bob,content:'independent peer record'},{scope:bobWid,kind});kept.push([logical,await records.get(logical)]);
+ }
+ // Multiple pages also cover service-wide indexes, whose scope is not a Team.
+ for(let index=0;index<35;index++){const logical='moderation-index-delete:'+index;await records.write(logical,{account:bob,targetAccount:alice,owner:bob},{scope:digest('service-report-index'),kind:'report_index'});removed.push(logical);}
+ const unrelated='unrelated-target-field';await records.write(unrelated,{account:bob,targetAccount:alice,owner:bob},{scope:bobWid,kind:'external_note'});kept.push([unrelated,await records.get(unrelated)]);
+ let progress={stage:'integrations',after:-1},pages=0;
+ while(progress.stage!=='done'){const result=await cleanup.page(alice,'d'.repeat(32),progress);progress=result.progress;assert.ok(++pages<40,'bounded cleanup must finish');}
+ assert.ok(pages>10,'fixture requires multiple bounded metadata pages');
+ for(const logical of removed)assert.equal(await records.get(logical),null,logical);
+ for(const [logical,prior]of kept)assert.deepEqual(await records.get(logical),prior,logical);
+ assert.ok(ledger.maxScan<=51,'global scan remains bounded');
+});
+test('actual RedX exact empty filtered scan is accepted while malformed metadata still fails closed',async()=>{
+ for(const table of ['Integration','DevEntry']){
+  const cleanup=new AccountDeletionRecords({call:async()=>({columns:[],rows:[]})});
+  assert.deepEqual(await cleanup.scan(table,-1),{rows:[],after:null});
+  for(const result of [null,{}, {columns:[],rows:[[1,'unexpected']]}, {columns:['unexpected'],rows:[]}, {rows:[]}, {columns:[]}]){
+   const invalid=new AccountDeletionRecords({call:async()=>result});
+   await assert.rejects(invalid.scan(table,-1),e=>e.code==='account_deletion_metadata_invalid');
+  }
+ }
 });
 test('unavailable billing leaves an honest failed receipt and retains cloud bytes before any workspace deletion',async t=>{
  const f=await fixture(t),directory=path.join(f.root,alice,wid);await fs.mkdir(directory,{recursive:true});const payload=path.join(directory,'retained.fixture');await fs.writeFile(payload,'KEEP UNTIL BILLING IS VERIFIED');

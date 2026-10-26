@@ -92,6 +92,10 @@ jobs:
           python -B -m pip install --only-binary=:all: -r native/Desktop/requirements.txt -r native/Desktop/requirements-build.txt
       - name: Verify actual same-user companion IPC and access restrictions
         run: python -B -m unittest discover -s native/Desktop/tests -p test_companion_server.py -v
+      - name: Require compiled-only codec packages and original license notices
+        run: python -B -m unittest discover -s native/Desktop/tests -p test_desktop_distribution.py -v
+      - name: Verify exact Teams UGC metadata scopes without file, key or billing authority
+        run: python -B -m unittest discover -s native/Desktop/tests -p test_team_routes.py -v
       - name: Stage the hash-pinned compiled platform runtime without private source checkout
         run: python -B native/Desktop/stage_runtime.py --destination "${{ runner.temp }}/gendragoon-desktop" --prebuilt "native/Desktop/runtimes/${{ runner.os == 'Windows' && 'windows' || 'linux' }}-x86_64.zip"
       - name: Create and verify an application-owned Windows UTF-8 interpreter without modifying Python

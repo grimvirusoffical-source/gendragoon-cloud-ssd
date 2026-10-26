@@ -13,7 +13,7 @@ from mount_platform import PlatformMountError
 
 sys.dont_write_bytecode=True
 from redx_session import RedXSession, IntegrationSession, SessionError
-from machinenotes_client import MachineNotesClient, DesktopInstance, storage
+from machinenotes_client import MachineNotesClient, DesktopInstance, storage, team_route_allowed
 from portable_vault import VaultError, ENVELOPE_LIMIT
 
 class GenDragoonGUI:
@@ -94,12 +94,12 @@ class GenDragoonGUI:
         ttk.Label(self.files,text="Folders organize archive items. Folder backups keep their archived contents together. Uploads retain your originals; library deletion retains encrypted payload bytes and does not reclaim quota.",wraplength=980).pack(fill="x",pady=8)
         drives=ttk.LabelFrame(self.files,text="Read-only workspace drives",padding=6);drives.pack(fill="x")
         actions=ttk.Frame(drives);actions.pack(fill="x")
-        for title,command in (("Mount selected MachineNote",self.mount_drive),("Open drive",self.open_drive),("Unmount selected drive",self.unmount_drive),("Choose rclone…",self.choose_rclone)):
+        for title,command in (("Mount selected MachineNote",self.mount_drive),("Open drive",self.open_drive),("Unmount selected drive",self.unmount_drive),("Choose mount helper…",self.choose_rclone)):
             ttk.Button(actions,text=title,command=command).pack(side="left",padx=3)
         self.drive_list=ttk.Treeview(drives,columns=("state","path"),height=3,selectmode="browse")
         self.drive_list.heading("#0",text="MachineNote");self.drive_list.heading("state",text="Status");self.drive_list.heading("path",text="Actual mount path")
         self.drive_list.column("#0",width=240);self.drive_list.column("state",width=120);self.drive_list.column("path",width=550);self.drive_list.pack(fill="x",pady=5)
-        ttk.Label(drives,text="Requires existing rclone and WinFsp (Windows) or FUSE (Linux). Files are verified in a private local cache before reading; opening a folder backup can restore its complete archive. Make changes in GenDragoon. Unmount every drive before disconnecting, changing accounts, or quitting because the OS may cache file data.",wraplength=980).pack(fill="x")
+        ttk.Label(drives,text="Windows requires the separately distributed open-source GenDragoon Mount Host and existing WinFsp; Linux requires existing rclone and FUSE. Files are verified in a private local cache before reading; opening a folder backup can restore its complete archive. Make changes in GenDragoon. Unmount every drive before disconnecting, changing accounts, or quitting because the OS may cache file data.",wraplength=980).pack(fill="x")
         self.refresh_drives()
     def _teams(self):
         from tkinter import ttk
@@ -124,7 +124,7 @@ class GenDragoonGUI:
         for title,command in (("Import encrypted vault…",self.import_vault),("Export encrypted vault…",self.export_vault),("Initialize a new empty account…",self.initialize_vault)):
             ttk.Button(self.settings,text=title,command=command).pack(anchor="w",pady=5)
         ttk.Label(self.settings,text="The exported file uses AES-256-GCM and PBKDF2-HMAC-SHA256 (600,000 iterations). Keep it and its passphrase safe. Different local keys are never replaced. New keys must be exported before uploading.",wraplength=900).pack(fill="x",pady=12)
-        ttk.Label(self.settings,text="Windows/Linux supports portable files, folder archives, and read-only workspace drives when existing rclone and WinFsp/FUSE are available. Backups containing macOS apps, extended attributes, or symbolic links must be restored on their original platform. Drives do not provide writeback or managed app launch.",wraplength=900).pack(fill="x",pady=12)
+        ttk.Label(self.settings,text="Windows/Linux supports portable files and folder archives. Read-only drives need existing GenDragoon Mount Host with WinFsp on Windows, or rclone with FUSE on Linux. Backups containing macOS apps, extended attributes, or symbolic links must be restored on their original platform. Drives do not provide writeback or managed app launch.",wraplength=900).pack(fill="x",pady=12)
         ttk.Separator(self.settings).pack(fill="x",pady=10)
         ttk.Label(self.settings,text="Browser and VS Code companion",font=("TkDefaultFont",13,"bold")).pack(anchor="w")
         ttk.Label(self.settings,text="Enable only your exact installed extension IDs. Each extension still needs native approval for the connected account. Account tokens and storage keys are never sent to a browser or editor.",wraplength=900).pack(fill="x",pady=8)
@@ -220,8 +220,9 @@ class GenDragoonGUI:
     def choose_rclone(self):
         from tkinter import filedialog
         if self.busy:return
-        chosen=filedialog.askopenfilename(parent=self.root,title="Select an existing trusted rclone executable")
-        if chosen:self.rclone_path=chosen;self.status.set("Selected rclone. The executable and filesystem prerequisites will be checked before mounting.")
+        label="GenDragoon Mount Host" if sys.platform=="win32" else "rclone"
+        chosen=filedialog.askopenfilename(parent=self.root,title="Select an existing trusted "+label+" executable")
+        if chosen:self.rclone_path=chosen;self.status.set("Selected "+label+". The executable and filesystem prerequisites will be checked before mounting.")
     def mount_drive(self):
         if self.busy or not self.model.selected_note:return
         model=self.model;note=model.selected_note;binary=self.rclone_path
@@ -472,8 +473,7 @@ class GenDragoonGUI:
                     library_route=re.fullmatch(r"/v1/receivers/me/workspaces/([a-f0-9]{32})/library",path)
                     if library_route and verb=="GET" and library_route[1] in {n["id"] for n in self.model.notes}:
                         return self.run("Loading browser library metadata…",lambda:self.model.session.request(path),respond,lambda _:reject("request_failed"))
-                    team_route=re.fullmatch(r"/v1/receivers/(?:me/dev-(?:profile|teams)|me/workspaces/[a-f0-9]{32}/team|teams/(?:join|[a-f0-9]{32}(?:/(?:members|invites|messages|presence|signals|membership)(?:/[a-f0-9]{32})?)?))(?:\?(?:limit=[0-9]{1,2}&)?cursor=[A-Za-z0-9_-]{1,300})?",path)
-                    if not team_route or verb not in ("GET","POST","PUT","DELETE","PATCH"):raise ValueError("Unsupported companion service request.")
+                    if not team_route_allowed(path) or verb not in ("GET","POST","PUT","DELETE","PATCH"):raise ValueError("Unsupported companion service request.")
                     return self.run("Processing the authenticated Teams request…",lambda:self.model.team_request(path,verb,body),respond,lambda _:reject("request_failed"))
                 if method not in ("selectUpload","uploadSelection","enqueue-selection"):raise ValueError("Unsupported desktop companion action.")
                 if self.busy:raise ValueError("The desktop is busy.")

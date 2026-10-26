@@ -316,7 +316,8 @@ async function createCloud(config) {
       q:'{Get[]} = "receivers.red-xai.db":Receiver[ID > $after] -> [ID, Owner], Sort = ID, Limit = $limit',
       params:{after,limit:limit + 1},
     });
-    if (JSON.stringify(result.columns) !== '["ID","Owner"]' || !Array.isArray(result.rows) || result.rows.length > limit + 1) throw new CloudError('metadata_invalid', 503);
+    const empty = Array.isArray(result?.columns) && result.columns.length === 0 && Array.isArray(result.rows) && result.rows.length === 0;
+    if ((!empty && JSON.stringify(result?.columns) !== '["ID","Owner"]') || !Array.isArray(result.rows) || result.rows.length > limit + 1) throw new CloudError('metadata_invalid', 503);
     let previous = after;
     for (const row of result.rows) {
       if (!Array.isArray(row) || row.length !== 2 || !Number.isSafeInteger(row[0]) || row[0] <= previous || row[0] > 0xfffffffffffff ||

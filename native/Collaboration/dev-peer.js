@@ -23,9 +23,11 @@
     }
     async authorized(peerId){
       if(this.closed||typeof peerId!=='string'||peerId===this.peerId)throw new Error('Peer session is unavailable.');
-      const member=await this.authorizePeer(peerId);
-      if(!member||member.peerId!==peerId||typeof member.username!=='string'||!member.username||this.closed)throw new Error('This person is no longer an authorized team peer.');
-      return member;
+      try{
+        const member=await this.authorizePeer(peerId);
+        if(!member||member.peerId!==peerId||member.directAvailable===false||typeof member.username!=='string'||!member.username||this.closed)throw new Error('This person is no longer an authorized team peer.');
+        return member;
+      }catch(e){this.close(peerId);throw e;}
     }
     current(entry){return !this.closed&&this.peers.get(entry.peerId)===entry;}
     make(peerId,connectionId){

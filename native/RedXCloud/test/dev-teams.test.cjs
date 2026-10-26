@@ -8,6 +8,7 @@ const {createCloud}=require('../server.cjs');
 const {CloudError,digest}=require('../redx-state.cjs');
 const {DevTeamRecords}=require('../dev-team-store.cjs');
 const {TTL,createDevTeams}=require('../dev-teams.cjs');
+const {POLICY,RETENTION,QUEUE}=require('../dev-community.cjs');
 async function scopedRedXFixture(t){
  const {spawn}=require('node:child_process'),net=require('node:net');
  const dir=await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(),'gd-team-records-'))),listener=net.createServer();
@@ -34,6 +35,8 @@ class Ledger{
 class Rows{
  constructor(){this.map=new Map();this.maxReturned=0;this.derive=new DevTeamRecords({});}
  async get(key){return this.map.has(key)?structuredClone(this.map.get(key)):null;}
+ async getByKey(key){return structuredClone([...this.map.values()].find(r=>r.key===key)||null);}
+ async replace(prior,value){const entry=[...this.map].find(([,r])=>r.key===prior.key);if(!entry||entry[1].revision!==prior.revision)throw new CloudError('concurrent_update',409);return this.write(entry[0],value,prior,prior);}
  async write(key,value,meta,prior=null){const old=this.map.get(key);if(old?.revision!==prior?.revision||Boolean(old)!==Boolean(prior))throw new CloudError('concurrent_update',409);const hash=this.derive.key(key),row={schema:1,key:hash,revision:old?old.revision+1:0,scope:meta.scope,kind:meta.kind,position:meta.position??this.derive.address(hash)+1,value:structuredClone(value)};this.map.set(key,row);return structuredClone(row);}
  async remove(row){const entry=[...this.map].find(([,r])=>r.key===row.key);if(!entry||entry[1].revision!==row.revision)throw new CloudError('concurrent_update',409);this.map.delete(entry[0]);}
  async list(scope,kind,{after=0,limit=50,activeAfter,expiredBefore}={}){const sorted=[...this.map.values()].filter(r=>r.scope===scope&&r.kind===kind&&r.position>after&&(activeAfter===undefined||r.value.expiresAtMs>activeAfter)&&(expiredBefore===undefined||r.value.expiresAtMs>0&&r.value.expiresAtMs<=expiredBefore)).sort((a,b)=>a.position-b.position),rows=sorted.slice(0,limit);this.maxReturned=Math.max(this.maxReturned,rows.length);return {rows:structuredClone(rows),after:sorted.length>limit?rows.at(-1).position:null};}
@@ -44,14 +47,15 @@ async function fixture(t,{rateLimits=false,records=new Rows()}={}){
  const tokens=new Map();
  const token=name=>{const v='rxca_'+crypto.createHash('sha256').update(name).digest('base64url');tokens.set(v,name);return v;};
  const cloud=await createCloud({root,issuer,authProvider:'redx-site-session',store,teamOptions:{records,now:()=>clock.value,rateLimits},fetchImpl:async(url,opts)=>{
-  assert.equal(url,issuer+'/redxai-connect/userinfo');const sub=tokens.get(opts.headers.authorization.slice(7));return Response.json({protocol:'redx-site-session-v1',client_id:'gendragoon',scope:'gendragoon.receiver',sub,email:sub+'@example.test',email_verified:true});
+  assert.equal(url,issuer+'/redxai-connect/userinfo');const sub=tokens.get(opts.headers.authorization.slice(7));return Response.json({protocol:'redx-site-session-v1',client_id:'gendragoon',scope:'gendragoon.receiver',sub,email:sub==='service-owner'?'support@infected-nation.com':sub+'@example.test',email_verified:true});
  }}),api=await cloud.listen();t.after(async()=>{await cloud.close();await fs.rm(root,{recursive:true,force:true});});
  async function call(who,route,method='GET',body){const r=await fetch(api+route,{method,headers:{authorization:'Bearer '+token(who),...(body!==undefined?{'content-type':'application/json'}:{})},body:body===undefined?undefined:JSON.stringify(body)});return {status:r.status,body:await r.json()};}
- async function profile(who,name=who){return call(who,'/v1/receivers/me/dev-profile','PUT',{username:name});}
- async function create(note=wid){const r=await call('alice','/v1/receivers/me/workspaces/'+note+'/team','POST',{});assert.equal(r.status,201,JSON.stringify(r.body));return r.body;}
+ async function accept(who){return call(who,'/v1/receivers/me/dev-community','PUT',{version:POLICY.version,accepted:true});}
+ async function profile(who,name=who){await accept(who);return call(who,'/v1/receivers/me/dev-profile','PUT',{username:name});}
+ async function create(note=wid){await accept('alice');const r=await call('alice','/v1/receivers/me/workspaces/'+note+'/team','POST',{});assert.equal(r.status,201,JSON.stringify(r.body));return r.body;}
  async function invite(team){const r=await call('alice','/v1/receivers/teams/'+team+'/invites','POST',{});assert.equal(r.status,201,JSON.stringify(r.body));return r.body;}
  async function join(who,team){await profile(who);const i=await invite(team),r=await call(who,'/v1/receivers/teams/join','POST',{token:i.token});assert.equal(r.status,200,JSON.stringify(r.body));return r.body;}
- return {root,store,records,clock,cloud,api,call,profile,create,invite,join,token};
+ return {root,store,records,clock,cloud,api,call,profile,accept,create,invite,join,token};
 }
 test('username is required, identity is server-bound, and invite secrets are stored only as hashes',async t=>{
  const f=await fixture(t),created=await f.create(),id=created.team.id;
@@ -155,7 +159,7 @@ test('a stalled team mutation body does not lock reads and membership is recheck
  assert.equal([...f.records.map.values()].filter(row=>row.kind==='message').length,0);
 });
 test('a stalled username body does not hold the account profile lock',async t=>{
- const f=await fixture(t),api=createDevTeams({store:f.store,records:f.records,rateLimits:false}),identity={owner:account('alice')};
+ const f=await fixture(t);await f.accept('alice');const api=createDevTeams({store:f.store,records:f.records,rateLimits:false}),identity={owner:account('alice')};
  const slow=new PassThrough();slow.method='PUT';slow.write('{"username":"');
  const pending=api.handle(slow,new URL('http://fixture/v1/receivers/me/dev-profile'),identity);
  await new Promise(setImmediate);
@@ -188,11 +192,106 @@ test('deleted MachineNotes revoke collaboration without exposing another account
  const list=await f.call('bob','/v1/receivers/me/dev-teams');assert.equal(list.status,200);assert.equal(list.body.teams.length,0);
  assert.equal(await f.store.get(account('bob')),null);
 });
+test('versioned rules require an explicit current acceptance before profile, team text, joining and chat',async t=>{
+ const f=await fixture(t);let r=await f.call('alice','/v1/receivers/me/dev-community');assert.equal(r.body.accepted,false);assert.equal(r.body.policy.version,POLICY.version);
+ assert.equal((await f.call('alice','/v1/receivers/me/dev-profile','PUT',{username:'alice'})).body.error,'community_acceptance_required');
+ for(const request of [{version:'old',accepted:true},{version:POLICY.version,accepted:false},{version:POLICY.version,accepted:true,account:account('alice')}])assert.notEqual((await f.call('alice','/v1/receivers/me/dev-community','PUT',request)).status,200);
+ assert.equal((await f.call('alice',`/v1/receivers/me/workspaces/${wid}/team`,'POST',{})).status,409);
+ const created=await f.create(),id=created.team.id;await f.profile('alice');const bob=await f.join('bob',id);
+ const key='profile:'+account('bob'),prior=await f.records.get(key);await f.records.write(key,{...prior.value,community:{version:'previous',acceptedMs:f.clock.value}},prior,prior);
+ assert.equal((await f.call('bob',`/v1/receivers/teams/${id}/messages`,'POST',{text:'not accepted',messageId:'a'.repeat(32)})).body.error,'community_acceptance_required');
+ assert.equal((await f.call('alice',`/v1/receivers/teams/${id}/members/${bob.self.peerId}`)).status,404);
+ await f.accept('bob');await f.profile('bob','bob_updated');assert.equal((await f.call('bob','/v1/receivers/me/dev-community')).body.accepted,true);
+ assert.equal((await f.call('alice',`/v1/receivers/teams/${id}/members/${bob.self.peerId}`)).status,200);
+});
+test('blocks are durable, bidirectional for relay/presence/signals and peer lease, scoped to their team',async t=>{
+ const f=await fixture(t),a=await f.create(),b=await f.create(otherWid);await f.profile('alice');const bob=await f.join('bob',a.team.id),other=await f.join('bob',b.team.id),route=`/v1/receivers/teams/${a.team.id}`;
+ await f.call('alice',route+'/messages','POST',{text:'before block',messageId:'a'.repeat(32)});
+ await f.call('alice',route+'/presence','PUT',{});
+ const signal={signalId:'b'.repeat(32),connectionId:'c'.repeat(32),to:bob.self.peerId,kind:'offer',payload:{type:'offer',sdp:'v=0\r\n'}};
+ assert.equal((await f.call('alice',route+'/signals','POST',signal)).status,201);
+ assert.equal((await f.call('bob',route+'/blocks/'+a.self.peerId,'PUT',{})).status,200);
+ assert.equal((await f.call('bob',route+'/messages')).body.messages.length,0);assert.equal((await f.call('bob',route+'/signals')).body.signals.length,0);assert.equal((await f.call('bob',route+'/presence')).body.peers.length,0);
+ for(const [who,peer]of [['alice',bob.self.peerId],['bob',a.self.peerId]])assert.equal((await f.call(who,route+'/members/'+peer)).status,404);
+ assert.equal((await f.call('alice',route+'/signals','POST',{...signal,signalId:'d'.repeat(32)})).status,404);
+ assert.equal((await f.call('alice',`/v1/receivers/teams/${b.team.id}/members/${other.self.peerId}`)).status,200);
+ const rows=(await f.call('bob',route+'/members')).body.members;assert.equal(rows.find(x=>x.peerId===a.self.peerId).blockedByYou,true);
+ const api=createDevTeams({store:f.store,records:f.records,now:()=>f.clock.value,rateLimits:false}),req=Readable.from([]);req.method='GET';const reopened=await api.handle(req,new URL('http://fixture'+route+'/members/'+a.self.peerId),{owner:account('bob')}).catch(e=>e);assert.equal(reopened.status,404,'a fresh process still denies the blocked lease');
+ assert.equal((await f.call('bob',route+'/blocks/'+a.self.peerId,'DELETE')).status,200);assert.equal((await f.call('bob',route+'/blocks')).body.blocks.length,0);assert.equal((await f.call('alice',route+'/members/'+bob.self.peerId)).status,200);
+});
+test('reports validate relay evidence, isolate receipts, and preserve service escalation across owner review',async t=>{
+ const f=await fixture(t),a=await f.create(),b=await f.create(otherWid),route=`/v1/receivers/teams/${a.team.id}`;await f.profile('alice');const bob=await f.join('bob',a.team.id),eve=await f.join('eve',a.team.id);await f.join('bob',b.team.id);
+ const sent=await f.call('alice',route+'/messages','POST',{text:'canonical relay evidence',messageId:'a'.repeat(32)}),body={reportId:'b'.repeat(32),peerId:a.self.peerId,messageId:sent.body.id,reason:'harassment',details:'Synthetic fixture'};
+ const result=await f.call('bob',route+'/reports','POST',body);assert.equal(result.status,201);assert.equal(result.body.report.escalated,true,'reports about the team owner always reach the service queue');const rid=result.body.report.id;
+ assert.deepEqual((await f.call('bob',route+'/reports','POST',body)).body.report,result.body.report);
+ assert.equal((await f.call('bob',route+'/reports')).status,403);assert.equal((await f.call('eve',route+'/reports/'+rid)).status,404);
+ const own=(await f.call('bob',route+'/reports/'+rid)).body;assert.equal(own.report.id,rid);assert.equal(own.report.evidence,undefined);assert.equal(own.reviews,undefined);
+ assert.equal((await f.call('bob',`/v1/receivers/teams/${b.team.id}/reports`,'POST',{...body,reportId:'c'.repeat(32),peerId:b.self.peerId})).status,404,'foreign relay IDs are rejected');
+ assert.equal((await f.call('bob',route+'/reports','POST',{...body,reportId:'d'.repeat(32),peerId:eve.self.peerId})).status,404,'message author must match reported person');
+ const decision={reviewId:'e'.repeat(32),status:'dismissed',action:'none',note:'Team review fixture'};assert.equal((await f.call('bob',route+'/reports/'+rid,'PATCH',decision)).status,403);
+ assert.equal((await f.call('alice',route+'/reports/'+rid,'PATCH',decision)).status,201);
+ assert.equal((await f.call('eve','/v1/receivers/me/dev-reports')).status,403);
+ const service=(await f.call('service-owner','/v1/receivers/me/dev-reports')).body;assert.equal(service.reports[0].id,rid);assert.equal(service.reports[0].evidence.text,'canonical relay evidence');
+ const sroute='/v1/receivers/me/dev-reports/'+rid;assert.equal((await f.call('service-owner',sroute,'PATCH',{...decision,reviewId:'f'.repeat(32),status:'reviewed',note:'Independent service review'})).status,201);
+ const detail=(await f.call('service-owner',sroute)).body;assert.equal(detail.reviews.length,2);assert.deepEqual(detail.reviews.map(x=>x.reviewer),['team-owner','service-owner']);assert.equal(detail.report.evidence.text,'canonical relay evidence');
+ assert.equal((await f.call('alice',route+'/reports/'+rid,'DELETE')).status,405);
+ const immutable=await f.records.get('report-root:'+rid);assert.equal(immutable.revision,0);assert.equal(immutable.value.input.evidence.text,'canonical relay evidence');
+ const disable={reviewId:'9'.repeat(32),status:'action_taken',action:'disable_team',note:'Synthetic service-only action'};
+ assert.equal((await f.call('alice',route+'/reports/'+rid,'PATCH',disable)).status,403);assert.equal((await f.call('service-owner',sroute,'PATCH',disable)).status,201);
+ assert.equal((await f.call('bob',route+'/messages')).status,404);assert.equal((await f.call('service-owner',sroute)).body.reviews.length,3,'service reviews survive disabling the team');
+});
+test('direct evidence is explicitly unverified and moderation actions revoke peers without granting file authority',async t=>{
+ const f=await fixture(t),a=await f.create(),route=`/v1/receivers/teams/${a.team.id}`;await f.profile('alice');const bob=await f.join('bob',a.team.id),eve=await f.join('eve',a.team.id);
+ let r=await f.call('eve',route+'/reports','POST',{reportId:'1'.repeat(32),peerId:bob.self.peerId,reason:'spam',directText:'Reporter-supplied fixture',escalate:true});assert.equal(r.status,201);const rid=r.body.report.id;
+ const reports=(await f.call('alice',route+'/reports')).body;assert.equal(reports.reports[0].evidence.verified,false);assert.equal(reports.reports[0].evidence.kind,'reporter-provided-direct-text');
+ assert.equal((await f.call('alice',route+'/members/'+bob.self.peerId,'PATCH',{role:'admin'})).status,200);
+ assert.equal((await f.call('bob',route+'/reports')).status,403,'team admins do not receive report inventory');
+ r=await f.call('alice',route+'/reports/'+rid,'PATCH',{reviewId:'2'.repeat(32),status:'action_taken',action:'remove_member',note:'Synthetic moderation'});assert.equal(r.status,201);
+ assert.equal((await f.call('bob',route+'/signals')).status,404);assert.equal((await f.call('eve',route+'/members/'+bob.self.peerId)).status,404);
+ assert.equal((await f.call('eve',`/v1/receivers/me/workspaces/${wid}/library`)).status,404);
+ assert.equal((await f.call('eve',route+'/reports','POST',{reportId:'3'.repeat(32),peerId:a.self.peerId,reason:'spam',file:'/private/local-path'})).status,400);
+});
+test('relay moderation hides the canonical message and new references support historical authenticated reads',async t=>{
+ const f=await fixture(t),a=await f.create(),route=`/v1/receivers/teams/${a.team.id}`;await f.profile('alice');const bob=await f.join('bob',a.team.id),sent=await f.call('bob',route+'/messages','POST',{text:'Synthetic message to hide',messageId:'4'.repeat(32)});
+ const pointer=await f.records.get(`message-ref:${a.team.id}:${sent.body.id}`);await f.records.remove(pointer);
+ await f.call('alice',route+'/messages');assert.ok(await f.records.get(`message-ref:${a.team.id}:${sent.body.id}`),'visible historical messages gain a server-resolved pointer');
+ const reported=await f.call('alice',route+'/reports','POST',{reportId:'5'.repeat(32),peerId:bob.self.peerId,messageId:sent.body.id,reason:'spam'});
+ assert.equal((await f.call('alice',route+'/reports/'+reported.body.report.id,'PATCH',{reviewId:'6'.repeat(32),status:'action_taken',action:'hide_message'})).status,201);
+ const messages=(await f.call('alice',route+'/messages')).body.messages;assert.equal(messages[0].deleted,true);assert.equal(messages[0].text,'');
+ const report=(await f.call('alice',route+'/reports/'+reported.body.report.id)).body;assert.equal(report.report.evidence.text,'Synthetic message to hide');
+});
+test('report pagination and bounded physical expiry cleanup retain unrelated active records',async t=>{
+ const f=await fixture(t),a=await f.create(),route=`/v1/receivers/teams/${a.team.id}`;await f.profile('alice');const bob=await f.join('bob',a.team.id);const ids=[];
+ for(let n=0;n<12;n++){const r=await f.call('bob',route+'/reports','POST',{reportId:n.toString(16).padStart(32,'0'),peerId:a.self.peerId,reason:'spam'});assert.equal(r.status,201);ids.push(r.body.report.id);}
+ let cursor=null,all=[];do{const r=await f.call('alice',route+'/reports?limit=3'+(cursor?'&cursor='+cursor:''));assert.equal(r.status,200);all.push(...r.body.reports);cursor=r.body.nextCursor;}while(cursor);assert.equal(all.length,12);
+ for(let n=0;n<24;n++)assert.equal((await f.call('alice',route+'/reports/'+ids[0],'PATCH',{reviewId:n.toString(16).padStart(32,'0'),status:'reviewed',action:'none'})).status,201);
+ f.clock.value+=RETENTION+1;
+ await f.call('service-owner','/v1/receivers/me/dev-reports');assert.ok([...f.records.map.values()].some(x=>x.kind==='report'),'one cleanup is bounded');
+ for(let n=0;n<5;n++)await f.call('service-owner','/v1/receivers/me/dev-reports');
+ assert.equal([...f.records.map.values()].filter(x=>['report','report_index','report_state','report_review'].includes(x.kind)).length,0,'expired evidence, history, state and indexes are physically removed');
+ assert.ok(await f.records.get('team:'+a.team.id));assert.ok(await f.records.get('profile:'+account('bob')));
+});
+test('interrupted report creation retains its cleanup index and repairs the same immutable input',async t=>{
+ const records=new Rows(),write=records.write.bind(records);let fail=true;records.write=async(key,value,meta,prior)=>{if(fail&&meta.kind==='report'){fail=false;throw new CloudError('metadata_unavailable',503);}return write(key,value,meta,prior);};
+ const f=await fixture(t,{records}),a=await f.create(),route=`/v1/receivers/teams/${a.team.id}/reports`;await f.profile('alice');await f.join('bob',a.team.id);
+ const body={reportId:'8'.repeat(32),peerId:a.self.peerId,reason:'spam',directText:'Synthetic explicit unverified text'};
+ assert.equal((await f.call('bob',route,'POST',body)).status,503);assert.equal([...records.map.values()].filter(r=>r.kind==='report').length,0);const index=[...records.map.values()].find(r=>r.kind==='report_index');assert.ok(index);assert(!JSON.stringify(index.value).includes(body.directText),'the index retains a hash, not unindexed private text');
+ f.clock.value+=10000;assert.equal((await f.call('bob',route,'POST',{...body,reason:'fraud'})).status,409);const repaired=await f.call('bob',route,'POST',body);assert.equal(repaired.status,201);assert.equal(repaired.body.report.submittedMs,index.value.submittedMs);assert.equal(repaired.body.report.expiresAtMs,index.value.expiresAtMs);
+ assert.equal((await f.call('service-owner','/v1/receivers/me/dev-reports')).body.reports.length,1);
+});
+test('deleted target barriers prevent post-scan safety metadata recreation and rate limits bound reports',async t=>{
+ const f=await fixture(t),a=await f.create(),route=`/v1/receivers/teams/${a.team.id}`;await f.profile('alice');const bob=await f.join('bob',a.team.id);await f.store.ensure(account('bob'));await f.store.change(account('bob'),s=>{s.accountDeletion={status:'running'};});
+ for(const [tail,method,b]of [['reports','POST',{reportId:'7'.repeat(32),peerId:bob.self.peerId,reason:'spam'}],['blocks/'+bob.self.peerId,'PUT',{}]])assert.equal((await f.call('alice',route+'/'+tail,method,b)).status,404);
+ const g=await fixture(t,{rateLimits:true}),c=await g.create(),peer=await g.join('bob',c.team.id),r=`/v1/receivers/teams/${c.team.id}/reports`;
+ for(let n=0;n<10;n++)assert.equal((await g.call('bob',r,'POST',{reportId:n.toString(16).padStart(32,'0'),peerId:c.self.peerId,reason:'spam'})).status,201);
+ assert.equal((await g.call('bob',r,'POST',{reportId:'f'.repeat(32),peerId:c.self.peerId,reason:'spam'})).status,429);assert.ok(peer.self.peerId);
+});
 test('actual scoped RedX records persist independent teams, bounded pages and CAS invite claims',
  {skip:!process.env.REDX_INTEGRATION_ROOT,timeout:30000},async t=>{
  const {RedXState}=require('../redx-state.cjs');const stack=await scopedRedXFixture(t);
  const store=new RedXState({url:stack.redxURL,key:stack.receiverKey,db:'gendragoon_receivers',local:true}),rows=new DevTeamRecords(store);
  const scope='d'.repeat(32);for(let n=0;n<6;n++)await rows.write('fixture:'+n,{index:n},{scope,kind:'invite'});
+ assert.deepEqual(await rows.list(scope,'presence'),{rows:[],after:null},'valid empty BoxQL projections are an empty page');
  const page=await rows.list(scope,'invite',{limit:2});assert.equal(page.rows.length,2);assert.ok(page.after);const next=await rows.list(scope,'invite',{limit:2,after:page.after});assert.equal(next.rows.length,2);assert.ok(next.rows[0].position>page.after);
  const old=await rows.get('fixture:0'),results=await Promise.allSettled([rows.write('fixture:0',{claimed:'a'},{scope,kind:'invite'},old),rows.write('fixture:0',{claimed:'b'},{scope,kind:'invite'},old)]);
  assert.equal(results.filter(x=>x.status==='fulfilled').length,1);assert.equal(results.find(x=>x.status==='rejected').reason.status,409);
@@ -204,5 +303,13 @@ test('actual scoped RedX records persist independent teams, bounded pages and CA
  await rows.remove(revoked);assert.equal(await rows.get('fixture:0'),null);
  await rows.write('expiring',{expiresAtMs:123},{scope,kind:'signal'},null);
  const expired=await rows.list(scope,'signal',{expiredBefore:124,limit:10});assert.equal(expired.rows.length,1);await rows.remove(expired.rows[0]);assert.equal(await rows.get('expiring'),null);
+ const f=await fixture(t,{records:rows}),created=await f.create(),route=`/v1/receivers/teams/${created.team.id}`;await f.profile('alice');const bob=await f.join('bob',created.team.id);
+ const sent=await f.call('bob',route+'/messages','POST',{messageId:'a'.repeat(32),text:'Actual scoped RedX moderation fixture'});assert.equal(sent.status,201,JSON.stringify(sent.body));
+ const report=await f.call('alice',route+'/reports','POST',{reportId:'b'.repeat(32),peerId:bob.self.peerId,messageId:sent.body.id,reason:'spam'});assert.equal(report.status,201);
+ const review=await f.call('alice',route+'/reports/'+report.body.report.id,'PATCH',{reviewId:'c'.repeat(32),status:'action_taken',action:'hide_message'});assert.equal(review.status,201);
+ assert.equal((await f.call('bob',route+'/messages')).body.messages[0].deleted,true,'hashed-key CAS modifies the canonical row without losing indexes');
+ assert.equal((await f.call('alice',route+'/blocks/'+bob.self.peerId,'PUT',{})).status,200);assert.equal((await f.call('bob',route+'/members/'+created.self.peerId)).status,404);
+ assert.equal((await f.call('service-owner','/v1/receivers/me/dev-reports')).body.reports[0].id,report.body.report.id);
+ f.clock.value+=RETENTION+1;await f.call('service-owner','/v1/receivers/me/dev-reports');assert.equal(await rows.get('report-root:'+report.body.report.id),null,'actual DB physically deletes expired root/history/state/index');
 });
 module.exports={Rows,Ledger};

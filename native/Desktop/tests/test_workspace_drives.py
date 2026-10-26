@@ -301,12 +301,13 @@ class ActualArchiveTests(unittest.TestCase):
         report=Path(os.environ["GD_MOUNT_REPORT"]) if os.environ.get("GD_MOUNT_REPORT") else None
         def emit(state,reason=None):
             if report:report.write_text(json.dumps({"schema":1,"platform":sys.platform,"mount":state,"reason":reason}),encoding="utf-8")
-        try:platform.prerequisites(os.environ.get("GD_TEST_RCLONE"))
+        helper=os.environ.get("GD_TEST_MOUNT_HOST" if sys.platform=="win32" else "GD_TEST_RCLONE")
+        try:platform.prerequisites(helper)
         except platform.PlatformMountError as error:
             emit("prerequisite-unavailable",str(error));self.skipTest(str(error))
         manager=mounts.WorkspaceMountManager(self.model.root);record=None
         try:
-            record=manager.mount(self.model,NOTE,os.environ.get("GD_TEST_RCLONE"));self.assertTrue(platform.mounted(record))
+            record=manager.mount(self.model,NOTE,helper);self.assertTrue(platform.mounted(record))
             path=Path(record["mountPath"])/self.source.name
             with path.open("rb") as source:
                 self.assertEqual(source.read(),self.payload)
@@ -349,19 +350,21 @@ class PlatformTests(unittest.TestCase):
             self.assertEqual(environment["RCLONE_WEBDAV_BEARER_TOKEN"],"local-dav-token")
             self.assertNotEqual(environment["RCLONE_RC_PASS"],environment["RCLONE_WEBDAV_BEARER_TOKEN"])
 
-    def test_windows_rclone_receives_exact_protected_current_user_read_execute_descriptor(self):
+    def test_windows_owned_host_receives_exact_protected_current_user_read_execute_descriptor(self):
         fixture,security,descriptor=self.windows_security_fixture();sid=fixture.user_sid()
         expected="FileSecurity=O:"+sid+"G:"+sid+"D:P(A;;FRFX;;;"+sid+")"
         with tempfile.TemporaryDirectory() as temporary:
             binary=Path(temporary)/"rclone.exe";binary.write_bytes(b"native fixture")
-            tools={"rclone":str(binary),"sha256":hashlib.sha256(binary.read_bytes()).hexdigest()}
+            tools={"rclone":str(binary),"sha256":hashlib.sha256(binary.read_bytes()).hexdigest(),"backend":"owned-host"}
             process=SimpleNamespace(stderr=io.BytesIO())
             with patch.dict(sys.modules,{"gendragoon_platform_ipc":fixture}),patch.object(platform,"sys",SimpleNamespace(platform="win32")),patch.object(platform,"trusted_binary",return_value=str(binary)),patch.object(platform.subprocess,"CREATE_NO_WINDOW",0,create=True),patch.object(platform.subprocess,"Popen",return_value=process) as start:
                 platform.start(tools,{"mountPath":"Z:\\","label":"Fixture"},"http://127.0.0.1:43124/","local-only",Path(temporary)/"cache")
-            args=start.call_args.args[0];position=args.index("--option")
-            self.assertEqual(args[args.index("--config")+1],"NUL")
-            self.assertEqual(args[position:position+2],["--option",expected]);self.assertEqual(args.count(expected),1)
-            self.assertIn("--read-only",args);self.assertNotIn("--allow-other",args)
+            args=start.call_args.args[0];environment=start.call_args.kwargs["env"]
+            self.assertEqual(args,[str(binary),"--mount-point","Z:","--volume-label","Fixture"])
+            self.assertEqual(environment["GD_MOUNT_FILE_SECURITY"],expected.removeprefix("FileSecurity="))
+            self.assertEqual(environment["GD_MOUNT_DAV_TOKEN"],"local-only")
+            self.assertNotEqual(environment["GD_MOUNT_CONTROL_TOKEN"],environment["GD_MOUNT_DAV_TOKEN"])
+            self.assertNotIn("RCLONE_RC_PASS",environment);self.assertNotIn("local-only",repr(args))
             security.ConvertStringSecurityDescriptorToSecurityDescriptor.assert_called_once_with(expected.removeprefix("FileSecurity="),1)
             self.assertEqual(descriptor.GetSecurityDescriptorDacl().GetAce(0)[-1],sid)
             for broad in (";;;WD)",";;;AU)",";;;BA)",";;;SY)"):self.assertNotIn(broad,expected)
@@ -369,7 +372,7 @@ class PlatformTests(unittest.TestCase):
     def test_windows_unknown_sid_or_broadened_descriptor_fails_before_process_creation(self):
         with tempfile.TemporaryDirectory() as temporary:
             binary=Path(temporary)/"rclone.exe";binary.write_bytes(b"native fixture")
-            tools={"rclone":str(binary),"sha256":hashlib.sha256(binary.read_bytes()).hexdigest()}
+            tools={"rclone":str(binary),"sha256":hashlib.sha256(binary.read_bytes()).hexdigest(),"backend":"owned-host"}
             with patch.object(platform,"sys",SimpleNamespace(platform="win32")),patch.object(platform,"trusted_binary",return_value=str(binary)),patch.object(platform.subprocess,"Popen") as start:
                 for sid in ("S-1-1-0","S-1-5-18","S-1-5-32-544","S-1-5-80-1","S-1-5-21-1-2-3-4294967296","S-1-5-21-1-2-3-1001)(A;;FA;;;WD)"):
                     fixture,_,_=self.windows_security_fixture(sid)

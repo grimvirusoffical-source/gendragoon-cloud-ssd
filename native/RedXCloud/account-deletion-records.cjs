@@ -7,6 +7,10 @@ const {IntegrationMetadata}=require('./integrations.cjs');
 const {peerID}=require('./dev-teams.cjs');
 const STAGES=['integrations','teams','members','data','signals','roots','markers','verify-integrations','verify-dev','done'];
 const ID=/^[a-f0-9]{32}$/,ACCOUNT=/^[a-f0-9]{64}$/;
+// These fields are derived by the Team service, never accepted as an arbitrary
+// client owner. Keep the list exact: unrelated records must not be erased by a
+// coincidental targetAccount field.
+const ACCOUNT_LINKED_TEAM_KINDS=new Set(['block','report','report_state','report_index','report_review','message_ref']);
 function decode(value){for(let i=0;i<3&&typeof value==='string';i++)value=JSON.parse(value);return value;}
 class AccountDeletionRecords{
  constructor(store,{exclusive=async(_key,fn)=>fn(),now=Date.now}={}){this.store=store;this.records=new DevTeamRecords(store);this.integrations=new IntegrationMetadata(store);this.exclusive=exclusive;this.now=now;}
@@ -16,7 +20,10 @@ class AccountDeletionRecords{
   let result;
   try{result=await this.store.call('POST','bx',{q:`{Get[]} = "${file}":${table}[ID > $after] -> [ID, State], Sort = ID, Limit = ${limit+1}`,params:{after}});}
   catch(e){if(e.status===404)return {rows:[],after:null};throw e;}
-  if(JSON.stringify(result.columns)!=='["ID","State"]'||!Array.isArray(result.rows)||result.rows.length>limit+1)throw new CloudError('account_deletion_metadata_invalid',503);
+  // Actual RedX omits projected columns when a filtered BoxQL scan is empty.
+  // Only the exact empty-array pair is equivalent to an empty page.
+  if(Array.isArray(result?.columns)&&result.columns.length===0&&Array.isArray(result.rows)&&result.rows.length===0)return {rows:[],after:null};
+  if(JSON.stringify(result?.columns)!=='["ID","State"]'||!Array.isArray(result.rows)||result.rows.length>limit+1)throw new CloudError('account_deletion_metadata_invalid',503);
   let previous=after;
   const rows=result.rows.map(tuple=>{
    if(!Array.isArray(tuple)||tuple.length!==2||!Number.isSafeInteger(tuple[0])||tuple[0]<=previous)throw new CloudError('account_deletion_metadata_invalid',503);
@@ -38,6 +45,7 @@ class AccountDeletionRecords{
   const r=row.value,v=r.value;
   if(r.kind==='deletion_peer')return false;
   if(r.scope===owner||v.account===owner||v.claimedBy===owner)return true;
+  if(ACCOUNT_LINKED_TEAM_KINDS.has(r.kind)&&(v.targetAccount===owner||v.owner===owner))return true;
   if(['message','presence'].includes(r.kind)&&ID.test(r.scope)&&v.peerId===peerID(r.scope,owner))return true;
   if(r.kind==='invite'&&await this.ownedTeam(r.scope,owner))return true;
   return false;

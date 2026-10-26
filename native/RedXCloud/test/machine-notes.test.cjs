@@ -82,6 +82,15 @@ test('admin MachineNotes pagination is bounded and rejects unknown, duplicate an
  assert.equal(f.store.queries.length,0);
  const r=await f.call('A','/v1/receivers/me/machine-notes?owner='+f.bob);assert.equal(r.status,400);
 });
+test('verified owner inventory accepts RedX exact empty projection and rejects malformed empty-looking data',async t=>{
+ const f=await fixture(t);let result={columns:[],rows:[]};f.store.call=async()=>result;
+ let response=await f.call('O','/v1/receivers/admin/machine-notes');assert.equal(response.status,200);
+ assert.deepEqual(response.body.machineNotes,[]);assert.equal(response.body.receiversScanned,0);assert.equal(response.body.nextCursor,null);
+ for(const bad of [{columns:[],rows:[[1,'bad']]},{columns:['unexpected'],rows:[]},{rows:[]},{columns:[]}]){
+  result=bad;response=await f.call('O','/v1/receivers/admin/machine-notes');assert.equal(response.status,503);assert.equal(response.body.error,'metadata_invalid');
+ }
+ assert.equal((await f.call('A','/v1/receivers/admin/machine-notes')).status,403);
+});
 test('MachineNotes admin enumeration reads actual scoped RedX Receiver records and control-only notes',
  {skip:!process.env.REDX_INTEGRATION_ROOT,timeout:30000},async t=>{
  const {startStack}=require('./stack.cjs'),{RedXState}=require('../redx-state.cjs'),{ControlState}=require('../control-state.cjs');

@@ -17,7 +17,7 @@ concurrency:
 jobs:
   actual-winfsp:
     runs-on: windows-2025
-    timeout-minutes: 20
+    timeout-minutes: 30
     env:
       PYTHONDONTWRITEBYTECODE: '1'
     steps:
@@ -27,6 +27,10 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
         with:
           python-version: '3.13'
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
+        with:
+          go-version: '1.26.0'
+          cache-dependency-path: native/Desktop/MountHost/go.sum
       - name: Require a disposable hosted Windows runner
         shell: pwsh
         run: |
@@ -61,6 +65,19 @@ jobs:
           python -B native/Desktop/stage_runtime.py --destination "$env:RUNNER_TEMP/gendragoon-desktop" --prebuilt native/Desktop/runtimes/windows-x86_64.zip
           python -B native/Desktop/windows_utf8.py --destination "$env:RUNNER_TEMP/gendragoon-python-utf8" --path "$env:RUNNER_TEMP/gendragoon-desktop" --path "$env:RUNNER_TEMP/gendragoon-desktop/runtime"
           python -B native/Desktop/stage_ci_rclone.py --destination "$env:RUNNER_TEMP/gendragoon-rclone-fixture"
+      - name: Build and test only the independent FLOSS mount host
+        shell: pwsh
+        env:
+          CGO_ENABLED: '0'
+          GOTOOLCHAIN: local
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          Push-Location native/Desktop/MountHost
+          try { go test -mod=readonly -tags=cmount ./... } finally { Pop-Location }
+          python -B native/Desktop/build_mount_host.py --destination "$env:RUNNER_TEMP/gendragoon-standalone-mount-host"
+          python -B -m unittest discover -s native/Desktop/tests -p test_desktop_distribution.py -v
+          "GD_TEST_MOUNT_HOST=$env:RUNNER_TEMP/gendragoon-standalone-mount-host/GenDragoonMountHost.exe" | Add-Content -Encoding utf8 $env:GITHUB_ENV
       - name: Require real mount, private descriptor, file read, busy refusal and normal unmount
         shell: pwsh
         env:
@@ -71,6 +88,23 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Windows drive tests failed' }
           $report = Get-Content -Raw -LiteralPath $env:GD_MOUNT_REPORT | ConvertFrom-Json
           if ($report.mount -ne 'verified') { throw 'Actual WinFsp mounting is mandatory in this workflow; a skip is not acceptance' }
+      - name: Require native duplicate, mapped-view, directory and concurrent-open lifetime safety
+        shell: pwsh
+        env:
+          GD_DESKTOP_RUNTIME: ${{ runner.temp }}/gendragoon-desktop
+          GD_MOUNT_HOST_REPORT: ${{ runner.temp }}/owned-host-driver-acceptance.json
+          GD_REQUIRE_MOUNT_HOST: '1'
+        run: |
+          & "$env:RUNNER_TEMP/gendragoon-python-utf8/python.exe" -B -m unittest discover -s native/Desktop/tests -p test_windows_mount_host.py -v
+          if ($LASTEXITCODE -ne 0) { throw 'Owned mount-host lifecycle tests failed' }
+          $report = Get-Content -Raw -LiteralPath $env:GD_MOUNT_HOST_REPORT | ConvertFrom-Json
+          if ($report.mount -ne 'verified' -or $report.checks.Count -ne 7) { throw 'All actual WinFsp lifetime checks are mandatory' }
+      - name: Preserve the independently distributed FLOSS host candidate and source
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: GenDragoon-MountHost-Windows-FLOSS-candidate
+          path: ${{ runner.temp }}/gendragoon-standalone-mount-host/
+          if-no-files-found: error
       - name: Preserve sanitized driver installation and actual filesystem results
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
@@ -79,4 +113,5 @@ jobs:
           path: |
             ${{ runner.temp }}/ci-winfsp-install.json
             ${{ runner.temp }}/desktop-mount-capabilities.json
+            ${{ runner.temp }}/owned-host-driver-acceptance.json
           if-no-files-found: warn

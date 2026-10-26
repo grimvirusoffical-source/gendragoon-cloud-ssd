@@ -42,8 +42,8 @@ def main():
     if not root.is_relative_to(runner) or root == runner or len(str(root / "socket/rpc.sock")) > 100:
         parser.error("Use a new short private directory beneath RUNNER_TEMP")
     bridge.private_path(root, directory=True)
-    if not bridge.CHROME_ORIGIN.fullmatch(options.origin):
-        parser.error("An exact disposable Chromium origin is required")
+    if not bridge.CHROME_ORIGIN.fullmatch(options.origin) and options.origin != bridge.FIREFOX_ID:
+        parser.error("An exact disposable Chromium origin or the fixed Firefox identity is required")
     if options.host.read_bytes()[:4] != b"\x7fELF":
         parser.error("The fixture requires the actual packaged ELF native host")
     base = root / "state/gendragoon"
@@ -92,6 +92,11 @@ def main():
                 value = {"items": [{"name": FILE_LABEL, "archiveBytes": 17}]}
             elif path == "/v1/receivers/me/dev-profile":
                 value = {"profile": {"username": "FixtureUser"}}
+            elif path == "/v1/receivers/me/dev-community":
+                value = {"policy": {"version": "fixture-v1", "title": "Disposable fixture rules",
+                    "rules": ["Synthetic account-free acceptance fixture."],
+                    "notice": "No real account or community acceptance is performed."},
+                    "accepted": False, "serviceOwner": False}
             elif path.startswith("/v1/receivers/me/dev-teams?"):
                 value = {"teams": [], "nextCursor": None}
             else:

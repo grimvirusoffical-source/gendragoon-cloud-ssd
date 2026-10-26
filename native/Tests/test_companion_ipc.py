@@ -36,6 +36,10 @@ struct Project {let buckets:[Note]}
 final class GDUpdateActivity {static let shared=GDUpdateActivity();func canStart()->Bool{true}}
 @main struct Probe {
  @MainActor static func main() async throws {
+  if CommandLine.arguments.count == 4 && CommandLine.arguments[1] == "check-route" {
+   print(GDCompanion.allowedRoute(CommandLine.arguments[2],method:CommandLine.arguments[3]) ? "allowed" : "denied")
+   return
+  }
   let model=GDCompanion(baseURL:URL(fileURLWithPath:CommandLine.arguments[1]),socketDirectoryURL:URL(fileURLWithPath:CommandLine.arguments[2]))
   model.start()
   FileHandle.standardOutput.write(Data((model.status+"\n").utf8))
@@ -131,6 +135,25 @@ class CompanionIPC(unittest.TestCase):
         with ThreadPoolExecutor(max_workers=6) as executor:
             results = list(executor.map(lambda _: self.request(), range(48)))
         self.assertTrue(all(r["ok"] for r in results))
+
+    def test_actual_swift_moderation_route_policy_remains_scoped(self):
+        team, peer = "a" * 32, "b" * 32
+        allowed = [("GET", "/v1/receivers/me/dev-community"), ("PUT", "/v1/receivers/me/dev-community"),
+                   ("GET", "/v1/receivers/me/dev-reports?limit=20"),
+                   ("PATCH", "/v1/receivers/me/dev-reports/" + peer),
+                   ("PUT", f"/v1/receivers/teams/{team}/blocks/{peer}"),
+                   ("POST", f"/v1/receivers/teams/{team}/reports")]
+        denied = [("GET", "/v1/receivers/admin/dev-reports"), ("GET", "/v1/integrations/keys"),
+                  ("DELETE", "/v2/account/deletion"), ("GET", "/v1/receivers/me/dev-reports?token=secret"),
+                  ("GET", "/v1/receivers/me/dev-reports/../library"),
+                  ("GET", f"/v1/receivers/teams/{team}/reports/{peer}/files"),
+                  ("GET", "/v1/receivers/me/dev-reports/%61")]
+        for expected, cases in (("allowed", allowed), ("denied", denied)):
+            for method, path in cases:
+                with self.subTest(method=method, path=path):
+                    result = subprocess.run([str(self.binary), "check-route", path, method],
+                                            capture_output=True, text=True, timeout=10, check=True)
+                    self.assertEqual(result.stdout.strip(), expected)
 
 
 if __name__ == "__main__":

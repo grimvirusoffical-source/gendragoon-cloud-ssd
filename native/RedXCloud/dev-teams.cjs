@@ -4,9 +4,10 @@
 const crypto=require('node:crypto');
 const {CloudError,digest}=require('./redx-state.cjs');
 const {DevTeamRecords}=require('./dev-team-store.cjs');
+const {createCommunity}=require('./dev-community.cjs');
 const ID=/^[a-f0-9]{32}$/,ACCOUNT=/^[a-f0-9]{64}$/;
-const TTL={presence:45000,signal:120000,message:7*86400000};
-const matches=pathname=>pathname==='/v1/receivers/me/dev-profile'||pathname==='/v1/receivers/me/dev-teams'||
+const TTL={presence:45000,signal:120000,message:7*86400000,message_ref:7*86400000};
+const matches=pathname=>['/v1/receivers/me/dev-profile','/v1/receivers/me/dev-teams','/v1/receivers/me/dev-community'].includes(pathname)||/^\/v1\/receivers\/me\/dev-reports(?:\/[a-f0-9]{32})?$/.test(pathname)||
  /^\/v1\/receivers\/me\/workspaces\/[a-f0-9]{32}\/team$/.test(pathname)||pathname.startsWith('/v1/receivers/teams/');
 function fields(value,allowed){if(!value||typeof value!=='object'||Array.isArray(value)||Object.keys(value).some(k=>!allowed.includes(k)))throw new CloudError('team_request_invalid',400);return value;}
 function text(value,max){if(typeof value!=='string'||!value.trim()||value.length>max||/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f\u202a-\u202e\u2066-\u2069]/.test(value))throw new CloudError('team_text_invalid',400);return value.trim();}
@@ -55,7 +56,7 @@ function createDevTeams({store,records=new DevTeamRecords(store),now=()=>Date.no
  async function teamResponse(t,m){const result=await view(t,m);return {team:result,self:result.me};}
  async function index(account,t,m){const key=`mine:${account}:${t.value.id}`,prior=await records.get(key);await put(key,{teamId:t.value.id,peerId:m.value.peerId},account,'mine',prior);}
  async function create(identity,wid,b){
-  fields(b,['name']);const note=await workspace(identity.owner,wid),id=teamID(identity.owner,wid);
+  fields(b,['name']);await community.requireAcceptance(identity.owner);const note=await workspace(identity.owner,wid),id=teamID(identity.owner,wid);
   return serial(id,async()=>{
    let t=await records.get('team:'+id);
    if(t&&t.value.owner!==identity.owner)throw new CloudError('team_not_found',404);
@@ -67,7 +68,7 @@ function createDevTeams({store,records=new DevTeamRecords(store),now=()=>Date.no
   });
  }
  async function join(identity,b){
-  fields(b,['token']);await profile(identity.owner,true);rate(identity,'join',10);
+  fields(b,['token']);await profile(identity.owner,true);await community.requireAcceptance(identity.owner);rate(identity,'join',10);
   const token=typeof b.token==='string'?b.token:'',match=/^gdt1_([a-f0-9]{32})_([a-f0-9]{32})_([A-Za-z0-9_-]{43})$/.exec(token);
   if(!match)throw new CloudError('team_invite_invalid',404);
   return serial(match[1],async()=>{
@@ -85,21 +86,25 @@ function createDevTeams({store,records=new DevTeamRecords(store),now=()=>Date.no
   });
  }
  async function sequence(t,field){const changed=await put('team:'+t.value.id,{...t.value,[field]:(t.value[field]||0)+1},t.value.id,'team',t);return {row:changed,number:changed.value[field]};}
+ const community=createCommunity({store,records,put,now,rate,fields,text,page,profile,memberKey,peerID,membership,serial});
  async function dispatch(req,u,identity){
   if(identity.apiKey||!ACCOUNT.test(identity.owner||''))throw new CloudError('team_session_required',403);
   const method=req.method,path=u.pathname;
   rate(identity,'all',240);
+  if(path==='/v1/receivers/me/dev-community'){if(u.search)throw new CloudError('invalid_pagination',400);return community.community(identity,method,method==='PUT'?await body(req):null);}
+  const serviceReport=/^\/v1\/receivers\/me\/dev-reports(?:\/([a-f0-9]{32}))?$/.exec(path);
+  if(serviceReport)return community.serviceReports(identity,u,method,serviceReport[1],method==='PATCH'?await body(req):null);
   if(path==='/v1/receivers/me/dev-profile'){
    if(u.search)throw new CloudError('invalid_pagination',400);
    if(method==='GET'){const p=await profile(identity.owner);return {status:200,body:{profile:p,usernameRequired:!p?.username}};}
    if(method==='PUT'){
-    rate(identity,'profile',10);const b=fields(await body(req),['username']);
+    rate(identity,'profile',10);const b=fields(await body(req),['username']);await community.requireAcceptance(identity.owner);
     return serial('profile:'+identity.owner,async()=>{
     if(typeof b.username!=='string'||!/^[A-Za-z][A-Za-z0-9_.-]{2,31}$/.test(b.username))throw new CloudError('username_invalid',400);
     const normalized=b.username.toLowerCase(),claimKey='username:'+normalized;let claim=await records.get(claimKey);
     if(claim&&claim.value.account!==identity.owner)throw new CloudError('username_taken',409);
     if(!claim)await put(claimKey,{account:identity.owner},digest(normalized),'username');
-    const prior=await records.get(profileKey(identity.owner));const p={username:b.username,updatedMs:now()};
+    const prior=await records.get(profileKey(identity.owner));const p={...prior?.value,username:b.username,updatedMs:now()};
     await put(profileKey(identity.owner),p,identity.owner,'profile',prior);
     return {status:200,body:{profile:p,usernameRequired:false}};
     });
@@ -114,29 +119,33 @@ function createDevTeams({store,records=new DevTeamRecords(store),now=()=>Date.no
   let m=/^\/v1\/receivers\/me\/workspaces\/([a-f0-9]{32})\/team$/.exec(path);
   if(m&&method==='POST'){if(u.search)throw new CloudError('invalid_pagination',400);rate(identity,'create',20);return create(identity,m[1],await body(req));}
   if(path==='/v1/receivers/teams/join'&&method==='POST'){if(u.search)throw new CloudError('invalid_pagination',400);return join(identity,await body(req));}
-  m=/^\/v1\/receivers\/teams\/([a-f0-9]{32})(?:\/(members|invites|messages|presence|signals|membership)(?:\/([a-f0-9]{32}))?)?$/.exec(path);
+  m=/^\/v1\/receivers\/teams\/([a-f0-9]{32})(?:\/(members|invites|messages|presence|signals|membership|blocks|reports)(?:\/([a-f0-9]{32}))?)?$/.exec(path);
   if(!m)throw new CloudError('team_not_found',404);
   const [,id,resource,target]=m;
   // A peer controls how quickly its request body arrives. Read the bounded
   // metadata before taking the team lock, then recheck membership and roles
   // inside the serialized operation before applying any mutation.
   const mutationBody=['POST','PUT','PATCH'].includes(method)?await body(req):null;
+  if(resource==='reports'){await membership(identity,id);await community.cleanup();}
   return serial(id,async()=>{
    const auth=await membership(identity,id),{t}=auth;
+   if(resource==='blocks')return community.blocks(identity,auth,u,method,target,mutationBody);
+   if(resource==='reports')return community.reports(identity,auth,u,method,target,mutationBody);
    if(!resource){
     if(u.search)throw new CloudError('invalid_pagination',400);
     if(method==='GET')return {status:200,body:await teamResponse(t,auth.m)};
     if(method==='PATCH'||method==='DELETE'){
      await membership(identity,id,'owner');const b=method==='PATCH'?fields(mutationBody,['name']):{};
+     if(method==='PATCH')await community.requireAcceptance(identity.owner);
      const changed=await put('team:'+id,{...t.value,...(method==='DELETE'?{status:'disabled'}:{name:text(b.name,80)})},id,'team',t);
      return {status:200,body:method==='DELETE'?{disabled:true}:await teamResponse(changed,auth.m)};
     }
    }
    if(resource==='members'){
-    if(!target&&method==='GET'){const p=await page(u,id,'member',v=>v.status==='active');return {status:200,body:{members:await Promise.all(p.rows.map(publicMember)),cursor:p.cursor,nextCursor:p.nextCursor,memberLimit:null}};}
+    if(!target&&method==='GET'){const p=await page(u,id,'member',v=>v.status==='active');return {status:200,body:{members:await Promise.all(p.rows.map(row=>community.decorate(auth,row,publicMember))),cursor:p.cursor,nextCursor:p.nextCursor,memberLimit:null}};}
     if(target&&method==='GET'){
      if(u.search)throw new CloudError('invalid_pagination',400);const row=await records.get(memberKey(id,target));
-     if(!row||row.value.status!=='active')throw new CloudError('team_member_not_found',404);
+     if(!await community.available(auth,row))throw new CloudError('team_member_not_found',404);
      return {status:200,body:{member:await publicMember(row)}};
     }
     if(target&&(method==='DELETE'||method==='PATCH')){
@@ -172,26 +181,28 @@ function createDevTeams({store,records=new DevTeamRecords(store),now=()=>Date.no
    if(resource==='presence'&&!target){
     await profile(identity.owner,true);
     if(method==='PUT'){
+     await community.requireAcceptance(identity.owner);
      if(u.search)throw new CloudError('invalid_pagination',400);rate(identity,'presence',30);fields(mutationBody,[]);const key=`presence:${id}:${auth.peer}`,prior=await records.get(key);
      await put(key,{peerId:auth.peer,generation:auth.m.value.generation,seenMs:now(),expiresAtMs:now()+TTL.presence},id,'presence',prior);
      return {status:200,body:{expiresAtMs:now()+TTL.presence}};
     }
     if(method==='GET'){
      const p=await page(u,id,'presence',v=>v.expiresAtMs>now()),peers=[];
-     for(const row of p.rows){const member=await records.get(memberKey(id,row.value.peerId));if(member?.value.status==='active'&&member.value.generation===row.value.generation)peers.push({peerId:row.value.peerId,seenMs:row.value.seenMs,expiresAtMs:row.value.expiresAtMs});}
+     for(const row of p.rows){const member=await records.get(memberKey(id,row.value.peerId));if(member?.value.status==='active'&&member.value.generation===row.value.generation&&!await community.blocked(id,identity.owner,member.value.account))peers.push({peerId:row.value.peerId,seenMs:row.value.seenMs,expiresAtMs:row.value.expiresAtMs});}
      return {status:200,body:{peers,cursor:p.cursor,nextCursor:p.nextCursor}};
     }
    }
    if(resource==='messages'){
     await profile(identity.owner,true);
-    if(!target&&method==='GET'){const p=await page(u,id,'message',v=>v.expiresAtMs>now());return {status:200,body:{transport:'server-relay',messages:p.rows.map(r=>({id:r.value.id,peerId:r.value.peerId,username:r.value.username,text:r.value.deleted?'':r.value.text,deleted:r.value.deleted===true,createdMs:r.value.createdMs})),cursor:p.cursor,nextCursor:p.nextCursor}};}
+    if(!target&&method==='GET'){await prune(id,'message_ref');const p=await page(u,id,'message',v=>v.expiresAtMs>now()),messages=[];for(const r of p.rows){const sender=await records.get(memberKey(id,r.value.peerId));if(sender&&!await community.blocked(id,identity.owner,sender.value.account)){await community.rememberKey(id,{...r,value:{...r.value,account:sender.value.account}});messages.push({id:r.value.id,peerId:r.value.peerId,username:r.value.username,text:r.value.deleted?'':r.value.text,deleted:r.value.deleted===true,createdMs:r.value.createdMs});}}return {status:200,body:{transport:'server-relay',messages,cursor:p.cursor,nextCursor:p.nextCursor}};}
     if(!target&&method==='POST'){
-     if(u.search)throw new CloudError('invalid_pagination',400);const p=await profile(identity.owner,true);rate(identity,'message',20,10000);const b=fields(mutationBody,['text','messageId']);
+     if(u.search)throw new CloudError('invalid_pagination',400);await community.requireAcceptance(identity.owner);const p=await profile(identity.owner,true);rate(identity,'message',20,10000);const b=fields(mutationBody,['text','messageId']);
      if(!ID.test(b.messageId||''))throw new CloudError('team_message_id_required',400);const content=text(b.text,2000),key=`message:${id}:${auth.m.value.generation}:${b.messageId}`,prior=await records.get(key);
      if(prior){if(prior.value.text!==content)throw new CloudError('team_message_conflict',409);return {status:200,body:{id:prior.value.id,transport:'server-relay',resumed:true}};}
      const seq=await sequence(t,'messageSeq'),mid=digest(key).slice(0,32);
      await prune(id,'message');
-     await put(key,{id:mid,peerId:auth.peer,username:p.username,text:content,createdMs:now(),expiresAtMs:now()+TTL.message},id,'message',null,seq.number);
+     const message=await put(key,{id:mid,peerId:auth.peer,account:identity.owner,username:p.username,text:content,createdMs:now(),expiresAtMs:now()+TTL.message},id,'message',null,seq.number);
+     await community.rememberKey(id,message,key);
      return {status:201,body:{id:mid,transport:'server-relay'}};
     }
    }
@@ -199,14 +210,14 @@ function createDevTeams({store,records=new DevTeamRecords(store),now=()=>Date.no
     await profile(identity.owner,true);const mailbox=digest('team-mailbox:'+id+':'+auth.peer);
     if(method==='GET'){
      const p=await page(u,mailbox,'signal',v=>v.expiresAtMs>now()),signals=[];
-     for(const row of p.rows){const v=row.value,sender=await records.get(memberKey(id,v.from));if(v.toGeneration===auth.m.value.generation&&sender?.value.status==='active'&&sender.value.generation===v.fromGeneration)signals.push({id:v.id,from:v.from,connectionId:v.connectionId,kind:v.type,payload:v.payload,createdMs:v.createdMs,expiresAtMs:v.expiresAtMs});}
+     for(const row of p.rows){const v=row.value,sender=await records.get(memberKey(id,v.from));if(v.toGeneration===auth.m.value.generation&&sender?.value.generation===v.fromGeneration&&await community.available(auth,sender))signals.push({id:v.id,from:v.from,connectionId:v.connectionId,kind:v.type,payload:v.payload,createdMs:v.createdMs,expiresAtMs:v.expiresAtMs});}
      return {status:200,body:{transport:'webrtc-signaling',signals,cursor:p.cursor,nextCursor:p.nextCursor}};
     }
     if(method==='POST'){
-     if(u.search)throw new CloudError('invalid_pagination',400);rate(identity,'signal',120);const b=fields(mutationBody,['signalId','to','connectionId','kind','type','payload']);
+     if(u.search)throw new CloudError('invalid_pagination',400);await community.requireAcceptance(identity.owner);rate(identity,'signal',120);const b=fields(mutationBody,['signalId','to','connectionId','kind','type','payload']);
      if(b.kind&&b.type&&b.kind!==b.type)throw new CloudError('team_signal_invalid',400);b.type=b.kind||b.type;
      if(!ID.test(b.signalId||'')||!ID.test(b.to||'')||!ID.test(b.connectionId||'')||!['offer','answer','ice'].includes(b.type))throw new CloudError('team_signal_invalid',400);
-     const targetMember=await records.get(memberKey(id,b.to));if(!targetMember||targetMember.value.status!=='active'||b.to===auth.peer)throw new CloudError('team_peer_unavailable',404);
+     const targetMember=await records.get(memberKey(id,b.to));if(b.to===auth.peer||!await community.available(auth,targetMember))throw new CloudError('team_peer_unavailable',404);
      if(b.type==='ice'){fields(b.payload,['candidate','sdpMid','sdpMLineIndex','usernameFragment']);if(!(b.payload.candidate===null||typeof b.payload.candidate==='string'&&b.payload.candidate.startsWith('candidate:')&&b.payload.candidate.length<=2000)||!(b.payload.sdpMid===null||typeof b.payload.sdpMid==='string'&&b.payload.sdpMid.length<=64)||!(b.payload.sdpMLineIndex===null||Number.isInteger(b.payload.sdpMLineIndex)&&b.payload.sdpMLineIndex>=0&&b.payload.sdpMLineIndex<=255)||b.payload.usernameFragment!==undefined&&b.payload.usernameFragment!==null&&!(typeof b.payload.usernameFragment==='string'&&b.payload.usernameFragment.length<=256))throw new CloudError('team_signal_invalid',400);}
      else{fields(b.payload,['type','sdp']);if(b.payload.type!==undefined&&b.payload.type!==b.type||typeof b.payload.sdp!=='string'||!b.payload.sdp.startsWith('v=0')||b.payload.sdp.length>8000||/[^\x09\x0a\x0d\x20-\x7e]/.test(b.payload.sdp))throw new CloudError('team_signal_invalid',400);}
      const key=`signal:${id}:${auth.m.value.generation}:${b.signalId}`,prior=await records.get(key);

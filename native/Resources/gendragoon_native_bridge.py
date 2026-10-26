@@ -143,7 +143,7 @@ def validate_request(value: object, client: dict) -> dict:
             raise BridgeError("route_denied", "Encoded and external routes are not supported.")
         path = parsed.path
         metadata = verb == "GET" and (path == "/v1/receivers/me" or re.fullmatch(r"/v1/receivers/me/workspaces/[a-f0-9]{32}/library", path))
-        teams = bool(re.fullmatch(r"/v1/receivers/(?:me/dev-(?:profile|teams)|me/workspaces/[a-f0-9]{32}/team|teams/(?:join|[a-f0-9]{32}(?:/(?:members|invites|messages|presence|signals|membership)(?:/[a-f0-9]{32})?)?))", path))
+        teams = bool(re.fullmatch(r"/v1/receivers/(?:me/dev-(?:profile|teams|community)|me/dev-reports(?:/[a-f0-9]{32})?|me/workspaces/[a-f0-9]{32}/team|teams/(?:join|[a-f0-9]{32}(?:/(?:members|invites|messages|presence|signals|membership|blocks|reports)(?:/[a-f0-9]{32})?)?))", path))
         if verb not in {"GET", "POST", "PUT", "PATCH", "DELETE"} or not (metadata or teams):
             raise BridgeError("route_denied", "Extensions can access file metadata and developer Teams only.")
         query = parse_qsl(parsed.query, keep_blank_values=True)

@@ -9,6 +9,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import secrets
 import shutil
 import stat
@@ -37,6 +38,24 @@ import gendragoon_auth_broker as broker
 MAX_ENTRIES=1_000_000
 MARGIN=64*1024*1024
 TRANSFER_LOCK=threading.RLock()
+TEAM_PATH=re.compile(r"/v1/receivers/(?:me/dev-(?:profile|teams|community)|me/dev-reports(?:/[a-f0-9]{32})?|me/workspaces/[a-f0-9]{32}/team|teams/(?:join|[a-f0-9]{32}(?:/(?:members|invites|messages|presence|signals|membership|blocks|reports)(?:/[a-f0-9]{32})?)?))")
+
+def team_route_allowed(path):
+    if not isinstance(path,str) or len(path)>1024 or re.search(r"[\x00-\x20\x7f#]",path) or path.endswith("?"):return False
+    from urllib.parse import urlsplit,parse_qsl
+    try:parsed=urlsplit(path)
+    except ValueError:return False
+    if parsed.scheme or parsed.netloc or parsed.fragment or not TEAM_PATH.fullmatch(parsed.path):return False
+    try:query=parse_qsl(parsed.query,keep_blank_values=True,strict_parsing=True)
+    except ValueError:return False
+    if len(query)>2 or len({k for k,_ in query})!=len(query):return False
+    for key,value in query:
+        if key=="limit":
+            if not re.fullmatch(r"[1-9][0-9]?",value) or int(value)>50:return False
+        elif key=="cursor":
+            if not re.fullmatch(r"[A-Za-z0-9_-]{1,300}",value):return False
+        else:return False
+    return True
 
 class TransferProgress:
     """Real phase/archive counters and streamed carrier bytes; memory only."""
@@ -432,7 +451,7 @@ class MachineNotesClient:
         return cursor
     def team_request(self,path,method="GET",value=None):
         if self.session.integration_mode:raise SessionError("Teams requires browser account approval.",403)
-        if not path.startswith(("/v1/receivers/me/dev-","/v1/receivers/me/workspaces/","/v1/receivers/teams/")):
+        if not team_route_allowed(path) or method not in ("GET","POST","PUT","DELETE","PATCH"):
             raise ValueError("Unsupported Teams request.")
         return self.session.request(path,method,value)
 

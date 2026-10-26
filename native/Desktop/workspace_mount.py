@@ -363,7 +363,7 @@ class WorkspaceMountManager:
                 record["process"]=platform_api.process_identity(process.pid);self._save(record)
                 deadline=time.monotonic()+30
                 while time.monotonic()<deadline:
-                    if platform_api.mounted(record) is True:
+                    if platform_api.mounted(record) is True and platform_api.ready(process):
                         record.update(platform_api.capture_mount_identity(record))
                         record["state"]="mounted";self._save(record);return dict(record)
                     if process.poll() is not None:break

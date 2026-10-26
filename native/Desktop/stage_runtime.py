@@ -51,7 +51,7 @@ def extract_prebuilt(archive,destination):
             raise RuntimeError("This compiled runtime requires the matching platform, architecture, and Python 3.13.")
         files=manifest.get("files")
         if not isinstance(files,dict) or not 1<=len(files)<=100:raise RuntimeError("The runtime file manifest is invalid.")
-        required={"runtime/redxai/__init__.pyc","runtime/redxai/_librsx.pyc","runtime/redsecretsxai/__init__.pyc",
+        required={"runtime/LICENSE","runtime/NOTICE","runtime/redxai/__init__.pyc","runtime/redxai/_librsx.pyc","runtime/redsecretsxai/__init__.pyc",
             "runtime/redxai/_native/"+("librsx.dll" if current_platform=="windows" else "librsx.so")}
         required.update("runtime/redsecretsxai/"+name+".pyc" for name in MODULES)
         if not required.issubset(files):raise RuntimeError("The compiled runtime is missing a required codec module.")
@@ -121,7 +121,8 @@ def stage(destination,build=None,prebuilt=None):
     for module in MODULES:shutil.copy2(vendor/"redsecretsxai"/(module+".py"),runtime/"redsecretsxai"/(module+".py"))
     binaries=runtime/"redxai/_native";binaries.mkdir(exist_ok=True)
     shutil.copy2(libraries[0],binaries/libraries[0].name)
-    shutil.copy2(vendor/"LICENSE",runtime/"Red-SecretsXAI-LICENSE.txt")
+    for name in ("LICENSE","NOTICE"):shutil.copy2(vendor/name,runtime/name)
+    freeze_codec_sources(runtime)
     for helper in HELPERS:shutil.copy2(NATIVE/"Resources"/helper,runtime/helper)
     shutil.copy2(NATIVE/"Backend/performance_profiles.json",runtime/"gendragoon_performance_profiles.json")
     for name in CLIENTS:
@@ -130,6 +131,20 @@ def stage(destination,build=None,prebuilt=None):
     manifest={"schema":1,"protocol":"MachineNotes-v1","pinnedLibrary":PIN,"encryptedTransfer":"redsecretsxai-png-v1","library":str(binaries/libraries[0].name)}
     (destination/"runtime.json").write_text(json.dumps(manifest,indent=2)+"\n")
     return manifest
+
+def freeze_codec_sources(runtime):
+    """Freeze the pinned private wrapper into adjacent Python3.13 bytecode."""
+    import py_compile
+    if sys.version_info[:2]!=(3,13):raise RuntimeError("A source-built desktop codec requires Python 3.13, matching the portable compiled runtime.")
+    runtime=Path(runtime)
+    expected={runtime/"redxai"/(name+".py") for name in ("__init__","_librsx")}
+    expected.update(runtime/"redsecretsxai"/(name+".py") for name in ("__init__",*MODULES))
+    actual={path for package in ("redxai","redsecretsxai") for path in (runtime/package).rglob("*.py")}
+    if actual!=expected or any(path.is_symlink() for path in actual):raise RuntimeError("The source-built codec contains unexpected wrapper sources.")
+    for source in sorted(expected):
+        py_compile.compile(str(source),cfile=str(source.with_suffix(".pyc")),dfile=source.relative_to(runtime).as_posix(),
+            doraise=True,invalidation_mode=py_compile.PycInvalidationMode.CHECKED_HASH)
+    for source in expected:source.unlink()
 
 def main(argv=None):
     parser=argparse.ArgumentParser(description=__doc__)

@@ -1,6 +1,6 @@
 # GenDragoon Cloud SSD User Guide 0.22
 
-This guide describes the source for **GenDragoon Cloud SSD 0.22.0 build 36**, reviewed on October 26, 2026. Build 36 is a development release candidate. The installed, previously verified Mac release is **0.21.0 build 35** until a separately verified build 36 installation replaces it. A source change, successful unit test, packaged download, or this guide does not establish that a candidate has been installed, published, or accepted by a store.
+This guide describes the source for **GenDragoon Cloud SSD 0.22.0 build 36**, reviewed on October 26, 2026. Build 36 remains a development release candidate. A fresh source `60f9128` package passed signing, notarization, stapling and a real compiled-codec roundtrip; later shared Teams moderation changes still need a matching final package. The installed, previously verified Mac release is **0.21.0 build 35** until a separately verified build 36 installation replaces it. A source change, successful unit test, packaged download, or this guide does not establish that a candidate has been installed, published, or accepted by a store.
 
 Build 35 already has unified source selection, the native library tree, folder organization, verified uploads and restores, and live upload progress. Build 36 adds the new Teams and Integrations pages, portable storage vaults, separate read-only MachineNote Finder drives, transfer credential renewal, and tighter application cache checks. Follow instructions for a new control only in a compatible build that actually contains it.
 
@@ -16,14 +16,14 @@ The word **implemented** below describes the current source. A **candidate** sti
 
 | Platform or client | Current status | Intended use and current limits |
 | --- | --- | --- |
-| Installed Mac build 35 | Previously verified signed and notarized Apple Silicon release | macOS 14 or later; hosted MachineNotes, verified files and complete Mac application backups, library organization, and upload progress. The new build 36 pages and recovery flows are not supplied by build 35. |
-| Mac build 36 | Development release candidate | Apple Silicon and macOS 14 or later. Adds the features in this guide. Final signing, notarization, installation, runtime acceptance, and source identity must be checked for the exact delivered artifact. No Intel Mac package is declared here. |
-| Windows desktop GUI | x86_64 candidate | Current MachineNotes Files, portable vault, durable upload jobs, and server-relayed Teams UI. Native Windows execution, private IPC, installation, and release checks remain separate gates. No Mac NFS drive or managed Mac app launcher. |
-| Linux desktop GUI | x86_64 candidate | The corresponding MachineNotes Files, vault, queue, and relay chat client. Requires the matching Python 3.13 runtime for source installs. Native installation and GUI acceptance remain release gates. No MachineNote FUSE/NFS drive is presented as a Linux feature. |
-| Android | Android 9 or later candidate for arm64-v8a and x86_64 | Existing MachineNotes, portable vault, selected documents/folders, verified archive restore/export, and Teams. APK/AAB, device, background work, and complete 16 KiB native dependency checks remain release gates. No purchase, Stripe checkout, or MachineNote creation button in this client. |
-| Chrome, Edge, Firefox, and Opera extensions | Packaged companion candidates | Require a matching installed, running GenDragoon app, an exact native-host allowlist, and local approval. They are limited clients of that app, not independent storage services. Linux Opera native-host installation is currently refused by the current-user installer. |
-| Local desktop VS Code | VSIX companion candidate | Explicit local selection and approved native companion only. The extension runs in the local UI host. Browser-based VS Code, remote file URIs, virtual workspaces, and untrusted workspaces are not upload targets. |
-| iPhone and iPad | Deferred | No maintained iOS release, tested recovery client, App Store submission, or promise to execute Mac applications is provided by this work. |
+| Installed Mac build 35 | Previously verified signed and notarized Apple Silicon release | macOS 14 or later; hosted MachineNotes, verified files and complete Mac application backups, library organization, and upload progress. New build 36 controls are not supplied by build 35. |
+| Mac build 36 | Fresh signed and notarized candidate; final shared Teams changes pending | Apple Silicon and macOS 14 or later. Compiled-only codec, current-account deletion controls and exact source checks passed their tests. Installation, native UI acceptance and the final matching backend remain pending. No Intel Mac package is declared. |
+| Windows desktop GUI | Packaged x86_64 candidate; drive acceptance blocked | Actual native codec, IPC, GUI and packaged PE-host checks passed. The real WinFsp test mounted and read content, but safe normal unmount failed; the drive was retained. A separate GenDragoon mount helper is under test. Do not treat Windows drive mounting as ready. No Mac managed app launcher. |
+| Linux desktop GUI | Packaged x86_64 candidate with actual read-only FUSE checks passed | MachineNotes Files, vault, queue and relay chat; actual native codec, IPC, GUI, mounted read, busy refusal and normal unmount passed for the tested source. Final installation, live-account restore and publication remain gates. Source installs require matching Python 3.13. |
+| Android | Normal application-ID candidate passed actual API 36 emulators | Android 9 or later; arm64-v8a and x86_64 packages. Both actual 4 KiB and 16 KiB x86_64 six-test suites passed, including visual codec and dependencies, and all 190 packaged ELF files passed alignment checks. Physical ARM, full live-account/background/document-provider acceptance, upload signing and store review remain gates. No purchase or MachineNote creation button. |
+| Chrome, Edge, Firefox, and Opera extensions | Actual Linux loading checks; companion candidates | Chrome, Edge, Opera and Chromium passed real native-messaging/IPC boundary tests; Firefox passed actual temporary load, reload and lint only. Opera's system-wide host registration was tested only on a disposable CI VM; the customer current-user Linux installer still refuses it. Signed store installation, native approval UI and live transfers remain unverified. |
+| Local desktop VS Code | VSIX installed and activated in actual editor test | Its five commands and companion status passed the isolated host test. It still requires a locally running approved native companion. Full picker UI, live-account transfers and Restricted Mode acceptance remain separate. Browser-based VS Code and remote/virtual paths are not upload targets. |
+| iPhone and iPad | Deferred until all other requested targets are finished and submitted | No maintained or tested iOS release or App Store submission is declared. iOS does not execute Mac applications. |
 
 For the new source, the principal differences are:
 
@@ -33,7 +33,7 @@ For the new source, the principal differences are:
 | Complete folder selection | Native folder picker and metadata-preserving archive | Portable directory archive; platform restrictions apply | Android document-tree permission and archive |
 | Optional original offload | Explicit Mac toggle after complete verification | Current GUI retains originals | Always retains originals |
 | Library move copy rename and reference deletion | Native tree | GUI tree | No equivalent complete organization or storage deletion flow is declared |
-| Read-only Finder drives | Implemented Mac-only flow | Not provided | Not provided |
+| Read-only MachineNote drives | Native Finder flow | Linux FUSE tested; Windows safe-unmount gate still blocked | Not provided |
 | Managed Mac application launch | Compatible Mac bundles after verified restore | Not provided by the current GUI | Not provided |
 | Portable hosted-storage vault | Import and export | Import and export | Import and export |
 | Teams | Relay chat and conditional direct WebRTC text chat | Relay chat; no peer-call/live-media UI in the Tk view | Packaged Teams UI; direct support requires device and network verification |
@@ -364,7 +364,7 @@ Restore, app launch, offload, library organization, storage deletion, billing, i
 
 Current browser packages request native messaging only, with no page injection, content scripts, website host access, or remote JavaScript. Exact IDs identify configured clients; they do not attest against every process already running as the same local OS user. Native local-user checks and account-scoped approval remain necessary.
 
-The current-user Linux installer refuses Opera because its documented native-host location is system-wide; this work does not write system configuration to bypass that boundary. Windows needs the real packaged PE native host, not a batch-file substitute. Account changes require fresh approval for the intended account.
+The current-user Linux installer refuses Opera because its documented native-host location is system-wide. The actual Opera CI test created and removed only its exact host manifest on a disposable VM; this does not provide or authorize a customer system installer. Windows needs the real packaged PE native host. Account changes require fresh approval for the intended account.
 
 ### Local VS Code setup
 
@@ -382,13 +382,13 @@ Uploads require a trusted local workspace and explicit selection. Remote/virtual
 
 The Windows/Linux **current GUI** is the MachineNotes Files and Teams client, not the retained legacy v3 command-line prototype. Do not use old cloud commands or raw provider-bucket instructions to infer support for today's encrypted MachineNotes.
 
-Source desktop installations require the matching Python 3.13 interpreter with Tkinter and the trusted platform runtime/dependencies. Standalone GUI/native-host candidates still need their own native CI, signing/distribution, and installation acceptance. The installers use current-user locations and do not elevate or relax PowerShell policy. Current GUI credentials stay in process memory and are discarded when the app closes; reconnect rather than looking for a plaintext token file. Explicit editor jobs are durable but can resume only with the same account and original vault available.
+Source desktop installations require matching Python 3.13 with Tkinter and the trusted runtime/dependencies. Actual Windows and Linux standalone codec, private IPC, GUI and packaged-host tests passed; final installation, live-account transfer and publication remain separate gates. The installers use current-user locations and do not elevate or relax PowerShell policy. GUI credentials stay in process memory and are discarded when the app closes. Explicit editor jobs are durable but can resume only with the same account and original vault available.
 
 The GUI retains originals, verifies complete restores, and uses new destinations. Mac extended attributes, symbolic links, and application bundles require their compatible original-platform restore client; portable restores do not manufacture equivalent Mac metadata. Current Tk Teams provides relay chat, not peer calls or live media. Its retained older CLI's portable-app lifecycle is not a declaration that the new GUI implements the Mac managed launcher.
 
 On Android, connect Red-XAI through browser approval, refresh existing MachineNotes, import the matching portable vault, and select documents or a complete folder through Android's document picker. WorkManager stages the selection and verifies a full cloud readback before success. Originals always remain. Restore first verifies in private storage, then lets you explicitly export verified bytes. Folder and Mac application backups can be exported as intact archives; Android does not execute Mac applications or recreate a Mac installation.
 
-The Android candidate has no Stripe checkout, purchase link, MachineNote creation, automatic original removal, ordinary cancel-running UI, server storage deletion, or garbage collector. A complete account-deletion flow is not verified; disconnect is not account deletion. Background/foreground work, process death, credential renewal, document-provider behavior, and real low-space cases still need device acceptance. Complete 16 KiB compatibility includes **every native dependency**, not just GenDragoon's codec. A passing 4 KiB emulator or aligned codec alone does not settle the NumPy/OpenBLAS dependency gate.
+The Android candidate has no Stripe checkout, purchase link, MachineNote creation, automatic original removal, ordinary cancel-running UI, individual server-item deletion, or garbage collector. Its current-account deletion control has strict receipt/identity and preservation tests; a live account has not been deleted for testing, and the matching backend is not yet active. Disconnect is separate from account deletion. The normal app-ID candidate passed build, lint, JVM tests, both actual API 36 4 KiB/16 KiB six-test instrumentation suites and all 190 native ELF alignment checks, including the numerical, font, JPEG and encrypted visual-codec dependencies. Physical ARM execution, process death, background/foreground work, real credential renewal, document-provider behavior, low-space recovery and store signing remain acceptance gates.
 
 ## Cleanup updates and troubleshooting
 
@@ -410,6 +410,33 @@ The Android candidate has no Stripe checkout, purchase link, MachineNote creatio
 | BYO pairing succeeds but files do not bind in another app | Consult the actual service limits. RottenApple's storageBind feature and other missing external consumers cannot be supplied by an API key or health response. |
 
 For help, record the app version/build, platform, MachineNote or connection label, job state, phase, and displayed safe error. Do not share account tokens, API keys, invitation secrets, portable vault passphrases, keymaps, screenshots containing credentials, or private support directories. The existing operator contact is **support@infected-nation.com**. Owner access and support do not replace an independent readable backup or lost decryption keys.
+
+## Read-only drives on desktop candidates
+
+On a compatible Mac build, select the MachineNote in Files, choose **Mount drive**, and wait for a verified mounted state before opening Finder. Each mounted note has its own identity and verified private cache. More than one note can remain mounted; select the appropriate mounted note explicitly.
+
+The Linux candidate uses a real read-only FUSE drive through a separately installed trusted rclone and FUSE runtime. Connect the intended account and vault, select its MachineNote and use the candidate's mount control. A verified cache directory alone is not a mounted drive. This flow passed actual Linux mounted reads, busy refusal and normal unmount for the tested candidate.
+
+Before switching accounts, changing keys, disconnecting, quitting or updating, close every application and terminal using the mounted drives, select each drive and choose **Unmount**. If it is busy, close its users and retry normally. Never force, lazy-unmount or terminate the drive process to bypass a refusal. A retained or unknown mount needs inspection.
+
+The Windows candidate's actual WinFsp test mounted and read data but failed normal safe unmount. Its guard retained the drive. A separate GenDragoon mount helper is being tested; Windows drive mounting must remain unavailable until that helper passes the real open-file, duplicated-handle, mapped-file, directory and concurrent-open tests. A passing general Windows GUI test does not settle this drive gate.
+
+## Permanently delete a GenDragoon account
+
+This is optional and irreversible once the server accepts the request. It applies only to a compatible current client and backend; it is not a troubleshooting step for a failed upload.
+
+1. Export and independently verify anything you need to keep, including the correct portable vault if required. Check the connected account carefully.
+2. Let all uploads and restores finish. Close managed applications and normally unmount every workspace drive. The client and server refuse active or unknown protected work; deletion does not stop it for you.
+3. On Mac, open **Account → Delete GenDragoon account…**. On Android, choose **Delete GenDragoon account…** in the connected account view.
+4. Read the scope. Type **DELETE GENDRAGOON** exactly, then choose the displayed request action only if permanent deletion is intended. Associated GenDragoon subscriptions are canceled as part of the verified workflow.
+5. Keep the saved request. **Queued**, **Running** and **Failed** retain local keys and do not mean deletion completed. Use **Check deletion receipt** or **Retry same deletion request**; do not create another request to bypass a conflict.
+6. You may close the app and resume later. If approval expires, use **Approve same Red-XAI account** on Mac or the corresponding same-account approval on Android. Recovery deliberately avoids creating a new Receiver.
+7. Only a matching **Completed** receipt authorizes the client's exact account cleanup. Mac removes that account's keymap, storage/auth Keychain entries and matching profile. Android removes its matching vault/session and attributable prepared job copies. Other accounts and original files remain.
+8. Mac shared managed caches and saved selections/jobs without reliable account attribution are retained for explicit review. Other devices, recipient copies, exported files, independent backups and BYO database bytes are outside this cleanup.
+
+The workflow removes active GenDragoon encrypted server payloads and covered account, integration and Team metadata. It does not delete the external Red-XAI identity or erase independent Stripe transaction history. A minimal pseudonymous tombstone and receipt remain to prevent old credentials silently recreating the account. If billing or local cleanup needs review, retain the receipt and contact support without sending secrets.
+
+A request can also be made through the public [account-deletion instructions](https://api.red-xai.com/gendragoon/account-deletion) after that compatible backend is activated. A support email request is separate from immediate verified completion.
 
 ## Store and release checklist for the operator
 

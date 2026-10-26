@@ -50,6 +50,7 @@ def package(runtime,output):
     runtime=Path(runtime).resolve();output=Path(output).resolve()
     if sys.platform!="win32" and not sys.platform.startswith("linux"):raise RuntimeError("Package desktop candidates on their Windows/Linux target.")
     if not (runtime/"runtime.json").is_file():raise RuntimeError("Stage and verify the pinned platform runtime first.")
+    check_compiled_codec(runtime/"runtime")
     output.mkdir(parents=True,exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="gd-gui-build-") as td:
         args=[sys.executable,"-B","-m","PyInstaller","--onedir","--noconfirm","--clean","--name","GenDragoon",
@@ -84,6 +85,19 @@ def package(runtime,output):
     (folder/"CANDIDATE_MANIFEST.json").write_text(json.dumps(manifest,sort_keys=True,indent=2)+"\n")
     archive=shutil.make_archive(str(output/("GenDragoon-"+sys.platform+"-candidate")),"zip",output,"GenDragoon")
     return {"archive":archive,"sha256":hashlib.sha256(Path(archive).read_bytes()).hexdigest(),"gui":str(binary),"nativeHost":str(host)}
+
+def check_compiled_codec(runtime):
+    """Release packages may contain compiled codec wrappers and legal notices."""
+    runtime=Path(runtime)
+    for name in ("LICENSE","NOTICE"):
+        source=runtime/name
+        if source.is_symlink() or not source.is_file() or not 0<source.stat().st_size<128*1024:
+            raise RuntimeError("The codec's original license and notice are required in every desktop package.")
+    for package in ("redxai","redsecretsxai"):
+        directory=runtime/package
+        if directory.is_symlink() or not directory.is_dir():raise RuntimeError("The compiled codec package is missing.")
+        if any(path.is_symlink() or path.suffix==".py" for path in directory.rglob("*")):
+            raise RuntimeError("A desktop release cannot include private codec source or linked codec inputs. Stage a compiled runtime first.")
 
 def main(argv=None):
     parser=argparse.ArgumentParser(description=__doc__);parser.add_argument("--runtime",type=Path,required=True);parser.add_argument("--output",type=Path,required=True)
