@@ -25,7 +25,7 @@ DROPINS={k:Path('/etc/systemd/system/gendragoon-'+k+'.service.d/36-safe-stop.con
 SOURCE_HASHES={'control':'176ebea80c72bb6ae73017d58829fdde50489164a1a26319fb49699424e391d2','receiver':'9ae4ac7e6590adefa21980069048501c4c2e4de10e0e0eabc24c662de50ef5a6'}
 STAGE_HASHES={'control':'600ebc0b4386e2c3e4cd6e0d3fea4072d3d6abc7523860930d0eef0050b37f34','receiver':'52b26df8ff848be8f97c8ed138306fbfc5263e754f64b4d93a2b27950c356e95'}
 STAGE_COUNTS={'control':1537,'receiver':33}
-HELPER_HASHES={'server-snapshot-36.py':'30423d1e499c8540becdac40f2bdf3cf2cc0ce90ef20625cfb890d854b51d4fc','server-activate-36.py':'5e63d948cebb207be8c309f77bbb40465b54e0adce41fae774969b7c3dcbc48b'}
+HELPER_HASHES={'server-snapshot-36.py':'a9903c7c1b931e277b20553b44fc407b6a7cb0bcba64ba8f4ee995f461645cce','server-activate-36.py':'5e63d948cebb207be8c309f77bbb40465b54e0adce41fae774969b7c3dcbc48b'}
 ADAPTER_FILES=('server-activation-controller-36.py','server-inspector-client-36.cjs','server-admission-gates-36.cjs','server-network-boundary-36.py')
 
 class Hold(RuntimeError):pass
