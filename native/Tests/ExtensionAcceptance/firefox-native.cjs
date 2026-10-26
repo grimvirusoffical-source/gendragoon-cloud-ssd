@@ -10,20 +10,20 @@ const HOST_NAME='com.redxai.gendragoon',MAX_RESPONSE=2*1024*1024;
 const FILE_LABEL='<img src=x onerror=alert(1)> café 😀.txt';
 const delay=ms=>new Promise(resolve=>setTimeout(resolve,ms));
 class BidiClient{
- constructor(socket,{timeout=15000}={}){this.socket=socket;this.timeout=timeout;this.sequence=0;this.pending=new Map();this.events=[];this.closed=false;
+ constructor(socket,{timeout=15000}={}){this.socket=socket;this.timeout=timeout;this.sequence=0;this.pending=new Map();this.events=[];this.trace=[];this.closed=false;
   socket.addEventListener('message',event=>this.receive(event.data));
   socket.addEventListener('close',()=>this.fail(new Error('Firefox BiDi connection closed')));
   socket.addEventListener('error',()=>this.fail(new Error('Firefox BiDi transport failed')));
  }
  receive(data){try{if(typeof data!=='string'||Buffer.byteLength(data)>MAX_RESPONSE)throw new Error('Firefox BiDi response exceeds fixture bound');const packet=JSON.parse(data);
    if(packet.type==='event'){if(this.events.length>=1000)this.events.shift();this.events.push(packet);return;}
-   const pending=this.pending.get(packet.id);if(!pending)return;this.pending.delete(packet.id);clearTimeout(pending.timer);
+   const pending=this.pending.get(packet.id);if(!pending)return;this.pending.delete(packet.id);clearTimeout(pending.timer);const trace=this.trace.find(entry=>entry.id===packet.id);if(trace){trace.status=packet.type;trace.elapsedMs=Date.now()-pending.started;if(packet.type==='error')trace.error=packet.error;}
    if(packet.type==='error')pending.reject(new Error(packet.error+': '+String(packet.message||'').slice(0,400)));else if(packet.type==='success')pending.resolve(packet.result);else pending.reject(new Error('Malformed Firefox BiDi response'));
   }catch(error){this.fail(error);this.socket.close();}
  }
  fail(error){this.closed=true;for(const p of this.pending.values()){clearTimeout(p.timer);p.reject(error);}this.pending.clear();}
  command(method,params={}){if(this.closed)return Promise.reject(new Error('Firefox BiDi session unavailable'));if(this.pending.size>=32)return Promise.reject(new Error('Firefox BiDi fixture request limit'));
-  const id=++this.sequence;return new Promise((resolve,reject)=>{const timer=setTimeout(()=>{this.pending.delete(id);reject(new Error('Firefox BiDi command timed out: '+method));},this.timeout);this.pending.set(id,{resolve,reject,timer});try{this.socket.send(JSON.stringify({id,method,params}));}catch(error){clearTimeout(timer);this.pending.delete(id);reject(error);}});
+  const id=++this.sequence,started=Date.now(),trace={id,method,status:'sent'};this.trace.push(trace);if(this.trace.length>100)this.trace.shift();return new Promise((resolve,reject)=>{const timer=setTimeout(()=>{this.pending.delete(id);trace.status='timeout';trace.elapsedMs=Date.now()-started;reject(new Error('Firefox BiDi command timed out: '+method));},this.timeout);this.pending.set(id,{resolve,reject,timer,started});try{this.socket.send(JSON.stringify({id,method,params}));}catch(error){clearTimeout(timer);this.pending.delete(id);trace.status='transport-error';reject(error);}});
  }
  async evaluate(context,expression){const response=await this.command('script.evaluate',{expression:'(async()=>JSON.stringify({value:await ('+expression+')}))()',target:{context},awaitPromise:true});
   if(response.type!=='success'||response.result?.type!=='string')throw new Error('Firefox extension evaluation failed: '+String(response.exceptionDetails?.text||response.type).slice(0,400));return JSON.parse(response.result.value).value;
@@ -74,7 +74,9 @@ async function firefoxNativeTest({root,directory,archive,firefoxBinary,webExt,we
   const reload=await runner.reloadAllExtensions();for(const result of reload||[])assert.ok(!result.reloadError,'The actual temporary Firefox extension must reload');
   bidi=await connectBidi('ws://127.0.0.1:'+port+'/session');const session=await bidi.command('session.new',{capabilities:{alwaysMatch:{acceptInsecureCerts:false}}});assert.equal(session.capabilities.browserName,'firefox');
   await bidi.command('session.subscribe',{events:['log.entryAdded']});
-  context=(await bidi.command('browsingContext.create',{type:'tab'})).context;
+  // This brand-new web-ext process already owns its explicit about:blank tab.
+  // Reusing it avoids coupling native messaging to browser window creation.
+  const tree=await bidi.command('browsingContext.getTree',{}),blank=tree.contexts.filter(entry=>entry.url==='about:blank');assert.equal(blank.length,1,'Select only the expected new disposable Firefox tab');context=blank[0].context;
   await bidi.command('browsingContext.navigate',{context,url:'moz-extension://'+UUID+'/dashboard.html',wait:'complete'});
   assert.equal(await bidi.evaluate(context,'browser.runtime.id'),FIREFOX_ID,'The actual loaded ID must match the native manifest and host config exactly');
   await bidi.wait(context,"document.querySelector('#status').textContent.includes('Approve this disposable CI fixture client first.')",'denied fixture consent');
@@ -93,13 +95,13 @@ async function firefoxNativeTest({root,directory,archive,firefoxBinary,webExt,we
   }
   // Navigate the real packaged Teams page; its bridge creates its own native
   // connection and must render the current policy/profile from private IPC.
-  const teams=(await bidi.command('browsingContext.create',{type:'tab'})).context;
+  const teams=context;
   await bidi.command('browsingContext.navigate',{context:teams,url:'moz-extension://'+UUID+'/teams/index.html?workspaceId='+'a'.repeat(32)+'&workspaceName=Fixture',wait:'complete'});
   await bidi.wait(teams,"document.querySelector('#username').value==='FixtureUser'&&document.querySelectorAll('#community-rules li').length>0",'packaged Teams profile and community policy');
   assert.equal(await bidi.evaluate(teams,'document.title'),'GenDragoon Teams');assert.equal(await bidi.evaluate(teams,"document.querySelector('h1').textContent"),'Build together.');
   assert.equal(await bidi.evaluate(teams,"document.querySelector('#join-team').disabled&&document.querySelector('#send-message').disabled"),true,'Participation stays disabled without current fixture rules acceptance');
+  await bidi.command('browsingContext.navigate',{context,url:'moz-extension://'+UUID+'/dashboard.html',wait:'complete'});await bidi.wait(context,"document.querySelector('#status').textContent.includes('Connected as Disposable CI fixture.')",'return to the packaged dashboard');
   const screenshot=await bidi.command('browsingContext.captureScreenshot',{context,origin:'document'});await fs.writeFile(path.join(root,'reports/firefox-dashboard.png'),Buffer.from(screenshot.data,'base64'),{mode:0o600});
-  await bidi.command('browsingContext.close',{context:teams});
   await atomicJSON(path.join(root,'consent.json'),{approved:false});
   assert.equal(await bidi.evaluate(context,"(async()=>{try{await GDCompanion.call('status');return null;}catch(error){return error.code;}})()"),'approval_required','Revoked consent must deny the already open native connection');
   const beforeManifestDenial=await events(root);await registration.setAllowedExtensions([NEGATIVE_ID]);
@@ -124,7 +126,7 @@ async function firefoxNativeTest({root,directory,archive,firefoxBinary,webExt,we
    installationMethod:'Pinned Mozilla web-ext temporary add-on, controlled by Firefox WebDriver BiDi in new disposable CI profile',
    nativeHostRegistration:'Exact allowed_extensions ID in disposable Actions VM user path; no existing manifest overwritten; exact created file removed after test',
    protocol:'Mozilla WebDriver BiDi over IPv4 loopback; Node built-in WebSocket; no new test dependencies'};
- }catch(error){await report(root,'firefox-native-failure',{passed:false,stage:'native messaging/IPC acceptance',message:String(error.message).slice(0,500)});throw error;}
+ }catch(error){await report(root,'firefox-native-failure',{passed:false,stage:'native messaging/IPC acceptance',message:String(error.message).slice(0,500),bidiCommands:bidi?.trace||[],eventTypes:(bidi?.events||[]).slice(-20).map(event=>({method:event.method,type:event.params?.type,level:event.params?.level}))});throw error;}
  finally{
   if(originalStateHome===undefined)delete process.env.XDG_STATE_HOME;else process.env.XDG_STATE_HOME=originalStateHome;
   try{if(bidi){try{await bidi.command('session.end');}catch{}bidi.close();}}
