@@ -238,7 +238,8 @@ class NetworkBoundary:
                                   or obj.get("rule", {}).get("chain") == chain]
 
     def render_guard(self) -> str:
-        return json.dumps({"nftables": [{"create": obj} for obj in self._objects(False)]},
+        return json.dumps({"nftables": [{"add" if "rule" in obj else "create": obj}
+                                      for obj in self._objects(False)]},
                           sort_keys=True, separators=(",", ":")) + "\n"
 
     def _check(self, script: str) -> None:
@@ -299,8 +300,9 @@ class NetworkBoundary:
 
     def install_guard(self) -> dict:
         _need(self.phase == "new", "phase_invalid")
-        # CREATE is atomic and refuses a nonce collision. There is deliberately
-        # no adoption or delete-before-create path, even for matching contents.
+        # Exclusive table/chain CREATE and rule ADD share one atomic batch.
+        # Table nonce collisions refuse the entire batch; nothing is adopted
+        # or deleted before creation, even when existing contents match.
         self._execute(self.render_guard())
         self.phase = "guard"
         return self._read(False, capture_new=True)
@@ -314,7 +316,7 @@ class NetworkBoundary:
         _need(type(proof) is ControlDrainProof, "control_drain_proof_required")
         proof.validate(self.nonce)
         self._read(False)
-        script = json.dumps({"nftables": [{"create": obj} for obj in self._objects(True)
+        script = json.dumps({"nftables": [{"add": obj} for obj in self._objects(True)
                             if "rule" in obj and ":service-" in obj["rule"]["comment"]]})
         self._check(script)
         proof.validate(self.nonce)  # No asynchronous check may stale the proof.

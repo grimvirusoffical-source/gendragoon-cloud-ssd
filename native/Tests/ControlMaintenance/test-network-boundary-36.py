@@ -60,21 +60,49 @@ class MemoryNft:
         self.fail_read = False
         self.corrupt_read = False
 
+    @staticmethod
+    def commands(script):
+        document = json.loads(script)
+        if (type(document) is not dict or set(document) != {"nftables"}
+                or type(document["nftables"]) is not list or not document["nftables"]):
+            raise ValueError("memory_nft_command_syntax_invalid")
+        commands = document["nftables"]
+        for command in commands:
+            if type(command) is not dict or len(command) != 1:
+                raise ValueError("memory_nft_command_syntax_invalid")
+            operation, obj = next(iter(command.items()))
+            if type(obj) is not dict or len(obj) != 1:
+                raise ValueError("memory_nft_command_syntax_invalid")
+            kind, value = next(iter(obj.items()))
+            allowed = {"create": {"table", "chain"}, "add": {"rule"},
+                       "delete": {"table", "rule"}}
+            if kind not in allowed.get(operation, set()) or type(value) is not dict:
+                # Match the exact adapter subset and nftables1.0.9's explicit
+                # rejection of CREATE rule. Validate the WHOLE batch first.
+                raise ValueError("memory_nft_command_syntax_invalid")
+        return commands
+
     def invoke(self, args, script=None, *, mutation=False):
         self.calls.append((args, script, mutation))
         if args == ("-c", "-f", "-"):
-            json.loads(script)
+            self.commands(script)
             return ""
         if args == ("-f", "-"):
+            commands = self.commands(script)
             if self.fail_apply:
                 raise RuntimeError("PRIVATE SENTINEL: never disclose raw error")
             before = copy.deepcopy(self.objects)
+            before_next_handle = self.next_handle
             try:
-                for cmd in json.loads(script)["nftables"]:
-                    if "create" in cmd:
-                        obj = copy.deepcopy(cmd["create"])
+                for cmd in commands:
+                    if "create" in cmd or "add" in cmd:
+                        operation = next(iter(cmd))
+                        obj = copy.deepcopy(cmd[operation])
                         kind, value = next(iter(obj.items()))
-                        if kind == "table" and any("table" in row for row in self.objects):
+                        if operation == "create" and any(
+                                kind in row and row[kind]["family"] == value["family"]
+                                and row[kind].get("table") == value.get("table")
+                                and row[kind]["name"] == value["name"] for row in self.objects):
                             raise RuntimeError("collision")
                         value["handle"] = self.next_handle
                         self.next_handle += 1
@@ -95,6 +123,7 @@ class MemoryNft:
                         raise AssertionError("forbidden nft command")
             except Exception:
                 self.objects = before
+                self.next_handle = before_next_handle
                 raise
             return ""
         if args == ("list", "tables", "inet"):
@@ -129,12 +158,14 @@ class BoundaryTests(unittest.TestCase):
                 mod.NetworkBoundary(value)
         self.assertEqual(self.backend.calls, [])
 
-    def test_renderer_has_only_owned_create_commands_and_exact_debugger_scope(self):
+    def test_renderer_uses_exclusive_create_for_table_chains_and_add_only_for_rules(self):
         document = json.loads(self.boundary.render_guard())
         self.assertEqual(len(document["nftables"]), 5)
         for command in document["nftables"]:
-            self.assertEqual(set(command), {"create"})
-            kind, obj = next(iter(command["create"].items()))
+            operation, value = next(iter(command.items()))
+            kind, obj = next(iter(value.items()))
+            self.assertEqual(operation, "add" if kind == "rule" else "create")
+            self.assertEqual(set(command), {operation})
             self.assertEqual(obj["family"], "inet")
             self.assertEqual(obj["name"] if kind == "table" else obj["table"], self.boundary.table)
         text = self.boundary.render_guard()
@@ -193,6 +224,11 @@ class BoundaryTests(unittest.TestCase):
         self.assertEqual(self.boundary.add_service_fence(drain())["ruleCount"], 6)
         # No service rule is admitted before the complete proof succeeds.
         self.assertEqual(len(self.backend.writes()), 2)
+        service_commands = json.loads(self.backend.writes()[-1][1])["nftables"]
+        self.assertEqual(len(service_commands), 4)
+        self.assertTrue(all(set(command) == {"add"} and set(command["add"]) == {"rule"}
+                            and command["add"]["rule"]["table"] == self.boundary.table
+                            for command in service_commands))
 
     def test_cleanup_needs_debugger_absence_preservation_and_completed_outcome(self):
         self.boundary.install_guard()
@@ -213,7 +249,8 @@ class BoundaryTests(unittest.TestCase):
         self.assertEqual(self.backend.objects, [])
         commands = [cmd for _, script, _ in self.backend.writes()
                     for cmd in json.loads(script)["nftables"]]
-        self.assertTrue(all(set(cmd) <= {"create", "delete"} for cmd in commands))
+        self.assertTrue(all(set(cmd) <= {"create", "add", "delete"} for cmd in commands))
+        self.assertTrue(all(set(cmd["add"]) == {"rule"} for cmd in commands if "add" in cmd))
 
     def test_existing_table_is_never_adopted_or_deleted(self):
         self.boundary.install_guard()
@@ -225,6 +262,43 @@ class BoundaryTests(unittest.TestCase):
         self.assertEqual(duplicate.phase, "hold")
         with self.assertRaises(mod.BoundaryError):
             duplicate.remove_guard(cleanup())
+
+    def test_memory_parser_refuses_create_rule_and_wrong_add_kinds_before_any_mutation(self):
+        original = json.loads(self.boundary.render_guard())
+        for kind in ("table", "chain", "rule"):
+            document = copy.deepcopy(original)
+            index = next(index for index, command in enumerate(document["nftables"])
+                         if kind in next(iter(command.values())))
+            obj = next(iter(document["nftables"][index].values()))
+            document["nftables"][index] = {"create" if kind == "rule" else "add": obj}
+            for args, mutation in ((("-c", "-f", "-"), False), (("-f", "-"), True)):
+                with self.subTest(kind=kind, mutation=mutation):
+                    backend = MemoryNft()
+                    with self.assertRaisesRegex(ValueError, "memory_nft_command_syntax_invalid"):
+                        backend.invoke(args, json.dumps(document), mutation=mutation)
+                    self.assertEqual(backend.objects, [])
+                    self.assertEqual(backend.next_handle, 10)
+
+    def test_exclusive_table_and_chain_collisions_revert_the_entire_batch(self):
+        self.boundary.install_guard()
+        before = copy.deepcopy(self.backend.objects)
+        before_handle = self.backend.next_handle
+        extra_rule = copy.deepcopy(next(row for row in before if "rule" in row))
+        extra_rule["rule"].pop("handle")
+        extra_rule["rule"]["comment"] += ":disposable-extra"
+        for kind in ("table", "chain"):
+            with self.subTest(kind=kind):
+                collision = copy.deepcopy(next(row for row in before if kind in row))
+                collision[kind].pop("handle")
+                # The staged ADD precedes the exclusive CREATE collision: both
+                # owned existing rules and every previous handle must survive.
+                script = json.dumps({"nftables": [{"add": extra_rule}, {"create": collision}]})
+                self.backend.invoke(("-c", "-f", "-"), script)
+                self.assertEqual(self.backend.objects, before)
+                with self.assertRaisesRegex(RuntimeError, "collision"):
+                    self.backend.invoke(("-f", "-"), script, mutation=True)
+                self.assertEqual(self.backend.objects, before)
+                self.assertEqual(self.backend.next_handle, before_handle)
 
     def test_readback_tampering_or_handle_replacement_prevents_cleanup(self):
         for tamper in ("expression", "identity", "extra"):
