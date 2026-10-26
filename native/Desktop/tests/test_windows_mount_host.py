@@ -95,7 +95,7 @@ def mapped_reader(path):
             raise AssertionError("The mapped-file reader did not retain an independent mapped view.")
         return value
     def reread():
-        process.stdin.write("read\n");process.stdin.flush()
+        process.stdin.buffer.write(b"read\n");process.stdin.buffer.flush()
         return reply()
     try:
         yield reply(),process,reread
@@ -116,6 +116,9 @@ class HostControlTests(unittest.TestCase):
             with mapped_reader(path) as (value,process,reread):
                 self.assertNotEqual(value["pid"],os.getpid());self.assertIsNone(process.poll())
                 self.assertEqual(value["size"],len(payload));self.assertEqual(value["sha256"],fixture.hashlib.sha256(payload).hexdigest())
+                # Reproduce Windows text-stream newline translation on every
+                # platform. The fixture command itself must remain raw LF.
+                process.stdin.reconfigure(newline="\r\n")
                 self.assertEqual(reread(),value);self.assertIsNone(process.poll())
             self.assertEqual(process.returncode,0);self.assertEqual(path.read_bytes(),payload)
 

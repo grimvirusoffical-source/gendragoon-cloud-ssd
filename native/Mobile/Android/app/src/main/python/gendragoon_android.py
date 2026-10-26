@@ -315,6 +315,24 @@ def archive_bound(source, manifest):
     return total
 
 
+def android_origin(config):
+    """Reuse the account's private random ID; Chaquopy's Linux host is Android."""
+    from gendragoon_device_origin import current_origin, validate_origin
+    receiver = config.get("receiverId")
+    if not isinstance(receiver, str) or not re.fullmatch(r"[a-f0-9]{64}", receiver):
+        raise ValueError("A verified account is required for device origin")
+    keymap = Path(config.get("keymapPath", ""))
+    if not keymap.is_absolute() or keymap.name != "private.keymap" or keymap.parent.name != receiver:
+        raise ValueError("Device origin must use this account's private vault profile")
+    info = keymap.lstat()
+    if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077 or info.st_nlink != 1:
+        raise ValueError("Device origin requires a private owned vault profile")
+    value = current_origin(receiver, state_dir=keymap.parent / "DeviceOrigins")
+    # Only the random deviceId is persisted by the shared helper. This explicit
+    # application platform does not alter a host-global sys.platform value.
+    return validate_origin(dict(value, platform="android"))
+
+
 def upload(config_json, source, cache, java_auth, callback):
     import gendragoon_redx_storage as storage
     with _operation_lock:
@@ -332,7 +350,8 @@ def upload(config_json, source, cache, java_auth, callback):
         manifest, layout, kind = prepare(source, archive)
         archive_sha = digest(archive)
         key = hashlib.sha256((config["receiverId"] + "|" + config["workspaceId"] + "|android|" + source.name).encode()).hexdigest()[:18]
-        result = storage.upload_archive(config, archive, key, source.name, kind, layout, archive_sha, manifest, client_factory=receiver)
+        result = storage.upload_archive(config, archive, key, source.name, kind, layout, archive_sha, manifest,
+                                        client_factory=receiver, origin=android_origin(config))
         item = receiver(config).json("/v1/receivers/me/library")
         matches = [row for row in item.get("items", []) if row.get("key") == key and row.get("workspace") == config["workspaceId"]]
         if len(matches) != 1:
@@ -421,4 +440,15 @@ def codec_selftest(directory, plain_bytes=2048):
             raise RuntimeError('Wrong-key restoration unexpectedly succeeded')
     if wrong_key.exists():
         raise RuntimeError('Failed authentication published plaintext')
-    return json.dumps({"ok": True, "pngBytes": len(png), "plainBytes": len(plain), "failedOperationsPublishNothing": True})
+    # Account-free device evidence for the exact metadata helper used by upload.
+    receiver = "a" * 64
+    keymap = path / "origin-profile" / receiver / "private.keymap"
+    keymap.parent.mkdir(mode=0o700, parents=True)
+    shutil.copyfile(path / "test.keymap", keymap)
+    keymap.chmod(0o600)
+    profile = {"receiverId": receiver, "keymapPath": str(keymap)}
+    origin = android_origin(profile)
+    if origin != android_origin(profile) or origin["platform"] != "android":
+        raise RuntimeError("Android origin did not retain its account-scoped identity")
+    return json.dumps({"ok": True, "pngBytes": len(png), "plainBytes": len(plain), "failedOperationsPublishNothing": True,
+                       "sourcePlatform": origin["platform"], "originStable": True})

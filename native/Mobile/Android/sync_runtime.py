@@ -15,7 +15,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent
 NATIVE = ROOT.parents[1]
 VENDOR = NATIVE / "vendor/Red-SecretsXAI"
-HELPERS = ("gendragoon_redx_storage.py", "gendragoon_progress.py", "gendragoon_auth_broker.py", "gendragoon_transfer_errors.py")
+HELPERS = ("gendragoon_redx_storage.py", "gendragoon_progress.py", "gendragoon_auth_broker.py", "gendragoon_transfer_errors.py", "gendragoon_device_origin.py")
 PACKAGED_RUNTIME = ROOT / "runtime/gendragoon-android-runtime-9235941b431b.zip"
 PACKAGED_RUNTIME_SHA256 = "47883fd5535bae569c7fe7bb9cfac2092fa8ab2ec83c4c39e4fd5e9c363ffa2f"
 
