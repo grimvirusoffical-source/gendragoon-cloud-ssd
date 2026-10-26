@@ -375,7 +375,7 @@ def download(config_json, item_json, cache, java_auth, callback):
                            "archiveExport": restored["root"]["archiveLayout"] == "zip-root"})
 
 
-def codec_selftest(directory):
+def codec_selftest(directory, plain_bytes=2048):
     """Device-only fixture: no credentials, user files, or network."""
     from redxai import _librsx
     from redsecretsxai import encode_image, decode_image
@@ -383,7 +383,10 @@ def codec_selftest(directory):
     path = Path(directory)
     path.mkdir(mode=0o700, parents=True, exist_ok=True)
     secret = "Android-instrumentation-test-only-secret-43A"
-    plain = (b"GenDragoon real pinned Android codec fixture\0" * 100)[:2048]
+    if type(plain_bytes) is not int or plain_bytes not in (2048, 65536):
+        raise RuntimeError("Only bounded public device fixture sizes are supported")
+    pattern = b"GenDragoon real pinned Android codec fixture\0"
+    plain = (pattern * (plain_bytes // len(pattern) + 1))[:plain_bytes]
     incoming, sealed, restored = path / "fixture", path / "sealed", path / "restored"
     incoming.write_bytes(plain)
     with _librsx.session_open(secret, str(path / "test.keymap")) as session:

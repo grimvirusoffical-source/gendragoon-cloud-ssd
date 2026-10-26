@@ -41,22 +41,22 @@
     },
     {
       "name": "numpy-2.5.4-cp313-cp313-android_28_arm64_v8a.whl",
-      "bytes": 7875368,
-      "sha256": "9f7e3557381146a8aba67e0e8f147e3cfc421f2af4ef723df50167a719731b80",
+      "bytes": 7876897,
+      "sha256": "4fb6f9d6ae88e51c6810856ab01ec24b71d4be6a815d35aa7f4b0fd140e9c2d0",
       "source": {
         "kind": "actions",
-        "run": 40280064152,
-        "head": "86341a45d5b1b77f330015ce38d47445ae681693"
+        "run": 40282484235,
+        "head": "793603cfb0a2ffb39ed4aa5adf1a43f0ae02cf19"
       }
     },
     {
       "name": "numpy-2.5.4-cp313-cp313-android_28_x86_64.whl",
-      "bytes": 9319440,
-      "sha256": "a84b2c44d3f183ea07dab09d291b6e9470083dfcdfe37c580246c91158bd86c7",
+      "bytes": 9321343,
+      "sha256": "5074af4b1f83ea7660603f24e8a5f695b61c3d96d5888136191fc9be6341ffc4",
       "source": {
         "kind": "actions",
-        "run": 40280064152,
-        "head": "86341a45d5b1b77f330015ce38d47445ae681693"
+        "run": 40282484235,
+        "head": "793603cfb0a2ffb39ed4aa5adf1a43f0ae02cf19"
       }
     },
     {

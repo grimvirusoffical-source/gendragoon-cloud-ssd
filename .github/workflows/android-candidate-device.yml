@@ -51,7 +51,7 @@ jobs:
       - name: Retrieve only the explicitly pinned public NumPy build
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh run download 40280064152 --repo grimvirusoffical-source/gendragoon-cloud-ssd --pattern 'Android-NumPy-candidate-*' --dir '${{ runner.temp }}/numpy-artifacts'
+        run: gh run download 40282484235 --repo grimvirusoffical-source/gendragoon-cloud-ssd --pattern 'Android-NumPy-candidate-*' --dir '${{ runner.temp }}/numpy-artifacts'
       - name: Hash-verify all eight wheels and every dependency ELF before offline installation
         run: python -B native/Mobile/Android/dependencies/candidate_profile.py --directory "$GENDRAGOON_ANDROID_CANDIDATE_WHEELS" --prepare-from '${{ runner.temp }}/numpy-artifacts'
       - name: Compile isolated candidate APKs and run all lint and JVM gates

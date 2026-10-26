@@ -28,8 +28,11 @@ def validate_wheel(path, record):
     if path.is_symlink() or not path.is_file() or path.stat().st_size != record['bytes'] or hashlib.sha256(path.read_bytes()).hexdigest() != record['sha256']:
         raise RuntimeError('Candidate SHA-256 or byte count failed: ' + path.name)
     sys.path.insert(0, str(ROOT.parent))
+    sys.path.insert(0, str(ROOT))
     from check_native_pages import inspect_elf
+    from prepare_linkage import needed_libraries
     libraries = 0
+    python_extensions = 0
     with zipfile.ZipFile(path) as archive:
         names = archive.namelist()
         if len(names) > 20000 or len(names) != len(set(names)):
@@ -57,10 +60,14 @@ def validate_wheel(path, record):
                 machine = 183 if '_arm64_v8a.whl' in path.name else 62
                 if proof['machine'] != machine or not proof['aligned16KiB']:
                     raise RuntimeError('Candidate native dependency is not architecture-bound and 16 KiB aligned')
+                if name.startswith(('numpy/', 'PIL/')):
+                    if 'libpython3.13.so' not in needed_libraries(data):
+                        raise RuntimeError('Android Python extension must explicitly link libpython3.13.so: ' + name)
+                    python_extensions += 1
                 libraries += 1
         if not libraries or not any('license' in name.lower() or 'notice' in name.lower() for name in names):
             raise RuntimeError('Candidate native dependency or licenses are missing')
-    return {'wheel': path.name, 'sha256': record['sha256'], 'libraries': libraries}
+    return {'wheel': path.name, 'sha256': record['sha256'], 'libraries': libraries, 'explicitPythonExtensions': python_extensions}
 
 
 def validate(directory):
