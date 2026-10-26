@@ -1,0 +1,91 @@
+name: Android dependency candidate device gates
+
+on:
+  push:
+    paths:
+      - 'native/Mobile/Android/app/**'
+      - 'native/Mobile/Android/dependencies/candidate*'
+      - 'native/Mobile/Android/dependencies/candidate-inputs/**'
+      - 'native/Mobile/Android/dependencies/run_instrumentation.sh'
+      - '.github/workflows/android-candidate-device.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: android-candidate-devices-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  packaged-runtime:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        include:
+          - pages: 4096
+            target: google_apis
+          - pages: 16384
+            target: google_apis_playstore_ps16k
+    env:
+      GENDRAGOON_ANDROID_CANDIDATE_WHEELS: ${{ github.workspace }}/.gendragoon-reviewed-candidates
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: '3.13'
+      - uses: android-actions/setup-android@be39fa834029ff78f1a44aa3bb0819b8fc2bd8fd # v4.0.4
+        with:
+          packages: 'platform-tools platforms;android-36 build-tools;35.0.0'
+      - uses: gradle/actions/setup-gradle@07d1f8453baaff67fb503883367f8b13e6158a54 # v6
+        with:
+          gradle-version: '8.13'
+      - name: Retrieve only the explicitly pinned public NumPy build
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh run download 40280064152 --repo grimvirusoffical-source/gendragoon-cloud-ssd --pattern 'Android-NumPy-candidate-*' --dir '${{ runner.temp }}/numpy-artifacts'
+      - name: Hash-verify all eight wheels and every dependency ELF before offline installation
+        run: python -B native/Mobile/Android/dependencies/candidate_profile.py --directory "$GENDRAGOON_ANDROID_CANDIDATE_WHEELS" --prepare-from '${{ runner.temp }}/numpy-artifacts'
+      - name: Compile isolated candidate APKs and run all lint and JVM gates
+        working-directory: native/Mobile/Android
+        run: gradle :app:assembleDebug :app:assembleRelease :app:bundleRelease :app:lint :app:testDebugUnitTest --no-daemon --console=plain --stacktrace
+      - name: Audit every ELF in the actual complete candidate APK
+        working-directory: native/Mobile/Android
+        run: python -B check_native_pages.py app/build/outputs/apk/debug/app-debug.apk --output app/build/reports/native-pages-candidate.json
+      - name: Enable hardware acceleration for bounded device fixtures
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+      - name: Exercise actual native crypto, encrypted graph, vault, JPEG, fonts, linalg and Mac carrier
+        uses: ReactiveCircus/android-emulator-runner@a421e43855164a8197daf9d8d40fe71c6996bb0d # v2.38.0
+        timeout-minutes: 15
+        with:
+          working-directory: native/Mobile/Android
+          api-level: 35
+          target: ${{ matrix.target }}
+          arch: x86_64
+          cores: 2
+          ram-size: 2048M
+          disk-size: 4096M
+          emulator-boot-timeout: 300
+          disable-animations: true
+          script: bash dependencies/run_instrumentation.sh '${{ matrix.pages }}'
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        if: ${{ !cancelled() }}
+        with:
+          name: Android-test-only-runtime-${{ matrix.pages }}
+          path: |
+            native/Mobile/Android/app/build/reports/
+            native/Mobile/Android/app/build/outputs/apk/**/*.apk
+            native/Mobile/Android/app/build/outputs/bundle/**/*.aab
+          if-no-files-found: error
+          retention-days: 7

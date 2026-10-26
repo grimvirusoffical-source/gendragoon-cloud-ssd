@@ -1,11 +1,22 @@
 plugins { id 'com.android.application'; id 'com.chaquo.python' }
 def compiledRuntime = System.getenv('GENDRAGOON_ANDROID_RUNTIME') ?: rootProject.file('runtime/gendragoon-android-runtime-9235941b431b.zip').path
 def useCompiledRuntime = file(compiledRuntime).isFile()
+// Explicit test-only dependency profile. Production pins remain unchanged until
+// the candidate passes the complete packaged 4/16 KiB device gates.
+def candidateWheels = System.getenv('GENDRAGOON_ANDROID_CANDIDATE_WHEELS')
+if (candidateWheels) {
+ if (!new File(candidateWheels).isAbsolute()) { throw new GradleException('Candidate wheel directory must be absolute') }
+ providers.exec {
+  workingDir rootProject.projectDir
+  commandLine(System.getenv('PYTHON') ?: 'python3.13', '-B', 'dependencies/candidate_profile.py', '--directory', candidateWheels)
+ }.standardOutput.asText.get()
+}
 android {
  namespace 'app.gendragoon.cloudssd.mobile'
  compileSdk 36
  ndkVersion '28.2.13676358'
  defaultConfig { applicationId 'app.gendragoon.cloudssd.mobile'; minSdk 28; targetSdk 36; versionCode 36; versionName '0.22.0'; testInstrumentationRunner 'androidx.test.runner.AndroidJUnitRunner'
+  if (candidateWheels) { applicationId 'app.gendragoon.cloudssd.mobile.runtimecandidate'; versionName '0.22.0-runtimecandidate' }
   ndk { abiFilters 'arm64-v8a', 'x86_64' }
   if (!useCompiledRuntime) { externalNativeBuild { cmake { targets 'rsx'; arguments '-DRSX_SHARED=ON', '-DRSX_FUZZ=OFF', '-DANDROID_SUPPORT_FLEXIBLE_PAGE_SIZES=ON' } } }
  }
@@ -19,7 +30,11 @@ android {
 chaquopy {
  defaultConfig {
   version '3.13'
-  pip { install 'numpy==1.26.2'; install 'Pillow==11.0.0' }
+  pip {
+   if (candidateWheels) { options '--no-index', '--find-links', candidateWheels; install 'numpy==2.5.4' }
+   else { install 'numpy==1.26.2' }
+   install 'Pillow==11.0.0'
+  }
   extractPackages 'redxai', 'redsecretsxai'
  }
  sourceSets { main { srcDirs = ['src/main/python', 'build/generated/python'] }; debug { srcDirs = ['src/debug/python'] } }

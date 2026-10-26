@@ -228,11 +228,7 @@ jobs:
           disk-size: 4096M
           emulator-boot-timeout: 300
           disable-animations: true
-          script: |
-            test "$(adb shell getconf PAGE_SIZE | tr -d '\r')" = 4096
-            timeout 10m gradle :app:connectedDebugAndroidTest --no-daemon --console=plain --stacktrace
-            mkdir -p app/build/reports/instrumentation-4096
-            cp -R app/build/outputs/androidTest-results app/build/reports/instrumentation-4096/
+          script: bash dependencies/run_instrumentation.sh 4096
       - name: Require every packaged native dependency to support 16 KiB pages
         if: ${{ !cancelled() && steps.android-build.outcome == 'success' }}
         working-directory: native/Mobile/Android
@@ -251,11 +247,7 @@ jobs:
           disk-size: 4096M
           emulator-boot-timeout: 300
           disable-animations: true
-          script: |
-            test "$(adb shell getconf PAGE_SIZE | tr -d '\r')" = 16384
-            timeout 10m gradle :app:connectedDebugAndroidTest --rerun-tasks --no-daemon --console=plain --stacktrace
-            mkdir -p app/build/reports/instrumentation-16384
-            cp -R app/build/outputs/androidTest-results app/build/reports/instrumentation-16384/
+          script: bash dependencies/run_instrumentation.sh 16384
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         if: ${{ !cancelled() && steps.android-build.outcome != 'skipped' }}
         with:

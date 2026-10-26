@@ -17,4 +17,23 @@ The official build tool may install its required SDK/NDK/target-Python packages 
 
 A candidate wheel is **not** the shipping dependency pin. Before adoption, both architecture candidates must pass the complete packaged-APK ELF audit and the actual GenDragoon embedded codec, encrypted graph, cross-workspace AAD and portable-vault instrumentation on 4 KiB and 16 KiB Android. Package and restore compatibility must remain unchanged. A successful crosscompile alone does not establish Android behavior or store readiness.
 
+## Explicit complete-app candidate profile
+
+`candidate-lock.json` binds exactly eight public wheels: both complete NumPy 2.5.4 builds, the unchanged official Pillow 11.0.0 binaries, and both rebuilt FreeType 2.9.1 and JPEG 1.5.3 runtimes. The four small replacement runtimes are compiled-only inputs in `candidate-inputs/`; their reproducible builder, original recipe/source pins, configuration, preserved exports and licenses are recorded in `pillow-runtime/`. The NumPy wheels include the exact builder NDK 27.3 and LLVM redistribution notices and a freshly generated wheel RECORD. No private encryption source is included.
+
+The NumPy artifacts are pinned to successful workflow run `40280064152` at source `86341a45d5b1b77f330015ce38d47445ae681693`. They are temporary GitHub Actions artifacts with a 14-day retention period. An expired or absent artifact fails this test profile; the workflow never substitutes an unreviewed wheel. Successful candidates need a durable, hash-bound distribution before any eventual shipping adoption.
+
+The separate `android-candidate-device.yml` workflow downloads those exact public artifacts with the workflow's temporary read-only token, downloads the two SHA-pinned official Pillow wheels over verified TLS, and validates every whole-wheel hash, byte count, internal RECORD, native architecture and 16 KiB load alignment. Pip then runs offline against that exact set. Setting `GENDRAGOON_ANDROID_CANDIDATE_WHEELS` explicitly enables the profile and produces a separate `.runtimecandidate` application ID and version suffix. Default builds retain their existing dependency pins.
+
+To prepare and inspect the isolated profile locally after obtaining the public artifacts:
+
+```sh
+gh run download 40280064152 --repo grimvirusoffical-source/gendragoon-cloud-ssd --pattern 'Android-NumPy-candidate-*' --dir /absolute/new/numpy-artifacts
+python3.13 -B native/Mobile/Android/dependencies/candidate_profile.py --directory /absolute/new/candidate-wheels --prepare-from /absolute/new/numpy-artifacts
+cd native/Mobile/Android
+GENDRAGOON_ANDROID_CANDIDATE_WHEELS=/absolute/new/candidate-wheels gradle :app:assembleDebug :app:lint :app:testDebugUnitTest
+```
+
+The device workflow checks the actual complete APK's native dependencies for both arm64 and x86_64, then runs the actual x86_64 app on separate 4 KiB and 16 KiB Android emulators. Its five device tests exercise the pinned encryption/visual renderer, complete encrypted archive graph and cross-workspace authentication, Mac portable-vault/JCE/core interoperability, required NumPy linear algebra plus JPEG and FreeType behavior, and a Mac-produced encrypted PNG decoded and authenticated on Android. The public dummy carrier and keys are test data only. Failure evidence is retained separately for each page size, including a bounded emulator log. These emulator results do not establish behavior on physical ARM devices or store acceptance.
+
 Primary references: [Chaquopy's current Android wheel guidance](https://github.com/chaquo/chaquopy/tree/master/server/pypi), [cibuildwheel Android support](https://cibuildwheel.pypa.io/en/stable/platforms/#android), [NumPy BLAS/LAPACK build options](https://numpy.org/doc/stable/building/blas_lapack.html), and [Android's 16 KiB checks](https://developer.android.com/guide/practices/page-sizes).

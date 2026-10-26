@@ -1,0 +1,81 @@
+{
+  "schema": 1,
+  "shipping": false,
+  "notice": "Test-only complete dependency candidate; default app pins unchanged until actual device gates pass.",
+  "files": [
+    {
+      "name": "chaquopy_freetype-2.9.1-9016-py3-none-android_21_arm64_v8a.whl",
+      "bytes": 411370,
+      "sha256": "ce8b604c14d1cae5f5dcdebedb7f11d14118a54ab5ebbe0a3e0fb346b3ada1d3",
+      "source": {
+        "kind": "bundled",
+        "path": "candidate-inputs/chaquopy_freetype-2.9.1-9016-py3-none-android_21_arm64_v8a.whl"
+      }
+    },
+    {
+      "name": "chaquopy_freetype-2.9.1-9016-py3-none-android_21_x86_64.whl",
+      "bytes": 428321,
+      "sha256": "6cb6d585b1cc72cae12aba910d95c483e2563c7aed0a9a0913851a9e32ff50b6",
+      "source": {
+        "kind": "bundled",
+        "path": "candidate-inputs/chaquopy_freetype-2.9.1-9016-py3-none-android_21_x86_64.whl"
+      }
+    },
+    {
+      "name": "chaquopy_libjpeg-1.5.3-9016-py3-none-android_21_arm64_v8a.whl",
+      "bytes": 181927,
+      "sha256": "850d74ca5c35dcf64f0457f107eaacdf93208904c1837c751d01f95f24a84b60",
+      "source": {
+        "kind": "bundled",
+        "path": "candidate-inputs/chaquopy_libjpeg-1.5.3-9016-py3-none-android_21_arm64_v8a.whl"
+      }
+    },
+    {
+      "name": "chaquopy_libjpeg-1.5.3-9016-py3-none-android_21_x86_64.whl",
+      "bytes": 188660,
+      "sha256": "3d5157541d74cefa14a7abecebdf483cc3ec5c620b42f29530cc976f1057780d",
+      "source": {
+        "kind": "bundled",
+        "path": "candidate-inputs/chaquopy_libjpeg-1.5.3-9016-py3-none-android_21_x86_64.whl"
+      }
+    },
+    {
+      "name": "numpy-2.5.4-cp313-cp313-android_28_arm64_v8a.whl",
+      "bytes": 7875368,
+      "sha256": "9f7e3557381146a8aba67e0e8f147e3cfc421f2af4ef723df50167a719731b80",
+      "source": {
+        "kind": "actions",
+        "run": 40280064152,
+        "head": "86341a45d5b1b77f330015ce38d47445ae681693"
+      }
+    },
+    {
+      "name": "numpy-2.5.4-cp313-cp313-android_28_x86_64.whl",
+      "bytes": 9319440,
+      "sha256": "a84b2c44d3f183ea07dab09d291b6e9470083dfcdfe37c580246c91158bd86c7",
+      "source": {
+        "kind": "actions",
+        "run": 40280064152,
+        "head": "86341a45d5b1b77f330015ce38d47445ae681693"
+      }
+    },
+    {
+      "name": "pillow-11.0.0-0-cp313-cp313-android_24_arm64_v8a.whl",
+      "bytes": 582449,
+      "sha256": "0d380685ae11d55ab6ac8152b1eb79999913c458f412fa50d7cc9157558bd174",
+      "source": {
+        "kind": "official",
+        "url": "https://chaquo.com/pypi-13.1/pillow/pillow-11.0.0-0-cp313-cp313-android_24_arm64_v8a.whl"
+      }
+    },
+    {
+      "name": "pillow-11.0.0-0-cp313-cp313-android_24_x86_64.whl",
+      "bytes": 603290,
+      "sha256": "5a9a22a405d55126efa6dad46d700e118ec2ff177d9a793050336d54fc0ed55b",
+      "source": {
+        "kind": "official",
+        "url": "https://chaquo.com/pypi-13.1/pillow/pillow-11.0.0-0-cp313-cp313-android_24_x86_64.whl"
+      }
+    }
+  ]
+}
