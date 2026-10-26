@@ -501,11 +501,25 @@ def main(argv=None):
         instance=DesktopInstance();instance.close();return
     if arguments.check:
         from machinenotes_client import crypto_runtime
-        if crypto_runtime().abi_version()!=2:raise RuntimeError("The native codec ABI is unsupported.")
+        import tempfile
+        import private_fs as private
+        rsx=crypto_runtime()
+        if rsx.abi_version()!=2:raise RuntimeError("The native codec ABI is unsupported.")
         from redsecretsxai import encode_image,decode_image
-        probe=b"RSX3"+b"GenDragoon public runtime check"*32
-        if decode_image(encode_image(probe,module=3,bits=3,noise=0,deterministic=True))!=probe:
-            raise RuntimeError("The packaged visual codec check failed.")
+        probe=b"GenDragoon public runtime check"*32
+        with tempfile.TemporaryDirectory(prefix="gd-runtime-測試-📦-") as temporary:
+            directory=private.private_directory(Path(temporary).resolve()/"codec")
+            source=directory/"plain-測試-📦";encrypted=directory/"encrypted";restored=directory/"restored"
+            private.write_private(source,probe)
+            with rsx.session_open("GenDragoon public disposable runtime check",str(directory/"fixture.keymap")) as session:
+                rsx.encrypt_file(session,str(source),out_path=str(encrypted),aad=b"gendragoon.desktop.runtime-check/v1")
+                ciphertext=encrypted.read_bytes()
+                decoded=decode_image(encode_image(ciphertext,module=3,bits=3,noise=0,deterministic=True))
+                if decoded!=ciphertext:raise RuntimeError("The packaged visual codec check failed.")
+                encrypted.write_bytes(decoded)
+                rsx.decrypt_file(session,str(encrypted),out_path=str(restored),aad=b"gendragoon.desktop.runtime-check/v1")
+            if restored.read_bytes()!=probe:raise RuntimeError("The native Unicode-path encrypted roundtrip failed.")
+            private.protect_generated_tree(directory)
         print(json.dumps({"ok":True,"protocol":"MachineNotes-v1","gui":"tkinter","encryptedTransfer":True,"accountTokens":"memory-only","teams":"server-relay"}))
         return
     root=tk.Tk();GenDragoonGUI(root);root.mainloop()

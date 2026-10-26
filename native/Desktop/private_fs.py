@@ -4,7 +4,10 @@ import os
 from pathlib import Path
 import shutil
 import stat
+import threading
 import uuid
+
+_directory_lock=threading.RLock()
 
 def _windows():
     from gendragoon_platform_ipc import modules, user_sid, secure_file, verify_private, security_attributes
@@ -20,6 +23,12 @@ def _attributes(directory=False):
     return attributes
 
 def private_directory(path):
+    # ACL normalization changes the descriptor size. Keep its owner check,
+    # update and verification together so another worker cannot race the
+    # two-call GetFileSecurity buffer allocation inside pywin32.
+    with _directory_lock:return _private_directory(path)
+
+def _private_directory(path):
     path=Path(path).absolute()
     if path.is_symlink() or path.exists() and getattr(path.lstat(),"st_file_attributes",0)&0x400:
         raise ValueError("A private GenDragoon directory cannot be linked.")

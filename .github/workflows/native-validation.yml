@@ -94,8 +94,18 @@ jobs:
         run: python -B -m unittest discover -s native/Desktop/tests -p test_companion_server.py -v
       - name: Stage the hash-pinned compiled platform runtime without private source checkout
         run: python -B native/Desktop/stage_runtime.py --destination "${{ runner.temp }}/gendragoon-desktop" --prebuilt "native/Desktop/runtimes/${{ runner.os == 'Windows' && 'windows' || 'linux' }}-x86_64.zip"
+      - name: Create and verify an application-owned Windows UTF-8 interpreter without modifying Python
+        if: runner.os == 'Windows'
+        run: python -B native/Desktop/windows_utf8.py --destination "${{ runner.temp }}/gendragoon-python-utf8" --path "${{ runner.temp }}/gendragoon-desktop" --path "${{ runner.temp }}/gendragoon-desktop/runtime"
       - name: Verify current MachineNotes, portable vault, genuine encrypted transfer, renewal and private filesystem
+        if: runner.os == 'Linux'
         run: python -B -m unittest discover -s native/Desktop/tests -p test_machinenotes.py -v
+        env:
+          GD_DESKTOP_RUNTIME: ${{ runner.temp }}/gendragoon-desktop
+      - name: Verify actual Windows Unicode codec paths, MachineNotes, vault, renewal and private filesystem
+        if: runner.os == 'Windows'
+        run: |
+          & "${{ runner.temp }}/gendragoon-python-utf8/python.exe" -B -m unittest discover -s native/Desktop/tests -p test_machinenotes.py -v
         env:
           GD_DESKTOP_RUNTIME: ${{ runner.temp }}/gendragoon-desktop
       - name: Construct the actual Linux Files and Teams GUI in an isolated profile
@@ -105,7 +115,8 @@ jobs:
           GD_DESKTOP_RUNTIME: ${{ runner.temp }}/gendragoon-desktop
       - name: Construct the actual Windows Files and Teams GUI in an isolated profile
         if: runner.os == 'Windows'
-        run: python -B -m unittest discover -s native/Desktop/tests -p test_gui_startup.py -v
+        run: |
+          & "${{ runner.temp }}/gendragoon-python-utf8/python.exe" -B -m unittest discover -s native/Desktop/tests -p test_gui_startup.py -v
         env:
           GD_DESKTOP_RUNTIME: ${{ runner.temp }}/gendragoon-desktop
       - name: Build and smoke-check standalone GUI and native messaging candidates

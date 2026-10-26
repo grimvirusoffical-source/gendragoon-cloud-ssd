@@ -109,6 +109,8 @@ class DesktopInstance:
         if self.fd is not None:os.close(self.fd);self.fd=None
 
 def crypto_runtime():
+    if sys.platform=="win32" and ctypes.windll.kernel32.GetACP()!=65001:
+        raise vault.VaultError("Open GenDragoon using its verified UTF-8 desktop launcher. This Python process cannot safely open Unicode encryption paths.")
     vendor=Path(__file__).resolve().parent.parent/"vendor/Red-SecretsXAI"
     if vendor.is_dir():sys.path.insert(0,str(vendor))
     try:

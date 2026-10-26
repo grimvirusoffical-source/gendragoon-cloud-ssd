@@ -69,7 +69,16 @@ sh native/Desktop/install-linux.sh
 
 On Windows, run `native/Desktop/install-windows.ps1` through the machine's existing
 PowerShell policy. It builds an actual `GenDragoonNativeHost.exe`; a batch file is
-not substituted for a native-messaging executable. Source builds require CMake and
+not substituted for a native-messaging executable. Windows 10 version 1903 or newer
+is required for native Unicode codec paths. Packaged executables embed a UTF-8
+process manifest. Source installation creates a separate application-owned Python
+launcher with that manifest and explicit module paths; it validates the process
+code page and dependencies, while preserving the original Python installation.
+Application code lives under `%LOCALAPPDATA%\Programs\GenDragoon\Companion`;
+the client's private account files remain under `%LOCALAPPDATA%\GenDragoon`.
+Starting the codec from an ordinary Python process with a legacy ANSI code page
+fails before key creation and directs the user to the verified launcher.
+Source builds require CMake and
 a C++ compiler; compiled runtime inputs can instead be selected explicitly:
 
 ```sh

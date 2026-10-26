@@ -18,6 +18,7 @@ def build(destination):
             "--name","GenDragoonNativeHost","--distpath",str(destination),"--workpath",str(Path(td)/"work"),"--specpath",td,
             "--paths",str(ROOT.parent/"Resources")]
         if sys.platform=="win32":
+            args.extend(["--manifest",str(ROOT/"windows-utf8.manifest")])
             for module in ("win32api","win32file","win32pipe","win32security","win32con","win32process","pywintypes","gendragoon_platform_ipc"):
                 args.extend(["--hidden-import",module])
         args.append(str(ROOT/"native_host_entry.py"))

@@ -59,7 +59,7 @@ def package(runtime,output):
             "--add-data",str(runtime/"install_native_host.py")+":.",
             "--hidden-import","tkinter","--hidden-import","tkinter.ttk",
             "--exclude-module","redxai","--exclude-module","redsecretsxai"]
-        if sys.platform=="win32":args.append("--windowed")
+        if sys.platform=="win32":args.extend(["--windowed","--manifest",str(Path(__file__).resolve().parent/"windows-utf8.manifest")])
         for module in ("numpy","PIL","cryptography"):args.extend(["--collect-all",module])
         args.append(str(runtime/"gendragoon_gui.py"))
         result=subprocess.run(args,capture_output=True,text=True,timeout=900)
