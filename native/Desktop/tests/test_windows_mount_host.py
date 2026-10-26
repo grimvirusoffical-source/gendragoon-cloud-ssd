@@ -210,35 +210,47 @@ class ActualOwnedHostTests(unittest.TestCase):
 
     def test_real_read_duplicate_mapping_directory_and_admission_race(self):
         import ntsecuritycon,win32api,win32con,win32file
-        checks=[];mapped_proof={};manager=mounts.WorkspaceMountManager(self.model.root);record=None
+        checks=[];mapped_proof={};native_status={};cleanup={};stage="mount";failed=False
+        manager=mounts.WorkspaceMountManager(self.model.root);record=None
         report=Path(os.environ["GD_MOUNT_HOST_REPORT"]) if os.environ.get("GD_MOUNT_HOST_REPORT") else None
         def emit(state):
-            if report:report.write_text(json.dumps({"schema":1,"platform":sys.platform,"mount":state,"checks":checks,"mappedView":mapped_proof}),encoding="utf-8")
+            if report:report.write_text(json.dumps({"schema":1,"platform":sys.platform,"mount":state,"checks":checks,
+                "mappedView":mapped_proof,"stage":stage,"nativeStatus":native_status,"cleanup":cleanup}),encoding="utf-8")
+        def capture_status(process):
+            value=platform.host_request(process,"/v1/status")
+            native_status.clear()
+            if value.get("state") in ("mounted","quiescing","unmounted"):native_status["state"]=value["state"]
+            for key in ("openFiles","openDirectories","pending","inflight"):
+                count=value.get(key)
+                if type(count) is int and 0<=count<=1000000:native_status[key]=count
+            return native_status
         def wait_closed(process):
             deadline=time.monotonic()+10
             while time.monotonic()<deadline:
-                state=platform.host_request(process,"/v1/status")
+                state=capture_status(process)
                 if not any(state.get(k,-1) for k in ("openFiles","openDirectories","pending","inflight")):return
                 time.sleep(.05)
-            self.fail("Native handles did not close within the bounded gate")
+            self.fail("Native handles did not close within the bounded gate at "+stage+": "+json.dumps(native_status,sort_keys=True))
         def busy():
             with self.assertRaises(platform.PlatformMountError):manager.unmount(record["id"])
             self.assertIs(platform.mounted(record),True)
         try:
             record=manager.mount(self.model,fixture.NOTE,os.environ["GD_TEST_MOUNT_HOST"])
             process=manager.live[record["id"]][3];path=Path(record["mountPath"])/self.source.name
+            stage="held-read"
             with path.open("rb") as source:
                 self.assertEqual(source.read(),self.payload);busy()
-            checks.extend(("genuine-encrypted-read","held-read-refused"));wait_closed(process)
+            checks.extend(("genuine-encrypted-read","held-read-refused"));stage="held-read-close";wait_closed(process)
             # DuplicateHandle retains the same native file object after the
             # original Python handle closes. Release must wait for native Close.
-            source=path.open("rb");current=win32api.GetCurrentProcess()
+            stage="duplicate-handle";source=path.open("rb");current=win32api.GetCurrentProcess()
             import msvcrt
             duplicate=win32api.DuplicateHandle(current,msvcrt.get_osfhandle(source.fileno()),current,0,False,win32con.DUPLICATE_SAME_ACCESS)
             source.close()
             try:busy()
             finally:duplicate.Close()
-            checks.append("duplicate-handle-refused");wait_closed(process)
+            checks.append("duplicate-handle-refused");stage="duplicate-handle-close";wait_closed(process)
+            stage="mapped-view"
             with mapped_reader(path) as (mapped,reader):
                 self.assertEqual(mapped["backend"],"win32-view-only")
                 self.assertIs(mapped["originalClosed"],True);self.assertIs(mapped["mappingHandleClosed"],True)
@@ -246,15 +258,16 @@ class ActualOwnedHostTests(unittest.TestCase):
                 self.assertEqual(mapped["size"],len(self.payload));self.assertEqual(mapped["sha256"],fixture.hashlib.sha256(self.payload).hexdigest())
                 self.assertIsNone(reader.poll());busy()
             self.assertEqual(reader.returncode,0)
-            checks.append("mapped-view-refused");wait_closed(process)
+            checks.append("mapped-view-refused");stage="mapped-view-close";wait_closed(process)
+            stage="directory-handle"
             directory=win32file.CreateFile(record["mountPath"],ntsecuritycon.FILE_READ_ATTRIBUTES|ntsecuritycon.FILE_LIST_DIRECTORY,
                 win32con.FILE_SHARE_READ|win32con.FILE_SHARE_WRITE|win32con.FILE_SHARE_DELETE,None,win32con.OPEN_EXISTING,win32con.FILE_FLAG_BACKUP_SEMANTICS,None)
             try:busy()
             finally:directory.Close()
-            checks.append("directory-handle-refused");wait_closed(process)
+            checks.append("directory-handle-refused");stage="directory-handle-close";wait_closed(process)
             # Concurrent native opens retain every successful handle until the
             # unmount response. An accepted unmount must deny all racing opens.
-            barrier=threading.Barrier(9);release=threading.Event();opened=[];errors=[];lock=threading.Lock()
+            stage="concurrent-open";barrier=threading.Barrier(9);release=threading.Event();opened=[];errors=[];lock=threading.Lock()
             def race_open():
                 barrier.wait()
                 try:
@@ -276,13 +289,22 @@ class ActualOwnedHostTests(unittest.TestCase):
                 for thread in threads:thread.join(timeout=25)
             self.assertFalse(any(thread.is_alive() for thread in threads));self.assertEqual(len(opened)+len(errors),8)
             checks.append("atomic-open-unmount-race")
+            stage="normal-unmount"
             if not unmounted:wait_closed(process);manager.unmount(record["id"])
             self.assertFalse(manager.has_mounts);self.assertEqual(process.returncode,0);self.assertEqual(self.source.read_bytes(),self.payload)
             checks.append("normal-unmount");emit("verified")
-        except Exception:emit("failed");raise
+        except Exception:failed=True;emit("failed");raise
         finally:
             # Cleanup uses the same normal gate. Never kill, signal or force a
             # failed candidate just to make the test or workflow appear green.
-            if record and manager.has_mounts:manager.unmount(record["id"])
+            try:
+                if record and manager.has_mounts:manager.unmount(record["id"])
+            except Exception:
+                cleanup["status"]="retained"
+                if record and record["id"] in manager.live:
+                    try:capture_status(manager.live[record["id"]][3])
+                    except Exception:cleanup["nativeStatus"]="unavailable"
+                emit("failed")
+                if not failed:raise
 
 if __name__=="__main__":unittest.main()
