@@ -31,4 +31,27 @@ def roundtrip(directory):
         with storage.Codec(Receiver(foreign))as codec:codec.open(blobs[foreign["workspaceId"],sample_id],sample_id)
     except Exception:rejected=True
     if not rejected:raise RuntimeError("Android codec accepted ciphertext under another workspace AAD")
-    return json.dumps({"ok":True,"verified":True,"pngObjects":len(blobs)-1,"plainBytes":len(plain),"crossWorkspaceRejected":rejected})
+    # Preserve older compact carriers with data larger than today's write chunk.
+    # All encryption, payload packing and compact carrier APIs are unchanged.
+    from redsecretsxai import encode_storage_image
+    from gendragoon_android_codec import MAX_LEGACY_READ
+    legacy_plain = (b'PUBLIC legacy compact fixture\0' * 100000)[:2*1024*1024]
+    legacy_id = '9'*32
+    legacy_aad = storage.aad(config['receiverId'], config['workspaceId'], legacy_id)
+    with storage.Codec(Receiver(config)) as codec:
+        sealed = storage.rsx.seal(codec._session, storage.rsx._pack_file_payload('plain', legacy_plain), aad=legacy_aad)
+        if codec.open(encode_storage_image(sealed), legacy_id) != legacy_plain:
+            raise RuntimeError('Historic compact PNG did not authenticate and restore')
+        source = root/'legacy-sealed'
+        source.write_bytes(sealed)
+        corrupt = root/'legacy-corrupt'
+        corrupt.write_bytes(sealed[:-1]+bytes([sealed[-1]^1]))
+        oversized = root/'legacy-oversized'
+        with oversized.open('xb') as output:output.truncate(MAX_LEGACY_READ+1)
+        for incoming, given_aad, name in [(source,b'wrong-aad','wrong-aad'),(corrupt,legacy_aad,'tampered'),(oversized,legacy_aad,'oversized')]:
+            target = root/('unpublished-'+name)
+            try:storage.rsx.decrypt_file(codec._session,incoming,out_path=target,aad=given_aad)
+            except Exception:pass
+            else:raise RuntimeError('Invalid legacy input unexpectedly restored')
+            if target.exists():raise RuntimeError('Invalid legacy input published plaintext')
+    return json.dumps({"ok":True,"verified":True,"pngObjects":len(blobs)-1,"plainBytes":len(plain),"crossWorkspaceRejected":rejected,"legacyCompactBytes":len(legacy_plain),"legacyBadAuthNoOutput":True})

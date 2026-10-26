@@ -84,6 +84,25 @@ class FileIOTests(unittest.TestCase):
                 codec.write_exclusive(output, b'replacement')
             self.assertEqual(output.read_bytes(), b'original')
 
+    def test_legacy_read_is_bounded_but_new_writes_remain_64k(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root/'legacy'
+            source.write_bytes(b'x'*(2*1024*1024))
+            api = codec.FileAPI(DelegatedCore())
+            api.decrypt_file(None, source, out_path=root/'restored')
+            self.assertEqual((root/'restored').stat().st_size, 2*1024*1024)
+            with self.assertRaises(ValueError):
+                api.encrypt_file(None, source, out_path=root/'new-upload')
+            self.assertFalse((root/'new-upload').exists())
+            with source.open('wb') as output:
+                output.truncate(codec.MAX_LEGACY_READ+1)
+            with patch.object(api.core, 'open_') as authenticated_open:
+                with self.assertRaises(ValueError):
+                    api.decrypt_file(None, source, out_path=root/'oversized')
+                authenticated_open.assert_not_called()
+            self.assertFalse((root/'oversized').exists())
+
 
 if __name__ == '__main__':
     unittest.main()

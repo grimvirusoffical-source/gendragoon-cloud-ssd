@@ -14,6 +14,9 @@ from pathlib import Path
 CHUNK = 64 * 1024
 MAX_AAD = 2048
 MAX_SEALED = CHUNK + 4096
+# Existing pinned compact decoder's exact MAX_PAYLOAD. Historic compact chunks
+# may exceed the current 64 KiB write size; keep that read compatibility.
+MAX_LEGACY_READ = 8 * 1024 * 1024
 _installed = None
 
 
@@ -83,14 +86,14 @@ class FileAPI:
     def decrypt_file(self, session, in_path, out_dir=None, out_path=None, aad=b''):
         if out_path is None:
             raise ValueError('Cloud restoration requires an explicit private output')
-        sealed = read_bounded(in_path, MAX_SEALED)
+        sealed = read_bounded(in_path, MAX_LEGACY_READ)
         # open_ verifies every chunk, final tag and clean EOF before returning.
         payload = self.core.open_(session, sealed, aad=self.checked_aad(aad))
-        if len(payload) > CHUNK + 265:
+        if len(payload) > MAX_LEGACY_READ + 265:
             raise ValueError('Authenticated file payload exceeds its cloud bound')
         _, plain = self.core._unpack_file_payload(payload)
-        if len(plain) > CHUNK:
-            raise ValueError('Authenticated plaintext exceeds 64 KiB')
+        if len(plain) > MAX_LEGACY_READ:
+            raise ValueError('Authenticated plaintext exceeds the compact legacy read bound')
         # The output does not exist until full authentication and size checks
         # have succeeded. A failed write removes only the file created here.
         write_exclusive(out_path, plain)
