@@ -23,7 +23,13 @@ public final class TransferAcceptanceActivity extends ComponentActivity {
             if(result.getResultCode()==Activity.RESULT_OK&&data!=null&&data.getData()!=null){
                 selected=data.getData();
                 int flags=data.getFlags()&(Intent.FLAG_GRANT_READ_URI_PERMISSION|Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
-                getContentResolver().takePersistableUriPermission(selected,flags);
+                if(flags==(Intent.FLAG_GRANT_READ_URI_PERMISSION|Intent.FLAG_GRANT_WRITE_URI_PERMISSION))
+                    getContentResolver().takePersistableUriPermission(selected,Intent.FLAG_GRANT_READ_URI_PERMISSION|Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
+                else if(flags==Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                    getContentResolver().takePersistableUriPermission(selected,Intent.FLAG_GRANT_READ_URI_PERMISSION);
+                else if(flags==Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
+                    getContentResolver().takePersistableUriPermission(selected,Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
+                else throw new SecurityException("Owned fixture did not return a readable or writable URI grant.");
             }
             results.incrementAndGet();
         });
