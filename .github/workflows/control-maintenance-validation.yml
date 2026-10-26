@@ -33,7 +33,23 @@ jobs:
           git show f01e25b63ea87b2d0d0892bfd910683e2d94ff84:native/RedXCloud/control-server.cjs | sha256sum | awk '$1 != "176ebea80c72bb6ae73017d58829fdde50489164a1a26319fb49699424e391d2" { exit 1 }'
       - name: Disposable exact-source inspector and asynchronous drain proof
         run: node native/Tests/ControlMaintenance/control33-drain-local-proof.cjs
+      - name: Disposable original Receiver counters, decoders and writer-lock ordering
+        run: node native/Tests/ControlMaintenance/receiver35-drain-local-proof.cjs
+      - name: Disposable external inspector and implementation admission fence
+        run: node --experimental-websocket --test native/Tests/ControlMaintenance/external-inspector-boundary.test.cjs
+      - name: Controller phase failures and fresh Mac admission gate
+        env:
+          PYTHONDONTWRITEBYTECODE: '1'
+        run: python3 -B native/Tests/ControlMaintenance/test-activation-state-machine-36.py
+      - name: Install isolated kernel-test prerequisites on the CI runner
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y nftables iproute2 util-linux
+      - name: Mandatory isolated Linux kernel boundary proof
+        env:
+          PYTHONDONTWRITEBYTECODE: '1'
+        run: sudo env PYTHONDONTWRITEBYTECODE=1 GD36_REQUIRE_NETNS=1 python3 -B native/Tests/ControlMaintenance/test-network-boundary-36.py
       - name: Disposable deletion, preservation, proxy and redirect proof
         env:
           PYTHONDONTWRITEBYTECODE: '1'
-        run: python3 native/Tests/ControlMaintenance/test-server-activation-36.py
+        run: python3 -B native/Tests/ControlMaintenance/test-server-activation-36.py
