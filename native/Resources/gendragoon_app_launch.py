@@ -409,6 +409,7 @@ def launch(key, project, bucket, remote, keep_cache=False):
         raise ValueError("Choose and verify the MachineNote destination")
     private_root()
     data = lib.selected_entry(key, project, bucket, remote)
+    lib.assert_restore_compatible(key,data,project,bucket,remote)
     if data.get("kind", "app") != "app":
         raise ValueError("Use Restore for files and folders")
     # The cloud SSD has one active application slot across ALL workspaces.

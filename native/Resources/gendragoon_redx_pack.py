@@ -567,6 +567,11 @@ def restore_source(client, config):
         raise PackError("macos_archive_required")
     import gendragoon_library as library
     entry = _archive_entry(client, config.get("path"))
+    import gendragoon_device_origin as device_origin
+    try:
+        device_origin.ensure_restore_compatible(entry)
+    except ValueError as error:
+        raise PackError("application_platform_mismatch", "This application or installer backup requires its matching original platform for restoration.") from error
     destination = config.get("destination")
     if not isinstance(destination, str) or not destination:
         raise PackError("destination_unsafe")

@@ -32,6 +32,7 @@ class NativeHelperTests(unittest.TestCase):
         }))
         (resources / "gendragoon_python").symlink_to(Path(sys.executable).resolve())
         (resources / "fixture_helper.py").write_text(HELPER)
+        (resources / "gendragoon_byo_vault.py").write_text(HELPER)
         production = (NATIVE / "Sources/GDNativeWorkspace.swift").read_text()
         # Extract unchanged production declarations; no Process or runtime facade.
         production = production[production.index("enum GDRuntime {"):
@@ -64,6 +65,9 @@ class NativeHelperTests(unittest.TestCase):
     def test_caller_cancellation_does_not_abandon_helper_or_clear_busy_early(self):
         self.run_case("cancellation")
 
+    def test_durable_byo_keymap_import_outlives_a_read_deadline_without_a_signal(self):
+        self.run_case("durable-byo-import")
+
 
 AUTH_FACADE = r'''
 @MainActor final class GDRedXAIAuthSession {
@@ -84,7 +88,7 @@ import time
 
 mode = sys.argv[1]
 data = sys.stdin.buffer.read()
-if mode in ("timeout", "delayed"):
+if mode in ("timeout", "delayed", "install-keymap"):
     root = Path(sys.argv[2])
     def terminated(signum, frame):
         # Publish a complete receipt: existence must not race write_text's
@@ -177,6 +181,15 @@ func awaitFile(_ path:URL) async throws {
             try Data().write(to:root.appendingPathComponent("release"))
             _ = try await caller.value
             precondition(!probe.busy)
+            precondition(FileManager.default.fileExists(atPath:root.appendingPathComponent("completed").path))
+        case "durable-byo-import":
+            let writer=Task { try await GDNativeHelper.invoke("gendragoon_byo_vault",
+                arguments:["install-keymap",root.path],timeout:0.1) }
+            try await awaitFile(root.appendingPathComponent("started"))
+            try await Task.sleep(nanoseconds:300_000_000)
+            precondition(!FileManager.default.fileExists(atPath:root.appendingPathComponent("terminated").path))
+            try Data().write(to:root.appendingPathComponent("release"))
+            _ = try await writer.value
             precondition(FileManager.default.fileExists(atPath:root.appendingPathComponent("completed").path))
         default:fatalError("Unknown helper regression")
         }

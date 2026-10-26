@@ -142,6 +142,11 @@ class DAVTests(unittest.TestCase):
             self.assertEqual(request(other)[1],("owned note "+OTHER).encode())
             self.assertEqual(request(other,headers={"Authorization":"Bearer "+first.token})[0],401)
             self.assertNotEqual(self.tree.cache,second.cache)
+    def test_foreign_or_spoofed_app_backup_is_refused_before_dav_metadata_or_payload_restore(self):
+        for updates in ({"name":"Tool.apk","applicationPlatform":"android"},{"name":"Tool.exe","applicationPlatform":"macos"}):
+            self.model.session.rows[NOTE]=[row(displayName="renamed-document.txt",**updates)]
+            with serving(self.tree) as server:self.assertEqual(request(server,"/renamed-document.txt")[0],400)
+            self.assertEqual(self.tree.materialized,{})
     def test_quiescing_and_authenticated_read_activity_protect_unmount(self):
         with self.tree.request():self.assertEqual(self.tree.active,1)
         self.assertEqual(self.tree.active,0)

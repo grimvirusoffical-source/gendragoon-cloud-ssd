@@ -11,6 +11,21 @@ import sys
 import tempfile
 from build_native_host import build as build_host
 
+def drop_package_options(runtime):
+    """The dependency's official 0.7 hook selects matching OS/CPU/Tcl data.
+
+    Keep its version metadata for the runtime's mandatory dependency check and
+    original notices alongside the candidate. Actual native loading is checked
+    by the packaged --check-gui probe below; missing TkDND fails the build.
+    """
+    options=["--hidden-import","tkinterdnd2","--copy-metadata","tkinterdnd2"]
+    for name in ("tkdnd-runtime.json","tkinterdnd2-LICENSE.txt","tkdnd-LICENSE.txt"):
+        path=Path(runtime)/name
+        if path.is_symlink() or not path.is_file() or not 0<path.stat().st_size<128*1024:
+            raise RuntimeError("The required native file-drop manifest and original notices are missing.")
+        options.extend(["--add-data",str(path)+":."])
+    return options
+
 def check_native_host(host,runtime):
     """Send a real native message through the packaged host to private IPC."""
     import io
@@ -60,6 +75,7 @@ def package(runtime,output):
             "--add-data",str(runtime/"install_native_host.py")+":.",
             "--hidden-import","tkinter","--hidden-import","tkinter.ttk",
             "--exclude-module","redxai","--exclude-module","redsecretsxai"]
+        args.extend(drop_package_options(runtime))
         if sys.platform=="win32":args.extend(["--windowed","--manifest",str(Path(__file__).resolve().parent/"windows-utf8.manifest")])
         for module in ("numpy","PIL","cryptography"):args.extend(["--collect-all",module])
         args.append(str(runtime/"gendragoon_gui.py"))

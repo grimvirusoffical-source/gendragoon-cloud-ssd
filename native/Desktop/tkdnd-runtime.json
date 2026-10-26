@@ -1,0 +1,139 @@
+{
+  "schema": 1,
+  "wrapperVersion": "0.7.0",
+  "nativeVersion": "2.10.3",
+  "wrapperSource": "https://github.com/Eliav2/tkinterdnd2/tree/80abb02f3f46036c8ffb063b37760c516aabeb1a",
+  "wheel": {
+    "url": "https://files.pythonhosted.org/packages/eb/13/73054a55222b55604846d78c2e5e0c84bbe9f35bc7d6d9697a289c905b3a/tkinterdnd2-0.7.0-py3-none-any.whl",
+    "bytes": 819285,
+    "sha256": "f93d4f5ad439648ba1673f15db3e271cdd08f075c87f43553ffcdde4e634a717"
+  },
+  "runtimeFiles": {
+    "linux-x64": {
+      "libtkdnd2.10.3.so": {
+        "bytes": 59296,
+        "sha256": "b06860716efe360c1f5ea6a9474aedce8c9370c7b380c93fd06c2f7044bae3a3"
+      },
+      "pkgIndex.tcl": {
+        "bytes": 2028,
+        "sha256": "d03959bb595375e6d52868a2d209def23ec98f349e524d10ee98cc6885817606"
+      },
+      "tkdnd.tcl": {
+        "bytes": 19109,
+        "sha256": "d47acfd2e2d5426c40e8f5c11646c49a7ecdadc92c73f9c3f47eb0ea6fbba4b7"
+      },
+      "tkdnd_compat.tcl": {
+        "bytes": 6231,
+        "sha256": "58b0aebd287df1d2cfe16231847b786ac9a3a2d18fff2a8a37955510221d10f5"
+      },
+      "tkdnd_generic.tcl": {
+        "bytes": 25705,
+        "sha256": "100d8b4199809f387b06cad1736f82536238c74ddbf7c6a87abbc1aa62cbbdf5"
+      },
+      "tkdnd_unix.tcl": {
+        "bytes": 38575,
+        "sha256": "a314a90863eef53db04203eaf637dff9324f0178d63c680b5bff7c4467a125f9"
+      },
+      "tkdnd_utils.tcl": {
+        "bytes": 10201,
+        "sha256": "fff7b046dfa50992dd3151c74291558c13a675efcaa758ce53d4d4a6ebebbb43"
+      }
+    },
+    "linux-x64-tcl9": {
+      "libtcl9tkdnd2.10.3.so": {
+        "bytes": 63376,
+        "sha256": "6b86d6236b7689cec8354611800ca7f77b93547f275bbd6653034edddcccb35e"
+      },
+      "pkgIndex.tcl": {
+        "bytes": 2032,
+        "sha256": "addad10a8db9abdb2555638f26a4160727aac711ce8ba079bb148ccad8a548f4"
+      },
+      "tkdnd.tcl": {
+        "bytes": 19109,
+        "sha256": "d47acfd2e2d5426c40e8f5c11646c49a7ecdadc92c73f9c3f47eb0ea6fbba4b7"
+      },
+      "tkdnd_compat.tcl": {
+        "bytes": 6231,
+        "sha256": "58b0aebd287df1d2cfe16231847b786ac9a3a2d18fff2a8a37955510221d10f5"
+      },
+      "tkdnd_generic.tcl": {
+        "bytes": 25705,
+        "sha256": "100d8b4199809f387b06cad1736f82536238c74ddbf7c6a87abbc1aa62cbbdf5"
+      },
+      "tkdnd_unix.tcl": {
+        "bytes": 38575,
+        "sha256": "a314a90863eef53db04203eaf637dff9324f0178d63c680b5bff7c4467a125f9"
+      },
+      "tkdnd_utils.tcl": {
+        "bytes": 10201,
+        "sha256": "fff7b046dfa50992dd3151c74291558c13a675efcaa758ce53d4d4a6ebebbb43"
+      }
+    },
+    "win-x64": {
+      "libtkdnd2.10.3.dll": {
+        "bytes": 153600,
+        "sha256": "d04d033efb45cf683b04ebe23b383bf2ea743891e2a6474a957b41da9b496f30"
+      },
+      "pkgIndex.tcl": {
+        "bytes": 2112,
+        "sha256": "74937780012f60c3aea8830f318a05e9bb0a116bff1b0040ca2c772a958659f7"
+      },
+      "tkdnd.tcl": {
+        "bytes": 19663,
+        "sha256": "0d857154d6a11a0a94a6ea7c480172fe81a3d6538acb821260fdc38f48b8ba44"
+      },
+      "tkdnd_compat.tcl": {
+        "bytes": 6391,
+        "sha256": "87ce43002f60fb7c22c8ca6c17ed13151d21e48175048254c448ac774937b580"
+      },
+      "tkdnd_generic.tcl": {
+        "bytes": 26340,
+        "sha256": "78a606df6864e72f1ff19aacbcee2c2559983f1a2aacad5cf21cce51ba7ec5db"
+      },
+      "tkdnd_utils.tcl": {
+        "bytes": 10457,
+        "sha256": "5269a7682f3a9c4a78410844d614277b21e63ac69cd30d18d666ddc7191c74c7"
+      },
+      "tkdnd_windows.tcl": {
+        "bytes": 7813,
+        "sha256": "5774188ca4b626a8ba243e860b04b198c12bbb61efa1896bfcf4eddc07399fe4"
+      }
+    },
+    "win-x64-tcl9": {
+      "libtkdnd2.10.3.dll": {
+        "bytes": 154624,
+        "sha256": "22dc45335018f291b98620d9d7fb2c398139306f555ce29a5032d275ca5de38a"
+      },
+      "pkgIndex.tcl": {
+        "bytes": 2112,
+        "sha256": "74937780012f60c3aea8830f318a05e9bb0a116bff1b0040ca2c772a958659f7"
+      },
+      "tkdnd.tcl": {
+        "bytes": 19663,
+        "sha256": "0d857154d6a11a0a94a6ea7c480172fe81a3d6538acb821260fdc38f48b8ba44"
+      },
+      "tkdnd_compat.tcl": {
+        "bytes": 6391,
+        "sha256": "87ce43002f60fb7c22c8ca6c17ed13151d21e48175048254c448ac774937b580"
+      },
+      "tkdnd_generic.tcl": {
+        "bytes": 26340,
+        "sha256": "78a606df6864e72f1ff19aacbcee2c2559983f1a2aacad5cf21cce51ba7ec5db"
+      },
+      "tkdnd_utils.tcl": {
+        "bytes": 10457,
+        "sha256": "5269a7682f3a9c4a78410844d614277b21e63ac69cd30d18d666ddc7191c74c7"
+      },
+      "tkdnd_windows.tcl": {
+        "bytes": 7813,
+        "sha256": "5774188ca4b626a8ba243e860b04b198c12bbb61efa1896bfcf4eddc07399fe4"
+      }
+    }
+  },
+  "sourceArchive": {
+    "url": "https://codeload.github.com/Eliav2/tkinterdnd2/tar.gz/80abb02f3f46036c8ffb063b37760c516aabeb1a",
+    "bytes": 754390,
+    "sha256": "e76f77664c2725fe8f26fa6df9f9adb05221c72f031ca46746490d92c6d4ffbb",
+    "matchedWheelFiles": 31
+  }
+}

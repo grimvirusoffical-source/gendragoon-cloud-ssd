@@ -477,10 +477,16 @@ struct StoredApp: Decodable, Identifiable {
     let parentKey: String?
     let virtualFolder: Bool?
     let archiveKey: String?
+    let origin: GDDeviceOrigin?
+    let applicationPlatform: String?
     var id: String { key }
     var label: String { displayName ?? name }
     var isFolder: Bool { kind == "folder" }
     var isVirtualFolder: Bool { virtualFolder == true }
+    var applicationPlatformCode: String? { isVirtualFolder ? nil : GDApplicationPlatform.hint(name: name, kind: kind, declared: applicationPlatform) }
+    var deviceLabel: String { isVirtualFolder ? "Library folder" : origin?.label ?? "Unknown upload device" }
+    var canRestoreOnMac: Bool { GDApplicationPlatform.mayRestoreOnMac(applicationPlatformCode) }
+    var compatibilityMessage: String { "This application or installer backup belongs to " + GDApplicationPlatform.label(applicationPlatformCode ?? "unknown") + ". Restore it using GenDragoon on its original platform. It cannot run as a Mac application." }
 }
 struct GDManagedAppSession: Identifiable {
     let key: String
@@ -675,6 +681,7 @@ struct GDManagedAppSession: Identifiable {
         invoke(["scan", "--root", root] + context) { [weak self] ok, _ in if ok { self?.loadApps() } }
     }
     func launch(_ app: StoredApp) {
+        guard app.canRestoreOnMac else { message = app.compatibilityMessage; return }
         if hasDestination && app.kind == "app" { smartLaunch(app); return }
         invoke(["launch", "--key", app.key] + context) { [weak self] ok, result in
             if ok, app.kind == "app", let path = result["localPath"] as? String {
@@ -684,6 +691,7 @@ struct GDManagedAppSession: Identifiable {
         }
     }
     func smartLaunch(_ app: StoredApp) {
+        guard app.kind == "app", app.canRestoreOnMac else { message = app.compatibilityMessage; return }
         guard hasDestination else { launch(app); return }
         var args = ["launch", "--key", app.key] + context
         if !cleanupAfterExit { args.append("--keep-cache") }
@@ -696,10 +704,16 @@ struct GDManagedAppSession: Identifiable {
         }
     }
     func preload(_ app: StoredApp) { smartLaunch(app) }
-    func restore(_ app: StoredApp) { invoke(["restore", "--key", app.key] + context) }
+    func restore(_ app: StoredApp) {
+        guard app.canRestoreOnMac else { message = app.compatibilityMessage; return }
+        invoke(["restore", "--key", app.key] + context)
+    }
     func performOnItems(_ action: String, items: [StoredApp]) {
         guard ["restore", "evict"].contains(action), !items.isEmpty,
               !busy, GDUpdateActivity.shared.canStart(excluding: self) else { return }
+        if action == "restore", let incompatible = items.first(where: { !$0.canRestoreOnMac }) {
+            message = incompatible.compatibilityMessage; return
+        }
         let expected = context, selectedRemote = remote, selectedBucket = bucket, managed = hasDestination
         busy = true
         Task {
@@ -1003,7 +1017,12 @@ private struct WelcomePanel: View {
         guard blocked else { return .terminateNow }
         let alert = NSAlert()
         alert.messageText = "Finish cloud activity before quitting"
-        alert.informativeText = "Wait for transfers and cache operations, close managed applications, and unmount the cloud drive. GenDragoon keeps your pending work open."
+        let reasons = GDUpdateActivity.shared.activeOperationReasons(
+            excluding: GDUpdateCoordinator.shared.requestsTermination ? GDUpdateCoordinator.shared : nil,
+            forUpdate: GDUpdateCoordinator.shared.requestsTermination)
+        let detail = reasons.isEmpty ? "The activity state changed; review the app and try Quit again."
+            : "Still active: " + reasons.joined(separator: "; ") + "."
+        alert.informativeText = detail + " Wait for transfers and cache operations, close managed applications, and unmount cloud drives. GenDragoon keeps your pending work open."
         alert.addButton(withTitle: "Keep GenDragoon Open")
         alert.runModal()
         return .terminateCancel

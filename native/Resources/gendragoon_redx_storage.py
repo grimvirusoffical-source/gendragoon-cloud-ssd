@@ -31,6 +31,7 @@ import zlib
 import gendragoon_progress as progress
 import gendragoon_auth_broker as auth_broker
 from gendragoon_transfer_errors import TransferError
+from gendragoon_device_origin import validate_origin, validate_application_platform, application_platform
 
 RESOURCE = Path(__file__).resolve().parent
 DEV_VENDOR = RESOURCE.parent / "vendor" / "Red-SecretsXAI"
@@ -587,7 +588,9 @@ def _load_pages(client, codec, pages, _depth=0, _seen=None):
     return out
 
 
-def upload_archive(config, archive, key, name, kind, archive_layout, archive_sha, source_manifest, parent_key=None, client_factory=None):
+def upload_archive(config, archive, key, name, kind, archive_layout, archive_sha, source_manifest, parent_key=None, client_factory=None, origin=None):
+    origin=validate_origin(origin)
+    artifact_platform=application_platform(name,kind)
     client = (client_factory or RedXReceiver)(config)
     workers = client.verified_workers(write=True)
     archive = Path(archive)
@@ -662,7 +665,7 @@ def upload_archive(config, archive, key, name, kind, archive_layout, archive_sha
             raise RedXStorageError("Encrypted root manifest is too large")
         manifest_id = object_id(VISUAL_PROFILE + "-root-manifest", archive_sha, key)
         root_record = _put_plain(client, codec, manifest_id, root_raw)
-        registered = client.register(key, {
+        catalog = {
             "name": name,
             "kind": kind,
             "workspace": client.workspace,
@@ -670,10 +673,16 @@ def upload_archive(config, archive, key, name, kind, archive_layout, archive_sha
             "archiveBytes": archive.stat().st_size,
             "archiveSha256": archive_sha,
             "parentKey": parent_key,
-        })
+            "applicationPlatform": artifact_platform,
+        }
+        if origin is not None:catalog["origin"]=origin
+        registered = client.register(key, catalog)
         if registered.get("manifestId") != manifest_id or registered.get("name") != name:
             raise RedXStorageError("Receiver library registration mismatch")
+        actual_origin=validate_origin(registered.get("origin"))
+        actual_application=validate_application_platform(registered.get("applicationPlatform"))
         return {"manifestId": manifest_id, "rootRecord": root_record, "chunks": len(chunks),
+                "origin":actual_origin,"applicationPlatform":actual_application,
                 "archiveBytes": archive.stat().st_size, "archiveSha256": archive_sha}
 
 
@@ -776,6 +785,11 @@ def _validate_library_items(values):
             raise RedXStorageError("Receiver library contains invalid metadata")
         if value["key"] in seen:
             raise RedXStorageError("Receiver library repeats an item")
+        try:
+            validate_origin(value.get("origin"))
+            validate_application_platform(value.get("applicationPlatform"))
+        except ValueError as exc:
+            raise RedXStorageError("Receiver library contains invalid device metadata") from exc
         seen.add(value["key"])
         items.append(value)
     return items

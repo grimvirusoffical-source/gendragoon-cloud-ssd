@@ -67,7 +67,9 @@ private struct GDLibraryOutline: NSViewRepresentable {
         name.title = "Name"; name.width = 430; name.minWidth = 190
         let kind = NSTableColumn(identifier: .init("kind"))
         kind.title = "Kind"; kind.width = 140; kind.minWidth = 90
-        outline.addTableColumn(name); outline.addTableColumn(kind); outline.outlineTableColumn = name
+        let device = NSTableColumn(identifier: .init("device"))
+        device.title = "Uploaded from"; device.width = 170; device.minWidth = 120
+        outline.addTableColumn(name); outline.addTableColumn(kind); outline.addTableColumn(device); outline.outlineTableColumn = name
         outline.delegate = context.coordinator; outline.dataSource = context.coordinator
         outline.target = context.coordinator; outline.doubleAction = #selector(Coordinator.doubleClick(_:))
         outline.registerForDraggedTypes([GDLibraryClipboard.type, .fileURL])
@@ -92,7 +94,7 @@ private struct GDLibraryOutline: NSViewRepresentable {
         init(_ parent: GDLibraryOutline) { self.parent = parent }
         func rebuild(_ items: [StoredApp]) {
             guard let outline else { return }
-            let next = parent.destination + "|" + items.map { "\($0.key):\($0.label):\($0.parentKey ?? ""): \($0.kind ?? "")" }.joined(separator: "|")
+            let next = parent.destination + "|" + items.map { "\($0.key):\($0.label):\($0.parentKey ?? ""): \($0.kind ?? ""): \($0.deviceLabel): \($0.applicationPlatformCode ?? "")" }.joined(separator: "|")
             if signature != next {
                 let expanded = Set(nodes.values.filter { outline.isItemExpanded($0) }.map { $0.item.key })
                 rebuilding = true
@@ -137,8 +139,12 @@ private struct GDLibraryOutline: NSViewRepresentable {
         func outlineView(_ outlineView: NSOutlineView, viewFor tableColumn: NSTableColumn?, item: Any) -> NSView? {
             guard let node = item as? GDLibraryNode else { return nil }
             let text: String
+            if tableColumn?.identifier.rawValue == "device" {
+                let field = NSTextField(labelWithString: node.item.deviceLabel)
+                field.textColor = .secondaryLabelColor; field.font = .systemFont(ofSize: 11); return field
+            }
             if tableColumn?.identifier.rawValue == "kind" {
-                text = node.item.isVirtualFolder ? "Folder" : node.item.isFolder ? "Folder backup" : node.item.kind == "app" ? "Application" : "File"
+                text = node.item.isVirtualFolder ? "Folder" : node.item.applicationPlatformCode.map { GDApplicationPlatform.label($0) + " app backup" } ?? (node.item.isFolder ? "Folder backup" : "File")
                 let field = NSTextField(labelWithString: text); field.textColor = .secondaryLabelColor
                 field.font = .systemFont(ofSize: 11); return field
             }
@@ -176,8 +182,9 @@ private struct GDLibraryOutline: NSViewRepresentable {
             }
             menu.autoenablesItems = false
             let one = keys.count == 1, selected = !keys.isEmpty, editable = parent.canEdit && !parent.busy
-            add("Open", .open, enabled: one && !parent.busy)
-            add("Download", .download, enabled: selected && !parent.busy)
+            let compatible = keys.allSatisfy { nodes[$0]?.item.canRestoreOnMac == true }
+            add("Open", .open, enabled: one && compatible && !parent.busy)
+            add("Download", .download, enabled: selected && compatible && !parent.busy)
             menu.addItem(.separator())
             add("Cut", .cut, enabled: selected && editable); add("Copy", .copy, enabled: selected)
             add("Paste", .paste, enabled: editable); add("Rename…", .rename, enabled: one && editable)
@@ -247,6 +254,7 @@ private final class GDMenuActionBox: NSObject {
     let showUpload: () -> Void
     @ObservedObject private var activity = GDUpdateActivity.shared
     @State private var search = ""
+    @State private var platformFilter = "all"
     @State private var selection = Set<String>()
     @State private var editingName = ""
     @State private var editingKey: String?
@@ -263,9 +271,13 @@ private final class GDMenuActionBox: NSObject {
         return item.isVirtualFolder ? item.key : item.parentKey
     }
     private var visibleItems: [StoredApp] {
-        guard !search.isEmpty else { return library.apps }
         let all = Dictionary(library.apps.map { ($0.key, $0) }, uniquingKeysWith: { first, _ in first })
-        var keys = Set(library.apps.filter { $0.label.localizedCaseInsensitiveContains(search) }.map(\.key))
+        var keys = Set(library.apps.filter { item in
+            if item.isVirtualFolder && search.isEmpty { return true }
+            let platform = content == .applications ? item.applicationPlatformCode ?? "unknown" : item.origin?.platformCode ?? "unknown"
+            return (platformFilter == "all" || platform == platformFilter)
+                && (search.isEmpty || item.label.localizedCaseInsensitiveContains(search))
+        }.map(\.key))
         for key in Array(keys) {
             var parent = all[key]?.parentKey, visited = Set<String>()
             while let key = parent, visited.insert(key).inserted { keys.insert(key); parent = all[key]?.parentKey }
@@ -335,6 +347,10 @@ private final class GDMenuActionBox: NSObject {
                 VStack(alignment: .leading) { TextField("Find apps, files or folders…", text: $search).textFieldStyle(.roundedBorder); toolbar }
             }
             HStack {
+                Picker(content == .applications ? "Application platform" : "Upload device", selection: $platformFilter) {
+                    Text("All device types").tag("all")
+                    ForEach(GDApplicationPlatform.codes, id: \.self) { Text(GDApplicationPlatform.label($0)).tag($0) }
+                }.frame(maxWidth: 280)
                 Label(targetFolder.flatMap { key in library.apps.first { $0.key == key }?.label } ?? "MachineNote root", systemImage: "folder")
                     .font(.caption).foregroundStyle(.secondary)
                 Spacer()
@@ -354,9 +370,13 @@ private final class GDMenuActionBox: NSObject {
             if content == .applications { Toggle("Remove managed application cache after the app exits", isOn: $library.cleanupAfterExit).font(.caption) }
             Text("Drag items onto folders to move them; hold Option to copy. Right-click for actions. Folder backups retain their complete archived contents; library folders organize backups.")
                 .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            Text("Applications and installers are separated by platform within this MachineNote. Upload-device labels are reported by the uploading client; older backups show an unknown device. Restore applications on their original platform. Ordinary documents remain available across devices.")
+                .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             if library.busy { ProgressView().controlSize(.small) }
             Label(library.message, systemImage: "info.circle").font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
         }
+        .onAppear { if content == .applications { platformFilter = "macos" } }
+        .onChange(of: platformFilter) { _, _ in selection = [] }
         .onChange(of: library.destinationIdentity) { _, _ in selection = []; upload.setUploadTarget(parentKey: nil) }
         .onChange(of: search) { _, _ in selection = [] }
         .onChange(of: library.apps.map(\.key)) { _, keys in selection.formIntersection(Set(keys)) }

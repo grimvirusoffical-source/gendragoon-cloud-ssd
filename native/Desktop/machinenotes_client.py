@@ -34,6 +34,7 @@ sys.path.insert(0,str(RESOURCE))
 install_sourceless_runtime(RESOURCE)
 import gendragoon_redx_storage as storage
 import gendragoon_auth_broker as broker
+from gendragoon_device_origin import current_origin,ensure_restore_compatible
 
 MAX_ENTRIES=1_000_000
 MARGIN=64*1024*1024
@@ -392,7 +393,8 @@ class MachineNotesClient:
             directory=Path(td);archive=directory/"archive.zip";self.progress.phase("archiving",total_bytes=total);package(source,archive,baseline)
             digest=storage.sha256_file(archive)
             result=storage.upload_archive(config,archive,key,source.name,"folder" if source.is_dir() else "file","zip-root",digest,
-                baseline["manifest"],parent_key=parent,client_factory=DesktopReceiver)
+                baseline["manifest"],parent_key=parent,client_factory=DesktopReceiver,
+                origin=current_origin(self.session.receiver,state_dir=self.root/"DeviceOrigins"))
             item=dict(key=key,name=source.name,kind="folder" if source.is_dir() else "file",workspace=self.selected_note,
                 manifestId=result["manifestId"],archiveBytes=result["archiveBytes"],archiveSha256=digest)
             readback=directory/"readback.zip";verified=storage.download_archive(config,item,readback,client_factory=DesktopReceiver)
@@ -402,10 +404,22 @@ class MachineNotesClient:
             if manifest(source)!=baseline:raise ValueError("The source changed during transfer. Original retained.")
         self.refresh_tree();return dict(verified=True,originalRetained=True,key=key,parentKey=parent,
             manifestId=result["manifestId"],archiveSha256=digest)
+    def check_restore_compatible(self,keys,*,items=None):
+        values=list(self.items if items is None else items);lookup={item['key']:item for item in values};children={}
+        for item in values:children.setdefault(item.get('parentKey'),[]).append(item['key'])
+        seen=set();pending=list(keys)
+        while pending:
+            key=pending.pop()
+            if key in seen:continue
+            seen.add(key);item=lookup.get(key)
+            if item is None:raise SessionError("Refresh the library selection before restoring.")
+            ensure_restore_compatible(item)
+            if item.get('virtualFolder'):pending.extend(children.get(key,()))
     @transfer_progress
     def download(self,key,destination):
         config=self.config();tree=self.refresh_tree();items={i["key"]:i for i in tree["items"]}
         if key not in items:raise SessionError("Refresh the library selection.")
+        self.check_restore_compatible([key],items=items.values())
         destination=Path(destination).absolute()
         if any(p.is_symlink() for p in (destination,*destination.parents)) or not destination.is_dir():raise ValueError("Choose an existing real destination folder.")
         root_name=items[key].get("displayName",items[key]["name"]);safe_path(root_name)

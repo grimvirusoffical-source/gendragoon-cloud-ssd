@@ -11,6 +11,7 @@ const {promisify} = require('node:util');
 const {createOidcVerifier} = require('../Backend/accounts/oidc');
 const {RedXState, CloudError, digest, origin} = require('./redx-state.cjs');
 const libraryTree = require('./library-tree.cjs');
+const libraryOrigin = require('./library-origin.cjs');
 const {createDevTeams} = require('./dev-teams.cjs');
 const {createIntegrations} = require('./integrations.cjs');
 const {createInternalEntitlementClient} = require('./internal-entitlements.cjs');
@@ -454,7 +455,7 @@ async function createCloud(config) {
         } finally { deletingWorkspaces.delete(key); }
       }
       const libraryBase = base + '/library';
-      const libraryView = item => ({...item,displayName:item.displayName||item.name,parentKey:item.parentKey||null,
+      const libraryView = item => ({...libraryOrigin.view(item),displayName:item.displayName||item.name,parentKey:item.parentKey||null,
         virtualFolder:item.virtualFolder===true,archiveKey:item.archiveKey||item.key});
       const scopedLibrary = /^\/v1\/receivers\/me\/workspaces\/([a-f0-9]{32})\/library$/.exec(u.pathname);
       if (scopedLibrary && req.method === 'GET') {
@@ -496,16 +497,18 @@ async function createCloud(config) {
           s.library ||= {};
           const previous = s.library[key];
           if(previous&&(previous.workspace!==workspace||previous.virtualFolder===true||previous.archiveKey&&previous.archiveKey!==key))throw new CloudError('library_item_conflict',409);
+          const deviceMetadata=libraryOrigin.metadata(body,previous);
           const parentKey=libraryTree.parent(s.library,workspace,body.parentKey===undefined?previous?.parentKey:body.parentKey);
           if(libraryTree.collision(s.library,workspace,parentKey,previous?.displayName||name,key))throw new CloudError('library_name_collision',409);
           const generation = previous ? previous.generation + 1 : 1;
           const history = previous ? [...(previous.previous || []), {
             generation: previous.generation, manifestId: previous.manifestId, archiveBytes: previous.archiveBytes,
-            archiveSha256: previous.archiveSha256, updatedMs: previous.updatedMs
+            archiveSha256: previous.archiveSha256, updatedMs: previous.updatedMs,
+            origin:previous.origin??null,applicationPlatform:libraryOrigin.applicationPlatform(previous.name,previous.kind,previous.applicationPlatform??null)
           }].slice(-20) : [];
           s.library[key] = {key, name, kind, workspace, manifestId, archiveBytes: body.archiveBytes,
             archiveSha256: body.archiveSha256, generation, updatedMs: now, previous: history,
-            displayName:previous?.displayName||name,parentKey,virtualFolder:false,archiveKey:key};
+            displayName:previous?.displayName||name,parentKey,virtualFolder:false,archiveKey:key,...deviceMetadata};
           libraryTree.bump(s,workspace);
         });
         return json(res, 200, state.library[key]);

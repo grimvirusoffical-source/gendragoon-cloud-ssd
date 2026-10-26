@@ -29,6 +29,7 @@ import machinenotes_client as model_api
 from machinenotes_client import MachineNotesClient,DesktopReceiver,storage,safe_path,checked_manifest,extract_checked,publish_exclusive,require_space
 from redx_session import SessionError
 import mount_platform as platform_api
+import gendragoon_device_origin as device_origin
 
 class MountError(RuntimeError):pass
 
@@ -114,6 +115,7 @@ class WorkspaceTree:
             with self.lock:self.active-=1
 
     def manifest(self,item):
+        device_origin.ensure_restore_compatible(item)
         key=identity(item)
         with self.lock:
             if key not in self.manifests:
@@ -151,6 +153,7 @@ class WorkspaceTree:
         return [(name,self.resolve((*parts,name))) for name in sorted(names)]
 
     def _restore(self,item):
+        device_origin.ensure_restore_compatible(item)
         if item["kind"]=="app":raise PermissionError("Restore macOS applications on their original platform.")
         records=self.manifest(item);checked_manifest(list(records.values()))
         generation=hashlib.sha256(json.dumps(identity(item),separators=(",",":")).encode()).hexdigest()

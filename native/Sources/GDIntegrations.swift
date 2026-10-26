@@ -1,5 +1,6 @@
 import AppKit
 import Combine
+import CryptoKit
 import Foundation
 import Security
 import SwiftUI
@@ -67,6 +68,7 @@ struct GDBYOArchive: Identifiable {
     let kind: String
     let parent: String
     let bytes: Int64
+    var applicationPlatform: String? { GDApplicationPlatform.hint(name: name, kind: kind, declared: nil) }
     init?(_ value: [String: Any]) {
         guard let path = value["path"] as? String, let name = value["name"] as? String,
               let kind = value["kind"] as? String, ["file", "folder", "app"].contains(kind),
@@ -110,14 +112,13 @@ private enum GDBYOKeychain {
         let result = SecItemCopyMatching(q as CFDictionary, &item)
         if result == errSecItemNotFound { return nil }
         guard result == errSecSuccess, let data = item as? Data, data.count <= 4096,
-              let value = try JSONSerialization.jsonObject(with: data) as? [String: String],
-              let key = value["key"], key.range(of: "^rx_live_[A-Za-z0-9]+$", options: .regularExpression) != nil,
-              let secret = value["storageSecret"], secret.range(of: "^[A-Za-z0-9_-]{32,128}$", options: .regularExpression) != nil else {
+              let value = try JSONSerialization.jsonObject(with: data) as? [String: String] else {
             throw GDNativeFailure(message: "The BYO connection's private Keychain credentials are unavailable.")
         }
-        return value
+        return try GDBYOVaultPolicy.record(value)
     }
     static func write(_ account: String, value: [String: String]) throws {
+        _ = try GDBYOVaultPolicy.record(value)
         let data = try JSONSerialization.data(withJSONObject: value)
         guard data.count <= 4096 else { throw GDNativeFailure(message: "Invalid BYO credential size.") }
         let q = query(account)
@@ -126,6 +127,21 @@ private enum GDBYOKeychain {
         guard result == errSecItemNotFound else { throw GDNativeFailure(message: "macOS Keychain could not update this BYO connection.") }
         var item = q; item[kSecValueData] = data; item[kSecAttrAccessible] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
         guard SecItemAdd(item as CFDictionary, nil) == errSecSuccess else { throw GDNativeFailure(message: "macOS Keychain could not save this BYO connection.") }
+    }
+    static func installRecovery(_ account: String, secret: String) throws {
+        let existing = try read(account)
+        let retained = try GDBYOVaultPolicy.recovery(existing: existing, secret: secret)
+        if existing != nil { return }
+        var item = query(account)
+        item[kSecValueData] = try JSONSerialization.data(withJSONObject: retained)
+        item[kSecAttrAccessible] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+        let result = SecItemAdd(item as CFDictionary, nil)
+        if result == errSecDuplicateItem {
+            guard let concurrent = try read(account) else { throw GDPortableVaultFailure(message: "Keychain changed during recovery. Existing keys were preserved.") }
+            _ = try GDBYOVaultPolicy.recovery(existing: concurrent, secret: secret)
+        } else if result != errSecSuccess {
+            throw GDPortableVaultFailure(message: "Keychain could not save the recovered BYO secret. Existing keys were preserved.")
+        }
     }
     static func randomSecret() throws -> String {
         var bytes = Data(count: 32)
@@ -335,7 +351,7 @@ private enum GDBYOKeychain {
     private func credentials(_ connection: GDBYOConnection, expected: String) async throws -> [String: Any] {
         var value = try await context(connection.config, expected: expected)
         guard let receiver = value["receiverId"] as? String,
-              let credentials = try GDBYOKeychain.read(expected + ":" + receiver) else {
+              let credentials = try GDBYOKeychain.read(GDBYOVaultPolicy.account(owner: expected, receiver: receiver)), credentials["key"] != nil else {
             throw GDNativeFailure(message: "Reconnect this BYO workspace on this Mac. Its key and encryption secret are stored only in macOS Keychain.")
         }
         for (key, secret) in credentials { value[key] = secret }
@@ -349,7 +365,7 @@ private enum GDBYOKeychain {
             let probe = try await self.helper("probe", value, expected: expected)
             guard probe["authorized"] as? Bool == true, let receiver = value["receiverId"] as? String,
                   let keymap = value["keymapPath"] as? String else { throw GDNativeFailure(message: "The host did not verify this database-scoped key.") }
-            let account = expected + ":" + receiver
+            let account = try GDBYOVaultPolicy.account(owner: expected, receiver: receiver)
             let old = try GDBYOKeychain.read(account)
             if old == nil, FileManager.default.fileExists(atPath: keymap) {
                 throw GDNativeFailure(message: "This encrypted workspace has a keymap but its Keychain secret is missing. Recover that secret before reconnecting; creating a replacement could strand existing backups.")
@@ -377,6 +393,93 @@ private enum GDBYOKeychain {
             _ = try await self.auth.serviceRequest(path: "/v1/integrations/byo/" + connection.id, method: "DELETE")
             try self.verify(expected); try await self.readMetadata(expected)
             self.message = "Connection metadata removed. External files, encryption keymap and recovery credentials were retained; revoke the external key in RedX when appropriate."
+        }
+    }
+    private func vaultOperation(_ body: @escaping (String) async throws -> Void) {
+        accountChanged()
+        do {
+            guard canStart, !auth.busy, !auth.portableVaultBusy, try auth.accountDeletionPending() == nil,
+                  !GDWorkspaceMounts.shared.hasMounts, GDUpdateActivity.shared.beginMaintenance(owner: self) else {
+                throw GDPortableVaultFailure(message: "Finish transfers, close managed apps, unmount drives, and resolve pending account deletion before BYO recovery.")
+            }
+        } catch { message = GDNativeMessage.safe(error.localizedDescription); return }
+        let expected = owner
+        busy = true; message = ""
+        Task {
+            defer { busy = false; GDUpdateActivity.shared.endMaintenance(owner: self) }
+            do { try await body(expected) }
+            catch { if auth.receiverID == expected { message = GDNativeMessage.safe(error.localizedDescription) } }
+        }
+    }
+    private func vaultHelper(_ action: String, context: [String: Any], expected: String,
+                             extra: [String: String] = [:]) async throws -> [String: Any] {
+        try verify(expected)
+        var input = context.filter { ["origin", "database", "pack", "development", "accountId", "receiverId", "workspaceId", "keymapPath"].contains($0.key) }
+        for (key, value) in extra { input[key] = value }
+        let result = try await GDNativeHelper.invoke("gendragoon_byo_vault", arguments: [action], timeout: 120,
+            standardInput: JSONSerialization.data(withJSONObject: input))
+        try verify(expected)
+        guard result["receiverId"] as? String == context["receiverId"] as? String,
+              result["workspaceId"] as? String == context["workspaceId"] as? String,
+              action == "preflight" || result["validated"] as? Bool == true else {
+            throw GDPortableVaultFailure(message: "The BYO keymap did not verify for this account and connection.")
+        }
+        return result
+    }
+    func exportBYOVault(_ connection: GDBYOConnection, password: String) {
+        vaultOperation { expected in
+            let context = try await self.context(connection.config, expected: expected)
+            _ = try await self.vaultHelper("preflight", context: context, expected: expected)
+            guard let receiver = context["receiverId"] as? String, let path = context["keymapPath"] as? String,
+                  let credentials = try GDBYOKeychain.read(GDBYOVaultPolicy.account(owner: expected, receiver: receiver)),
+                  let secret = credentials["storageSecret"] else { throw GDPortableVaultFailure(message: "This BYO workspace has no encryption keys to export on this Mac.") }
+            let bytes = try GDPortableVaultFiles.read(URL(fileURLWithPath: path), limit: 95)
+            try GDPortableVaultCodec.validateKeymap(bytes)
+            let hash = SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined()
+            _ = try await self.vaultHelper("check-keymap", context: context, expected: expected,
+                extra: ["storageSecret": secret, "keymapSha256": hash])
+            let keys = GDPortableVaultCodec.Keys(receiverId: receiver, storageSecret: secret, keymap: bytes)
+            let envelope = try await Task.detached(priority: .userInitiated) { try GDPortableVaultCodec.seal(keys, password: password) }.value
+            _ = try await self.vaultHelper("preflight", context: context, expected: expected)
+            let panel = NSSavePanel(); panel.title = "Export Encrypted BYO Recovery Vault"
+            panel.nameFieldStringValue = "GenDragoon-BYO-" + String(receiver.prefix(12)) + ".gdbyovault"
+            panel.message = "For this Red-XAI account and exact host, database and pack. Keep the passphrase separately. The database API key is excluded."
+            guard panel.runModal() == .OK, let url = panel.url else { return }
+            try self.verify(expected)
+            let scoped = url.startAccessingSecurityScopedResource(); defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+            try GDPortableVaultFiles.create(envelope, at: url)
+            self.message = "Encrypted BYO recovery vault exported. Keep its passphrase separately. On another Mac, connect the same account, enter this exact host/database/pack, import the vault, then obtain a new scoped database API key."
+        }
+    }
+    func importBYOVault(config: [String: Any], password: String) {
+        vaultOperation { expected in
+            let context = try await self.context(config, expected: expected)
+            _ = try await self.vaultHelper("preflight", context: context, expected: expected)
+            guard let receiver = context["receiverId"] as? String, let path = context["keymapPath"] as? String else {
+                throw GDPortableVaultFailure(message: "Invalid BYO recovery context.")
+            }
+            let panel = NSOpenPanel(); panel.title = "Import Encrypted BYO Recovery Vault"; panel.prompt = "Import"
+            panel.canChooseDirectories = false; panel.allowsMultipleSelection = false
+            panel.message = "Choose the vault for this account and exact host/database/pack. Existing different keys will be preserved."
+            guard panel.runModal() == .OK, let url = panel.url else { return }
+            let scoped = url.startAccessingSecurityScopedResource(); defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+            let envelope = try GDPortableVaultFiles.read(url, limit: GDPortableVaultCodec.envelopeLimit)
+            let keys = try await Task.detached(priority: .userInitiated) {
+                try GDPortableVaultCodec.open(envelope, password: password, expectedReceiver: receiver)
+            }.value
+            try self.verify(expected)
+            let account = try GDBYOVaultPolicy.account(owner: expected, receiver: receiver)
+            _ = try GDBYOVaultPolicy.recovery(existing: GDBYOKeychain.read(account), secret: keys.storageSecret)
+            let result = try await self.vaultHelper("install-keymap", context: context, expected: expected,
+                extra: ["storageSecret": keys.storageSecret, "keymap": GDPortableVaultCodec.base64(keys.keymap)])
+            let keymap = URL(fileURLWithPath: path)
+            var installed = false
+            defer { if !installed && result["created"] as? Bool == true { GDPortableVaultFiles.removeIfIdentical(keys.keymap, at: keymap) } }
+            guard try GDPortableVaultFiles.read(keymap, limit: 95) == keys.keymap else { throw GDPortableVaultFailure(message: "The BYO keymap changed. Existing keys were preserved.") }
+            try self.verify(expected)
+            try GDBYOKeychain.installRecovery(account, secret: keys.storageSecret)
+            installed = true
+            self.message = "BYO encryption keys recovered for this account and exact host/database/pack. The database API key was not imported. Use Verify and Connect with a newly authorized scoped key when reconnecting."
         }
     }
     private func readBrowser(_ expected: String, connection: GDBYOConnection?, path: String) async throws {
@@ -417,6 +520,9 @@ private enum GDBYOKeychain {
     }
     func restore(_ archive: GDBYOArchive) {
         guard canStart, let connection = selectedConnection else { return }
+        guard GDApplicationPlatform.mayRestoreOnMac(archive.applicationPlatform) else {
+            message = "This application or installer backup requires " + GDApplicationPlatform.label(archive.applicationPlatform ?? "unknown") + " for restoration. It cannot run as a Mac application."; return
+        }
         let panel = NSOpenPanel(); panel.title = "Choose a Folder for the Verified Restore"; panel.prompt = "Restore"
         panel.canChooseFiles = false; panel.canChooseDirectories = true; panel.canCreateDirectories = true
         guard panel.runModal() == .OK, let url = panel.url else { return }
@@ -455,6 +561,10 @@ private enum GDBYOKeychain {
     @State private var database = "gendragoon"
     @State private var pack = "gendragoon"
     @State private var externalKey = ""
+    @State private var vaultPassword = ""
+    @State private var vaultConfirmation = ""
+    @State private var recoverEnteredConnection = false
+    @State private var byoPlatform = "all"
     @State private var redXCode = ""
     @State private var pendingRevoke: GDIntegrationKeySummary?
     @State private var pendingDisconnect: GDBYOConnection?
@@ -474,13 +584,14 @@ private enum GDBYOKeychain {
             }.padding(24).frame(maxWidth: 1050, alignment: .leading)
         }
         .task { model.accountChanged(); if model.services.isEmpty { model.refresh() } }
-        .onChange(of: auth.receiverID) { _, _ in externalKey = ""; model.accountChanged(); if auth.linked { model.refresh() } }
-        .onChange(of: origin) { _, _ in model.clearConnectCode(); externalKey = ""; redXCode = "" }
-        .onChange(of: database) { _, _ in model.clearConnectCode(); externalKey = ""; redXCode = "" }
-        .onChange(of: pack) { _, _ in model.clearConnectCode(); externalKey = ""; redXCode = "" }
+        .onChange(of: auth.receiverID) { _, _ in externalKey = ""; clearVaultPassword(); model.accountChanged(); if auth.linked { model.refresh() } }
+        .onChange(of: origin) { _, _ in model.clearConnectCode(); externalKey = ""; redXCode = ""; clearVaultPassword() }
+        .onChange(of: database) { _, _ in model.clearConnectCode(); externalKey = ""; redXCode = ""; clearVaultPassword() }
+        .onChange(of: pack) { _, _ in model.clearConnectCode(); externalKey = ""; redXCode = ""; clearVaultPassword() }
         .onChange(of: model.receivedRedXCode) { _, code in if !code.isEmpty { redXCode = code } }
-        .onChange(of: model.selectedConnectionID) { _, _ in if model.canStart { model.browse() } }
-        .onDisappear { model.oneTimeKey = nil; model.clearConnectCode(); externalKey = ""; redXCode = "" }
+        .onChange(of: model.selectedConnectionID) { _, _ in clearVaultPassword(); if model.canStart { model.browse() } }
+        .onChange(of: recoverEnteredConnection) { _, _ in clearVaultPassword() }
+        .onDisappear { model.oneTimeKey = nil; model.clearConnectCode(); externalKey = ""; redXCode = ""; clearVaultPassword() }
         .sheet(isPresented: Binding(get: { model.oneTimeKey != nil }, set: { if !$0 { model.oneTimeKey = nil } })) { secretSheet }
         .alert("Revoke this integration key?", isPresented: Binding(get: { pendingRevoke != nil }, set: { if !$0 { pendingRevoke = nil } })) {
             Button("Cancel", role: .cancel) { pendingRevoke = nil }
@@ -560,15 +671,21 @@ private enum GDBYOKeychain {
                     }.padding(.top, 8)
                 }
                 Picker("BYO workspace", selection: $model.selectedConnectionID) { Text("Choose a connection").tag(""); ForEach(model.connections) { Text($0.name + " · " + $0.database).tag($0.id) } }.disabled(!model.canStart)
+                byoRecovery
                 if let selected = model.selectedConnection {
                     HStack { Text(selected.origin + " / " + selected.database + " / " + selected.pack).font(.caption).foregroundStyle(.secondary); Spacer(); Button("Disconnect…") { pendingDisconnect = selected }.disabled(!model.canStart) }
                     HStack { Button("Upload Apps, Files or Folders…") { model.uploadSources() }.buttonStyle(.borderedProminent); Button("Refresh Files") { model.browse(model.rawPath) } }.disabled(!model.canStart)
-                    Text("GenDragoon backups use encrypted visual PNG chunks and preserve complete apps, folders and Mac metadata. Uploads retain original files. Save your Keychain encryption secret and keymap securely before moving to another Mac; the external API key alone cannot decrypt these backups.").font(.caption).foregroundStyle(.secondary)
+                    Text("GenDragoon backups use encrypted visual PNG chunks and preserve complete apps, folders and Mac metadata. Uploads retain original files. Export an encrypted BYO recovery vault before moving to another Mac; the external API key alone cannot decrypt these backups.").font(.caption).foregroundStyle(.secondary)
                     Text("Encrypted GenDragoon backups").font(.headline)
-                    if model.archives.isEmpty { Text("No published verified backups in this connection.").font(.caption).foregroundStyle(.secondary) }
-                    ForEach(model.archives) { archive in
-                        HStack { Image(systemName: archive.kind == "app" ? "app" : archive.kind == "folder" ? "folder" : "doc"); VStack(alignment: .leading) { Text(archive.name); Text((archive.parent.isEmpty ? "Root" : archive.parent) + " · " + ByteCountFormatter.string(fromByteCount: archive.bytes, countStyle: .file)).font(.caption).foregroundStyle(.secondary) }; Spacer(); Button("Restore…") { model.restore(archive) }.disabled(!model.canStart) }
+                    Picker("Application platform", selection: $byoPlatform) {
+                        Text("All backups").tag("all")
+                        ForEach(GDApplicationPlatform.codes, id: \.self) { Text(GDApplicationPlatform.label($0)).tag($0) }
                     }
+                    if model.archives.isEmpty { Text("No published verified backups in this connection.").font(.caption).foregroundStyle(.secondary) }
+                    ForEach(model.archives.filter { byoPlatform == "all" || ($0.applicationPlatform ?? "unknown") == byoPlatform }) { archive in
+                        HStack { Image(systemName: archive.kind == "app" ? "app" : archive.kind == "folder" ? "folder" : "doc"); VStack(alignment: .leading) { Text(archive.name); Text((archive.applicationPlatform.map { GDApplicationPlatform.label($0) + " app backup · " } ?? "") + (archive.parent.isEmpty ? "Root" : archive.parent) + " · " + ByteCountFormatter.string(fromByteCount: archive.bytes, countStyle: .file)).font(.caption).foregroundStyle(.secondary) }; Spacer(); Button("Restore…") { model.restore(archive) }.disabled(!model.canStart || !GDApplicationPlatform.mayRestoreOnMac(archive.applicationPlatform)) }
+                    }
+                    Text("Application platform is a backup filename/type hint, not a compatibility certificate. These BYO records do not identify the uploading device. Restore apps on their original platform; ordinary documents remain portable.").font(.caption).foregroundStyle(.secondary)
                     Divider()
                     HStack { Text("Raw database pack files").font(.headline); Spacer(); Button("Root") { model.browse() }.disabled(!model.canStart || model.rawPath.isEmpty); Button("Up") { model.browse(model.rawPath.split(separator: "/").dropLast().joined(separator: "/")) }.disabled(!model.canStart || model.rawPath.isEmpty) }
                     Text(model.rawPath.isEmpty ? "/" : model.rawPath).font(.caption.monospaced()).textSelection(.enabled)
@@ -576,6 +693,34 @@ private enum GDBYOKeychain {
                     ForEach(model.rawEntries) { entry in HStack { Image(systemName: entry.directory ? "folder" : "doc"); Text(entry.name); Spacer(); if entry.directory { Button("Open") { model.browse(entry.path) } } else { Text(ByteCountFormatter.string(fromByteCount: entry.bytes, countStyle: .file)).font(.caption).foregroundStyle(.secondary); Button("Download…") { model.downloadRaw(entry) } } }.disabled(!model.canStart) }
                 }
             }.padding(8).disabled(!auth.linked || model.busy)
+        }
+    }
+    private func clearVaultPassword() { vaultPassword = ""; vaultConfirmation = "" }
+    private var byoRecovery: some View {
+        let selected = model.selectedConnection
+        let entered = recoverEnteredConnection || selected == nil
+        let config: [String: Any] = entered ? ["origin": origin, "database": database, "pack": pack] : selected!.config
+        let target = entered ? origin + " / " + database + " / " + pack : selected!.origin + " / " + selected!.database + " / " + selected!.pack
+        return DisclosureGroup("Encrypted BYO recovery vault") {
+            VStack(alignment: .leading, spacing: 8) {
+                if selected != nil { Toggle("Use the host, database and pack entered in the connection form", isOn: $recoverEnteredConnection) }
+                Text("Recovery target: " + target).font(.caption).textSelection(.enabled)
+                Text("Bound to your currently connected Red-XAI account and this exact host/database/pack. The encrypted vault contains only the storage secret and encrypted keymap. It excludes database API keys and your paid MachineNote vault. On a new Mac, enter this connection, import first, then authorize a new scoped database key and choose Verify and Connect.").font(.caption).foregroundStyle(.secondary)
+                SecureField("Recovery vault passphrase (at least 12 characters)", text: $vaultPassword)
+                SecureField("Confirm passphrase for export", text: $vaultConfirmation)
+                HStack {
+                    Button("Export BYO Vault…") {
+                        guard let selected, !entered else { return }
+                        let password = vaultPassword; clearVaultPassword()
+                        model.exportBYOVault(selected, password: password)
+                    }.disabled(!model.canStart || entered || vaultPassword.isEmpty || vaultPassword != vaultConfirmation)
+                    Button("Import BYO Vault…") {
+                        let password = vaultPassword; clearVaultPassword()
+                        model.importBYOVault(config: config, password: password)
+                    }.disabled(!model.canStart || vaultPassword.isEmpty || (entered && (origin.isEmpty || database.isEmpty || pack.isEmpty)))
+                }
+                Text("Keep the vault and passphrase separately. Finish transfers and unmount drives first. Import preserves existing matching keys and refuses different keys.").font(.caption).foregroundStyle(.secondary)
+            }.padding(.top, 8)
         }
     }
     private var secretSheet: some View {

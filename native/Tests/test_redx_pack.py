@@ -26,6 +26,17 @@ class Response(io.BytesIO):
 
 
 class PackTests(unittest.TestCase):
+    def test_foreign_application_backup_is_refused_before_destination_or_payload_io(self):
+        for name in ("App.exe", "App.AppImage", "App.apk", "App.ipa"):
+            with self.subTest(name=name), patch.object(pack.sys, "platform", "darwin"), patch.object(pack, "_archive_entry", return_value={"name": name, "kind": "file"}):
+                with self.assertRaises(pack.PackError) as error:
+                    pack.restore_source(object(), {"path": "fixture", "destination": "/does-not-exist"})
+                self.assertEqual(error.exception.code, "application_platform_mismatch")
+        with patch.object(pack.sys, "platform", "darwin"), patch.object(pack, "_archive_entry", return_value={"name": "Reports.exe", "kind": "folder"}):
+            with self.assertRaises(pack.PackError) as error:
+                pack.restore_source(object(), {"path": "fixture"})
+            self.assertEqual(error.exception.code, "destination_unsafe")
+
     def test_origin_transport_and_context_canonicalization(self):
         self.assertEqual(pack.origin("https://EXAMPLE.test:443/"), "https://example.test")
         self.assertEqual(pack.origin("http://127.0.0.1:7777", True), "http://127.0.0.1:7777")

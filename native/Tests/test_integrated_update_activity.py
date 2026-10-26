@@ -48,9 +48,10 @@ protocol ObservableObject: AnyObject {}
 protocol NSApplicationDelegate {}
 final class NSApplication { enum TerminateReply { case terminateNow, terminateCancel } }
 final class NSAlert {
+    static var lastDetail=""
     var messageText=""; var informativeText=""
     func addButton(withTitle: String) {}
-    func runModal() {}
+    func runModal() { Self.lastDetail=informativeText }
 }
 @MainActor final class GDUpdateCoordinator {
     static let shared=GDUpdateCoordinator()
@@ -71,6 +72,8 @@ ASSERTIONS = '''
         precondition(gate.canStart())
         precondition(!gate.beginMaintenance(owner:updater))
         precondition(delegate.applicationShouldTerminate(app) == .terminateCancel)
+        precondition(NSAlert.lastDetail.contains("The main cloud drive is mounted"))
+        precondition(gate.activeOperationReasons(forUpdate:true).isEmpty)
         precondition(gate.beginUpdateMaintenance(owner:updater))
         precondition(!gate.canStart(excluding:transfer))
         precondition(!gate.isBusyForUpdate(excluding:updater))
@@ -78,6 +81,8 @@ ASSERTIONS = '''
         precondition(delegate.applicationShouldTerminate(app) == .terminateNow)
         gate.set(transfer,key:"upload",active:true)
         precondition(delegate.applicationShouldTerminate(app) == .terminateCancel)
+        precondition(NSAlert.lastDetail.contains("An upload or its verification"))
+        precondition(!NSAlert.lastDetail.contains("The main cloud drive is mounted"))
         gate.set(transfer,key:"upload",active:false)
         gate.set(managed,key:"runningApps",active:true)
         precondition(gate.isBusyForUpdate(excluding:updater))
@@ -95,6 +100,14 @@ ASSERTIONS = '''
         precondition(!gate.beginUpdateMaintenance(owner:updater))
         precondition(delegate.applicationShouldTerminate(app) == .terminateCancel)
         gate.set(cloud,key:"workspaceMounts",active:false)
+        // Explanations use fixed categories and never expose a supplied flag.
+        gate.set(cloud,key:"synthetic-private-path-or-token",active:true)
+        precondition(gate.activeOperationReasons() == ["Another protected operation"])
+        gate.set(cloud,key:"synthetic-private-path-or-token",active:false)
+        var temporary:NSObject?=NSObject()
+        gate.set(temporary!,key:"upload",active:true)
+        temporary=nil
+        precondition(gate.activeOperationReasons().isEmpty,"Expired owners must not leave stale explanations")
         // Maintenance prevents new polling without interrupting an existing
         // reader. Both real leases must drain before the worker can begin.
         let first=gate.beginBackgroundInspection()!,second=gate.beginBackgroundInspection()!

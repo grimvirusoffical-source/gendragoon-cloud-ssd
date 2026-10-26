@@ -94,6 +94,7 @@ enum GDNativeHelper {
             }
             let writing = resource == "gendragoon_library" && ["upload", "organize"].contains(arguments.first ?? "")
                 || resource == "gendragoon_redx_pack" && ["upload-source", "put", "mkdir", "delete"].contains(arguments.first ?? "")
+                || resource == "gendragoon_byo_vault" && arguments.first == "install-keymap"
             let deadline = writing ? Date.distantFuture : Date().addingTimeInterval(timeout)
             while process.isRunning {
                 if Date() >= deadline {
@@ -252,7 +253,7 @@ enum GDNativeHelper {
             HStack(alignment: .top) {
                 VStack(alignment: .leading, spacing: 6) {
                     Text("MACHINENOTES · RED-XAI SERVER").font(.system(size: 9, weight: .bold, design: .monospaced)).tracking(2).foregroundStyle(.purple)
-                    Label(content == .applications ? "Managed Mac applications" : "MachineNote files & folders", systemImage: content == .applications ? "app.badge.fill" : "folder.fill")
+                    Label(content == .applications ? "Applications by platform" : "MachineNote files & folders", systemImage: content == .applications ? "app.badge.fill" : "folder.fill")
                         .font(.system(size: 24, weight: .bold, design: .rounded))
                     Text(native.destinationLabel).font(.caption.monospaced()).foregroundStyle(.secondary).textSelection(.enabled)
                 }

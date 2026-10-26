@@ -11,6 +11,7 @@ import ctypes, errno, fcntl, posixpath, stat, time, unicodedata, uuid, zipfile
 from pathlib import Path
 import gendragoon_performance as performance
 import gendragoon_progress as progress
+import gendragoon_device_origin as device_origin
 HOME=Path.home()
 def rclone_path(helper=__file__):
     helper=Path(helper).absolute()
@@ -256,6 +257,7 @@ def sync_redx_library(project,bucket,remote,cloud_snapshot=None):
             same=existing.get("redxManifestId")==item.get("manifestId")
             base={"name":item["name"],"kind":item["kind"],"format":"redxai","archiveLayout":existing.get("archiveLayout",""),
                   "displayName":item.get("displayName",item["name"]),"parentKey":item.get("parentKey"),"virtualFolder":virtual,"archiveKey":item.get("archiveKey",key),
+                  "origin":device_origin.validate_origin(item.get("origin")),"applicationPlatform":device_origin.validate_application_platform(item.get("applicationPlatform")),
                   "remote":"redxai","folder":bucket+"/Library","file":item.get("manifestId","")+".png" if not virtual else "","sha256":item.get("archiveSha256",""),
                   "source":existing.get("source",""),"offloaded":existing.get("offloaded",True),
                   "verified":existing.get("verified",False) if same else False,"verifiedAt":existing.get("verifiedAt",0) if same else 0,
@@ -629,7 +631,8 @@ def _upload(source,remote,folder,offload=False,project=None,bucket=None,parent_k
         verified=Path(tmp)/("verified-"+fname)
         redx_result=None
         if remote=="redxai":
-            options={"parent_key":parent_key} if parent_key is not None else {}
+            origin=device_origin.current_origin(redx["receiverId"],state_dir=SUPPORT/"DeviceOrigins")
+            options={"origin":origin,**({"parent_key":parent_key} if parent_key is not None else {})}
             redx_result=redx_module().upload_archive(redx,archive,key,src.name,typ,
                 "zip-root" if zipped else "flat",original_hash,baseline["manifest"],**options)
             cloud_item={"key":key,"name":src.name,"kind":typ,"workspace":bucket,
@@ -658,6 +661,7 @@ def _upload(source,remote,folder,offload=False,project=None,bucket=None,parent_k
             verify_restored(verified,baseline["manifest"])
         unchanged(src,baseline)
     entry={"name":src.name,"kind":typ,"format":"redxai" if remote=="redxai" else "archive","archiveLayout":"zip-root" if zipped else "flat","remote":remote,"folder":folder,"file":(redx_result["manifestId"]+".png") if remote=="redxai" else fname,"sha256":original_hash,"source":str(src),"offloaded":False,"verified":True,"verifiedAt":time.time(),"manifest":baseline["manifest"],"sizeBytes":total_bytes,**({"redxManifestId":redx_result["manifestId"],"redxGeneration":1,"parentKey":parent_key,"virtualFolder":False,"archiveKey":key,"displayName":previous.get("displayName",src.name) if previous else src.name} if remote=="redxai" else {}),**(context or {})}
+    if remote=="redxai":entry.update(origin=redx_result.get("origin"),applicationPlatform=redx_result.get("applicationPlatform"))
     # Raw copy/check validates data bytes, not Darwin resource forks or xattrs.
     # Only metadata-compatible apps receive this optional streaming layout;
     # every app retains its fully verified metadata-preserving archive.
@@ -786,9 +790,26 @@ def stage_virtual_folder(key,data,open_after,project,bucket,remote,emit=True):
     if emit:reply(message="Restored library folder and its nested items into a verified local cache.",localPath=str(destination))
     return str(destination)
 
+def assert_restore_compatible(key,data,project=None,bucket=None,remote="gendragoon"):
+    device_origin.ensure_restore_compatible(data)
+    if data.get("virtualFolder") is not True:return
+    context=selected_context(project,bucket,remote)
+    children={}
+    for child_key,item in load().items():
+        if in_context(item,context) and not item.get("cloudMissing"):children.setdefault(item.get("parentKey"),[]).append((child_key,item))
+    pending=[key];visited=set()
+    while pending:
+        parent=pending.pop()
+        if parent in visited or len(visited)>=1000:raise ValueError("Invalid library folder hierarchy.")
+        visited.add(parent)
+        for child_key,item in children.get(parent,[]):
+            device_origin.ensure_restore_compatible(item)
+            if item.get("virtualFolder") is True:pending.append(child_key)
+
 def stage_item(key,open_after=False,project=None,bucket=None,remote="gendragoon",emit=True):
     idx=load()
     data=selected_entry(key,project,bucket,remote);name=data["name"]
+    assert_restore_compatible(key,data,project,bucket,remote)
     if data.get("virtualFolder") is True:return stage_virtual_folder(key,data,open_after,project,bucket,remote,emit)
     kind=data.get("kind","app")
     prepare_cache();dest=_cache_display_destination(key,data);safe_path(dest.parent,directory=True)

@@ -3,6 +3,8 @@
 import argparse
 import concurrent.futures
 import json
+import os
+import time
 from pathlib import Path
 import queue
 import sys
@@ -15,6 +17,106 @@ sys.dont_write_bytecode=True
 from redx_session import RedXSession, IntegrationSession, SessionError
 from machinenotes_client import MachineNotesClient, DesktopInstance, storage, team_route_allowed
 from portable_vault import VaultError, ENVELOPE_LIMIT
+from desktop_transfer_ui import destination,validate_sources,directory_page,TransferPresentation,format_bytes,format_eta,filter_library,source_key,source_label,PLATFORM_LABELS
+from gendragoon_device_origin import application_platform
+from desktop_drop import create_root,bind_file_drop
+
+class MixedSourcePicker:
+    """One lazy PC tree; its sole Upload action queues the mixed selection."""
+    def __init__(self,app,context,accepted,*,roots=None,lister=directory_page,initial_paths=None):
+        self.app=app;self.context=dict(context);self.accepted=accepted;self.lister=lister
+        self.window=app.tk.Toplevel(app.root);self.window.title("Select files, folders and application backups")
+        self.window.geometry("850x620");self.window.minsize(650,420);self.window.transient(app.root)
+        self.after=None;self.closed=False;self.nodes={};self.sequence=0;self.loading_count=0;self.results=queue.Queue();self.executor=concurrent.futures.ThreadPoolExecutor(max_workers=1,thread_name_prefix="gendragoon-picker")
+        self.status=app.tk.StringVar(value="Select files and folders together with Ctrl/Shift. Expand folders to browse; originals are retained.")
+        app.ttk.Label(self.window,text="Upload to "+context['noteName']+" / "+context['folderName'],wraplength=800,padding=10).pack(fill="x")
+        app.ttk.Label(self.window,text="Application files or folders are backups here. Managed app launch and original offload are not enabled.",wraplength=800,padding=6).pack(fill="x")
+        frame=app.ttk.Frame(self.window);frame.pack(fill="both",expand=True,padx=10)
+        self.tree=app.ttk.Treeview(frame,columns=("kind",),selectmode="extended");self.tree.heading("#0",text="This PC · local files and folders");self.tree.heading("kind",text="Type");self.tree.column("#0",width=600);self.tree.column("kind",width=160)
+        scroll=app.ttk.Scrollbar(frame,orient="vertical",command=self.tree.yview);self.tree.configure(yscrollcommand=scroll.set);scroll.pack(side="right",fill="y");self.tree.pack(fill="both",expand=True)
+        self.file_drop=bind_file_drop(self.tree,self.stage_paths,self.status.set)
+        self.tree.bind("<<TreeviewOpen>>",self.expand);self.tree.bind("<Double-1>",self.activate);self.tree.bind("<Return>",self.activate);self.tree.bind("<<TreeviewSelect>>",self.selection_changed)
+        app.ttk.Label(self.window,textvariable=self.status,wraplength=800,padding=10).pack(fill="x")
+        buttons=app.ttk.Frame(self.window,padding=10);buttons.pack(fill="x")
+        app.ttk.Button(buttons,text="Cancel",command=self.close).pack(side="right",padx=5)
+        self.upload_button=app.ttk.Button(buttons,text="Upload selected",command=self.accept);self.upload_button.pack(side="right")
+        if roots is None:
+            roots=[("Home",Path.home())]
+            roots.extend((str(p),Path(p)) for p in (os.listdrives() if os.name=="nt" and hasattr(os,"listdrives") else [Path.home().anchor or "/"]))
+        seen=set()
+        for label,path in roots:
+            value=str(Path(path).absolute())
+            if value in seen:continue
+            seen.add(value);self.insert("",{'path':value,'name':label,'label':'Folder','kind':'folder','selectable':True,'expandable':True})
+        if initial_paths:
+            try:self.stage_paths(initial_paths)
+            except Exception:self.close();raise
+        self.window.protocol("WM_DELETE_WINDOW",self.close);self.after=self.window.after(50,self.pump)
+        self.window.grab_set()
+    def stage_paths(self,paths):
+        selected=list(self.tree.selection())
+        for value in validate_sources(paths):
+            key=next((k for k,n in self.nodes.items() if n.get('path')==value and n.get('selectable')),None)
+            if key is None:
+                path=Path(value);is_folder=path.is_dir()
+                key=self.insert('',{'path':value,'name':path.name or str(path),'label':'Folder' if is_folder else 'File / app backup','kind':'folder' if is_folder else 'file','selectable':True,'expandable':is_folder})
+            if key not in selected:selected.append(key)
+        self.tree.selection_set(selected);self.selection_changed()
+    def insert(self,parent,value):
+        self.sequence+=1;key="local-"+str(self.sequence);self.nodes[key]=dict(value)
+        self.tree.insert(parent,"end",iid=key,text=value['name'],values=(value.get('label',''),))
+        if value.get('expandable'):self.tree.insert(key,"end",text="Expand to load…")
+        return key
+    def expand(self,_=None):
+        key=self.tree.focus();node=self.nodes.get(key,{})
+        if node.get('expandable') and not node.get('loaded') and not node.get('loading'):self.load(key,0)
+    def activate(self,_=None):
+        key=self.tree.focus();node=self.nodes.get(key,{})
+        if node.get('more'):self.load(node['parent'],node['offset'],more_key=key);return "break"
+        self.expand()
+    def load(self,key,offset,more_key=None):
+        node=self.nodes[key]
+        if node.get('loading'):return
+        if self.loading_count>=8:self.status.set('Wait for the current directory pages to finish.');return
+        self.loading_count+=1;node['loading']=True;self.status.set("Reading one directory page…")
+        future=self.executor.submit(self.lister,node['path'],offset)
+        future.add_done_callback(lambda f:self.results.put((key,more_key,f)))
+    def pump(self):
+        if self.closed:return
+        while True:
+            try:key,more_key,future=self.results.get_nowait()
+            except queue.Empty:break
+            node=self.nodes[key];node['loading']=False;self.loading_count-=1
+            try:
+                page=future.result()
+                if more_key:self.tree.delete(more_key);self.nodes.pop(more_key,None)
+                elif not node.get('loaded'):
+                    for child in self.tree.get_children(key):self.tree.delete(child)
+                for item in page['entries']:self.insert(key,item)
+                if page['nextOffset'] is not None:self.insert(key,{'name':'Load more… (double-click)','label':'More entries','more':True,'parent':key,'offset':page['nextOffset']})
+                node['loaded']=True;self.tree.item(key,open=True);self.selection_changed()
+            except (OSError,ValueError) as error:self.status.set("This folder could not be listed. Choose another folder. "+str(error)[:160])
+        self.after=self.window.after(50,self.pump)
+    def selection_changed(self,_=None):
+        values=[self.nodes.get(k,{}) for k in self.tree.selection()]
+        count=sum(bool(v.get('selectable')) for v in values)
+        self.status.set(str(count)+" selected source(s). Expand folders or Ctrl/Shift-select files and folders, then Upload selected.")
+    def accept(self):
+        from tkinter import messagebox
+        try:
+            nodes=[self.nodes.get(k,{}) for k in self.tree.selection()]
+            if not nodes or any(not n.get('selectable') for n in nodes):raise ValueError("Select real files or folders; unsupported links and Load more rows cannot be uploaded.")
+            paths=validate_sources([n['path'] for n in nodes]);self.accepted(self.context,paths)
+        except Exception as error:messagebox.showerror("Selection could not be queued",self.app._error(error),parent=self.window);return
+        self.close()
+    def close(self):
+        if self.closed:return
+        self.closed=True
+        if self.after is not None:self.window.after_cancel(self.after)
+        self.executor.shutdown(wait=False,cancel_futures=True)
+        try:self.window.grab_release()
+        except self.app.tk.TclError:pass
+        self.window.destroy()
 
 class GenDragoonGUI:
     def __init__(self,root,*,companion_directory=None):
@@ -26,6 +128,7 @@ class GenDragoonGUI:
         self.executor=concurrent.futures.ThreadPoolExecutor(max_workers=1,thread_name_prefix="gendragoon-desktop")
         self.messages=queue.Queue();self.busy=False;self.clipboard=None;self.team=None;self.team_cursor=None;self.chat_cursor=None
         self.team_values=[];self.drag=None
+        self.visible_items={};self.visible_note=None;self.source_picker=None;self.active_job=None;self.transfer_presentations={};self.transfer_rows={};self.last_transfer=None;self.next_jobs_refresh=0;self.operation_job=None
         self.companion_grants=set();self.companion=None;self.companion_completed={}
         root.title("GenDragoon · MachineNotes");root.geometry("1060x760");root.minsize(800,600)
         self.status=tk.StringVar(value="Connect Red-XAI to browse your MachineNotes.")
@@ -37,7 +140,7 @@ class GenDragoonGUI:
         self.tabs=ttk.Notebook(root);self.tabs.pack(fill="both",expand=True,padx=12)
         self.files=ttk.Frame(self.tabs,padding=10);self.teams=ttk.Frame(self.tabs,padding=10);self.settings=ttk.Frame(self.tabs,padding=10)
         self.tabs.add(self.files,text="Files");self.tabs.add(self.teams,text="Teams");self.tabs.add(self.settings,text="Storage keys")
-        self._files();self._teams();self._settings()
+        self._files();self._teams();self._settings();self._transfers()
         ttk.Label(root,textvariable=self.status,wraplength=1000,padding=12).pack(fill="x")
         root.protocol("WM_DELETE_WINDOW",self.close);root.after(40,self.pump)
         try:
@@ -49,31 +152,32 @@ class GenDragoonGUI:
         while True:
             try:self.messages.get_nowait()()
             except queue.Empty:break
-        if self.busy and self.model.progress is not None:
-            progress=self.model.progress.snapshot();total=progress.get("total_bytes",0);completed=progress.get("completed_bytes",0)
-            stage=str(progress["phase"]).capitalize()
-            self.status.set(stage+(" · archive bytes "+str(int(completed))+" / "+str(int(total)) if total else "")
-                +" · carrier bytes sent "+str(int(progress.get("uploaded_bytes",0)))+" · received "+str(int(progress.get("downloaded_bytes",0))))
+        self.update_transfer_progress()
+        if time.monotonic()>=self.next_jobs_refresh:
+            self.next_jobs_refresh=time.monotonic()+.75;self.refresh_jobs()
         self.root.after(40,self.pump)
     def _error(self,error):
         if isinstance(error,(SessionError,VaultError,storage.RedXStorageError,ValueError,MountError,PlatformMountError)):
             return str(error)[:600]
         return "The operation could not finish. Your originals and existing keys were preserved."
-    def run(self,label,work,done=None,failed=None):
+    def run(self,label,work,done=None,failed=None,*,transfer_job=None):
         if self.busy:
             self.status.set("Wait for the current operation to finish.")
             if failed:failed(SessionError("Another desktop operation is active.",409))
             return
         self.busy=True;self.model.progress=None;self.status.set(label)
+        if self.active_job is None:self.operation_progress=TransferPresentation();self.operation_job=transfer_job
         future=self.executor.submit(work)
         def finished():
             self.busy=False
             try:
                 value=future.result()
                 self.status.set("Ready. Originals are retained after uploads.")
+                if self.active_job is None:self.finish_transfer(True)
                 if done:done(value)
             except Exception as error:
                 self.status.set(self._error(error))
+                if self.active_job is None:self.finish_transfer(False)
                 if failed:failed(error)
         future.add_done_callback(lambda _:self.messages.put(finished))
     def _files(self):
@@ -82,13 +186,24 @@ class GenDragoonGUI:
         self.note=ttk.Combobox(bar,state="readonly");self.note.pack(side="left",fill="x",expand=True)
         self.note.bind("<<ComboboxSelected>>",self.note_changed)
         ttk.Button(bar,text="Refresh",command=self.refresh).pack(side="left",padx=4)
+        filters=ttk.Frame(self.files);filters.pack(fill="x",pady=4)
+        ttk.Label(filters,text="Artifact OS hint").pack(side="left")
+        self.artifact_choice=ttk.Combobox(filters,state="readonly",values=('All items','Documents / folders','macOS','Windows','Linux','Android','iOS'),width=21);self.artifact_choice.current(0);self.artifact_choice.pack(side="left",padx=4)
+        ttk.Label(filters,text="Uploaded from").pack(side="left",padx=(12,0))
+        self.source_choice=ttk.Combobox(filters,state="readonly",values=('All source devices',),width=45);self.source_choice.current(0);self.source_choice.pack(side="left",fill="x",expand=True)
+        self.source_choices={'All source devices':'all'}
+        for chooser in (self.artifact_choice,self.source_choice):chooser.bind('<<ComboboxSelected>>',lambda _:self.display_tree(refresh_snapshot=False))
         toolbar=ttk.Frame(self.files);toolbar.pack(fill="x",pady=8)
-        for title,command in (("New folder",self.new_folder),("Upload file…",lambda:self.upload(False)),("Upload folder…",lambda:self.upload(True)),("Resume queued",self.resume_queue),("Download…",self.download),("Rename",self.rename),("Delete",self.delete)):
+        for title,command in (("New folder",self.new_folder),("Upload selected…",self.upload),("Transfers…",self.show_transfers),("Download…",self.download),("Rename",self.rename),("Delete",self.delete)):
             ttk.Button(toolbar,text=title,command=command).pack(side="left",padx=2)
-        self.tree=ttk.Treeview(self.files,columns=("kind","bytes"),selectmode="extended")
-        self.tree.heading("#0",text="Name");self.tree.heading("kind",text="Type");self.tree.heading("bytes",text="Archive bytes")
-        self.tree.column("#0",width=500);self.tree.column("kind",width=140);self.tree.column("bytes",width=130,anchor="e")
+        self.tree=ttk.Treeview(self.files,columns=("kind","source","bytes"),selectmode="extended")
+        self.tree.heading("#0",text="Name");self.tree.heading("kind",text="Type / artifact OS hint");self.tree.heading("source",text="Uploaded from (client reported)");self.tree.heading("bytes",text="Archive bytes")
+        self.tree.column("#0",width=330);self.tree.column("kind",width=230);self.tree.column("source",width=270);self.tree.column("bytes",width=120,anchor="e")
         self.tree.pack(fill="both",expand=True)
+        self.progress_text=self.tk.StringVar(value="No transfer running. Originals are retained.")
+        self.progress_bar=ttk.Progressbar(self.files,maximum=100,mode="determinate");self.progress_bar.pack(fill="x",pady=(5,0))
+        ttk.Label(self.files,textvariable=self.progress_text,wraplength=980).pack(fill="x")
+        self.file_drop=bind_file_drop(self.tree,self.review_dropped_sources,self.status.set)
         self.tree.bind("<Button-3>",self.context);self.tree.bind("<Control-c>",lambda _:self.copy(False));self.tree.bind("<Control-x>",lambda _:self.copy(True));self.tree.bind("<Control-v>",lambda _:self.paste())
         self.tree.bind("<ButtonPress-1>",self.drag_start,add=True);self.tree.bind("<ButtonRelease-1>",self.drag_end,add=True)
         ttk.Label(self.files,text="Folders organize archive items. Folder backups keep their archived contents together. Uploads retain your originals; library deletion retains encrypted payload bytes and does not reclaim quota.",wraplength=980).pack(fill="x",pady=8)
@@ -101,6 +216,66 @@ class GenDragoonGUI:
         self.drive_list.column("#0",width=240);self.drive_list.column("state",width=120);self.drive_list.column("path",width=550);self.drive_list.pack(fill="x",pady=5)
         ttk.Label(drives,text="Windows requires the separately distributed open-source GenDragoon Mount Host and existing WinFsp; Linux requires existing rclone and FUSE. Files are verified in a private local cache before reading; opening a folder backup can restore its complete archive. Make changes in GenDragoon. Unmount every drive before disconnecting, changing accounts, or quitting because the OS may cache file data.",wraplength=980).pack(fill="x")
         self.refresh_drives()
+    def clear_transfer_view(self):
+        self.artifact_choice.current(0);self.source_choice["values"]=("All source devices",);self.source_choice.current(0);self.source_choices={"All source devices":"all"}
+        self.visible_items={};self.visible_note=None;self.active_job=None;self.transfer_presentations.clear();self.transfer_rows.clear();self.last_transfer=None
+        self.tree.delete(*self.tree.get_children());self.jobs_tree.delete(*self.jobs_tree.get_children())
+        self.progress_bar['value']=0;self.transfer_bar['value']=0;self.progress_text.set("No transfer running. Originals are retained.");self.transfer_detail.set("No transfer running.")
+    def _transfers(self):
+        self.transfers_window=self.tk.Toplevel(self.root);self.transfers_window.title("GenDragoon transfers")
+        self.transfers_window.geometry("1000x500");self.transfers_window.protocol("WM_DELETE_WINDOW",self.hide_transfers)
+        self.transfers_window.withdraw()
+        self.ttk.Label(self.transfers_window,text="Most recent 200 jobs. Uploads finish only after encrypted cloud readback and verification. Closing this panel keeps work running.",wraplength=950,padding=10).pack(fill="x")
+        self.transfer_detail=self.tk.StringVar(value="No transfer running.")
+        self.transfer_bar=self.ttk.Progressbar(self.transfers_window,maximum=100,mode="determinate");self.transfer_bar.pack(fill="x",padx=10)
+        self.ttk.Label(self.transfers_window,textvariable=self.transfer_detail,wraplength=950,padding=10).pack(fill="x")
+        self.jobs_tree=self.ttk.Treeview(self.transfers_window,columns=("note","sources","state","progress"),selectmode="browse")
+        for column,label,width in (("#0","Selection",220),("note","MachineNote",220),("sources","Verified sources",110),("state","State",180),("progress","Overall estimate",130)):
+            self.jobs_tree.heading(column,text=label);self.jobs_tree.column(column,width=width)
+        self.jobs_tree.pack(fill="both",expand=True,padx=10)
+        actions=self.ttk.Frame(self.transfers_window,padding=10);actions.pack(fill="x")
+        for label,command in (("Resume queued / retry failed",self.resume_queue),("Hide transfers",self.hide_transfers),("Minimize · keep running",self.minimize_background)):
+            self.ttk.Button(actions,text=label,command=command).pack(side="left",padx=4)
+        self.ttk.Label(self.transfers_window,text="Queued jobs keep their original account and destination. Quit still waits for active transfers and mounted drives; hiding or minimizing never stops a writer.",wraplength=950,padding=10).pack(fill="x")
+    def show_transfers(self):
+        self.transfers_window.deiconify();self.transfers_window.lift();self.refresh_jobs()
+    def hide_transfers(self):self.transfers_window.withdraw()
+    def minimize_background(self):self.hide_transfers();self.root.iconify()
+    def refresh_jobs(self):
+        try:jobs=self.model.jobs()
+        except Exception as error:self.status.set(self._error(error));return
+        self.transfer_rows={j['id']:j for j in jobs}
+        visible=list(reversed(jobs))[:200]
+        retained={j['id'] for j in visible}|({self.active_job} if self.active_job else set());self.transfer_presentations={k:v for k,v in self.transfer_presentations.items() if k in retained}
+        existing=set(self.jobs_tree.get_children());notes={n['id']:n.get('name','MachineNote') for n in self.model.notes}
+        for index,job in enumerate(visible):
+            key=job['id'];state=job['state'];completed=len(job.get('completedSources') or []);count=len(job['sources'])
+            if state=='running' and key!=self.active_job:state='Interrupted · resume required'
+            percent=100 if job['state']=='completed' else self.transfer_presentations.get(key).percent if key in self.transfer_presentations else min(99,100*completed/max(1,count))
+            values=(notes.get(job['workspaceId'],job['workspaceId'][:8]),f'{completed} / {count}',state,f'{percent:.1f}%')
+            title=Path(job['sources'][0]).name or 'Root folder'
+            if count>1:title+=f' (+{count-1})'
+            if key in existing:self.jobs_tree.item(key,text=title,values=values);existing.remove(key)
+            else:self.jobs_tree.insert('', 'end',iid=key,text=title,values=values)
+            self.jobs_tree.move(key,'',index)
+        for key in existing:self.jobs_tree.delete(key)
+    def update_transfer_progress(self,*,finished=None):
+        progress=self.model.progress
+        if progress is None:return
+        if not self.busy and finished is None:return
+        job=self.transfer_rows.get(self.active_job) if self.active_job else None
+        if job is None:job=self.operation_job or {'sources':[''],'state':'running','completedSources':[]}
+        presenter=self.transfer_presentations.get(self.active_job) if self.active_job else getattr(self,'operation_progress',None)
+        if presenter is None:return
+        value=presenter.snapshot(job,progress.snapshot(),finished=finished);self.last_transfer=value
+        summary=f"{value['percent']:.1f}% overall estimate · source {value['sourceIndex']} / {value['sourceCount']} · {value['phase']}"
+        counters=f"Phase work {format_bytes(value['completedBytes'])} / {format_bytes(value['totalBytes']) if value['totalBytes'] else 'measuring'} · source carrier sent {format_bytes(value['uploadedBytes'])} · received {format_bytes(value['downloadedBytes'])}"
+        eta=f"Estimated remaining: {format_eta(value['overallETA'])} overall · {format_eta(value['phaseETA'])} current phase"
+        if value['objectsTotal']:counters+=f" · carrier chunks {value['objectsDone']} / {value['objectsTotal']}"
+        self.progress_bar['value']=value['percent'];self.transfer_bar['value']=value['percent'];self.progress_text.set(summary);self.transfer_detail.set(summary+'\n'+counters+'\n'+eta)
+        if self.busy:self.status.set(value['phase']+' · '+counters)
+    def finish_transfer(self,success):
+        self.refresh_jobs();self.update_transfer_progress(finished=success);self.active_job=None;self.operation_job=None
     def _teams(self):
         from tkinter import ttk
         bar=ttk.Frame(self.teams);bar.pack(fill="x")
@@ -171,7 +346,7 @@ class GenDragoonGUI:
             model=MachineNotesClient(IntegrationSession(key));model.refresh_notes();return model
         self.run("Verifying the scoped integration key…",work,self.connected)
     def connected(self,model):
-        self.model.session.logout();self.model=model;self.clipboard=None;self.team=None;self.team_values=[];self.companion_grants.clear();self.companion_completed.clear()
+        self.model.session.logout();self.model=model;self.clear_transfer_view();self.clipboard=None;self.team=None;self.team_values=[];self.companion_grants.clear();self.companion_completed.clear()
         self.team_list["values"]=[];self.team_list.set("");self.display_notes()
         if model.selected_note:self.refresh_tree()
     def disconnect(self):
@@ -179,7 +354,7 @@ class GenDragoonGUI:
         if not self.can_switch():return
         if self.model.keys and not self.model.vault_exported:
             messagebox.showwarning("Export your vault","Export your new vault before disconnecting, so its storage key is not lost.",parent=self.root);return
-        self.model.session.logout();self.model=MachineNotesClient();self.note["values"]=[];self.note.set("");self.tree.delete(*self.tree.get_children());self.clipboard=None;self.team=None;self.companion_grants.clear();self.status.set("Disconnected. Account credentials are no longer held in this session.")
+        self.model.session.logout();self.model=MachineNotesClient();self.clear_transfer_view();self.note["values"]=[];self.note.set("");self.tree.delete(*self.tree.get_children());self.clipboard=None;self.team=None;self.companion_grants.clear();self.status.set("Disconnected. Account credentials are no longer held in this session.")
     def can_switch(self):
         from tkinter import messagebox
         if self.busy:return False
@@ -191,26 +366,38 @@ class GenDragoonGUI:
     def display_notes(self):
         self.note["values"]=[str(n.get("name") or "MachineNote")+(" · read only" if not n.get("active") or n.get("readOnly") else "") for n in self.model.notes]
         for i,n in enumerate(self.model.notes):
-            if n["id"]==self.model.selected_note:self.note.current(i)
+            if n["id"]==(self.visible_note if self.busy and self.visible_note else self.model.selected_note):self.note.current(i)
     def note_changed(self,_=None):
         index=self.note.current()
         if self.busy:self.display_notes();return
-        if index>=0:self.model.selected_note=self.model.notes[index]["id"];self.model.selected_parent=None;self.refresh_tree()
+        if index>=0:
+            self.model.selected_note=self.model.notes[index]["id"];self.visible_note=self.model.selected_note;self.visible_items={};self.tree.delete(*self.tree.get_children());self.model.selected_parent=None;self.refresh_tree()
     def refresh(self):
         self.run("Refreshing owned MachineNotes…",self.model.refresh_notes,lambda _:(self.display_notes(),self.refresh_tree() if self.model.selected_note else None))
     def refresh_tree(self):self.run("Loading the current library…",self.model.refresh_tree,lambda _:self.display_tree())
-    def display_tree(self):
-        self.tree.delete(*self.tree.get_children())
-        pending={i["key"]:i for i in self.model.items};inserted=set()
+    def display_tree(self,*,refresh_snapshot=True):
+        if refresh_snapshot:
+            self.visible_note=self.model.selected_note;self.visible_items={i['key']:dict(i,applicationPlatform=application_platform(i.get('name'),i.get('kind'),i.get('applicationPlatform'))) for i in self.model.items}
+        choice=self.source_choice.get();self.source_choices={'All source devices':'all'}
+        for item in self.visible_items.values():
+            label=source_label(item);key=source_key(item)
+            if label in self.source_choices and self.source_choices[label]!=key:label+=' ['+key+']'
+            self.source_choices[label]=key
+        self.source_choice['values']=tuple(self.source_choices)
+        self.source_choice.set(choice if choice in self.source_choices else 'All source devices')
+        artifact={'All items':'all','Documents / folders':'documents',**{v:k for k,v in PLATFORM_LABELS.items() if k!='unknown'}}.get(self.artifact_choice.get(),'all')
+        filtered=filter_library(list(self.visible_items.values()),artifact=artifact,source=self.source_choices[self.source_choice.get()])
+        self.tree.delete(*self.tree.get_children());pending={i['key']:i for i in filtered};inserted=set()
         while pending:
             progressed=False
             for key,item in list(pending.items()):
-                parent=item.get("parentKey")
+                parent=item.get('parentKey')
                 if parent is None or parent in inserted:
-                    kind="Folder" if item.get("virtualFolder") else "Folder backup" if item["kind"]=="folder" else "macOS app" if item["kind"]=="app" else "File"
-                    self.tree.insert(parent or "","end",iid=key,text=item.get("displayName",item["name"]),values=(kind,item.get("archiveBytes",0)),open=True)
+                    target=item.get('applicationPlatform')
+                    kind='Folder' if item.get('virtualFolder') else PLATFORM_LABELS.get(target,'Unknown')+' app/installer backup' if target else 'Folder backup' if item['kind']=='folder' else 'File'
+                    self.tree.insert(parent or '', 'end',iid=key,text=item.get('displayName',item['name']),values=(kind,source_label(item),item.get('archiveBytes',0)),open=True)
                     inserted.add(key);del pending[key];progressed=True
-            if not progressed:self.status.set("The library hierarchy needs review. Refresh before changing it.");break
+            if not progressed:self.status.set('The library hierarchy needs review. Refresh before changing it.');break
     def selected(self):return list(self.tree.selection())
     def refresh_drives(self):
         self.drive_list.delete(*self.drive_list.get_children())
@@ -292,22 +479,51 @@ class GenDragoonGUI:
             item=next((i for i in self.model.items if i["key"]==target),None)
             if not item or not item.get("virtualFolder"):self.status.set("Drop into a Folder, or into blank space for the MachineNote root.");return
         self.mutate("move",self.selected() or [key],parent=target or None)
-    def upload(self,directory=False):
-        from tkinter import filedialog
-        if self.busy:return
-        path=filedialog.askdirectory(parent=self.root,title="Upload folder · original retained") if directory else filedialog.askopenfilename(parent=self.root,title="Upload file · original retained")
-        if path:
-            try:self.model.enqueue_selection(self.model.selected_note,self.folder(),[str(Path(path).absolute())]);self.drain_queue()
-            except Exception as error:self.status.set(self._error(error))
+    def upload_context(self):
+        index=self.note.current()
+        if index<0 or index>=len(self.model.notes):raise ValueError("Choose a MachineNote before selecting sources.")
+        note=self.model.notes[index];parent=None;folder_name="MachineNote root"
+        if note.get('active') is not True or note.get('readOnly'):raise ValueError('This MachineNote is read only. Choose an active writable MachineNote for uploads.')
+        selected=self.selected()
+        if len(selected)==1:
+            item=self.visible_items.get(selected[0])
+            if item:
+                parent=item['key'] if item.get('virtualFolder') else item.get('parentKey')
+                folder_name=self.visible_items.get(parent,{}).get('displayName',self.visible_items.get(parent,{}).get('name','MachineNote root'))
+        return destination(self.model.session.receiver,note['id'],parent,note_name=note.get('name','MachineNote'),folder_name=folder_name)
+    def queue_sources(self,context,paths):
+        if context['receiverId']!=self.model.session.receiver:raise ValueError("The account changed. Select the destination again.")
+        paths=validate_sources(paths)
+        job=self.model.enqueue_selection(context['workspaceId'],context['parentKey'],paths)
+        self.status.set(str(len(paths))+" source(s) queued. Originals are retained.");self.refresh_jobs();self.show_transfers();self.drain_queue()
+        if self.model.keys is None or not self.model.vault_exported:self.status.set("Sources queued. Import or export this account’s portable vault in Storage keys before transfers can start.")
+        return job
+    def review_dropped_sources(self,paths):
+        # Native-drop integration calls this only after its COPY-only path guard.
+        # The dialog's explicit Upload selected action remains the only enqueue.
+        try:
+            paths=validate_sources(paths)
+            if self.source_picker is not None and not self.source_picker.closed:
+                self.source_picker.stage_paths(paths);self.source_picker.window.lift();return
+            self.source_picker=MixedSourcePicker(self,self.upload_context(),self.queue_sources,initial_paths=paths)
+        except Exception as error:self.status.set(self._error(error));return False
+    def upload(self):
+        try:
+            if self.source_picker is not None and not self.source_picker.closed:self.source_picker.window.lift();return
+            self.source_picker=MixedSourcePicker(self,self.upload_context(),self.queue_sources)
+        except Exception as error:self.status.set(self._error(error))
     def drain_queue(self):
         if self.busy or self.model.keys is None or not self.model.vault_exported:return
         try:
-            if not any(j["state"]=="queued" for j in self.model.jobs()):return
+            queued=next((j for j in self.model.jobs() if j["state"]=="queued"),None)
+            if queued is None:return
+            self.active_job=queued["id"];self.transfer_presentations[self.active_job]=TransferPresentation();self.show_transfers()
         except Exception as error:self.status.set(self._error(error));return
         def completed(_):
+            self.finish_transfer(True)
             if any(j["state"]=="queued" for j in self.model.jobs()):self.drain_queue()
             else:self.refresh_tree()
-        self.run("Encrypting queued files, uploading, and verifying readback…",self.model.run_next_job,completed)
+        self.run("Encrypting queued files, uploading, and verifying readback…",self.model.run_next_job,completed,lambda _:self.finish_transfer(False))
     def resume_queue(self):
         if self.busy:return
         try:self.model.retry_jobs();self.drain_queue()
@@ -316,10 +532,17 @@ class GenDragoonGUI:
         from tkinter import filedialog
         selected=self.selected()
         if self.busy or not selected:return
+        try:self.model.check_restore_compatible(selected,items=self.visible_items.values())
+        except Exception as error:self.status.set(self._error(error));return
         destination=filedialog.askdirectory(parent=self.root,title="Restore verified copies into this folder")
         if not destination:return
-        def work():return [self.model.download(key,Path(destination)) for key in selected]
-        self.run("Downloading, decrypting, and verifying selected items…",work)
+        operation={'sources':list(selected),'completedSources':[],'state':'running'}
+        def work():
+            results=[]
+            for index,key in enumerate(selected):
+                results.append(self.model.download(key,Path(destination)));operation['completedSources'].append(index)
+            return results
+        self.run("Downloading, decrypting, and verifying selected items…",work,transfer_job=operation)
     def import_vault(self):
         from tkinter import filedialog,simpledialog
         if self.busy:return
@@ -502,6 +725,8 @@ class GenDragoonGUI:
             messagebox.showwarning("Workspace drives active","Unmount every workspace drive before quitting. Mounted, orphaned, or uncertain drives keep this account session protected.",parent=self.root);return
         if self.model.keys and not self.model.vault_exported:
             messagebox.showwarning("Export your vault","Export your new vault before quitting, so its storage key is not lost.",parent=self.root);return
+        if self.source_picker is not None and not self.source_picker.closed:self.source_picker.close()
+        self.transfers_window.destroy()
         if self.companion:self.companion.close()
         self.model.session.logout();self.executor.shutdown(wait=False);self.instance.close();self.root.destroy()
 
@@ -517,7 +742,7 @@ def check_gui():
         os.environ.update(variables)
         root=None;app=None
         try:
-            root=tk.Tk();root.withdraw()
+            root=create_root();root.withdraw()
             app=GenDragoonGUI(root,companion_directory=directory/"ipc")
             root.update_idletasks();root.update()
             if ([app.tabs.tab(tab,"text") for tab in app.tabs.tabs()]!=["Files","Teams","Storage keys"]
@@ -567,6 +792,6 @@ def main(argv=None):
             private.protect_generated_tree(directory)
         print(json.dumps({"ok":True,"protocol":"MachineNotes-v1","gui":"tkinter","encryptedTransfer":True,"accountTokens":"memory-only","teams":"server-relay"}))
         return
-    root=tk.Tk();GenDragoonGUI(root);root.mainloop()
+    root=create_root();GenDragoonGUI(root);root.mainloop()
 
 if __name__=="__main__":main()
