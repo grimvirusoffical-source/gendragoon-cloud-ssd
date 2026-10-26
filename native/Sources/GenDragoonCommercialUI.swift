@@ -332,7 +332,7 @@ private struct GDPrimary: View {
                     .buttonStyle(.borderedProminent).tint(gdPurple)
                 Button("Refresh") { Task { await redXSession.refreshWorkspaces(); await native.refreshCloudChoices() } }
             }
-            Text("Workspace creation is billing-controlled: first project free, then $5 one-time activation plus the selected storage and performance plans.")
+            Text("Workspace #1 has no workspace fee forever, but still needs a storage plan and a performance choice. Workspace #2+ adds $5/month each. Free performance uses 1 worker; paid tiers increase verified transfer/preload concurrency.")
                 .font(.caption).foregroundStyle(.secondary)
             Text("\(redXSession.uploadProjects.first?.buckets.count ?? 0) Red-XAI workspace(s) available in the Files / Applications destination picker.")
                 .font(.caption).foregroundStyle(.secondary)
