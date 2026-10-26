@@ -11,6 +11,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from unittest import mock
 
@@ -56,9 +57,11 @@ class UploadWorkspaceTests(unittest.TestCase):
         source = Path(value("--source"))
         destination = {"project": value("--project"), "bucket": value("--bucket"),
                        "remote": value("--remote"), "prefix": value("--folder")[len(value("--bucket")) + 1:]}
-        return {"ok": True, "verified": True, "key": workspace.library_key(destination, {"name": source.name}),
+        parent_key = value("--parent-key") if "--parent-key" in command else None
+        return {"ok": True, "verified": True, "key": workspace.library_key(destination, {"name": source.name, "parent_key": parent_key}),
                 "offloaded": "--offload" in command, **{key: destination[key] for key in ("project", "bucket", "remote")},
-                "folder": value("--folder"), "source": str(source), "kind": workspace.kindof(source), "name": source.name}
+                "folder": value("--folder"), "source": str(source), "kind": workspace.kindof(source), "name": source.name,
+                "parentKey": parent_key}
 
     @contextmanager
     def fake_library(self, callback=None):
@@ -77,6 +80,23 @@ class UploadWorkspaceTests(unittest.TestCase):
         data = (workspace.support(self.home) / "UploadWorkspace/state.json").read_text()
         self.assertNotIn("credential", data)
         self.assertNotIn("api_key", data)
+
+    def test_companion_queue_keeps_native_selection_and_destination_unchanged(self):
+        original=self.source("retained.app.zip")
+        explicit=self.source("explicit.txt")
+        state=self.select()
+        state=workspace.add_sources([str(original)],state["revision"],self.home)
+        result,job_id=workspace.enqueue(state["revision"],False,self.home,
+            explicit_selection=[str(explicit)],explicit_destination=SECOND)
+        self.assertEqual(result["sources"],state["sources"])
+        self.assertEqual(result["destination"],FIRST)
+        job=next(j for j in result["jobs"] if j["id"]==job_id)
+        self.assertEqual(job["destination"],SECOND)
+        self.assertEqual([s["path"] for s in job["sources"]],[str(explicit)])
+        self.assertFalse(job["offload"])
+        with self.assertRaises(workspace.WorkspaceError):
+            workspace.enqueue(result["revision"],True,self.home,
+                explicit_selection=[str(explicit)],explicit_destination=SECOND)
 
     def test_app_bundle_is_atomic_and_quick_entries_are_present(self):
         app = self.sources / "Game.app"
@@ -140,6 +160,57 @@ class UploadWorkspaceTests(unittest.TestCase):
         self.assertEqual(command[command.index("--project") + 1], FIRST["project"])
         self.assertEqual(command[command.index("--folder") + 1], "bucket-one/apps/custom")
         self.assertNotIn("gen-dragoon-ssd", command)
+
+    def test_running_application_offload_reason_is_preserved_without_exposing_child_output(self):
+        original = self.source()
+        state, job_id = self.prepare([original], offload=True)
+        result = subprocess.CompletedProcess([], 1,
+            json.dumps({"ok": False, "message": "Quit this application before offloading it"}),
+            "private diagnostic containing Bearer fixture-never-expose")
+        with mock.patch.object(workspace, "run_with_progress", return_value=result):
+            with self.assertRaises(workspace.WorkspaceError) as caught:
+                workspace.run_next(self.home)
+        self.assertEqual(caught.exception.code, "source_in_use")
+        self.assertIn("Quit the selected application", caught.exception.message)
+        final = workspace.read_state(self.home)
+        self.assertEqual(final["jobs"][0]["state"], "failed")
+        self.assertIsNone(final["active_job_id"])
+        self.assertEqual(final["sources"], state["sources"])
+        self.assertEqual(original.read_bytes(), b"fixture source")
+        self.assertNotIn("fixture-never-expose", json.dumps(final))
+        self.assertIsNone(final["jobs"][0]["items"][0]["offloaded"])
+
+    def test_unknown_child_failures_remain_private_and_do_not_gain_the_guard_allowlist(self):
+        for message in ("Bearer private-fixture-token", "Quit this application before offloading it Bearer private-fixture-token"):
+            result = subprocess.CompletedProcess([], 1, json.dumps({"ok": False, "message": message}), message)
+            with mock.patch.object(workspace.subprocess, "run", return_value=result):
+                with self.assertRaises(workspace.WorkspaceError) as caught:
+                    workspace.child_result(["python3", "-B", "/fixture/gendragoon_library.py", "upload"])
+            self.assertEqual(caught.exception.code, "helper_failed")
+            self.assertNotIn("private-fixture-token", caught.exception.message)
+
+    def test_cancel_legacy_queued_upload_preserves_sources_and_other_jobs(self):
+        original = self.source()
+        queued, job_id = self.prepare([original], offload=True)
+        second = self.select(SECOND)
+        second, other_id = workspace.enqueue(second["revision"], False, self.home)
+        with self.assertRaises(workspace.WorkspaceError) as stale:
+            workspace.cancel_job(job_id, queued["revision"], self.home)
+        self.assertEqual(stale.exception.code, "revision_conflict")
+        result = workspace.cancel_job(job_id, second["revision"], self.home)
+        self.assertEqual(original.read_bytes(), b"fixture source")
+        self.assertEqual(result["sources"], second["sources"])
+        self.assertEqual(result["jobs"][0]["state"], "failed")
+        self.assertFalse(result["jobs"][0]["items"][0]["offloaded"])
+        self.assertEqual(result["jobs"][1]["id"], other_id)
+        self.assertEqual(result["jobs"][1]["state"], "queued")
+        with self.fake_library() as child:
+            final, completed = workspace.run_next(self.home)
+        self.assertEqual(completed, other_id)
+        self.assertEqual(final["jobs"][0]["state"], "failed")
+        self.assertEqual(child.call_count, 1)
+        with self.assertRaises(workspace.WorkspaceError):
+            workspace.cancel_job(other_id, final["revision"], self.home)
 
     def test_source_change_before_enqueue_is_rejected_without_job(self):
         source = self.source()
@@ -252,14 +323,128 @@ except w.WorkspaceError as e:print(json.dumps({'ok':False,'error':e.code}))
         self.assertEqual((root / "state.lock").stat().st_mode & 0o777, 0o600)
         self.assertEqual(list(root.glob(".state-*")), [])
 
-    def test_overlapping_folder_and_child_are_rejected_before_offload(self):
+    def test_complete_folder_selection_includes_child_without_extra_upload_step(self):
         child = self.source("Parent/child.file")
         state = self.select()
         state = workspace.add_sources([str(child.parent), str(child)], state["revision"], self.home)
-        with self.assertRaises(workspace.WorkspaceError) as failure:
-            workspace.enqueue(state["revision"], True, self.home)
-        self.assertEqual(failure.exception.code, "overlapping_sources")
+        self.assertEqual([value["path"] for value in state["sources"]], [str(child.parent)])
+        queued, _ = workspace.enqueue(state["revision"], False, self.home)
+        self.assertEqual(len(queued["jobs"][0]["sources"]), 1)
+        self.assertFalse(queued["jobs"][0]["offload"])
         self.assertTrue(child.exists())
+
+    def test_selecting_parent_after_child_preserves_only_complete_folder(self):
+        child = self.source("Parent/child.file")
+        state = workspace.add_sources([str(child)], 0, self.home)
+        state = workspace.add_sources([str(child.parent)], state["revision"], self.home)
+        self.assertEqual([value["path"] for value in state["sources"]], [str(child.parent)])
+        self.assertTrue(child.exists())
+
+    def test_multiple_complete_applications_files_and_folders_enqueue_together(self):
+        applications = []
+        for name in ("First.app", "Second.app"):
+            path = self.source(name + "/Contents/Info.plist")
+            applications.append(path.parent.parent)
+        regular = self.source("notes.txt")
+        folder_file = self.source("Documents/nested.txt")
+        state = self.select()
+        selected = workspace.add_sources([str(path) for path in [*applications, regular, folder_file.parent]],
+                                         state["revision"], self.home)
+        queued, _ = workspace.enqueue(selected["revision"], False, self.home)
+        self.assertEqual([value["kind"] for value in queued["jobs"][0]["sources"]], ["app", "app", "file", "folder"])
+        self.assertEqual(queued["jobs"][0]["total_items"], 4)
+        self.assertTrue(all(path.exists() for path in [*applications, regular, folder_file]))
+
+    def test_virtual_parent_is_frozen_per_source_and_forwarded_to_library(self):
+        parent = "a" * 18
+        state = self.select()
+        original = self.source("original.txt")
+        state = workspace.add_sources([str(original)], state["revision"], self.home, parent_key=parent)
+        queued, job_id = workspace.enqueue(state["revision"], False, self.home)
+        state = workspace.clear_sources(queued["revision"], self.home)
+        later = self.source("later.txt")
+        state = workspace.add_sources([str(later)], state["revision"], self.home, parent_key="b" * 18)
+        self.assertEqual(state["jobs"][0]["sources"][0]["parent_key"], parent)
+        with self.fake_library() as child:
+            finished, completed = workspace.run_next(self.home)
+        command = child.call_args.args[0]
+        self.assertEqual(command[command.index("--parent-key") + 1], parent)
+        self.assertEqual(completed, job_id)
+        self.assertEqual(finished["sources"][0]["parent_key"], "b" * 18)
+        self.assertEqual(finished["jobs"][0]["state"], "succeeded")
+
+    def test_reselecting_existing_source_does_not_silently_retarget(self):
+        source = self.source()
+        state = workspace.add_sources([str(source)], 0, self.home, parent_key="a" * 18)
+        initial = state["sources"][0].copy()
+        state = workspace.add_sources([str(source)], state["revision"], self.home, parent_key="b" * 18)
+        self.assertEqual(state["sources"], [initial])
+
+    def test_parent_validation_rejects_paths_and_mismatched_result(self):
+        source = self.source()
+        for bad in ("../folder", "A" * 18, "a" * 17, 2, True):
+            with self.subTest(parent=bad), self.assertRaises(workspace.WorkspaceError):
+                workspace.add_sources([str(source)], 0, self.home, parent_key=bad)
+        self.assertEqual(workspace.read_state(self.home)["revision"], 0)
+        state = self.select()
+        state = workspace.add_sources([str(source)], state["revision"], self.home, parent_key="a" * 18)
+        workspace.enqueue(state["revision"], False, self.home)
+        def wrong_parent(command, maintenance_fd=None):
+            value = self.outcome(command, maintenance_fd)
+            value["parentKey"] = "b" * 18
+            return value
+        with self.fake_library(wrong_parent), self.assertRaises(workspace.WorkspaceError) as failure:
+            workspace.run_next(self.home)
+        self.assertEqual(failure.exception.code, "result_mismatch")
+        self.assertTrue(source.exists())
+
+    def test_private_progress_rejects_unbounded_and_nonfinite_frames(self):
+        path = self.root / "progress.json"
+        good = {"schema": 1, "phase": "uploading", "completed_bytes": 20, "total_bytes": 100, "workers": 4}
+        for changes in ({"completed_bytes": True}, {"eta_seconds": float("nan")}, {"workers": 25},
+                        {"completed_bytes": 101}, {"phase": "Bearer private-token"}, {"phase": []},
+                        {"completed_bytes": 10 ** 400}, {"objects_done": 3, "objects_total": 2}):
+            path.write_text(json.dumps({**good, **changes})); path.chmod(0o600)
+            self.assertIsNone(workspace.read_progress(path))
+        path.write_text(json.dumps({**good, "secret": "private-token"})); path.chmod(0o600)
+        self.assertEqual(workspace.read_progress(path), {key: value for key, value in good.items() if key != "schema"})
+        path.write_bytes(b"x" * (workspace.MAX_PROGRESS_BYTES + 1))
+        self.assertIsNone(workspace.read_progress(path))
+        path.unlink(); path.symlink_to(self.source())
+        self.assertIsNone(workspace.read_progress(path))
+
+    def test_running_child_reports_monotonic_progress_before_completion_and_cleans_file(self):
+        original = self.source()
+        state, job_id = self.prepare([original])
+        outcome = {"ok": True, "verified": True, "key": workspace.library_key(FIRST, {"name": original.name}),
+                   "offloaded": False, "project": FIRST["project"], "bucket": FIRST["bucket"], "remote": FIRST["remote"],
+                   "folder": FIRST["bucket"] + "/" + FIRST["prefix"], "source": str(original), "kind": "file", "name": original.name}
+        child = self.root / "gendragoon_library.py"
+        child.write_text("import json,os,sys,time\nfrom pathlib import Path\n" +
+            "sys.path.insert(0," + repr(str(SCRIPT.parent)) + ")\nimport gendragoon_progress as telemetry\n" +
+            "reporter=telemetry._Reporter(os.environ['GD_UPLOAD_PROGRESS_FILE'],home=Path(" + repr(str(self.home)) + "))\n" +
+            "for phase,done in [('uploading',70),('encoding',10),('readback',40)]:\n" +
+            " reporter.phase(phase,total_bytes=100,completed_bytes=done,workers=4);time.sleep(.8)\n" +
+            "print(" + repr(json.dumps(outcome)) + ")\n")
+        seen = []
+        with mock.patch.object(workspace, "helper_path", return_value=child), ThreadPoolExecutor(max_workers=1) as pool:
+            running = pool.submit(workspace.run_next, self.home)
+            deadline = time.monotonic() + 8
+            while not running.done() and time.monotonic() < deadline:
+                active = workspace.read_state(self.home)
+                progress = active["jobs"][0].get("progress", {})
+                if progress.get("completed_bytes") is not None:
+                    seen.append(progress["fraction"])
+                time.sleep(.1)
+            finished, completed = running.result(timeout=2)
+        self.assertTrue(seen, "No byte progress was visible while the child was running")
+        self.assertEqual(seen, sorted(seen))
+        self.assertTrue(any(0 < value < 1 for value in seen), "Expected a live intermediate percentage")
+        self.assertLessEqual(max(seen), 1)
+        self.assertEqual(completed, job_id)
+        self.assertEqual(finished["jobs"][0]["progress"]["fraction"], 1)
+        self.assertEqual(list((workspace.support(self.home) / "UploadWorkspace/Progress").iterdir()), [])
+        self.assertTrue(original.exists())
 
     def test_busy_job_blocks_context_and_sources_while_state_polling_remains_available(self):
         queued, job_id = self.prepare()
@@ -414,6 +599,7 @@ except w.WorkspaceError as e:print(json.dumps({'ok':False,'error':e.code}))
         bundle.mkdir()
         copied = bundle / SCRIPT.name
         shutil.copyfile(SCRIPT, copied)
+        shutil.copyfile(SCRIPT.parent / "gendragoon_transfer_errors.py", bundle / "gendragoon_transfer_errors.py")
         (bundle / "gendragoon_connect.py").write_text('''
 import argparse,json,sys
 import gendragoon_upload_workspace as w

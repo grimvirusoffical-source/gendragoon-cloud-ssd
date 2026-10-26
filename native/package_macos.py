@@ -18,26 +18,84 @@ import sys
 ROOT=Path(__file__).resolve().parent
 
 REQUIRED_RESOURCES=("gendragoon_update_restart.py", "gendragoon_auto_update.py",
+    "RCLONE-COPYING.txt",
     "gendragoon_app_control.py", "gendragoon_app_launch.py", "gendragoon_library.py",
-    "gendragoon_upload_workspace.py", "gendragoon_performance.py",
-    "gendragoon_performance_profiles.json", "gendragoon_project_files.py")
+    "gendragoon_upload_workspace.py", "gendragoon_performance.py", "gendragoon_redx_storage.py", "gendragoon_progress.py",
+    "gendragoon_auth_broker.py", "gendragoon_transfer_errors.py",
+    "gendragoon_workspace_mount.py", "gendragoon_redx_pack.py", "gendragoon_native_bridge.py",
+    "gendragoon_vault.py", "gendragoon_byo_vault.py", "gendragoon_device_origin.py",
+    "gendragoon_platform_ipc.py",
+    "gendragoon_performance_profiles.json", "gendragoon_project_files.py",
+    "GenDragoonTeams/index.html", "GenDragoonTeams/teams.css", "GenDragoonTeams/teams-ui.js", "GenDragoonTeams/dev-peer.js")
+PRIVATE_PYC_RESOURCES=("redxai/__init__.pyc","redxai/_librsx.pyc",
+    "redsecretsxai/__init__.pyc","redsecretsxai/storage_image.pyc",
+    *["redsecretsxai/" + name + ".pyc" for name in (
+        "_image", "rs", "decode_math", "chaff", "look", "stencil_decode", "glyphs",
+        "pyramid", "chromatic", "operators", "ct_sample", "confidence_map", "capacity",
+        "damage_recover", "geom_sync")])
+RED_SECRETS_RESOURCES=(*PRIVATE_PYC_RESOURCES,"redxai/_native/librsx.dylib",
+    "Red-SecretsXAI-LICENSE.txt","Red-SecretsXAI-NOTICE.txt","gendragoon_codec_loader.py",
+    "gendragoon_python_runtime.json", "numpy/__init__.py", "PIL/__init__.py")
+
+def validate_compiled_runtime(resources):
+    """Fail before signing/archive commands if codec source or stale code leaks."""
+    allowed=set(PRIVATE_PYC_RESOURCES)|{"redxai/_native/librsx.dylib"}
+    for package in ("redxai","redsecretsxai"):
+        root=resources/package
+        if root.is_symlink() or not root.is_dir():
+            raise RuntimeError("Missing compiled codec package: "+package)
+        for path in root.rglob("*"):
+            relative=path.relative_to(resources).as_posix()
+            if path.is_symlink():
+                raise RuntimeError("Linked compiled codec resource: "+relative)
+            if path.is_dir():
+                if relative!="redxai/_native":
+                    raise RuntimeError("Unexpected compiled codec directory: "+relative)
+            elif relative not in allowed:
+                raise RuntimeError("Unexpected codec source or resource: "+relative)
+    metadata=resources/"gendragoon_python_runtime.json"
+    if metadata.is_symlink() or not metadata.is_file() or metadata.stat().st_size>64*1024:
+        raise RuntimeError("Missing or oversized compiled codec manifest")
+    try:record=json.loads(metadata.read_text())
+    except (ValueError,UnicodeError) as error:raise RuntimeError("Invalid compiled codec manifest") from error
+    if (not isinstance(record,dict) or record.get("schema")!=1 or record.get("pythonMajorMinor")!="3.13"
+            or record.get("architecture")!="arm64" or record.get("bytecodeMagic")!="f30d0d0a"
+            or record.get("pinnedLibrary")!="9235941b431bc1c23c34286b82052f845121592f"
+            or record.get("sourceIncluded") is not False):
+        raise RuntimeError("Compiled codec interpreter or library identity mismatch")
+    modules=record.get("compiledModules")
+    if not isinstance(modules,dict) or set(modules)!=set(PRIVATE_PYC_RESOURCES):
+        raise RuntimeError("Compiled codec module manifest is incomplete")
+    for name,entry in modules.items():
+        path=resources/name
+        if path.is_symlink() or not path.is_file() or path.stat().st_size>2*1024*1024:
+            raise RuntimeError("Missing or oversized compiled codec module: "+name)
+        data=path.read_bytes()
+        if (len(data)<17 or data[:4]!=bytes.fromhex("f30d0d0a") or data[4:8]!=b"\x01\0\0\0"
+                or not isinstance(entry,dict) or type(entry.get("bytes")) is not int or entry["bytes"]!=len(data)
+                or entry.get("sha256")!=hashlib.sha256(data).hexdigest()):
+            raise RuntimeError("Compiled codec bytecode or digest mismatch: "+name)
 
 def require_runtime_resources(app):
     resources=app/"Contents/Resources"
-    for name in REQUIRED_RESOURCES:
+    validate_compiled_runtime(resources)
+    required=list(REQUIRED_RESOURCES)+list(RED_SECRETS_RESOURCES)
+    for name in required:
         path=resources/name
         if path.is_symlink() or not path.is_file() or path.stat().st_size==0:
             raise RuntimeError("Required bundled runtime resource missing: "+name)
-    return list(REQUIRED_RESOURCES)
+    return required
 
 def reject_python_caches(app):
-    """Signed caches are mutable on import; a release must not contain them."""
+    """Allow only intentional adjacent codec bytecode, never import caches."""
+    allowed={"Contents/Resources/"+name for name in PRIVATE_PYC_RESOURCES}
     def fail(error):
         raise error
     for directory, folders, files in os.walk(app, followlinks=False, onerror=fail):
         for name in folders + files:
-            if name == "__pycache__" or name.endswith((".pyc", ".pyo")):
-                relative=(Path(directory)/name).relative_to(app)
+            relative=(Path(directory)/name).relative_to(app)
+            if (name == "__pycache__" or name.endswith(".pyo")
+                    or name.endswith(".pyc") and relative.as_posix() not in allowed):
                 raise RuntimeError("Python cache artifact in app bundle: "+str(relative)+". Rebuild before signing and notarizing.")
 
 def package(app,output,candidate=False):

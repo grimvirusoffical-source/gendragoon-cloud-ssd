@@ -158,9 +158,9 @@ def verify_bundle(app, budget, final=False):
                    + '" and certificate 1[field.1.2.840.113635.100.6.2.6] exists'
                    + ' and certificate leaf[field.1.2.840.113635.100.6.1.13] exists')
     budget.command(["/usr/bin/codesign", "--verify", "--deep", "--strict", "-R", "=" + requirement, app], final=final)
-    resources = app / "Contents/Resources"
-    require(not any(path.name == "__pycache__" or path.suffix in {".pyc", ".pyo"}
-                    for path in resources.rglob("*")), "Signed Resources contain Python bytecode")
+    package = load_exact("gd_smoke_package_validation", Path(__file__).resolve().parents[1] / "package_macos.py")
+    package.reject_python_caches(app)
+    package.require_runtime_resources(app)
 
 
 def index_state(library, path):

@@ -104,7 +104,11 @@ def read(identifier):
     if entry.get("name") != data["name"] or entry.get("kind", "app") != "app":
         raise ValueError("Launch receipt no longer matches the cloud application")
     session_root = lib.safe_path(ROOT / identifier, directory=True)
-    expected = (lib.CACHE / data["key"] / data["name"] if data["mode"] == "managed-local"
+    cache_name = data.get("cacheName", data["name"])
+    lib.check_name(cache_name)
+    if not cache_name.lower().endswith(".app"):
+        raise ValueError("Invalid application cache name")
+    expected = (lib.CACHE / data["key"] / cache_name if data["mode"] == "managed-local"
                 else session_root / "mount" / data["name"])
     if data.get("cachePath") != str(expected):
         raise ValueError("Unsafe launch cache path")
@@ -355,23 +359,79 @@ def prepare_stream(data, record):
     return path
 
 
+def local_cache_preflight(data, destination):
+    """Bound complete-bundle fallback; never clear caches to make room silently."""
+    budget_gib = lib.performance.current().get("cacheGiB")
+    if type(budget_gib) is not int or not 1 <= budget_gib <= 64:
+        raise RuntimeError("Invalid application cache budget")
+    limit = budget_gib * 1024 ** 3
+    used = 0
+    entries = 0
+    def inventory_error(error):
+        raise RuntimeError("Application cache could not be measured safely; nothing downloaded") from error
+    for directory, folders, files in os.walk(lib.CACHE, followlinks=False, onerror=inventory_error):
+        for name in list(folders):
+            child = Path(directory) / name
+            if child.is_symlink():
+                folders.remove(name)
+            elif os.path.ismount(child):
+                raise RuntimeError("Unexpected mounted application cache; retained for review")
+        for name in files:
+            entries += 1
+            if entries > 250000:
+                raise RuntimeError("Application cache inventory exceeds its safety limit")
+            info = (Path(directory) / name).lstat()
+            if stat.S_ISREG(info.st_mode):
+                used += info.st_size
+    extra = 0
+    if not destination.exists():
+        manifest = data.get("manifest")
+        if not isinstance(manifest, list) or not manifest:
+            raise RuntimeError("This legacy app has no verified size manifest. "
+                               "A bounded cloud launch cannot download it automatically.")
+        for entry in manifest:
+            size = entry.get("size", 0) if isinstance(entry, dict) else None
+            if type(size) is not int or size < 0:
+                raise RuntimeError("Invalid application size manifest")
+            extra += size
+    if used + extra > limit:
+        raise RuntimeError("This complete-bundle fallback would exceed the " + str(budget_gib) +
+                           " GiB app cache budget. Use a compatible streamed app or "
+                           "explicitly clear an unused cache. Existing files were retained.")
+    lib.require_space(extra * 2 + 64 * 1024 ** 2)
+    return {"cacheLimitBytes": limit, "existingCacheBytes": used, "additionalBytes": extra}
+
+
 def launch(key, project, bucket, remote, keep_cache=False):
     if sys.platform != "darwin":
         raise RuntimeError("macOS application launching requires macOS")
     if not project or not bucket:
-        raise ValueError("Choose and verify the Google Cloud project and bucket")
+        raise ValueError("Choose and verify the MachineNote destination")
     private_root()
     data = lib.selected_entry(key, project, bucket, remote)
+    lib.assert_restore_compatible(key,data,project,bucket,remote)
     if data.get("kind", "app") != "app":
         raise ValueError("Use Restore for files and folders")
-    if any(x["key"] == key and x["active"] for x in sessions(project, bucket, remote)["sessions"]):
-        raise RuntimeError("This application already has an active managed session")
-    record = {"id": uuid.uuid4().hex, "key": key, "name": data["name"], "project": project,
+    # The cloud SSD has one active application slot across ALL workspaces.
+    # The caller holds the shared maintenance lock while inspecting sessions
+    # and writing the preparing receipt, so two launchers cannot both pass.
+    active = [item for item in sessions()["sessions"] if item["active"]]
+    if active:
+        if any(item["key"] == key for item in active):
+            raise RuntimeError("This application already has an active managed session")
+        raise RuntimeError("Another cloud application is still running or cleaning up. "
+                           "Quit it and wait for its helpers before launching the next app. "
+                           "No application was stopped and no cache was deleted.")
+    cache_name = data.get("displayName") or data.get("cacheName") or data["name"]
+    lib.check_name(cache_name)
+    if not cache_name.lower().endswith(".app"):
+        raise ValueError("Application names must retain the .app extension before launching")
+    record = {"id": uuid.uuid4().hex, "key": key, "name": data["name"], "cacheName": cache_name, "project": project,
               "bucket": bucket, "remote": remote, "state": "preparing", "mode": "managed-local",
               "keepCache": bool(keep_cache), "createdAt": time.time(),
               "launcherPid": os.getpid(), "launcherIdentity": process_identity(os.getpid()),
               "performance": lib.performance.current(),
-              "cachePath": str(lib.CACHE / key / data["name"])}
+              "cachePath": str(lib.CACHE / key / cache_name)}
     if not record["launcherIdentity"]:
         raise RuntimeError("Launch process identity could not be verified")
     save(record)
@@ -379,13 +439,34 @@ def launch(key, project, bucket, remote, keep_cache=False):
     try:
         path = prepare_stream(data, record)
         if path is None:
+            preflight_path = Path(record["cachePath"])
+            previous_name = data.get("cacheName") or data["name"]
+            lib.check_name(previous_name)
+            previous_path = lib.CACHE / key / previous_name
+            if not preflight_path.exists() and previous_path.exists():
+                preflight_path = previous_path
+            record["cachePreflight"] = local_cache_preflight(data, preflight_path)
+            save(record)
             with contextlib.redirect_stdout(io.StringIO()):
-                lib.stage_item(key, False, project, bucket, remote)
-            path = Path(record["cachePath"])
+                staged = lib.stage_item(key, False, project, bucket, remote)
+            if not isinstance(staged, (str, Path)):
+                raise RuntimeError("Application staging did not return its verified cache path")
+            path = Path(staged)
+            if not path.is_absolute() or path.parent != lib.CACHE / key:
+                raise ValueError("Application staging returned an unsafe cache path")
+            lib.check_name(path.name)
+            lib.safe_path(path.parent, directory=True)
+            record.update(cachePath=str(path), cacheName=path.name)
+            save(record)
             compatible(path)
         try:
+            # Use the already verified manifest size, rather than traversing a
+            # potentially remote bundle merely to decide how much to preload.
+            app_bytes = data.get("rawBytes") or data.get("sizeBytes") or data.get("archiveBytes")
+            preload_args = lib.performance.preload_arguments(app_bytes=app_bytes)
+            preload_timeout = float(preload_args[preload_args.index("--seconds") + 1]) + 2.5
             result = lib.run([sys.executable, "-B", RESOURCE / "gendragoon_preload.py", "--app", path,
-                              *lib.performance.preload_arguments()], timeout=5)
+                              *preload_args], timeout=preload_timeout)
             record["preload"] = json.loads(result)
         except Exception:
             record["preload"] = {"ok": False, "message": "Preload unavailable; normal launch continues"}
@@ -407,7 +488,7 @@ def launch(key, project, bucket, remote, keep_cache=False):
         pending = current["state"] == "launching"
         # A slow Launch Services request remains owned by the live watcher.
         # Never rewrite its receipt or unmount its application from this parent.
-        return {"key": key, "name": data["name"], "mode": current["mode"], "cachePath": current["cachePath"],
+        return {"key": key, "name": data.get("displayName") or data["name"], "mode": current["mode"], "cachePath": current["cachePath"],
                 "pid": current.get("pid", process.pid), "cleanup": "keep" if keep_cache else "on-exit",
                 "state": current["state"],
                 "message": ("Launch requested. macOS is still opening the application; inspect its session status."
@@ -497,7 +578,7 @@ def watch(identifier):
 
 def evict(key, project, bucket, remote):
     if not project or not bucket:
-        raise ValueError("Choose and verify the Google Cloud project and bucket")
+        raise ValueError("Choose and verify the MachineNote destination")
     entry = lib.selected_entry(key, project, bucket, remote)
     for data in sessions(project, bucket, remote)["sessions"]:
         if data["key"] != key:
@@ -509,7 +590,9 @@ def evict(key, project, bucket, remote):
         cleanup(record)
         record["state"] = "exited-cleaned"
         save(record)
-    local_path = lib.CACHE / key / entry["name"]
+    cache_name = entry.get("cacheName") or entry.get("displayName") or entry["name"]
+    lib.check_name(cache_name)
+    local_path = lib.CACHE / key / cache_name
     if local_path.exists() and cache_users(local_path):
         raise RuntimeError("Application resources are still open; managed cache retained")
     with contextlib.redirect_stdout(io.StringIO()):

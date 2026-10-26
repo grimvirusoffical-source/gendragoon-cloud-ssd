@@ -28,7 +28,7 @@
           "performance"
         ],
         "defaultLimit": 10,
-        "feeIsOneTime": false,
+        "feeIsOneTime": true,
         "firstProjectFree": true,
         "firstWorkspaceIncludes": {
           "performanceTier": "free",
@@ -41,7 +41,7 @@
         "freeWorkspaces": 1,
         "grandfatheredProjects": 1,
         "locked": false,
-        "newProjectOneTimeCents": 0,
+        "newProjectOneTimeCents": 500,
         "overBy": 0,
         "ownerFeeWaived": false,
         "paymentAvailable": false,
@@ -58,7 +58,7 @@
         "unpaidWorkspaceIds": [],
         "uploadsBlocked": false,
         "usedProjectSlots": 1,
-        "workspaceFeeIncluded": true,
+        "workspaceFeeIncluded": false,
         "workspaceMonthlyCents": 0
       },
       "project": {

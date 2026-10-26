@@ -1,0 +1,47 @@
+package app.gendragoon.cloudssd.mobile;
+
+import org.junit.Test;
+import org.json.*;
+import java.io.*;
+import java.nio.file.*;
+import java.nio.charset.StandardCharsets;
+import java.util.concurrent.*;
+import static org.junit.Assert.*;
+
+/** Current Control API proof, independent of the older Firebase deletion fixtures. */
+public final class MachineNoteDeletionTest {
+    private static final String KEY="1".repeat(32),ID="2".repeat(32),OTHER="3".repeat(64);
+    private MachineNoteDeletion.Pending pending(String id)throws Exception{return new MachineNoteDeletion.Pending("https://red-xai.com","dummy-user",RedXSession.receiver("dummy-user"),KEY,id);}
+    private JSONObject proof(String status)throws Exception {
+        boolean done=status.equals("completed"),failed=status.equals("failed");
+        JSONObject row=new JSONObject().put("id",ID).put("status",status).put("phase",done?"complete":"billing").put("requestedAt","2026-10-26T10:00:00.000Z").put("updatedAt","2026-10-26T10:01:00.000Z").put("retryable",failed).put("cloudDataDeleted",done).put("externalIdentityDeleted",false).put("externalBYODataDeleted",false).put("localOriginalsDeleted",false);
+        if(done)row.put("completedAt","2026-10-26T10:01:00.000Z");if(failed)row.put("error","account_deletion_retry_required");return new JSONObject().put("schema",1).put("deletion",row);
+    }
+    private static void write(Path path,String value)throws Exception {Files.write(path,value.getBytes(StandardCharsets.UTF_8));}
+    private static void write(Path path,String value,java.nio.charset.Charset charset)throws Exception {Files.write(path,value.getBytes(charset));}
+    private static String read(Path path)throws Exception {return new String(Files.readAllBytes(path),StandardCharsets.UTF_8);}
+    private interface Checked {void run()throws Exception;}
+    private void rejects(Checked task)throws Exception {try{task.run();fail("Expected a closed failure");}catch(AssertionError error){throw error;}catch(Exception expected){}}
+    @Test public void queuedRunningFailedNeverAuthorizeCleanup()throws Exception {for(String status:new String[]{"queued","running","failed"}){MachineNoteDeletion.Receipt r=MachineNoteDeletion.parse(proof(status),pending(ID),false);assertFalse(r.complete);assertEquals(status.equals("failed"),r.retryable);}}
+    @Test public void onlyBoundGetOrOurIdempotentPostCanComplete()throws Exception {assertFalse(MachineNoteDeletion.parse(proof("completed"),pending(""),false).complete);assertTrue(MachineNoteDeletion.parse(proof("completed"),pending(ID),false).complete);assertTrue(MachineNoteDeletion.parse(proof("completed"),pending(""),true).complete);}
+    @Test public void changedReceiptIdRetainsData()throws Exception {rejects(()->MachineNoteDeletion.parse(proof("completed"),pending("4".repeat(32)),false));rejects(()->pending(ID).bind("4".repeat(32)));}
+    @Test public void missingProofAndStringBooleansRejected()throws Exception {JSONObject body=proof("completed");body.getJSONObject("deletion").remove("cloudDataDeleted");rejects(()->MachineNoteDeletion.parse(body,pending(ID),false));JSONObject string=proof("completed");string.getJSONObject("deletion").put("cloudDataDeleted","true");rejects(()->MachineNoteDeletion.parse(string,pending(ID),false));}
+    @Test public void falseCloudCompletionOrWrongPhaseRejected()throws Exception {JSONObject body=proof("completed");body.getJSONObject("deletion").put("cloudDataDeleted",false);rejects(()->MachineNoteDeletion.parse(body,pending(ID),false));JSONObject phase=proof("completed");phase.getJSONObject("deletion").put("phase","storage");rejects(()->MachineNoteDeletion.parse(phase,pending(ID),false));}
+    @Test public void externalDeletionClaimsAreNotAcceptedAsOurContract()throws Exception {for(String field:new String[]{"externalIdentityDeleted","externalBYODataDeleted","localOriginalsDeleted"}){JSONObject body=proof("completed");body.getJSONObject("deletion").put(field,true);rejects(()->MachineNoteDeletion.parse(body,pending(ID),false));}}
+    @Test public void invalidTimestampsAndVersionRejected()throws Exception {JSONObject body=proof("completed");body.getJSONObject("deletion").put("completedAt","2026-10-26T09:00:00Z");rejects(()->MachineNoteDeletion.parse(body,pending(ID),false));JSONObject version=proof("completed").put("schema",1.5);rejects(()->MachineNoteDeletion.parse(version,pending(ID),false));}
+    @Test public void unknownStatusOrFailureRejected()throws Exception {JSONObject unknown=proof("failed");unknown.getJSONObject("deletion").put("error","raw_private_backend_error");rejects(()->MachineNoteDeletion.parse(unknown,pending(ID),false));JSONObject status=proof("running");status.getJSONObject("deletion").put("status","done");rejects(()->MachineNoteDeletion.parse(status,pending(ID),false));}
+    @Test public void noRequestDoesNotAuthorizeCleanup()throws Exception {assertNull(MachineNoteDeletion.parse(new JSONObject().put("schema",1).put("deletion",JSONObject.NULL),pending(ID),false));}
+    @Test public void accountBindingRequiresIssuerSubjectAndReceiver()throws Exception {MachineNoteDeletion.Pending p=pending(ID);JSONObject profile=new JSONObject().put("issuer",p.issuer).put("subject",p.subject).put("receiverId",p.receiver);assertTrue(p.matches(profile));profile.put("subject","other-user");assertFalse(p.matches(profile));rejects(()->new MachineNoteDeletion.Pending(p.issuer,p.subject,OTHER,KEY,ID));assertFalse(p.toString().contains(KEY));}
+    @Test public void cleanupRequiresStoredBoundReceiptSameAccountAndIdleBody()throws Exception {MachineNoteDeletion.Pending p=pending(ID);JSONObject profile=new JSONObject().put("issuer",p.issuer).put("subject",p.subject).put("receiverId",p.receiver);MachineNoteDeletion.Receipt done=MachineNoteDeletion.parse(proof("completed"),p,false);MachineNoteDeletion.authorizeCleanup(p,p,done,profile,false);rejects(()->MachineNoteDeletion.authorizeCleanup(p,p,done,profile,true));rejects(()->MachineNoteDeletion.authorizeCleanup(pending(""),p,done,profile,false));rejects(()->MachineNoteDeletion.authorizeCleanup(p,p,MachineNoteDeletion.parse(proof("running"),p,false),profile,false));JSONObject wrong=new JSONObject(profile.toString()).put("subject","other-user");rejects(()->MachineNoteDeletion.authorizeCleanup(p,p,done,wrong,false));}
+    @Test public void exactOwnFilesRemovedOtherAccountAndUnknownJobsRetained()throws Exception {
+        Path root=Files.createTempDirectory("gd-delete-scope-");try{
+            String receiver=pending(ID).receiver;Path own=root.resolve("redx-vault/"+receiver),other=root.resolve("redx-vault/"+OTHER);Files.createDirectories(own);write(own.resolve("private.keymap"),"dummy-encrypted-map");Files.createDirectories(other);write(other.resolve("private.keymap"),"other-encrypted-map");
+            Path ownJob=job(root,"a",receiver),otherJob=job(root,"b",OTHER),unknown=job(root,"c",null);Path original=root.resolve("user-original.txt");write(original,"retained");MachineNoteDeletion.cleanupAccountFiles(root.toFile(),receiver);
+            assertFalse(Files.exists(own));assertFalse(Files.exists(ownJob));assertTrue(Files.exists(other.resolve("private.keymap")));assertTrue(Files.exists(otherJob));assertTrue(Files.exists(unknown));assertEquals("retained",read(original));
+        }finally{MachineNoteDeletion.removeTree(root);}
+    }
+    private Path job(Path root,String digit,String receiver)throws Exception {Path job=root.resolve("redx-jobs/"+digit.repeat(8)+"-"+digit.repeat(4)+"-"+digit.repeat(4)+"-"+digit.repeat(4)+"-"+digit.repeat(12));Files.createDirectories(job);write(job.resolve("verified.archive"),"dummy-copy");if(receiver!=null)write(job.resolve("account.receiver"),receiver,StandardCharsets.US_ASCII);return job;}
+    @Test public void linkedVaultParentCannotEscapeScope()throws Exception {Path root=Files.createTempDirectory("gd-delete-link-"),outside=Files.createTempDirectory("gd-delete-outside-");try{write(outside.resolve("original"),"retained");Files.createSymbolicLink(root.resolve("redx-vault"),outside);rejects(()->MachineNoteDeletion.cleanupAccountFiles(root.toFile(),pending(ID).receiver));assertEquals("retained",read(outside.resolve("original")));}finally{MachineNoteDeletion.removeTree(root);MachineNoteDeletion.removeTree(outside);}}
+    @Test public void symlinkInOwnedJobDeletesLinkOnly()throws Exception {Path root=Files.createTempDirectory("gd-delete-child-link-"),outside=Files.createTempDirectory("gd-delete-child-outside-");try{write(outside.resolve("original"),"retained");Path own=job(root,"d",pending(ID).receiver);Files.createSymbolicLink(own.resolve("link"),outside);MachineNoteDeletion.cleanupAccountFiles(root.toFile(),pending(ID).receiver);assertFalse(Files.exists(own));assertEquals("retained",read(outside.resolve("original")));}finally{MachineNoteDeletion.removeTree(root);MachineNoteDeletion.removeTree(outside);}}
+    @Test public void leaseStaysActiveUntilActualWorkerReturns()throws Exception {CountDownLatch started=new CountDownLatch(1),finish=new CountDownLatch(1);Thread thread=new Thread(()->{TransferLease.enter();started.countDown();try{finish.await();}catch(InterruptedException ignored){}finally{TransferLease.leave();}});thread.start();assertTrue(started.await(2,TimeUnit.SECONDS));assertTrue(TransferLease.active());finish.countDown();thread.join(2000);assertFalse(TransferLease.active());}
+}

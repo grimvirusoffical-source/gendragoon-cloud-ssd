@@ -32,13 +32,14 @@ class NativeHelperTests(unittest.TestCase):
         }))
         (resources / "gendragoon_python").symlink_to(Path(sys.executable).resolve())
         (resources / "fixture_helper.py").write_text(HELPER)
+        (resources / "gendragoon_byo_vault.py").write_text(HELPER)
         production = (NATIVE / "Sources/GDNativeWorkspace.swift").read_text()
         # Extract unchanged production declarations; no Process or runtime facade.
         production = production[production.index("enum GDRuntime {"):
                                 production.index("@MainActor private final class GDNativeUploadSignal:")]
         source = cls.root / "HelperRegression.swift"
-        source.write_text("import Foundation\nimport Darwin\n" + production + HARNESS)
-        compiled = subprocess.run(["/usr/bin/xcrun", "swiftc", "-parse-as-library", str(source),
+        source.write_text("import Foundation\nimport Darwin\n" + production + AUTH_FACADE + HARNESS)
+        compiled = subprocess.run(["/usr/bin/xcrun", "swiftc", "-parse-as-library", str(source), str(NATIVE / "Sources/GDWorkerAuthChannel.swift"),
                                    "-o", str(cls.binary)], capture_output=True, text=True, timeout=60)
         if compiled.returncode:
             raise AssertionError("Actual Swift helper fixture did not compile:\n" + compiled.stderr[-8000:])
@@ -64,6 +65,18 @@ class NativeHelperTests(unittest.TestCase):
     def test_caller_cancellation_does_not_abandon_helper_or_clear_busy_early(self):
         self.run_case("cancellation")
 
+    def test_durable_byo_keymap_import_outlives_a_read_deadline_without_a_signal(self):
+        self.run_case("durable-byo-import")
+
+
+AUTH_FACADE = r'''
+@MainActor final class GDRedXAIAuthSession {
+    static let shared = GDRedXAIAuthSession()
+    func workerRenewalAuthorization(_ value:[String:Any]) throws -> (receiver:String,workspace:String,renew:@Sendable (Bool) async throws -> String) {
+        fatalError("No production account is used by the helper lifecycle fixture")
+    }
+}
+'''
 
 HELPER = r'''
 import json
@@ -75,7 +88,7 @@ import time
 
 mode = sys.argv[1]
 data = sys.stdin.buffer.read()
-if mode in ("timeout", "delayed"):
+if mode in ("timeout", "delayed", "install-keymap"):
     root = Path(sys.argv[2])
     def terminated(signum, frame):
         # Publish a complete receipt: existence must not race write_text's
@@ -168,6 +181,15 @@ func awaitFile(_ path:URL) async throws {
             try Data().write(to:root.appendingPathComponent("release"))
             _ = try await caller.value
             precondition(!probe.busy)
+            precondition(FileManager.default.fileExists(atPath:root.appendingPathComponent("completed").path))
+        case "durable-byo-import":
+            let writer=Task { try await GDNativeHelper.invoke("gendragoon_byo_vault",
+                arguments:["install-keymap",root.path],timeout:0.1) }
+            try await awaitFile(root.appendingPathComponent("started"))
+            try await Task.sleep(nanoseconds:300_000_000)
+            precondition(!FileManager.default.fileExists(atPath:root.appendingPathComponent("terminated").path))
+            try Data().write(to:root.appendingPathComponent("release"))
+            _ = try await writer.value
             precondition(FileManager.default.fileExists(atPath:root.appendingPathComponent("completed").path))
         default:fatalError("Unknown helper regression")
         }

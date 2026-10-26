@@ -106,11 +106,17 @@ class NotarizationSafetyTests(unittest.TestCase):
         self.assertEqual(self.commands, [])
 
     def test_storage_shortfall_blocks_before_credentials(self):
-        with patch.object(notary.shutil, "disk_usage", return_value=SimpleNamespace(free=8*1024**3)):
+        with patch.object(notary.shutil, "disk_usage", return_value=SimpleNamespace(free=1)):
             with self.assertRaisesRegex(notary.NotarizationError, "insufficient free storage"):
                 self.invoke()
         self.assertEqual(self.commands, [])
         self.assertFalse(self.receipt.exists())
+
+    def test_measured_submission_space_can_proceed_below_advisory_ten_gb(self):
+        with patch.object(notary.shutil,"disk_usage",return_value=SimpleNamespace(free=1024**3)):
+            result=self.invoke()
+        self.assertTrue(result['notarized'])
+        self.assertEqual(self.count('submit'),1)
 
     def test_bad_credentials_never_submit_staple_or_leak_diagnostics(self):
         self.fail_command = "history"
@@ -376,8 +382,13 @@ class PackagingFailClosedTests(unittest.TestCase):
             resources.mkdir(parents=True)
             # Reach the ticket gate with the complete required runtime fixture.
             # The fake code-signing command does not execute these resources.
-            for name in package.REQUIRED_RESOURCES:
-                (resources / name).write_bytes(b"bundled runtime fixture\n")
+            for name in (*package.REQUIRED_RESOURCES, *package.RED_SECRETS_RESOURCES):
+                target = resources / name
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(b"bundled runtime fixture\n")
+            try:from .macos_runtime_fixture import seed_compiled_runtime
+            except ImportError:from macos_runtime_fixture import seed_compiled_runtime
+            seed_compiled_runtime(package,resources)
             with self.assertRaisesRegex(RuntimeError, "stapled Apple notarization ticket"):
                 package.package(app, Path(folder) / "unused-release", candidate=False)
         self.assertTrue(any("-R" in args for args in commands))

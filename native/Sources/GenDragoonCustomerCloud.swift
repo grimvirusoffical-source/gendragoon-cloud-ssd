@@ -679,7 +679,7 @@ struct GenDragoonFreeCloudPanel: View {
                 }.font(.caption)
             }
             DisclosureGroup("Transfer details") {
-                Text("Complete folders are scanned locally, then uploaded with byte checksums, a folder manifest and a full restore check. Interrupted transfers resume from their prepared copy. Data saver limits transfers to one worker. Verified staging keeps at least 10 GiB free on this Mac. Project files are separate from any connected Google Cloud bucket library shown below.")
+                Text("Complete folders are scanned locally, then uploaded with byte checksums, a folder manifest and a full restore check. Interrupted transfers resume from their prepared copy. Data saver limits transfers to one worker. Keeping 10 GB free is recommended; each transfer checks its actual preparation and verification space.")
                     .font(.system(size: 11)).foregroundStyle(.secondary).padding(.top, 7)
             }.font(.system(size: 11)).tint(accent)
         }.padding(24).background(.white.opacity(0.035), in: RoundedRectangle(cornerRadius: 21))

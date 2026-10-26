@@ -1,0 +1,7 @@
+# Installed only inside the GenDragoon desktop virtual environment.
+cryptography==50.0.2
+numpy==2.5.4
+Pillow==13.0.0
+# Required OS file drops: official 0.7.0 wheel, with an immutable download digest.
+tkinterdnd2 @ https://files.pythonhosted.org/packages/eb/13/73054a55222b55604846d78c2e5e0c84bbe9f35bc7d6d9697a289c905b3a/tkinterdnd2-0.7.0-py3-none-any.whl#sha256=f93d4f5ad439648ba1673f15db3e271cdd08f075c87f43553ffcdde4e634a717
+pywin32==312; sys_platform == 'win32'

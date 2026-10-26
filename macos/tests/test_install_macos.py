@@ -96,6 +96,20 @@ class InstallerTests(unittest.TestCase):
         self.assertEqual((self.old_contents / "old-marker").read_text(), "original application")
         self.assertFalse((self.old_contents / "new-marker").exists())
 
+    def test_actual_staging_space_allows_install_below_the_advisory_ten_gb(self):
+        with self.fake_mac(), mock.patch.object(installer.shutil,"disk_usage",
+                return_value=shutil._ntuple_diskusage(2*1024**3,0,1024**3)):
+            installer.install(self.archive,self.app.parent)
+        self.assertTrue((self.app/"Contents/new-marker").is_file())
+
+    def test_real_staging_shortage_retains_original_app_before_extraction(self):
+        with self.fake_mac(), mock.patch.object(installer.shutil,"disk_usage",
+                return_value=shutil._ntuple_diskusage(1024**3,0,1)), \
+                self.assertRaisesRegex(installer.InstallError,"Insufficient space"):
+            installer.install(self.archive,self.app.parent)
+        self.assert_old_preserved()
+        self.assertFalse(any(call[0]=="/usr/bin/ditto" for call in self.calls))
+
     def test_shared_maintenance_busy_preserves_app_without_quit(self):
         with installer.maintenance_lock(self.root), self.fake_mac():
             with self.assertRaisesRegex(installer.InstallError, "active"):

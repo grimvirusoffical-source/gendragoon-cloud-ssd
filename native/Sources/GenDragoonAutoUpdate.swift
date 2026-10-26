@@ -14,7 +14,7 @@ final class GDUpdateActivity: ObservableObject {
     private var entries: [ObjectIdentifier: Entry] = [:]
     private weak var maintenanceOwner: AnyObject?
     private var backgroundInspections: Set<UUID> = []
-    private let persistentFlags: Set<String> = ["mounted", "runningApps"]
+    private let persistentFlags: Set<String> = ["mounted", "runningApps", "workspaceMounts"]
 
     private func changed() {
         DispatchQueue.main.async { [weak self] in self?.revision &+= 1 }
@@ -39,6 +39,37 @@ final class GDUpdateActivity: ObservableObject {
     var hasActiveOperations: Bool {
         lock.lock(); defer { lock.unlock() }
         return busyLocked(excluding: nil, ignorePersistent: false)
+    }
+    /// User-facing categories only. Never disclose owner identities, paths or
+    /// dynamically supplied flag text while explaining a refused normal Quit.
+    func activeOperationReasons(excluding owner: AnyObject? = nil, forUpdate: Bool = false) -> [String] {
+        let labels = [
+            "busy": "An account or cloud request",
+            "cloudBusy": "A cloud connection operation",
+            "mounted": "The main cloud drive is mounted",
+            "mountInspection": "Cloud drive status is not yet verified",
+            "library": "A file or cache operation",
+            "upload": "An upload or its verification",
+            "selection": "A file selection is open",
+            "runningApps": "A managed application is still open",
+            "launchMaintenance": "Managed application status is not yet verified",
+            "workspaceMounts": "A MachineNote drive is mounted or needs review",
+            "mountPreparing": "A MachineNote drive operation",
+            "portableVault": "An encrypted recovery vault operation",
+            "integrations": "An integration or BYO workspace operation",
+            "accountDeletionRequest": "An account deletion request",
+            "updater": "An app update operation",
+            "redXCloudBusy": "A RedX cloud operation"
+        ]
+        lock.lock(); defer { lock.unlock() }
+        entries = entries.filter { $0.value.owner != nil }
+        var reasons = Set<String>()
+        for (id, entry) in entries {
+            if let owner, id == ObjectIdentifier(owner) { continue }
+            let flags = forUpdate ? entry.flags.subtracting(["mounted"]) : entry.flags
+            for flag in flags { reasons.insert(labels[flag] ?? "Another protected operation") }
+        }
+        return reasons.sorted()
     }
     var isBusy: Bool { isBusy(excluding: nil) }
     func isBusy(excluding owner: AnyObject?) -> Bool {

@@ -167,6 +167,13 @@ function installedBilling({app,db,bucket,admin,firebaseAuth,firebaseAuthWithoutT
     if(object.metadata?.kind==="project_creation"){
       const latest=await stripe.checkout.sessions.retrieve(object.id);
       await billing.projects.reconcilePayment(latest,{failed:event.type==="checkout.session.async_payment_failed"});
+    } else if(object.metadata?.kind==="workspace_plans"&&["checkout.session.completed","checkout.session.async_payment_succeeded"].includes(event.type)){
+      const latest=await stripe.checkout.sessions.retrieve(object.id);
+      const paid=await billing.projects.reconcilePlansCheckout(latest);
+      if(paid&&latest.subscription){
+        const id=typeof latest.subscription==="string"?latest.subscription:latest.subscription.id;
+        if(id)await applySubscription(await stripe.subscriptions.retrieve(id),event.type,latest);
+      }
     } else if(object.metadata?.kind==="remove_ads"&&["checkout.session.completed","checkout.session.async_payment_succeeded"].includes(event.type)){
       const latest=await stripe.checkout.sessions.retrieve(object.id);
       await billing.reconcileAds(latest);
