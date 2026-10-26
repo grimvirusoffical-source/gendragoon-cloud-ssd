@@ -40,7 +40,7 @@
     "CUA native pipe disconnected during safe UI refresh attempt; one user request for normal refresh/quit is pending.",
     "Opera connector requires reauthentication; no store submission has been attempted."
   ],
-  "storeStatus": "No store submission or GitHub release publication. Final runtime gates remain open; do not imply packages are accepted.",
+  "storeStatus": "No store submission or GitHub release. Mozilla and Opera authentication currently include explicit Terms acceptance; action-time user confirmation will be required before proceeding through those forms. Concrete packages and runtime gates remain in progress.",
   "iosStatus": "deferred until all other requested targets are finished and submitted",
   "targetVersion": "0.22.0",
   "targetBuild": 36,
@@ -53,11 +53,11 @@
     "actualSwiftCompanionSocket": "3 passed including 48 concurrent status requests",
     "actualBrowserWebRTC": "2 same-device real peers, 400/400 ordered messages, 0 duplicate deliveries, attachment-shaped packet rejected, removed membership closed both connections",
     "internetP2P": "NAT/TURN reachability pending",
-    "extensionPackages": "4 ZIPs and VSIX built; native runtime and store verification pending",
+    "extensionPackages": "Four browser ZIPs and VSIX built; regenerate final packages after Firefox minimum140 manifest. No marketplace publication.",
     "backend": "67 passed,6 optional external/runtime tests skipped in broad local suite; exact RottenApple Go pairing and genuine RedX/C++ app restore verified separately",
     "portableVault": "MacCryptoKit/CommonCrypto, Pythoncryptography and actualJDK17JCE vectors agree; tamper/account/password/import-safety negatives pass",
     "desktopCompanion": "Actual Windows named-pipe privacy/SID tests passed 5/5. Built PE and ELF hosts exchanged an approved framed request and rejected an unlisted extension.",
-    "android": "Compile/lint/JVM and actual16KiB portable vault passed at45de; full codec failed specifically missing old NumPy libopenblas.so. New notice-complete aligned NumPy and rebuilt Pillow dependencies remain candidate-only until4/16KiB devices pass.",
+    "android": "Both actual4/16KiB six-test device jobs passed a573cf64c4f97f6a396328591bc99f6b9ec23490, including64KiB full visual chunk,2MiB legacy compact and authentication negatives. Android-only memory-API file publication avoids SELinux O_TMPFILE failure while pinned crypto source/functions remain unchanged. Shipping dependencies remain old pins until final candidate promotion.",
     "androidRuntimeSha256": "47883fd5535bae569c7fe7bb9cfac2092fa8ab2ec83c4c39e4fd5e9c363ffa2f",
     "androidRuntimeBytes": 777660,
     "firstCI": "Backend and Linux desktop jobs passed. Mac compiler expression timeout and packaging fixture omission corrected. Windows default elevated owner exposed; atomic current-user SID creation added. Android Gradle dependency corrected. Next CI pending.",
@@ -76,13 +76,15 @@
       "zipSha256": "85cb41453463046aaf08ff7e14ec4b0f0adbb6dc73f52b7dd7ee2754419dc858",
       "installationGate": "Native installed35 activity protection unresolved; normal Quit required."
     },
-    "androidDeviceCandidate": "Both 1a02bfb actual 4/16 KiB jobs exposed unresolved CPython symbols despite complete ELF alignment passing. NumPy recipe 793603c preserves official target linker flags and explicitly links libpython3.13; both rebuilt ABIs passed. Updated exact eight-wheel lock and six device tests at a890d9a, including a 64 KiB visual chunk, are running. Shipping pins are unchanged.",
+    "androidDeviceCandidate": "Reviewed eight-wheel aligned NumPy/Pillow dependency profile passed a573cf6 on both page sizes. Latest da653b9 memory instrumentation run40286028999 passed4KiB but16KiB failed; exact diagnostics under investigation before promotion. Default shipping pins must not ship.",
     "receiverActualRedX": "Isolated actual RedX seven-row CAS/query/revocation/expiry/cleanup probe passed; all seven fixtures removed and account-state fingerprint unchanged. Replacement Set preserves K/Scope/Kind/Position physical indexes.",
     "backendDeployment": "Receiver and Control36-45de7e8 immutable releases and private env prepared, source hashes/syntax verified; NOT activated. Live Receiver35 and Control33 unchanged.",
     "serverPreactivation": "Private logical metadata export and a full stored encrypted PNG checksum scan passed. Account metadata remained stable across the scan, with zero pending reservations. No records, source files, active writer locks or service links changed.",
     "billingLiveReadOnly": "All 31 offered live prices match the configured account, active status, USD amounts and monthly/yearly recurrence. Live billing health reports ready. No charges, Checkout creation, customer retrieval or subscription mutation occurred. This is not a live payment test of every tier.",
     "guide": "Detailed how-to Page updated and native block readback verified. The platform matrix distinguishes installed build 35, held Mac 36, staged backend 36, runtime candidates and no store publication.",
-    "extensionRuntime": "Actual isolated Linux browser/VS Code acceptance tests are being added. Node RPC and package tests pass. Brand-specific browser and marketplace verification remain open."
+    "extensionRuntime": "Exact b84ea6313c5fc7d47cb10ea049ef503fbb2e705e run40284952720 passed real Chromium nativeMessaging/compiled ELF/private IPC, real VSIX installation/activation/commands/status in VS Code, and Firefox temporary addon load/reload plus lint. Fixtures are synthetic account-free dispatch. Native approval, live transfers, Firefox nativeMessaging and brand-specific Chrome/Opera/Edge remain open.",
+    "desktopMountCandidate": "57c06ff contains isolated account/note readonly DAV/rclone drives, normal safe unmount and protected account/Quit guards.22 host drive tests pass with target driver skipped on Mac; actualWindows/Linux run40286765483 pending. Existing trusted rclone plusWinFsp/FUSE required; no drivers or permissions installed.",
+    "accountDeletion": "Current authenticated Control/Receiver durable deletion API and external support-request page under implementation, then Android in-app receipt-based deletion. Legacy Firebase/v2 client does not establish current-path compliance. No real account deletion or billing cancellation tested on production."
   },
   "limitations": [
     "RottenApple current caller pairs successfully but its storageBind returns unavailable before network; complete file binding requires changes outside this authorized repository.",
@@ -96,9 +98,10 @@
     "coreVerified": "45de7e8b9844e1cd0edf987961ff1c8509d85139",
     "windowsRepair": "1c6a5861477329742c1fd604dab60b54e23fa495",
     "committedAndPushed": true,
-    "uncommittedCandidates": "Desktop read-only multi-mount and extension acceptance tests. Android a890d9a test candidate is committed; wait for actual device gates before promotion.",
+    "uncommittedCandidates": "Current Control/Receiver account deletion and Android client integration are under implementation. Desktop drives and extension acceptance are committed.",
     "androidDependencyRepair": "793603cfb0a2ffb39ed4aa5adf1a43f0ae02cf19",
-    "androidDeviceCandidate": "a890d9a"
+    "androidDeviceCandidate": "a890d9a",
+    "desktopMountCandidate": "57c06ff4f1f5ecce329de4a3ad9e8e547bf5734a"
   },
-  "updatedAt": "2026-10-26T07:04:00Z"
+  "updatedAt": "2026-10-26T07:37:19.275110+00:00"
 }
