@@ -309,6 +309,15 @@ class ActualArchiveTests(unittest.TestCase):
             if record and manager.has_mounts:manager.unmount(record["id"])
 
 class PlatformTests(unittest.TestCase):
+    @staticmethod
+    def windows_security_fixture(sid="S-1-5-21-123-456-789-1001"):
+        descriptor=MagicMock();acl=descriptor.GetSecurityDescriptorDacl.return_value
+        acl.GetAceCount.return_value=1;acl.GetAce.return_value=((0,0),0x1200a9,sid)
+        descriptor.GetSecurityDescriptorOwner.return_value=sid;descriptor.GetSecurityDescriptorControl.return_value=(0x1004,1)
+        security=MagicMock();security.ConvertSidToStringSid.side_effect=lambda value:value
+        security.ConvertStringSecurityDescriptorToSecurityDescriptor.return_value=descriptor
+        return SimpleNamespace(modules=lambda:(security,),user_sid=lambda:sid),security,descriptor
+
     def test_script_and_missing_tool_cannot_start_a_filesystem_process(self):
         with tempfile.TemporaryDirectory() as temporary:
             script=Path(temporary)/"rclone";script.write_bytes(b"#!/bin/sh\nexit 0\n")
@@ -328,6 +337,53 @@ class PlatformTests(unittest.TestCase):
             self.assertNotIn("local-dav-token",repr(args));self.assertNotIn("private-fixture",repr(environment));self.assertNotIn("RX_ACCESS_TOKEN",environment)
             self.assertEqual(environment["RCLONE_WEBDAV_BEARER_TOKEN"],"local-dav-token")
             self.assertNotEqual(environment["RCLONE_RC_PASS"],environment["RCLONE_WEBDAV_BEARER_TOKEN"])
+
+    def test_windows_rclone_receives_exact_protected_current_user_read_execute_descriptor(self):
+        fixture,security,descriptor=self.windows_security_fixture();sid=fixture.user_sid()
+        expected="FileSecurity=O:"+sid+"G:"+sid+"D:P(A;;FRFX;;;"+sid+")"
+        with tempfile.TemporaryDirectory() as temporary:
+            binary=Path(temporary)/"rclone.exe";binary.write_bytes(b"native fixture")
+            tools={"rclone":str(binary),"sha256":hashlib.sha256(binary.read_bytes()).hexdigest()}
+            process=SimpleNamespace(stderr=io.BytesIO())
+            with patch.dict(sys.modules,{"gendragoon_platform_ipc":fixture}),patch.object(platform,"sys",SimpleNamespace(platform="win32")),patch.object(platform,"trusted_binary",return_value=str(binary)),patch.object(platform.subprocess,"CREATE_NO_WINDOW",0,create=True),patch.object(platform.subprocess,"Popen",return_value=process) as start:
+                platform.start(tools,{"mountPath":"Z:\\","label":"Fixture"},"http://127.0.0.1:43124/","local-only",Path(temporary)/"cache")
+            args=start.call_args.args[0];position=args.index("--option")
+            self.assertEqual(args[position:position+2],["--option",expected]);self.assertEqual(args.count(expected),1)
+            self.assertIn("--read-only",args);self.assertNotIn("--allow-other",args)
+            security.ConvertStringSecurityDescriptorToSecurityDescriptor.assert_called_once_with(expected.removeprefix("FileSecurity="),1)
+            self.assertEqual(descriptor.GetSecurityDescriptorDacl().GetAce(0)[-1],sid)
+            for broad in (";;;WD)",";;;AU)",";;;BA)",";;;SY)"):self.assertNotIn(broad,expected)
+
+    def test_windows_unknown_sid_or_broadened_descriptor_fails_before_process_creation(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            binary=Path(temporary)/"rclone.exe";binary.write_bytes(b"native fixture")
+            tools={"rclone":str(binary),"sha256":hashlib.sha256(binary.read_bytes()).hexdigest()}
+            with patch.object(platform,"sys",SimpleNamespace(platform="win32")),patch.object(platform,"trusted_binary",return_value=str(binary)),patch.object(platform.subprocess,"Popen") as start:
+                for sid in ("S-1-1-0","S-1-5-18","S-1-5-32-544","S-1-5-80-1","S-1-5-21-1-2-3-4294967296","S-1-5-21-1-2-3-1001)(A;;FA;;;WD)"):
+                    fixture,_,_=self.windows_security_fixture(sid)
+                    with self.subTest(sid=sid),patch.dict(sys.modules,{"gendragoon_platform_ipc":fixture}):
+                        with self.assertRaises(platform.PlatformMountError):platform.start(tools,{"mountPath":"Z:\\","label":"Fixture"},"http://127.0.0.1:43124/","local-only",Path(temporary)/"cache")
+                for mode in ("extra-ace","wrong-owner","unprotected","write-access"):
+                    fixture,_,descriptor=self.windows_security_fixture()
+                    if mode=="extra-ace":descriptor.GetSecurityDescriptorDacl().GetAceCount.return_value=2
+                    elif mode=="wrong-owner":descriptor.GetSecurityDescriptorOwner.return_value="S-1-5-32-544"
+                    elif mode=="unprotected":descriptor.GetSecurityDescriptorControl.return_value=(4,1)
+                    else:descriptor.GetSecurityDescriptorDacl().GetAce.return_value=((0,0),0x1f01ff,fixture.user_sid())
+                    with self.subTest(mode=mode),patch.dict(sys.modules,{"gendragoon_platform_ipc":fixture}):
+                        with self.assertRaises(platform.PlatformMountError):platform.start(tools,{"mountPath":"Z:\\","label":"Fixture"},"http://127.0.0.1:43124/","local-only",Path(temporary)/"cache")
+                start.assert_not_called()
+
+    @unittest.skipUnless(sys.platform=="win32","Actual Windows SID and security descriptor parser")
+    def test_real_windows_descriptor_has_only_current_user_and_read_execute_rights(self):
+        from gendragoon_platform_ipc import modules,user_sid
+        security=modules()[-1];sid=security.ConvertSidToStringSid(user_sid())
+        option=platform._windows_file_security()
+        descriptor=security.ConvertStringSecurityDescriptorToSecurityDescriptor(option.removeprefix("FileSecurity="),1)
+        self.assertEqual(security.ConvertSidToStringSid(descriptor.GetSecurityDescriptorOwner()),sid)
+        self.assertTrue(descriptor.GetSecurityDescriptorControl()[0]&0x1000)
+        acl=descriptor.GetSecurityDescriptorDacl();self.assertEqual(acl.GetAceCount(),1)
+        ace=acl.GetAce(0);self.assertEqual(ace[0],(0,0));self.assertEqual(ace[1],0x1200a9)
+        self.assertEqual(security.ConvertSidToStringSid(ace[-1]),sid)
     def test_kernel_busy_or_changed_process_identity_never_stops_a_helper(self):
         record={"mountPath":"/fixture/mount","tools":{"unmount":"/fixture/fusermount"},"process":{"pid":1}}
         process=MagicMock()

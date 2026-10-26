@@ -175,6 +175,26 @@ def process_matches(identity):
     except (ProcessLookupError,FileNotFoundError):return False
     except Exception:return None
 
+def _windows_file_security():
+    """WinFsp must not add metadata permissions for other local accounts."""
+    try:
+        from gendragoon_platform_ipc import modules,user_sid
+        security=modules()[-1];owner=security.ConvertSidToStringSid(user_sid())
+        # Normal local/domain users and Azure AD users. Service, group,
+        # application and alias SIDs are deliberately unsupported here.
+        if not isinstance(owner,str) or not re.fullmatch(r"S-1-(?:5-21|12-1)(?:-(?:0|[1-9][0-9]{0,9})){4}",owner):raise ValueError()
+        if any(int(part)>0xffffffff for part in owner.split("-")[4:]):raise ValueError()
+        sddl="O:"+owner+"G:"+owner+"D:P(A;;FRFX;;;"+owner+")"
+        descriptor=security.ConvertStringSecurityDescriptorToSecurityDescriptor(sddl,1)
+        acl=descriptor.GetSecurityDescriptorDacl();ace=acl.GetAce(0) if acl is not None and acl.GetAceCount()==1 else None
+        if (security.ConvertSidToStringSid(descriptor.GetSecurityDescriptorOwner())!=owner
+                or not descriptor.GetSecurityDescriptorControl()[0]&0x1000
+                or ace is None or ace[0]!=(0,0) or ace[1]!=0x1200a9
+                or security.ConvertSidToStringSid(ace[-1])!=owner):raise ValueError()
+        return "FileSecurity="+sddl
+    except Exception:
+        raise PlatformMountError("The current Windows user's private drive permissions could not be verified. No filesystem process was started.") from None
+
 def start(tools,record,url,token,cache):
     if trusted_binary(tools["rclone"])!=tools["rclone"] or hashlib.sha256(Path(tools["rclone"]).read_bytes()).hexdigest()!=tools["sha256"]:
         raise PlatformMountError("The selected rclone executable changed. Select and verify it again.")
@@ -186,6 +206,7 @@ def start(tools,record,url,token,cache):
     args=[tools["rclone"],"--config",os.devnull,"mount",":webdav:",record["mountPath"],"--read-only","--vfs-cache-mode=off",
         "--cache-dir",str(cache),"--dir-cache-time=0s","--attr-timeout=0s","--dir-perms=0500","--file-perms=0400",
         "--volname",record["label"],"--timeout=0","--rc","--rc-addr=127.0.0.1:0","--log-level=NOTICE","--log-format="]
+    if sys.platform=="win32":args.extend(("--option",_windows_file_security()))
     flags={"creationflags":subprocess.CREATE_NO_WINDOW} if sys.platform=="win32" else {"start_new_session":True}
     process=subprocess.Popen(args,env=environment,stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.PIPE,**flags)
     process._gd_rc_password=password;process._gd_rc_url=None
