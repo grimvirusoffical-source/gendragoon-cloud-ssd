@@ -1,4 +1,5 @@
 """Construct the actual target Tk GUI in an isolated profile, without signing in."""
+import json
 import os
 from pathlib import Path
 import sys
@@ -26,7 +27,17 @@ class DesktopGUIStartupTests(unittest.TestCase):
                 try:
                     prepared=prepare_native_fixture(app.model.portable_apps,binary)
                     receipt=app.model.portable_apps.launch(prepared,binary.name,approved=True)
-                    wait_fixture(lambda:(prepared.payload/'child-heartbeat').exists())
+                    try:wait_fixture(lambda:(prepared.payload/'child-heartbeat').exists())
+                    except AssertionError:
+                        code=next((row.get('mainExitCode') for row in app.model.portable_apps.leases() if row.get('id')==receipt['id']),None)
+                        child_error=None
+                        try:
+                            value=int((prepared.payload/'e').read_text(encoding='ascii'))
+                            if 0<=value<=0xffffffff:child_error=value
+                        except (OSError,ValueError):pass
+                        details=dict(mainExitCode=code,cwdUtf16Units=len(str(prepared.payload).encode('utf-16-le'))//2,
+                            exeUtf16Units=len(str(prepared.payload/binary.name).encode('utf-16-le'))//2,fixtureChildWinerror=child_error)
+                        raise AssertionError('Disposable GUI native diagnostics: '+json.dumps(details,sort_keys=True)) from None
                     with patch('tkinter.messagebox.showwarning') as warning:
                         self.assertFalse(app.can_switch());self.assertTrue(warning.called)
                     app.close();closed=True

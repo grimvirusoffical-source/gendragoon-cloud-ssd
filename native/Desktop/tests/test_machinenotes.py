@@ -440,6 +440,34 @@ class CompiledRuntimeTests(unittest.TestCase):
             self.assertTrue(all(str(root) in p for p in result["manifests"]))
 
 class PortableAppFormatTests(unittest.TestCase):
+    @unittest.skipUnless(sys.platform=='win32','Actual Windows retained-record sharing behavior required')
+    def test_windows_held_receipt_reader_allows_atomic_replace_and_preserves_old_and_new_bytes(self):
+        with tempfile.TemporaryDirectory(prefix='gd-json-reader-') as td:
+            root=private.private_directory(Path(td).resolve()/'control');lease=root/'lease-fixture.json'
+            old=dict(generation='old disposable JSON',number=1);new=dict(generation='new disposable JSON',number=2)
+            apps._write(lease,old)
+            # Reproduce the actual CRT denial first, using only generated JSON.
+            fd=os.open(lease,os.O_RDONLY|os.O_BINARY|os.O_NOINHERIT)
+            try:
+                with self.assertRaises(PermissionError):apps._write(lease,new)
+            finally:os.close(fd)
+            self.assertEqual(apps._read(lease),old)
+            ready=threading.Event();release=threading.Event();result=[];errors=[];inheritable=[];load=apps.json.load
+            def stalled(source):
+                inheritable.append(os.get_inheritable(source.fileno()));ready.set()
+                if not release.wait(10):raise AssertionError('Fixture reader release timed out')
+                return load(source)
+            def read():
+                try:result.append(apps._read(lease))
+                except BaseException as error:errors.append(type(error).__name__)
+            with patch.object(apps.json,'load',stalled):
+                reader=threading.Thread(target=read);reader.start()
+                try:
+                    self.assertTrue(ready.wait(5));apps._write(lease,new)
+                    with lease.open('rb') as source:self.assertEqual(load(source),new)
+                finally:release.set();reader.join(5)
+            self.assertFalse(reader.is_alive());self.assertEqual(errors,[]);self.assertEqual(inheritable,[False])
+            self.assertEqual(result,[old]);self.assertEqual(apps._read(lease),new);private.verify(lease)
     def test_stalled_atomic_receipt_writer_keeps_status_readable_and_both_guards_blocked(self):
         with tempfile.TemporaryDirectory() as td:
             manager=apps.PortableApps(Path(td).resolve()/'cache');binding=apps.identity(OWNER,NOTE,item())
@@ -684,7 +712,10 @@ int main(int argc,char **argv) {
 #ifdef _WIN32
   char executable[32768],command[32800];GetModuleFileNameA(NULL,executable,sizeof(executable));snprintf(command,sizeof(command),"\"%s\" --child",executable);
   STARTUPINFOA startup={0};PROCESS_INFORMATION process={0};startup.cb=sizeof(startup);
-  if(!CreateProcessA(executable,command,NULL,NULL,FALSE,CREATE_NEW_PROCESS_GROUP|DETACHED_PROCESS,NULL,NULL,&startup,&process))return 2;
+  if(!CreateProcessA(executable,command,NULL,NULL,FALSE,CREATE_NEW_PROCESS_GROUP|DETACHED_PROCESS,NULL,NULL,&startup,&process)) {
+    DWORD error=GetLastError();FILE *f=fopen("e","wb");
+    if(f){fprintf(f,"%lu",(unsigned long)error);fclose(f);}return 2;
+  }
   CloseHandle(process.hThread);CloseHandle(process.hProcess);
 #else
   pid_t child=fork();if(child<0)return 2;

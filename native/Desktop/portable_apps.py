@@ -95,7 +95,19 @@ def _safe_ancestors(path):
 def _read(path):
     info=private.verify(path);_real(path)
     if not stat.S_ISREG(info.st_mode) or info.st_nlink!=1 or info.st_size>MAX_RECORD:raise PortableAppError("The retained portable app record needs review.")
-    fd=os.open(path,os.O_RDONLY|getattr(os,"O_NOFOLLOW",0))
+    if os.name=="nt":
+        import msvcrt,win32api,win32con,win32file
+        # A CRT _wopen reader omits FILE_SHARE_DELETE and can prevent the
+        # broker's atomic receipt replacement. Open a non-inherited native
+        # read handle with rename sharing; retain all checks below and open
+        # the leaf itself rather than following a replacement reparse point.
+        handle=win32file.CreateFile(str(path),win32con.GENERIC_READ,
+            win32con.FILE_SHARE_READ|win32con.FILE_SHARE_WRITE|win32con.FILE_SHARE_DELETE,
+            None,win32con.OPEN_EXISTING,win32con.FILE_FLAG_OPEN_REPARSE_POINT,None)
+        raw=handle.Detach()
+        try:fd=msvcrt.open_osfhandle(raw,os.O_RDONLY|os.O_BINARY|os.O_NOINHERIT)
+        except BaseException:win32api.CloseHandle(raw);raise
+    else:fd=os.open(path,os.O_RDONLY|getattr(os,"O_NOFOLLOW",0))
     with os.fdopen(fd,"rb") as source:
         opened=os.fstat(source.fileno())
         if (opened.st_dev,opened.st_ino)!=(info.st_dev,info.st_ino):raise PortableAppError("The portable app record changed while opening it.")
