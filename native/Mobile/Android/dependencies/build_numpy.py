@@ -52,6 +52,7 @@ def include_runtime_notices(path):
 def verify_wheel(path,abi):
     sys.path.insert(0,str(ROOT.parent))
     from check_native_pages import inspect_elf
+    from prepare_linkage import needed_libraries
     records=[]
     with zipfile.ZipFile(path)as archive:
         names=archive.namelist()
@@ -70,6 +71,9 @@ def verify_wheel(path,abi):
                 record={'path':name,**inspect_elf(data)}
                 if record['machine']!=(183 if abi=='arm64_v8a'else 62)or not record['aligned16KiB']:raise RuntimeError('A candidate native module has the wrong architecture or 16 KiB alignment')
                 if b'libopenblas'in data or b'libgfortran'in data:raise RuntimeError('Candidate ELF still references an external BLAS/Fortran runtime')
+                record['needed']=needed_libraries(data)
+                if name.startswith('numpy/')and '.cpython-313-'in name and 'libpython3.13.so'not in record['needed']:
+                    raise RuntimeError('Android Python extensions must explicitly link libpython3.13.so: '+name)
                 records.append(record)
         for module in ('_multiarray_umath','lapack_lite','_umath_linalg'):
             if not any(module in row['path']for row in records):raise RuntimeError('Required complete NumPy core/linear-algebra native module missing: '+module)

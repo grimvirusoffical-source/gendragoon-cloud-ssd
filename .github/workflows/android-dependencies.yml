@@ -37,6 +37,8 @@ jobs:
           packages: 'platform-tools platforms;android-36 build-tools;35.0.0'
       - name: Install the version-pinned public Android wheel builder
         run: python -m pip install cibuildwheel==4.3.4
+      - name: Verify explicit Android Python linkage and preserved safety flags
+        run: python -B -m unittest discover -s native/Mobile/Android/dependencies/tests -p 'test_*.py' -v
       - name: Build a complete NumPy candidate without external BLAS or Fortran
         run: python -B native/Mobile/Android/dependencies/build_numpy.py --abi '${{ matrix.abi }}' --work-dir '${{ runner.temp }}/gendragoon-numpy-${{ matrix.abi }}'
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
