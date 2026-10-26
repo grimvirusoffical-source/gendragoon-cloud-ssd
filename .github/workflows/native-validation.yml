@@ -21,7 +21,7 @@ permissions:
 
 concurrency:
   group: native-validation-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   native-helpers:
@@ -88,7 +88,8 @@ jobs:
       - name: Test native lifecycle, archive security and the real v3 transfer router
         run: python -m unittest discover -s native/Desktop/tests -p test_desktop.py -v
       - name: Install only the desktop test and packaging dependencies
-        run: python -B -m pip install --only-binary=:all: -r native/Desktop/requirements.txt -r native/Desktop/requirements-build.txt
+        run: |
+          python -B -m pip install --only-binary=:all: -r native/Desktop/requirements.txt -r native/Desktop/requirements-build.txt
       - name: Verify actual same-user companion IPC and access restrictions
         run: python -B -m unittest discover -s native/Desktop/tests -p test_companion_server.py -v
       - name: Stage the hash-pinned compiled platform runtime without private source checkout
