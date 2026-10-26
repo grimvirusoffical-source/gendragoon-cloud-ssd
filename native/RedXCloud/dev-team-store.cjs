@@ -38,7 +38,7 @@ class DevTeamRecords{
  }
  async remove(row){
   this.validate(row,row?.key);const id=this.address(row.key);
-  await this.receiver.call('POST','bx',{q:`{Tx[]} = [ {Require[]} = "${FILE}":${TABLE}[ID=$id, K=$key, Revision=$previous], {Delete[]} = "${FILE}":${TABLE}[ID=$id] ]`,params:{id,key:row.key,previous:row.revision}});
+  await this.receiver.call('POST','bx',{q:`{Tx[]} = [ {Require[]} = "${FILE}":${TABLE}[ID=$id, K=$key, Revision=$previous, State=$expected], {Delete[]} = "${FILE}":${TABLE}[ID=$id] ]`,params:{id,key:row.key,previous:row.revision,expected:JSON.stringify(row)}});
  }
  async list(scope,kind,{after=0,limit=50,activeAfter,expiredBefore}={}){
   if(!/^[a-f0-9]{32,64}$/.test(scope)||! /^[a-z_]{2,24}$/.test(kind)||!Number.isSafeInteger(after)||after<0||!Number.isSafeInteger(limit)||limit<1||limit>50)throw new CloudError('invalid_pagination',400);

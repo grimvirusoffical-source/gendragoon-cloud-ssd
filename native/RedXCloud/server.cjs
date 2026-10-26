@@ -14,6 +14,7 @@ const libraryTree = require('./library-tree.cjs');
 const {createDevTeams} = require('./dev-teams.cjs');
 const {createIntegrations} = require('./integrations.cjs');
 const {createInternalEntitlementClient} = require('./internal-entitlements.cjs');
+const {createReceiverDeletion} = require('./account-deletion-receiver.cjs');
 const exec = promisify(execFile);
 const MAX_BYTES = 8 * 1024 * 1024;
 const MAX_QUOTA = 8 * 1024**4;
@@ -51,7 +52,8 @@ async function createCloud(config) {
     token:config.internalEntitlementToken || process.env.GENDRAGOON_CONTROL_INTERNAL_TOKEN,issuer,
     fetchImpl:config.internalEntitlementFetch || fetch,
   });
-  const integrations = createIntegrations({store,authorizeWorkspace,...config.integrationOptions});
+  const integrations = createIntegrations({store,authorizeWorkspace,beforeUse:async identity=>{if((await store.get(identity.owner))?.accountDeletion)throw new CloudError('account_deleted',410);},
+    withAccount:async(identity,operation)=>{const release=accountDeletion.enter(identity.owner);try{if((await store.get(identity.owner))?.accountDeletion)throw new CloudError('account_deleted',410);return await operation();}finally{release();}},...config.integrationOptions});
   const fetchImpl = config.fetchImpl || fetch;
   const secureFetch = async (url, opts = {}) => {
     if (new URL(url).origin !== issuer) throw new CloudError('issuer_endpoint_invalid', 503);
@@ -76,6 +78,8 @@ async function createCloud(config) {
   const decoderLimit = config.decoderConcurrency ?? 4;
   if (!Number.isInteger(decoderLimit) || decoderLimit < 1 || decoderLimit > 8) throw new Error('Invalid decoder concurrency');
   const workspaceDeleteKey = config.workspaceDeleteKey || config.redxKey || null;
+  const accountDeletion=createReceiverDeletion({store,root,key:workspaceDeleteKey,exclusive:devTeams.exclusive,...config.accountDeletionOptions,isBusy:owner=>
+    [...workspaceOperations.keys(),...deletingWorkspaces].some(key=>key.startsWith(owner+'/'))});
   async function responseJSON(response, max = 65536) {
     const chunks = []; let size = 0;
     for await (const chunk of response.body) {
@@ -338,7 +342,7 @@ async function createCloud(config) {
   }
   const server = http.createServer(async (req, res) => {
     requests++;
-    let releaseWorkspace;
+    let releaseWorkspace,releaseAccount;
     try {
       if (requests > 128) throw new CloudError('busy_retry', 503);
       const host = req.headers.host;
@@ -352,11 +356,14 @@ async function createCloud(config) {
       if (req.method === 'GET' && ['/healthz','/v1/receivers/healthz'].includes(u.pathname)) return json(res, 200, {service: 'Red-XAI-Reiceivers', developmentOnly, productionReady, authProvider});
       if (publicIntegrationRoute) { const response = await integrations.handlePublic(req,u); return json(res,response.status,response.body); }
       const identity = integrations.isAPIKey(req) ? await integrations.authenticateAPIKey(req,u.pathname) : await identify(req), owner = identity.owner;
+      if(accountDeletion.matches(u.pathname))return json(res,200,await accountDeletion.handle(req,u.pathname,identity));
+      const workspaceDelete = /^\/v1\/receivers\/me\/workspaces\/([a-f0-9]{32})$/.exec(u.pathname);
+      const internalDelete = req.method === 'DELETE' && workspaceDelete && signedWorkspaceDelete(req, owner, workspaceDelete[1]);
+      if(!internalDelete){releaseAccount=accountDeletion.enter(owner);if((await store.get(owner))?.accountDeletion)throw new CloudError('account_deleted',410);}
+      else if((await store.get(owner))?.accountDeletion?.status==='completed')throw new CloudError('account_deleted',410);
       if (integrationRoute) { const response = await integrations.handle(req,u,identity); return json(res,response.status,response.body); }
       if (devTeamRoute) { const response = await devTeams.handle(req,u,identity); return json(res,response.status,response.body); }
       if (adminNotes) return json(res, 200, await adminMachineNotes(identity, u));
-      const workspaceDelete = /^\/v1\/receivers\/me\/workspaces\/([a-f0-9]{32})$/.exec(u.pathname);
-      const internalDelete = req.method === 'DELETE' && workspaceDelete && signedWorkspaceDelete(req, owner, workspaceDelete[1]);
       // The control plane calls this route while deleting its billing record;
       // requesting its entitlements again would create a recursive operation.
       const entitlement = internalDelete || identity.apiKey ? null : await entitlementState(identity);
@@ -419,6 +426,8 @@ async function createCloud(config) {
             Object.assign(ws, {active:false, readOnly:true, quotaBytes:0, workers:0, status:'deleting'});
           });
           const deletion = state.workspaceDeletions[workspace], dir = path.join(root, owner, workspace);
+          const ownerDirectory=path.join(root,owner);
+          try{const st=await fs.lstat(ownerDirectory);if(!st.isDirectory()||st.isSymbolicLink()||await fs.realpath(ownerDirectory)!==ownerDirectory)throw new CloudError('stored_object_corrupt',503);}catch(e){if(e.code!=='ENOENT')throw e;}
           try {
             const st = await fs.lstat(dir);
             if (!st.isDirectory() || st.isSymbolicLink()) throw new CloudError('stored_object_corrupt', 503);
@@ -735,7 +744,7 @@ async function createCloud(config) {
     } catch(e) {
       if (!res.headersSent) json(res, e instanceof CloudError ? e.status : 503, {error: e instanceof CloudError ? e.code : 'service_unavailable'});
       else res.destroy();
-    } finally { if (releaseWorkspace) releaseWorkspace(); requests--; }
+    } finally { if (releaseWorkspace) releaseWorkspace();if(releaseAccount)releaseAccount();requests--; }
   });
   server.requestTimeout = 60000; server.headersTimeout = 10000;
   server.maxHeadersCount = 30;

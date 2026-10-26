@@ -81,12 +81,13 @@ function filterState(value,identity){
  return {...value,workspaces,machineNotes:workspaces,objects:(value.objects||[]).filter(x=>x.workspace===id),libraryItems:undefined,
   quotaBytes:workspaces[0]?.quotaBytes||0,usedBytes:workspaces[0]?.usedBytes||0,ownerBenefits:false,projectLimit:1};
 }
-function createIntegrations({store,metadata,authorizeWorkspace,now=Date.now}={}){
+function createIntegrations({store,metadata,authorizeWorkspace,beforeUse=async()=>{},withAccount=async(_identity,operation)=>operation(),now=Date.now}={}){
  const records=metadata||new IntegrationMetadata(store);
  const matches=path=>/^\/v1\/integrations\/(services|keys(?:\/[a-f0-9]{16})?|byo(?:\/byo_[a-f0-9]{32})?)$/.test(path)||['/provider/v1/connect/grants','/provider/v1/connect/authorize','/provider/v1/health'].includes(path);
  const matchesPublic=path=>['/provider/v1/connect/redeem','/provider/v1/connect/token','/v1/connect/exchange','/v1/connect/revoke'].includes(path);
- async function checked(actor,workspaceId,allowed){if(!authorizeWorkspace)fail('integration_entitlements_unavailable',503);const entitlement=await authorizeWorkspace(actor,workspaceId);validateEntitlement(entitlement,workspaceId,allowed.includes('files:write'),now());return entitlement;}
+ async function checked(actor,workspaceId,allowed){await beforeUse(actor);if(!authorizeWorkspace)fail('integration_entitlements_unavailable',503);const entitlement=await authorizeWorkspace(actor,workspaceId);validateEntitlement(entitlement,workspaceId,allowed.includes('files:write'),now());return entitlement;}
  async function issueKey(actor,{service,workspaceId,scopes:allowed,name}){
+  return withAccount(actor,async()=>{
    await checked(actor,workspaceId,allowed);
    const previous=await records.account(actor.owner);if(Object.values(previous.keys).filter(x=>x.revokedAtMs===null&&x.expiresAtMs>now()).length>=MAX_KEYS)fail('integration_key_limit',409);
    const id=crypto.randomBytes(8).toString('hex'),secret=crypto.randomBytes(32).toString('base64url'),apiKey='gdpk_'+id+'_'+secret;
@@ -94,6 +95,7 @@ function createIntegrations({store,metadata,authorizeWorkspace,now=Date.now}={})
    await records.linkKey(id,actor.owner);
    await records.update(actor.owner,current=>{if(current.keys[id])fail('integration_key_collision',409);if(Object.values(current.keys).filter(x=>x.revokedAtMs===null&&x.expiresAtMs>now()).length>=MAX_KEYS)fail('integration_key_limit',409);for(const stale of Object.values(current.keys).filter(x=>x.revokedAtMs!==null||x.expiresAtMs<=now()).sort((a,b)=>a.createdAtMs-b.createdAtMs)){if(Object.keys(current.keys).length<200)break;delete current.keys[stale.id];}current.keys[id]=key;});
    return {status:201,body:{...summary(key,now()),apiKey,key:apiKey,keyId:id,warning:'Copy this secret now. It is shown only once.'}};
+  });
  }
  async function handle(req,u,identity){
   if(u.pathname==='/provider/v1/health'&&req.method==='GET'){
@@ -137,8 +139,8 @@ function createIntegrations({store,metadata,authorizeWorkspace,now=Date.now}={})
  async function handlePublic(req,u){
   if(req.method!=='POST'||u.search||!matchesPublic(u.pathname))fail('not_found',404);
   if(u.pathname==='/v1/connect/revoke'){
-   const key=await keyForRequest(req);await records.update(key.identity.owner,current=>{if(!current.keys[key.id]||current.keys[key.id].digest!==key.digest)fail('integration_key_invalid',401);current.keys[key.id].revokedAtMs=now();});
-   return {status:200,body:{revoked:true,connection_id:'cn_'+key.id,key_id:key.id}};
+   const key=await keyForRequest(req);return withAccount(key.identity,async()=>{await records.update(key.identity.owner,current=>{if(!current.keys[key.id]||current.keys[key.id].digest!==key.digest)fail('integration_key_invalid',401);current.keys[key.id].revokedAtMs=now();});
+   return {status:200,body:{revoked:true,connection_id:'cn_'+key.id,key_id:key.id}};});
   }
   const value=await body(req),redxStyle=u.pathname==='/v1/connect/exchange',code=redxStyle||u.pathname.endsWith('/token'),secret=code?value.code:value.grant;
   if(typeof secret!=='string'||!(code?/^gdpc_[A-Za-z0-9_-]{43}$/:/^gdpg_[A-Za-z0-9_-]{43}$/).test(secret))fail('invalid_grant');
@@ -147,10 +149,12 @@ function createIntegrations({store,metadata,authorizeWorkspace,now=Date.now}={})
   const id=digest(secret),grant=await records.grant(id);
   const verify=g=>g.kind===(code?'code':'grant')&&(!code||g.challenge===challenge)&&(!redxStyle||Boolean(g.stateDigest))&&(!g.stateDigest||typeof value.state==='string'&&g.stateDigest===digest(value.state));
   if(!grant||grant.usedAtMs!==null||grant.expiresAtMs<=now()||!verify(grant))fail('invalid_grant');
+  return withAccount(grant.identity,async()=>{
   await checked(grant.identity,grant.workspaceId,grant.scopes);
   const accepted=await records.consumeGrant(id,verify,now());
   const issued=await issueKey(accepted.identity,accepted);
   return {status:201,body:{...issued.body,bindingId:issued.body.id,binding:{id:issued.body.id,workspaceId:accepted.workspaceId,workspaceName:accepted.name},workspaceId:accepted.workspaceId,keyExpiresAt:issued.body.expiresAt,capabilities:{receiverFiles:true,legacyBlobAPI:false,manifestCas:false},...(redxStyle?{api:'v1',connection_id:'cn_'+issued.body.id,workspace:{db:accepted.workspaceId,name:accepted.name},key_id:issued.body.id,scope:accepted.scopes.includes('files:write')?'write':'read',prefix:'',endpoints:{revoke:'/v1/connect/revoke',files:'/v1/receivers/me/workspaces/'+accepted.workspaceId+'/blobs/'},storage:{mode:'gendragoon',provider:'gendragoon',status:'scoped-storage-key'}}:{})}};
+  });
  }
  const isAPIKey=req=>/^Bearer gdpk_/.test(req.headers.authorization||'');
  async function keyForRequest(req){
@@ -162,6 +166,7 @@ function createIntegrations({store,metadata,authorizeWorkspace,now=Date.now}={})
  }
  async function authenticateAPIKey(req,path,method=req.method){
   const key=await keyForRequest(req);
+  await beforeUse(key.identity);
   const scope=routeAccess(path,method,key.workspaceId);if(!key.scopes.includes(scope))fail('integration_scope_required',403);
   if(!authorizeWorkspace)fail('integration_entitlements_unavailable',503);
   const entitlement=await authorizeWorkspace(key.identity,key.workspaceId);validateEntitlement(entitlement,key.workspaceId,scope==='files:write',now());

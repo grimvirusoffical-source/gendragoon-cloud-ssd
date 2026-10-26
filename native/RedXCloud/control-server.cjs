@@ -4,6 +4,10 @@ const crypto=require('node:crypto');
 const {ControlState}=require('./control-state.cjs');
 const {RedXState,CloudError,digest,origin}=require('./redx-state.cjs');
 const {createInternalEntitlements}=require('./internal-entitlements.cjs');
+const {createDeletionClient,createAccountDeletion,settleAccountBilling}=require('./account-deletion.cjs');
+const fs=require('node:fs/promises');
+const path=require('node:path');
+const {PRIVACY_HTML}=require('./privacy-page.cjs');
 const {STORAGE,PERFORMANCE:PAID_PERFORMANCE}=require('../Backend/catalog.js');
 // Receiver subscriptions support a genuinely free one-worker option. Keep the
 // legacy Firebase paid-price catalog unchanged (there is no Stripe Free price).
@@ -72,6 +76,7 @@ async function createControl(config){
  const receiverLocal=config.receiverLocal||'http://127.0.0.1:17779';
  const receiverEndpoint=new URL(receiverLocal);
  if(receiverEndpoint.protocol!=='http:'||receiverEndpoint.hostname!=='127.0.0.1'||receiverEndpoint.username||receiverEndpoint.password||receiverEndpoint.pathname!=='/'||receiverEndpoint.search||receiverEndpoint.hash)throw new Error('Receiver delete endpoint must stay on local loopback');
+ const deletionPage=await fs.readFile(path.join(__dirname,'account-deletion.html'),'utf8');
  let billingReady=false;
  if(stripe){
    const expected=[];
@@ -116,6 +121,7 @@ async function createControl(config){
    return {policyVersion:3,ownerBenefits:owner,adFree:owner,projects};
  }
  async function state(identity){
+   if((await receiverStore.get(identity.owner))?.accountDeletion)throw new CloudError('account_deleted',410);
    let s=await store.get(identity.owner);
    if(!s)s=await store.ensure(identity.owner,await seed(identity));
    if(identity.email===OWNER_EMAIL&&(!s.ownerBenefits||(s.policyVersion||0)<3)){
@@ -318,10 +324,24 @@ async function createControl(config){
    removeAds:{oneTimeCents:REMOVE_ADS_CENTS},owner:{email:OWNER_EMAIL,allPlansIncluded:true,lifetime:true}};
  const accountLocks=new Map();
  async function serial(owner,fn){const before=accountLocks.get(owner)||Promise.resolve();let release;const gate=new Promise(r=>{release=r;});const tail=before.catch(()=>{}).then(()=>gate);accountLocks.set(owner,tail);await before.catch(()=>{});try{return await fn();}finally{release();if(accountLocks.get(owner)===tail)accountLocks.delete(owner);}}
+ const deletionReceiver=createDeletionClient({url:receiverLocal,key:config.redxKey});
+ const accountDeletion=createAccountDeletion({store:receiverStore,receiver:config.accountDeletionReceiver||deletionReceiver,
+   autoRun:config.accountDeletionAutoRun!==false,settleBilling:(identity,s)=>settleAccountBilling(stripe,identity,s),
+   removeWorkspace:async(identity,id)=>{
+    if(config.deleteWorkspace)return config.deleteWorkspace({identity,project:{id}});
+    if(!config.redxKey)throw new CloudError('account_deletion_unavailable',503);
+    const stamp=String(Date.now()),proof=crypto.createHmac('sha256',config.redxKey).update(identity.owner+'/'+id+'/'+stamp).digest('hex');
+    const r=await fetch(receiverLocal+'/v1/receivers/me/workspaces/'+id,{method:'DELETE',redirect:'error',headers:{authorization:identity.bearer,'x-confirm-workspace':id,'x-control-delete':proof,'x-control-delete-time':stamp},signal:AbortSignal.timeout(30000)});
+    if(!r.ok)throw new CloudError('workspace_delete_failed',503);
+    const text=await r.text();if(text.length>16384)throw new CloudError('workspace_delete_failed',503);
+    let result;try{result=JSON.parse(text);}catch{throw new CloudError('workspace_delete_failed',503);}
+    if(result.ok!==true||result.workspace!==id)throw new CloudError('workspace_delete_failed',503);
+   }});
  const integrationProofs=new Map();
  const internalEntitlements=createInternalEntitlements({token:config.internalEntitlementToken,issuer,resolve:async(identity,workspaceId)=>serial(identity.owner,async()=>{
    let s=await store.get(identity.owner);const p=s?.projects?.[workspaceId];
    const receiver=await receiverStore.get(identity.owner);
+   if(receiver?.accountDeletion)return null;
    if(!p||p.status==='deleting'||receiver?.workspaceDeletions?.[workspaceId]||receiver?.deletedWorkspaces?.[workspaceId])return null;
    // API keys delegate existing account storage. They never establish fresh
    // verified-owner/admin authority or create/migrate an account's benefits.
@@ -345,9 +365,17 @@ async function createControl(config){
      const pathname=legacyPath.replace(/^\/v2\/machinenotes(?=\/|$)/,'/v2/projects');
      if(await internalEntitlements(req,res,pathname))return;
      if(req.method==='GET'&&pathname==='/healthz')return send(res,200,{service:'gendragoon-control',redx:true,billing:billingReady});
+     if(req.method==='GET'&&pathname==='/account-deletion'){res.writeHead(200,{'content-type':'text/html; charset=utf-8','cache-control':'no-store','x-content-type-options':'nosniff','referrer-policy':'no-referrer','content-security-policy':"default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"});return res.end(deletionPage);}
+     if(req.method==='GET'&&['/privacy','/privacy.html'].includes(pathname)){res.writeHead(200,{'content-type':'text/html; charset=utf-8','cache-control':'no-store','x-content-type-options':'nosniff','content-security-policy':"default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'"});return res.end(PRIVACY_HTML);}
      if(req.method==='GET'&&pathname==='/v2/pricing')return send(res,200,pricing);
      if(req.method==='GET'&&['/billing/success','/billing/cancel','/billing/return'].includes(pathname)){res.writeHead(200,{'content-type':'text/html; charset=utf-8','cache-control':'no-store','x-content-type-options':'nosniff'});return res.end('<!doctype html><meta charset="utf-8"><title>GenDragoon</title><body style="font-family:system-ui;background:#0b0912;color:#eee;padding:48px"><h1>GenDragoon billing</h1><p>Return to GenDragoon Cloud SSD. The app will verify your current entitlement with the server.</p></body>');}
-     const identity=await identify(req);return await serial(identity.owner,async()=>{let s=await state(identity);s=await reconcile(identity,s);
+     const identity=await identify(req);
+     if(pathname==='/v2/account/deletion'&&req.method==='GET')return send(res,200,await accountDeletion.status(identity));
+     if(pathname==='/v2/account/deletion'&&req.method==='POST'||pathname==='/v2/account'&&req.method==='DELETE'){
+      const body=await readJSON(req,4096);
+      return await serial(identity.owner,async()=>{const result=await accountDeletion.request(identity,body);return send(res,result.deletion.status==='completed'?200:202,result);});
+     }
+     return await serial(identity.owner,async()=>{let s=await state(identity);s=await reconcile(identity,s);
      if(req.method==='GET'&&pathname==='/v2/account')return send(res,200,{ownerBenefits:s.ownerBenefits===true,adFree:s.adFree===true,projectLimit:limitFor(s),usedProjectSlots:Object.keys(s.projects||{}).length,email:identity.email});
      if(req.method==='GET'&&pathname==='/v2/projects')return send(res,200,{ownerBenefits:s.ownerBenefits===true,projectLimit:limitFor(s),projects:Object.values(s.projects||{}).sort((a,b)=>a.createdMs-b.createdMs).map(publicProject)});
      if(req.method==='GET'&&pathname==='/v2/receiver-entitlements')return send(res,200,{schema:1,ownerBenefits:s.ownerBenefits===true,projectLimit:limitFor(s),usedProjectSlots:Object.keys(s.projects||{}).length,workspaces:Object.values(s.projects||{}).map(p=>({projectId:p.id,id:p.id,name:p.name,active:p.active===true,readOnly:p.readOnly===true,quotaBytes:p.quotaBytes||0,workers:p.workers||0,status:p.status,storageTier:p.storageTier||null,performanceTier:p.performanceTier||null,entitlementSource:p.owner?'owner':p.feeWaived?'fee-waived':'subscription'}))});
@@ -362,7 +390,7 @@ async function createControl(config){
    }catch(e){if(!res.headersSent){const code=e instanceof CloudError?e.code:'service_unavailable';send(res,e instanceof CloudError?e.status:503,{error:code,...(MACHINE_NOTE_MESSAGES[code]?{message:MACHINE_NOTE_MESSAGES[code]}:{})});}else res.destroy();}
  });
  server.requestTimeout=60000;server.headersTimeout=10000;server.maxHeadersCount=30;
- return {server,store,async listen(port=0){await new Promise((ok,no)=>{server.once('error',no);server.listen(port,'127.0.0.1',ok)});return 'http://127.0.0.1:'+server.address().port;},async close(){await new Promise(r=>server.close(r));}};
+ return {server,store,accountDeletion,async listen(port=0){await new Promise((ok,no)=>{server.once('error',no);server.listen(port,'127.0.0.1',ok)});return 'http://127.0.0.1:'+server.address().port;},async close(){await accountDeletion.drain();await new Promise(r=>server.close(r));}};
 }
 if(require.main===module){
  const Stripe=require('stripe'),secret=process.env.STRIPE_SECRET_KEY||'';

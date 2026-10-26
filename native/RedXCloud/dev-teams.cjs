@@ -220,7 +220,7 @@ function createDevTeams({store,records=new DevTeamRecords(store),now=()=>Date.no
    throw new CloudError('method_not_allowed',405);
   });
  }
- return {matches,handle:dispatch};
+ return {matches,handle:dispatch,exclusive:serial};
 }
 function sameJSON(a,b){return JSON.stringify(a)===JSON.stringify(b);}
 module.exports={createDevTeams,matches,peerID,teamID,TTL};
