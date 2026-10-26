@@ -6,6 +6,8 @@ import argparse
 import copy
 import importlib.util
 import json
+import hashlib
+import io
 import os
 from pathlib import Path
 import select
@@ -22,6 +24,9 @@ ROOT = Path(__file__).resolve().parent
 SPEC = importlib.util.spec_from_file_location('gd36_controller_test', ROOT/'adapter/server-activation-controller-36.py')
 C = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(C)
+
+def approved_mac_proof():
+    return dict(source='native-mac-preflight',challenge='disposable-fresh-challenge',observedAtEpoch=time.time(),screenUnlocked=True,uploadWorkspaceTerminal=True,appControlIdle=True,nativeAppClosedVerified=True,maintenanceLeaseHeld=True)
 
 # Separate product invariants, not a list copied from the controller's phases.
 class DisposableServices:
@@ -42,6 +47,7 @@ class DisposableServices:
         self.logical = 'all-three-tables-v1'
         self.payload = 'every-png-and-sidecar-v1'
         self.baseline = None
+        self.full_payload_backup = False
         self.stopped_preserved = self.after_start_preserved = False
         self.healthy = False
         self.force_calls = self.lock_removals = self.restores = 0
@@ -106,8 +112,14 @@ class DisposableServices:
         if label == 'drained': self.baseline = copy.deepcopy(value)
         return value
 
+    def backup_payload(self, before):
+        self.record('full-payload-backup')
+        assert before == self.baseline
+        self.full_payload_backup = True
+
     def configure(self):
         self.record('config')
+        assert self.full_payload_backup
         assert self.baseline and self.drained == {'control', 'receiver'}
         assert self.writer_lock and not self.decoder_children
         self.originals_retained = True
@@ -246,8 +258,13 @@ class ControllerTests(unittest.TestCase):
 
     def test_unreviewed_bundle_cannot_import_the_mutation_backend(self):
         with patch.object(C, 'module') as load, patch.object(C.sys, 'platform', 'linux'), patch.object(C.os, 'geteuid', return_value=0):
-            with self.assertRaises(C.Hold): C.LiveOps({}, {'reviewedForExecution': True})
+            with self.assertRaises(C.Hold): C.LiveOps({}, {'reviewedForExecution': True}, mac_gate=lambda:None)
             load.assert_not_called()
+
+    def test_optimized_controller_refuses_before_backend_or_assertion_helper_import(self):
+        with patch.object(C.sys,'flags',SimpleNamespace(optimize=1)), patch.object(C,'module') as imported:
+            with self.assertRaisesRegex(C.Hold,'optimized_python_forbidden'):C.LiveOps({}, {}, mac_gate=lambda:None)
+            imported.assert_not_called()
 
     def test_real_disposable_private_file_rejects_link_and_permissions(self):
         with tempfile.TemporaryDirectory(prefix='gd36-controller-') as raw:
@@ -263,7 +280,7 @@ class ControllerTests(unittest.TestCase):
             with self.assertRaises(C.Hold): C.private_file(file, os.getuid())
 
     def test_actual_atomic_replacement_keeps_private_bytes_and_rejects_symlink(self):
-        ops = object.__new__(C.LiveOps)
+        ops = object.__new__(C.LiveOps);ops.mutation_proof=approved_mac_proof()
         with tempfile.TemporaryDirectory(prefix='gd36-atomic-') as raw:
             root = Path(raw); target = root/'owned'
             def only_disposable_directory(path):
@@ -288,7 +305,8 @@ class ControllerTests(unittest.TestCase):
             def disposable_subprocess(argv, **kwargs):
                 self.assertEqual(argv[:5], ['/usr/sbin/runuser', '-u', 'redxai', '--', '/usr/bin/python3'])
                 self.assertNotIn(ops.token, repr(argv)); self.assertNotIn(str(helper), repr(argv))
-                self.assertNotIn('env', kwargs)
+                self.assertEqual(argv[5:8], ['-I', '-S', '-B'])
+                self.assertEqual(kwargs['env'], {'PATH':'/usr/bin:/bin','LC_ALL':'C','PYTHONDONTWRITEBYTECODE':'1'})
                 return actual_run([sys.executable, *argv[5:]], **kwargs)
             with patch.object(C, 'HERE', adapter), patch.dict(C.HELPER_HASHES, {helper.name:C.sha(helper)}), patch.object(C, 'private_file'), patch.object(C.subprocess, 'run', side_effect=disposable_subprocess):
                 ops.service_probe()
@@ -306,6 +324,140 @@ class ControllerTests(unittest.TestCase):
         self.assertEqual(json.loads(result.stdout)['decision'], 'NO_GO')
         self.assertEqual(result.stderr, '')
 
+class FullPayloadBackupTests(unittest.TestCase):
+    def make_fixture(self, root):
+        source=root/'source'; source.mkdir(); backup=root/'backup'; backup.mkdir(mode=0o700)
+        files={'notes/one.png':b'PNG DISPOSABLE BYTES', 'notes/one.json':b'{"fixture":true}', 'other.bin':bytes(range(256))}
+        rows=[]
+        for name,data in files.items():
+            path=source/name;path.parent.mkdir(parents=True,exist_ok=True);path.write_bytes(data)
+            rows.append({'path':name,'bytes':len(data),'sha256':C.sha(path)})
+        manifest=backup/'drained-files.jsonl';manifest.write_text(''.join(json.dumps(v,separators=(',',':'))+'\n' for v in rows));manifest.chmod(0o600)
+        baseline={'payload':{'files':len(rows),'bytes':sum(v['bytes'] for v in rows),'fileManifest':manifest.name,'fileManifestSha256':C.sha(manifest)}}
+        return source,backup,baseline,files
+
+    def test_actual_complete_copies_survive_source_change_and_reopen_independently(self):
+        with tempfile.TemporaryDirectory(prefix='gd36-payload-copy-') as raw:
+            source,backup,baseline,files=self.make_fixture(Path(raw).resolve())
+            with patch.object(C.shutil,'disk_usage',return_value=SimpleNamespace(free=4*1024**3)):
+                proof=C.copy_payload_bytes(source,backup,baseline)
+            self.assertTrue(proof['verified']);self.assertTrue(C.verify_payload_copies(proof['destination'],proof['rows']))
+            for name,data in files.items():
+                original=source/name;copy=proof['destination']/name
+                self.assertNotEqual((original.stat().st_dev,original.stat().st_ino),(copy.stat().st_dev,copy.stat().st_ino))
+                self.assertEqual(stat.S_IMODE(copy.stat().st_mode),0o600)
+                original.write_bytes(b'CHANGED SOURCE ONLY')
+                self.assertEqual(copy.read_bytes(),data)
+            self.assertTrue(C.verify_payload_copies(proof['destination'],proof['rows']))
+
+    def test_space_and_source_digest_fail_before_configuration_and_preserve_originals(self):
+        for failure in ('space','source'):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory(prefix='gd36-payload-failure-') as raw:
+                source,backup,baseline,files=self.make_fixture(Path(raw).resolve())
+                if failure=='source':(source/'notes/one.png').write_bytes(b'X'*len(files['notes/one.png']))
+                captured={name:(source/name).read_bytes() for name in files}
+                class ActualCopyFailure(DisposableServices):
+                    def backup_payload(self,before):
+                        self.record('full-payload-backup')
+                        C.copy_payload_bytes(source,backup,baseline)
+                ops=ActualCopyFailure()
+                with patch.object(C.shutil,'disk_usage',return_value=SimpleNamespace(free=0 if failure=='space' else 4*1024**3)):
+                    result=C.Controller(ops,lambda:None).run()
+                self.assertEqual(result['decision'],'HOLD');self.assertNotIn('config',ops.events)
+                self.assertEqual(captured,{name:(source/name).read_bytes() for name in files})
+
+    def test_configure_itself_refuses_absent_or_corrupted_full_backup(self):
+        ops=object.__new__(C.LiveOps);ops.full_payload_backup=None
+        with self.assertRaisesRegex(C.Hold,'full_payload_backup_required'):ops.configure()
+        with tempfile.TemporaryDirectory(prefix='gd36-payload-config-') as raw:
+            source,backup,baseline,files=self.make_fixture(Path(raw).resolve())
+            with patch.object(C.shutil,'disk_usage',return_value=SimpleNamespace(free=4*1024**3)):
+                ops.full_payload_backup=C.copy_payload_bytes(source,backup,baseline)
+            (ops.full_payload_backup['destination']/'other.bin').write_bytes(b'corrupt')
+            with self.assertRaises(C.Hold):ops.configure()
+
+class LiveWriteFreshnessTests(unittest.TestCase):
+    def fixture(self,root):
+        ops=object.__new__(C.LiveOps);ops.full_payload_backup={'verified':True,'destination':root/'copies','rows':[]};ops.status={k:{'ready':True} for k in C.KINDS};ops.backup=root/'private-backup';ops.backup.mkdir();ops.plan={'privateConfig':{'preparedReceiverSha256':'fixture-sha'}};ops.debugger_absent=lambda:True;ops.identity=lambda k:None;ops.config_unchanged=lambda:None;ops.fast_continuity=lambda k,**kw:'stable-'+k;ops.config_stamps=lambda:{}
+        return ops
+
+    def test_withdrawn_gate_after_large_verification_blocks_every_config_write(self):
+        with tempfile.TemporaryDirectory(prefix='gd36-write-gate-') as raw:
+            ops=self.fixture(Path(raw).resolve());events=[]
+            ops.mac_gate=lambda:(_ for _ in ()).throw(C.Hold('mac_withdrawn_after_hashing'))
+            with patch.object(C,'verify_payload_copies',side_effect=lambda *a:events.append('hashed')), patch.object(ops,'atomic') as write, patch.object(ops,'command') as command, patch.object(C.Path,'mkdir') as mkdir:
+                with self.assertRaisesRegex(C.Hold,'mac_withdrawn'):ops.configure()
+                self.assertEqual(events,['hashed']);write.assert_not_called();command.assert_not_called();mkdir.assert_not_called()
+
+    def test_success_orders_hash_then_fresh_gate_then_writes_and_predaemon_gate(self):
+        with tempfile.TemporaryDirectory(prefix='gd36-write-order-') as raw:
+            root=Path(raw).resolve();ops=self.fixture(root);events=[]
+            receiver=root/'receiver.env';shared=root/'shared.env';overlay=root/'control.env'
+            receiver.write_bytes(b'OLD=value\n');shared.write_bytes(b'SHARED=value\n')
+            drops={k:root/(k+'.d')/'36.conf' for k in C.KINDS};token='t'*43
+            prepared={'OLD':'value','GENDRAGOON_CONTROL_INTERNAL_TOKEN':token,'GENDRAGOON_INTEGRATION_ENTITLEMENTS_URL':'http://127.0.0.1:17778/internal/receiver-entitlements'}
+            ops.proof=SimpleNamespace(environment_values=lambda value:{'OLD':'value'} if value==b'OLD=value\n' else prepared)
+            ops.mac_gate=lambda:events.append('fresh-gate') or approved_mac_proof();ops.atomic=lambda path,data:events.append('write');ops.command=lambda *a:events.append('daemon-reload')
+            real_read=Path.read_bytes
+            def read(path):
+                if str(path)=='/etc/red-x-ai/gendragoon-receiver.env.prepared-36':return b'PREPARED'
+                return real_read(path)
+            with patch.object(C,'verify_payload_copies',side_effect=lambda *a:events.append('hashed')), patch.object(C,'RECEIVER_ENV',receiver), patch.object(C,'SHARED_ENV',shared), patch.object(C,'OVERLAY',overlay), patch.object(C,'DROPINS',drops), patch.object(C,'private_file',side_effect=lambda p:Path(p).stat()), patch.object(C,'sha',return_value='fixture-sha'), patch.object(C.Path,'read_bytes',read):
+                ops.configure()
+            self.assertEqual(events[:3],['hashed','fresh-gate','write']);self.assertEqual(events[-2:],['fresh-gate','daemon-reload'])
+
+    def test_cleanup_manifest_reads_then_gate_before_either_network_removal(self):
+        for method,event in (('release_services','remove-service'),('cleanup','remove-guard')):
+            for withdrawn in (True,False):
+                with self.subTest(method=method,withdrawn=withdrawn):
+                    ops=object.__new__(C.LiveOps);events=[];ops.nonce='f'*32;ops.preservation={'after-start'};ops.plan={'privateConfig':{'sharedRedXEnvSha256':'unchanged'}};ops.debugger_absent=lambda:True
+                    ops.candidate_identity=lambda k:events.append('manifest-'+k) or True;ops.fast_continuity=lambda k,**kw:'stable-'+k
+                    def gate():
+                        events.append('fresh-gate')
+                        if withdrawn:raise C.Hold('mac_withdrawn_after_manifests')
+                        return approved_mac_proof()
+                    ops.mac_gate=gate;ops.net=SimpleNamespace(CleanupProof=lambda *a,**kw:'proof');ops.boundary=SimpleNamespace(remove_service_fence=lambda p:events.append('remove-service'),remove_guard=lambda p:events.append('remove-guard'))
+                    with patch.object(C,'sha',return_value='unchanged'):
+                        if withdrawn:
+                            with self.assertRaises(C.Hold):getattr(ops,method)()
+                        else:getattr(ops,method)()
+                    self.assertEqual(events,['manifest-control','manifest-receiver','fresh-gate']+([] if withdrawn else [event]))
+
+    def test_real_ops_and_controller_must_share_the_explicit_gate_instance(self):
+        ops=object.__new__(C.LiveOps);same=lambda:None;ops.mac_gate=same
+        C.Controller(ops,same)
+        with self.assertRaisesRegex(C.Hold,'mac_gate_instance_mismatch'):C.Controller(ops,lambda:None)
+        with self.assertRaises(TypeError):C.LiveOps({}, {})
+
+class PeriodicMacObserverTests(unittest.TestCase):
+    def test_protected_state_while_remote_stdout_idle_closes_only_stdin(self):
+        child=SimpleNamespace(stdout=object(),stdin=io.StringIO(),wait=unittest.mock.Mock())
+        ticks=iter([0,.2,.8,1.1,1.2,1.3])
+        with patch.object(C.time,'monotonic',side_effect=lambda:next(ticks)), patch.object(C.select,'select',return_value=([],[],[])), patch.object(C.uuid,'uuid4',return_value=SimpleNamespace(hex='periodic')):
+            proof=unittest.mock.Mock(side_effect=C.Hold('app_opened'))
+            with self.assertRaises(C.Hold):C.coordinate_stream(child,proof)
+        proof.assert_called_once_with('periodic');self.assertTrue(child.stdin.closed);child.wait.assert_not_called()
+
+    def test_partial_stdout_line_cannot_block_periodic_mac_observation(self):
+        reader=SimpleNamespace(fileno=lambda:123);child=SimpleNamespace(stdout=reader,stdin=io.StringIO(),wait=unittest.mock.Mock())
+        ticks=iter([0,.1,.2,1.1])
+        with patch.object(C.time,'monotonic',side_effect=lambda:next(ticks)), patch.object(C.select,'select',return_value=([reader],[],[])), patch.object(C.os,'read',return_value=b'{"partial":'), patch.object(C.uuid,'uuid4',return_value=SimpleNamespace(hex='periodic')):
+            proof=unittest.mock.Mock(side_effect=C.Hold('app_opened'))
+            with self.assertRaises(C.Hold):C.coordinate_stream(child,proof)
+        proof.assert_called_once_with('periodic');self.assertTrue(child.stdin.closed);child.wait.assert_not_called()
+
+    def test_phase_challenge_receives_fresh_matching_proof_and_natural_exit(self):
+        request={'type':'mac_gate_request','challenge':'new-phase'}
+        reader=SimpleNamespace(fileno=lambda:123);writer=io.StringIO()
+        child=SimpleNamespace(stdout=reader,stdin=writer,wait=unittest.mock.Mock(return_value=0))
+        answers=[]
+        class Capture(io.StringIO):
+            def close(self):answers.append(self.getvalue());super().close()
+        child.stdin=Capture();proof=unittest.mock.Mock(return_value={'challenge':'new-phase','fresh':True})
+        with patch.object(C.select,'select',return_value=([reader],[],[])), patch.object(C.os,'read',side_effect=[(json.dumps(request)+'\n').encode(),b'']):
+            self.assertEqual(C.coordinate_stream(child,proof),0)
+        proof.assert_called_once_with('new-phase');self.assertEqual(json.loads(answers[0]),{'challenge':'new-phase','fresh':True});self.assertTrue(child.stdin.closed)
+
 class ControllerBackendTests(unittest.TestCase):
     """Call real backend methods against disposable /proc and cgroup trees."""
 
@@ -316,7 +468,7 @@ class ControllerBackendTests(unittest.TestCase):
         self.proc = self.root/'proc'; self.proc.mkdir()
         self.system_slice = self.root/'cgroup/system.slice'
         self.system_slice.mkdir(parents=True)
-        self.ops = object.__new__(C.LiveOps)
+        self.ops = object.__new__(C.LiveOps);self.ops.mutation_proof=approved_mac_proof()
         self.ops.plan = {'expectedPIDs': {'control': 100, 'receiver': 200},
                          'expectedNodeSha256': 'fixture-node-digest'}
         self.ops.candidates = {}
@@ -623,6 +775,152 @@ class ControllerBackendTests(unittest.TestCase):
                 self.assertEqual(events[:3], ['queue', 'cache', 'quiet'])
                 imports.assert_not_called()
 
+
+class PostGateContinuityTests(unittest.TestCase):
+    def fixture(self,candidate=False):
+        f=ControllerBackendTests(methodName='runTest');f.setUp();self.addCleanup(f.doCleanups);ops=f.ops;props={}
+        ops.plan['expectedStartTicks']={};ops.plan['expectedProcessEnvironmentSha256']={};ops.status={};ops.preservation={'stopped','after-start'};ops.nonce='a'*32
+        for kind,pid in (('control',123),('receiver',223)):
+            folder=f.process(kind,pid=pid);raw=(folder/'environ').read_bytes();envsha=hashlib.sha256(raw).hexdigest();ops.plan['expectedPIDs'][kind]=pid;ops.plan['expectedStartTicks'][kind]=456;ops.plan['expectedProcessEnvironmentSha256'][kind]=envsha;ops.candidates[kind]=(pid,456,envsha)
+            props[kind]={**f.candidate_context(kind,pid),'KillMode':'mixed','SendSIGKILL':'no','TimeoutStopUSec':'infinity'}
+            ops.status[kind]={'pid':pid,'ready':True,'closed':True,'workAdmissionFenced':True,'pendingRejected':0}
+            if not candidate:f.links[kind].unlink();f.links[kind].symlink_to(C.ACTIVE[kind])
+        ops.properties=lambda k,**kw:dict(props[k]);ops.identity=lambda k:(ops.plan['expectedPIDs'][k],456,{})
+        ops.config_unchanged=lambda:None;ops.config_stamps=lambda:{};ops.owned_listeners=lambda pid:[];ops.service_listeners=lambda k,pid:None;ops.debugger_absent=lambda:True
+        self.addCleanup(patch.stopall)
+        patch.object(C.pwd,'getpwnam',return_value=SimpleNamespace(pw_uid=os.getuid())).start()
+        patch.object(C,'file_stamp',side_effect=lambda path:('stable',str(path))).start()
+        return f,ops,props
+
+    def change(self,f,ops,props,kind,change):
+        if change=='pid':props[kind]['MainPID']='999'
+        if change=='start':
+            pid=ops.plan['expectedPIDs'][kind];(f.proc/str(pid)/'stat').write_text(str(pid)+' (node) S '+'0 '*18+'999\n')
+        if change=='environment':
+            pid=ops.plan['expectedPIDs'][kind];(f.proc/str(pid)/'environ').write_bytes(b'UNREVIEWED=changed\0')
+
+    def test_gate_replacement_prevents_ordinary_stop(self):
+        for change in ('pid','start','environment'):
+            with self.subTest(change=change):
+                f,ops,props=self.fixture();ops.command=unittest.mock.Mock()
+                def gate():self.change(f,ops,props,'control',change);return approved_mac_proof()
+                ops.mac_gate=gate
+                with self.assertRaises(C.Hold):ops.stop('control')
+                ops.command.assert_not_called()
+
+    def test_gate_replacement_prevents_owned_configuration_writes(self):
+        f,ops,props=self.fixture();ops.full_payload_backup={'verified':True,'destination':f.root/'copies','rows':[]};ops.command=unittest.mock.Mock();ops.atomic=unittest.mock.Mock()
+        def gate():self.change(f,ops,props,'receiver','start');return approved_mac_proof()
+        ops.mac_gate=gate
+        with patch.object(C,'verify_payload_copies'):
+            with self.assertRaises(C.Hold):ops.configure()
+        ops.command.assert_not_called();ops.atomic.assert_not_called()
+
+    def test_gate_replacement_prevents_both_network_fence_removals(self):
+        for method in ('release_services','cleanup'):
+            for change in ('pid','start','environment'):
+                with self.subTest(method=method,change=change):
+                    f,ops,props=self.fixture(candidate=True);ops.candidate_identity=lambda k:True;ops.net=SimpleNamespace(CleanupProof=lambda *a,**kw:'proof');ops.boundary=SimpleNamespace(remove_service_fence=unittest.mock.Mock(),remove_guard=unittest.mock.Mock())
+                    def gate():self.change(f,ops,props,'control',change);return approved_mac_proof()
+                    ops.mac_gate=gate
+                    with self.assertRaises(C.Hold):getattr(ops,method)()
+                    ops.boundary.remove_service_fence.assert_not_called();ops.boundary.remove_guard.assert_not_called()
+
+    def test_gate_start_or_orphan_or_lock_prevents_environment_and_link_switch(self):
+        for change in ('start','orphan','lock'):
+            with self.subTest(change=change):
+                f,ops,props=self.fixture();storage=f.root/'payload';storage.mkdir();ops.old_env={'REDX_RECEIVERS_ROOT':str(storage)};ops.plan['privateConfig']={'sharedRedXEnvSha256':'unchanged'};ops.atomic=unittest.mock.Mock()
+                for kind in C.KINDS:props[kind].update(MainPID='0',ActiveState='inactive');(f.system_slice/('gendragoon-'+kind+'.service')/'cgroup.procs').write_text('')
+                def gate():
+                    if change=='start':props['receiver'].update(MainPID='223',ActiveState='active')
+                    if change=='orphan':(f.system_slice/'gendragoon-control.service/cgroup.procs').write_text('123\n')
+                    if change=='lock':(storage/'.writer-lock').mkdir()
+                    return approved_mac_proof()
+                ops.mac_gate=gate
+                with patch.object(C,'sha',return_value='unchanged'),patch.object(C.os,'symlink') as symlink:
+                    with self.assertRaises(C.Hold):ops.switch()
+                    ops.atomic.assert_not_called();symlink.assert_not_called()
+
+    def test_proof_aging_during_post_gate_continuity_blocks_configuration(self):
+        f,ops,props=self.fixture();ops.full_payload_backup={'verified':True,'destination':f.root/'copies','rows':[]};ops.command=unittest.mock.Mock();ops.atomic=unittest.mock.Mock();clock=[100];calls=[0]
+        real=ops.fast_continuity
+        def continuity(*a,**kw):
+            result=real(*a,**kw);calls[0]+=1
+            if calls[0]==4:clock[0]=111
+            return result
+        ops.fast_continuity=continuity;ops.mac_gate=approved_mac_proof
+        with patch.object(C.time,'time',side_effect=lambda:clock[0]),patch.object(C,'verify_payload_copies'):
+            with self.assertRaisesRegex(C.Hold,'mac_proof_stale'):ops.configure()
+        ops.command.assert_not_called();ops.atomic.assert_not_called()
+
+    def test_post_gate_show_uses_two_second_bound(self):
+        ops=object.__new__(C.LiveOps);ops.command=unittest.mock.Mock(return_value='MainPID=0\nActiveState=inactive')
+        ops.properties('control',timeout=2)
+        self.assertEqual(ops.command.call_args.kwargs['timeout'],2)
+
+    def test_mutating_command_rejects_original_expired_proof_before_subprocess(self):
+        ops=object.__new__(C.LiveOps);ops.mutation_proof={**approved_mac_proof(),'observedAtEpoch':time.time()-11}
+        with patch.object(C.subprocess,'check_output') as launch:
+            for verb in ('start','stop','daemon-reload'):
+                with self.assertRaisesRegex(C.Hold,'mac_proof_stale'):ops.command('/usr/bin/systemctl',verb,'gendragoon-control.service')
+            launch.assert_not_called()
+
+    def test_retained_original_proof_aging_during_kernel_check_prevents_apply(self):
+        clock=[100];events=[]
+        class FakeKernel:
+            def __init__(self,**kw):self.guard_retained=True
+            def invoke(self,args,script=None,*,mutation=False):
+                events.append('apply' if mutation else 'check')
+                if mutation:self.guard_retained=False
+                else:clock[0]=111
+                return '{}'
+        net=SimpleNamespace(KernelBackend=FakeKernel,NetworkBoundary=lambda nonce,backend:SimpleNamespace(backend=backend))
+        gate=approved_mac_proof
+        with patch.object(C,'verify_bundle'),patch.object(C,'module',return_value=net),patch.object(C.time,'time',side_effect=lambda:clock[0]):
+            ops=C.LiveOps({}, {}, mac_gate=gate);controller=C.Controller(ops,gate)
+            def operation():
+                ops.boundary.backend.invoke(('-c','-f','-'),'fixture')
+                ops.boundary.backend.invoke(('-f','-'),'fixture',mutation=True)
+            with self.assertRaisesRegex(C.Hold,'mac_proof_stale'):controller.step('debugger-guard',operation)
+        self.assertEqual(events,['check']);self.assertTrue(ops.boundary.backend.guard_retained)
+
+class ExpiredPhaseJournalTests(unittest.TestCase):
+    def setUp(self):
+        self.temporary=tempfile.TemporaryDirectory(prefix='gd36-journal-');self.addCleanup(self.temporary.cleanup);self.root=Path(self.temporary.name).resolve()/'root';self.root.mkdir(mode=0o700);self.nonce='a'*32;self.backup=self.root/('gendragoon36-preactivation-'+self.nonce);self.backup.mkdir(mode=0o700)
+        self.ops=object.__new__(C.LiveOps);self.ops.nonce=self.nonce;self.ops.backup=self.backup;self.ops.mutation_proof=approved_mac_proof();self.clock=[100];self.ops.mac_gate=approved_mac_proof
+        real_path=Path;real_lstat=Path.lstat
+        def mapped(value):return self.root if str(value)=='/root' else real_path(value)
+        def root_owned_info(path,*args,**kwargs):
+            info=real_lstat(path,*args,**kwargs)
+            if path in (self.root,self.backup,self.backup/'phase.json'):
+                fields={name:getattr(info,name) for name in dir(info) if name.startswith('st_')};fields['st_uid']=0;return SimpleNamespace(**fields)
+            return info
+        for context in (patch.object(C,'Path',side_effect=mapped),patch.object(Path,'lstat',root_owned_info),patch.object(C.os,'fchown'),patch.object(C.time,'time',side_effect=lambda:self.clock[0])):
+            context.start();self.addCleanup(context.stop)
+
+    def test_real_completion_and_hold_journal_survive_expired_long_phase(self):
+        controller=C.Controller(self.ops,self.ops.mac_gate,self.ops.journal)
+        def long_phase():self.clock[0]=700;return 'read-only-phase-finished'
+        self.assertEqual(controller.step('full-payload-byte-backup',long_phase),'read-only-phase-finished')
+        leaf=self.backup/'phase.json';record=json.loads(leaf.read_text());self.assertEqual(record,{'operationNonce':self.nonce,'phase':'full-payload-byte-backup','state':'complete'});self.assertEqual(stat.S_IMODE(leaf.stat().st_mode),0o600)
+        self.ops.journal({'decision':'HOLD','phase':'owned-config','activationComplete':False})
+        self.assertEqual(json.loads(leaf.read_text())['decision'],'HOLD')
+        self.assertEqual(sorted(p.name for p in self.backup.iterdir()),['phase.json'])
+
+    def test_config_atomic_stays_proof_gated_after_expired_journal(self):
+        self.ops.mutation_proof={**approved_mac_proof(),'observedAtEpoch':100};self.clock[0]=700;self.ops.journal({'decision':'HOLD','phase':'drained-snapshot'})
+        target=self.backup/'owned-config.env';target.write_bytes(b'ORIGINAL')
+        with self.assertRaisesRegex(C.Hold,'mac_proof_stale'):self.ops.atomic(target,b'FORBIDDEN')
+        self.assertEqual(target.read_bytes(),b'ORIGINAL');self.assertEqual(sorted(p.name for p in self.backup.iterdir()),['owned-config.env','phase.json'])
+
+    def test_journal_rejects_other_directory_permissions_and_symlink_leaf(self):
+        other=self.root/'other';other.mkdir(mode=0o700);self.ops.backup=other
+        with self.assertRaisesRegex(C.Hold,'phase_journal_scope_invalid'):self.ops.journal({'decision':'HOLD'})
+        self.assertEqual(list(other.iterdir()),[]);self.ops.backup=self.backup;self.backup.chmod(0o755)
+        with self.assertRaisesRegex(C.Hold,'phase_journal_directory_invalid'):self.ops.journal({'decision':'HOLD'})
+        self.backup.chmod(0o700);target=self.root/'preserve.env';target.write_bytes(b'ORIGINAL');(self.backup/'phase.json').symlink_to(target)
+        with self.assertRaises(C.Hold):self.ops.journal({'decision':'HOLD'})
+        self.assertEqual(target.read_bytes(),b'ORIGINAL')
 
 class InspectorSocketOwnershipTests(unittest.TestCase):
     def test_linux_actual_duplicate_websocket_client_is_refused(self):

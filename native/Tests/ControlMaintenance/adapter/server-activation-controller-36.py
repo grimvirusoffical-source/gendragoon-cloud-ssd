@@ -9,7 +9,7 @@ restore exists. This file is not approval to execute a bundle.
 from __future__ import annotations
 import sys
 sys.dont_write_bytecode=True
-import argparse,datetime,fcntl,hashlib,importlib.util,json,math,os,platform,pwd,re,select,signal,socket,stat,subprocess,time,uuid
+import argparse,datetime,fcntl,hashlib,importlib.util,json,math,os,platform,pwd,re,select,shutil,signal,socket,stat,subprocess,time,uuid
 from pathlib import Path
 
 HERE=Path(__file__).resolve().parent
@@ -33,6 +33,8 @@ def need(value,code):
  if not value:raise Hold(code)
 
 def sha(path):return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+def file_stamp(path):
+ s=Path(path).stat();return (s.st_dev,s.st_ino,s.st_size,s.st_mtime_ns,s.st_ctime_ns,s.st_mode,s.st_uid,s.st_gid,s.st_nlink)
 def module(name,path):
  spec=importlib.util.spec_from_file_location(name,path);value=importlib.util.module_from_spec(spec);sys.modules[name]=value;spec.loader.exec_module(value);return value
 
@@ -43,12 +45,62 @@ def trusted_directory(path):
  path=Path(path);s=path.lstat();need(path.is_absolute() and path.resolve()==path and stat.S_ISDIR(s.st_mode) and s.st_uid==0 and s.st_mode&0o022==0,'directory_untrusted');return path
 
 def verify_bundle(review):
+ need(sys.flags.optimize==0,'optimized_python_forbidden')
  need(sys.platform=='linux' and os.geteuid()==0,'linux_root_required')
  need(review.get('reviewedForExecution') is True and review.get('implementationCISuccess') is True,'bundle_not_reviewed')
  need(re.fullmatch('[0-9a-f]{40}',review.get('validatedCommit','')) is not None,'ci_commit_unverified')
  need(set(review['files'])==set(ADAPTER_FILES),'bundle_file_scope_invalid');trusted_directory(HERE);trusted_directory(HERE.parent)
  for name,digest in review['files'].items():private_file(HERE/name);need(sha(HERE/name)==digest,'bundle_hash_mismatch')
  for name,digest in HELPER_HASHES.items():private_file(HERE.parent/name);need(sha(HERE.parent/name)==digest,'proof_helper_changed')
+
+def copy_directory(path):
+ path=Path(path);info=path.lstat();need(path.resolve()==path and stat.S_ISDIR(info.st_mode) and info.st_uid==os.geteuid() and stat.S_IMODE(info.st_mode)==0o700,'payload_backup_directory_invalid');return path
+
+def payload_rows(backup,baseline):
+ manifest=copy_directory(backup)/baseline['payload']['fileManifest'];need(manifest.parent==Path(backup) and manifest.name==baseline['payload']['fileManifest'],'payload_manifest_path_invalid');private_file(manifest,os.geteuid());need(sha(manifest)==baseline['payload']['fileManifestSha256'],'payload_manifest_changed');rows=[];names=set()
+ with manifest.open('r') as stream:
+  for line in stream:
+   need(len(line)<=32768,'payload_manifest_row_oversized');row=json.loads(line);need(set(row)=={'path','bytes','sha256'} and type(row['path']) is str,'payload_manifest_shape_invalid');relative=Path(row['path']);need(not relative.is_absolute() and '..' not in relative.parts and str(relative)==row['path'] and str(relative) not in ('','.') and relative.parts[0]!='.writer-lock' and row['path'] not in names,'payload_manifest_relative_path_invalid');need(type(row['bytes']) is int and row['bytes']>=0 and re.fullmatch('[0-9a-f]{64}',row['sha256']) is not None,'payload_manifest_value_invalid');names.add(row['path']);rows.append(row)
+ need(len(rows)==baseline['payload']['files'] and sum(v['bytes'] for v in rows)==baseline['payload']['bytes'],'payload_manifest_totals_invalid');return rows
+
+def verify_payload_copies(destination,rows):
+ destination=copy_directory(destination);seen=set()
+ for path in destination.rglob('*'):
+  need(not path.is_symlink(),'payload_backup_link_invalid')
+  if path.is_dir():copy_directory(path)
+  else:private_file(path,os.geteuid());seen.add(str(path.relative_to(destination)))
+ need(seen=={row['path'] for row in rows},'payload_backup_coverage_invalid')
+ for row in rows:
+  path=destination/row['path'];before=private_file(path,os.geteuid());need(before.st_size==row['bytes'],'payload_backup_size_invalid');h=hashlib.sha256();fd=os.open(path,os.O_RDONLY|os.O_NOFOLLOW)
+  with os.fdopen(fd,'rb') as file:
+   opened=os.fstat(file.fileno());need((opened.st_dev,opened.st_ino)==(before.st_dev,before.st_ino),'payload_backup_replaced')
+   for block in iter(lambda:file.read(1024*1024),b''):h.update(block)
+   after=os.fstat(file.fileno())
+  final=path.lstat();need((before.st_dev,before.st_ino,before.st_size,before.st_mtime_ns,before.st_ctime_ns)==(after.st_dev,after.st_ino,after.st_size,after.st_mtime_ns,after.st_ctime_ns)==(final.st_dev,final.st_ino,final.st_size,final.st_mtime_ns,final.st_ctime_ns) and h.hexdigest()==row['sha256'],'payload_backup_verification_failed')
+ return True
+
+def copy_payload_bytes(source_root,backup,baseline):
+ source_root=Path(source_root);need(source_root.resolve()==source_root and source_root.is_dir(),'payload_source_root_invalid');backup=copy_directory(backup);rows=payload_rows(backup,baseline);total=sum(v['bytes'] for v in rows);margin=max(1024**3,(total+9)//10);overhead=len(rows)*8192
+ need(shutil.disk_usage(backup).free>=total+overhead+margin,'payload_backup_space_insufficient');destination=backup/'payload-full-bytes';destination.mkdir(mode=0o700);remaining=total
+ for row in rows:
+  need(shutil.disk_usage(backup).free>=remaining+margin,'payload_backup_space_changed');relative=Path(row['path']);source=source_root/relative;need(source.resolve()==source,'payload_source_link_invalid');before=source.lstat();need(stat.S_ISREG(before.st_mode) and before.st_size==row['bytes'],'payload_source_invalid');target=destination/relative
+  for parent in reversed(target.parent.relative_to(destination).parents):
+   if parent!=Path('.'): (destination/parent).mkdir(mode=0o700,exist_ok=True)
+  target.parent.mkdir(mode=0o700,parents=True,exist_ok=True);copy_directory(target.parent)
+  reader=os.open(source,os.O_RDONLY|os.O_NOFOLLOW)
+  with os.fdopen(reader,'rb') as incoming:
+   opened=os.fstat(incoming.fileno());need((opened.st_dev,opened.st_ino,opened.st_size,opened.st_mtime_ns,opened.st_ctime_ns)==(before.st_dev,before.st_ino,before.st_size,before.st_mtime_ns,before.st_ctime_ns),'payload_source_replaced');writer=os.open(target,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600);h=hashlib.sha256();written=0
+   with os.fdopen(writer,'wb') as outgoing:
+    for block in iter(lambda:incoming.read(1024*1024),b''):outgoing.write(block);h.update(block);written+=len(block)
+    outgoing.flush();os.fsync(outgoing.fileno());copied=os.fstat(outgoing.fileno());need(copied.st_uid==os.geteuid() and stat.S_IMODE(copied.st_mode)==0o600 and copied.st_nlink==1 and (copied.st_dev,copied.st_ino)!=(opened.st_dev,opened.st_ino),'payload_copy_identity_invalid')
+   after=os.fstat(incoming.fileno())
+  final=source.lstat();need((before.st_dev,before.st_ino,before.st_size,before.st_mtime_ns,before.st_ctime_ns)==(after.st_dev,after.st_ino,after.st_size,after.st_mtime_ns,after.st_ctime_ns)==(final.st_dev,final.st_ino,final.st_size,final.st_mtime_ns,final.st_ctime_ns) and written==row['bytes'] and h.hexdigest()==row['sha256'],'payload_source_changed_during_copy');remaining-=row['bytes']
+ for path in [*sorted((p for p in destination.rglob('*') if p.is_dir()),key=lambda p:len(p.parts),reverse=True),destination,backup]:
+  fd=os.open(path,os.O_RDONLY|os.O_DIRECTORY);os.fsync(fd);os.close(fd)
+ verify_payload_copies(destination,rows);return {'destination':destination,'rows':rows,'verified':True,'bytes':total,'marginBytes':margin,'measuredSpaceRequired':total+overhead+margin}
+
+def phase_journal_path(backup,nonce):
+ need(type(nonce) is str and re.fullmatch('[0-9a-f]{32}',nonce) is not None,'phase_journal_nonce_invalid');expected=Path('/root')/('gendragoon36-preactivation-'+nonce);need(Path(backup)==expected and expected.resolve()==expected,'phase_journal_scope_invalid');trusted_directory(Path('/root'));info=expected.lstat();need(stat.S_ISDIR(info.st_mode) and info.st_uid==0 and stat.S_IMODE(info.st_mode)==0o700,'phase_journal_directory_invalid');return expected/'phase.json'
 
 def validate_mac_proof(proof,challenge,now=None):
  now=time.time() if now is None else now
@@ -62,13 +114,17 @@ class MacRPCGate:
  def __call__(self):
   challenge=uuid.uuid4().hex;print(json.dumps({'type':'mac_gate_request','challenge':challenge}),flush=True)
   need(bool(select.select([sys.stdin],[],[],30)[0]),'mac_coordinator_unavailable')
-  line=sys.stdin.readline(16385);need(0<len(line)<=16384,'mac_proof_unavailable');validate_mac_proof(json.loads(line),challenge)
+  line=sys.stdin.readline(16385);need(0<len(line)<=16384,'mac_proof_unavailable');proof=json.loads(line);validate_mac_proof(proof,challenge);return proof
 
 class Controller:
  """Ordering is shared by live backend and disposable failure-injection tests."""
- def __init__(self,ops,mac_gate,journal=lambda value:None):self.ops=ops;self.mac_gate=mac_gate;self.journal=journal;self.phase='not-started';self.started=False;self.candidate_may_run=False;self.public_may_open=False;self.guard_cleanup_may_start=False
+ def __init__(self,ops,mac_gate,journal=lambda value:None):
+  if isinstance(ops,LiveOps):need(ops.mac_gate is mac_gate,'mac_gate_instance_mismatch')
+  self.ops=ops;self.mac_gate=mac_gate;self.journal=journal;self.phase='not-started';self.started=False;self.candidate_may_run=False;self.public_may_open=False;self.guard_cleanup_may_start=False
  def step(self,name,fn):
-  self.mac_gate();self.phase=name
+  proof=self.mac_gate()
+  if isinstance(self.ops,LiveOps):self.ops.mutation_proof=proof
+  self.phase=name
   if name in ('start-control','start-receiver'):self.candidate_may_run=True
   if name=='release-service-fence':self.public_may_open=True
   if name=='owned-debugger-guard-cleanup':self.guard_cleanup_may_start=True
@@ -84,6 +140,7 @@ class Controller:
    self.step('receiver-enable',lambda:self.ops.enable('receiver'));self.step('receiver-fence',lambda:self.ops.install('receiver'))
    self.step('receiver-drain',lambda:self.ops.drain('receiver'));self.step('receiver-inspector-close',lambda:self.ops.close_inspector('receiver'))
    before=self.step('drained-snapshot',lambda:self.ops.snapshot('drained'))
+   self.step('full-payload-byte-backup',lambda:self.ops.backup_payload(before))
    self.step('owned-config',self.ops.configure)
    self.step('ordinary-stop-control',lambda:self.ops.stop('control'));self.step('ordinary-stop-receiver',lambda:self.ops.stop('receiver'))
    self.step('stopped-preservation',lambda:self.ops.compare(before,self.ops.snapshot('stopped')))
@@ -144,23 +201,39 @@ class Transport:
   return self.reply()
 
 class LiveOps:
- def __init__(self,plan,review):
-  self.plan=plan;self.review=review;self.nonce=uuid.uuid4().hex;self.clients={};self.status={};self.old_env=None;self.token=None;self.preservation=set();self.old_environments={};self.candidates={}
+ def __init__(self,plan,review,*,mac_gate):
+  need(callable(mac_gate),'explicit_mac_gate_required');self.mac_gate=mac_gate
+  self.plan=plan;self.review=review;self.nonce=uuid.uuid4().hex;self.clients={};self.status={};self.old_env=None;self.token=None;self.preservation=set();self.old_environments={};self.candidates={};self.full_payload_backup=None
   verify_bundle(review) # Verify every executable byte before importing a backend.
   self.net=module('gd36_network',HERE/'server-network-boundary-36.py')
-  self.boundary=self.net.NetworkBoundary(self.nonce,backend=self.net.KernelBackend(enable_mutations=True))
+  self.mutation_proof=None
+  owner=self
+  class FreshMacBackend(self.net.KernelBackend):
+   def invoke(backend,args,script=None,*,mutation=False):
+    if mutation:owner.require_fresh_mac(owner.mutation_proof)
+    return super().invoke(args,script,mutation=mutation)
+  self.boundary=self.net.NetworkBoundary(self.nonce,backend=FreshMacBackend(enable_mutations=True))
   self.backup=None
  def journal(self,record):
   if self.backup is None:
    if record!={'phase':'debugger-guard','state':'before'}:return
    trusted_directory('/root');self.backup=Path('/root')/('gendragoon36-preactivation-'+self.nonce);self.backup.mkdir(mode=0o700)
-  self.atomic(self.backup/'phase.json',json.dumps({'operationNonce':self.nonce,**record},sort_keys=True).encode())
+  self._write_phase_journal(json.dumps({'operationNonce':self.nonce,**record},sort_keys=True).encode())
+ def _write_phase_journal(self,data):
+  # This fixed evidence leaf alone may persist after a phase's proof expires.
+  # There is no caller-supplied path or flag that bypasses atomic() protection.
+  target=phase_journal_path(self.backup,self.nonce);need(type(data) is bytes and len(data)<=16384,'phase_journal_record_invalid');need(not target.is_symlink(),'phase_journal_link_invalid')
+  if target.exists():private_file(target)
+  temporary=target.with_name('.phase.json.'+uuid.uuid4().hex);fd=os.open(temporary,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
+  with os.fdopen(fd,'wb') as output:os.fchown(output.fileno(),0,0);os.fchmod(output.fileno(),0o600);output.write(data);output.flush();os.fsync(output.fileno())
+  phase_journal_path(self.backup,self.nonce);need(not target.is_symlink(),'phase_journal_link_invalid');os.replace(temporary,target);directory=os.open(self.backup,os.O_RDONLY|os.O_DIRECTORY);os.fsync(directory);os.close(directory)
  def command(self,*args,timeout=30):
   need(args[0] in ('/usr/bin/systemctl','/usr/bin/node','/usr/sbin/runuser','/usr/bin/python3'),'command_not_allowlisted')
+  if args[0]=='/usr/bin/systemctl' and args[1] in ('start','stop','daemon-reload'):self.require_fresh_mac(self.mutation_proof)
   try:return subprocess.check_output(args,text=True,timeout=timeout,stderr=subprocess.DEVNULL,env={'PATH':'/usr/sbin:/usr/bin:/sbin:/bin','LC_ALL':'C','PYTHONDONTWRITEBYTECODE':'1'}).strip()
   except Exception:raise Hold('owned_command_failed') from None
- def properties(self,k):
-  raw=self.command('/usr/bin/systemctl','show','gendragoon-'+k+'.service','-p','MainPID','-p','ActiveState','-p','ControlGroup','-p','KillMode','-p','SendSIGKILL','-p','TimeoutStopUSec')
+ def properties(self,k,*,timeout=30):
+  raw=self.command('/usr/bin/systemctl','show','gendragoon-'+k+'.service','-p','MainPID','-p','ActiveState','-p','ControlGroup','-p','KillMode','-p','SendSIGKILL','-p','TimeoutStopUSec',timeout=timeout)
   return dict(v.split('=',1) for v in raw.splitlines() if '=' in v)
  def identity(self,k):
   p=self.properties(k);pid=int(p['MainPID']);need(pid==self.plan['expectedPIDs'][k] and pid>1,'old_pid_changed');folder=Path('/proc')/str(pid);uid=pwd.getpwnam('redxai').pw_uid
@@ -172,6 +245,26 @@ class LiveOps:
   env=dict(v.split('=',1) for v in raw.decode().split('\0') if '=' in v);need(not env.get('NODE_OPTIONS') and not env.get('NODE_PATH'),'unreviewed_node_preload')
   need(os.readlink(LINKS[k])==ACTIVE[k] and sha(LINKS[k]/'native/RedXCloud'/('control-server.cjs' if k=='control' else 'server.cjs'))==SOURCE_HASHES[k],'active_source_changed')
   return pid,start,env
+ def require_fresh_mac(self,proof):
+  need(type(proof) is dict and type(proof.get('challenge')) is str,'acknowledged_mac_proof_required');validate_mac_proof(proof,proof['challenge']);return proof
+ def acknowledge_mac(self):
+  proof=self.mac_gate();self.require_fresh_mac(proof);self.mutation_proof=proof;return proof
+ def config_stamps(self):
+  return {str(p):file_stamp(p) for p in (RECEIVER_ENV,SHARED_ENV,Path('/etc/red-x-ai/gendragoon-receiver.env.prepared-36'))}
+ def fast_continuity(self,k,*,candidate=False):
+  p=self.properties(k,timeout=2);pid=int(p['MainPID']);need(p['ActiveState']=='active' and p['ControlGroup']=='/system.slice/gendragoon-'+k+'.service','post_gate_unit_changed');folder=Path('/proc')/str(pid)
+  pin=self.candidates[k] if candidate else (self.plan['expectedPIDs'][k],self.plan['expectedStartTicks'][k],self.plan['expectedProcessEnvironmentSha256'][k])
+  need(pid==pin[0] and pid>1,'post_gate_pid_changed');need(folder.stat().st_uid==pwd.getpwnam('redxai').pw_uid and os.readlink(folder/'exe')=='/usr/bin/node','post_gate_executable_changed');start=int((folder/'stat').read_text().split(') ',1)[1].split()[19]);raw=(folder/'environ').read_bytes();need((pid,start,hashlib.sha256(raw).hexdigest())==tuple(pin),'post_gate_process_changed')
+  expected=str(LINKS[k]/'native/RedXCloud'/('control-server.cjs' if k=='control' else 'server.cjs'));need((folder/'cmdline').read_bytes().split(b'\0')[:-1]==[b'/usr/bin/node',expected.encode()],'post_gate_arguments_changed');self.verify_membership(k,pid);need(self.cgroup_members(k,pid)=={str(pid)},'post_gate_children_present')
+  target=TARGETS[k] if candidate else ACTIVE[k];need(os.readlink(LINKS[k])==target,'post_gate_link_changed')
+  if candidate:self.service_listeners(k,pid)
+  else:
+   status=self.status[k];need(status['ready'] is True and status['pid']==pid and status['closed'] is True and status['workAdmissionFenced'] is True and status['pendingRejected']==0,'old_drain_proof_changed');need(not self.owned_listeners(pid),'old_drained_listener_reopened')
+  return {'identity':tuple(pin),'exe':file_stamp(folder/'exe'),'source':file_stamp(Path(target)/'native/RedXCloud'/('control-server.cjs' if k=='control' else 'server.cjs'))}
+ def stopped_continuity(self):
+  for k in KINDS:
+   p=self.properties(k,timeout=2);need(p['MainPID']=='0' and p['ActiveState']=='inactive' and p['ControlGroup'] in ('','/system.slice/gendragoon-'+k+'.service'),'post_gate_service_not_stopped');need(not self.cgroup_members(k),'post_gate_stopped_children_present');need(os.readlink(LINKS[k])==ACTIVE[k],'post_gate_stopped_link_changed')
+  need(not (Path(self.old_env['REDX_RECEIVERS_ROOT'])/'.writer-lock').exists(),'post_gate_writer_lock_present');return self.config_stamps()
  def cgroup_members(self,k,active_pid=0):
   group=Path('/sys/fs/cgroup/system.slice')/('gendragoon-'+k+'.service')
   if not group.exists():need(not active_pid,'active_cgroup_missing');return set()
@@ -236,7 +329,7 @@ class LiveOps:
   # A pidfd remains bound to this process even if its numeric PID is reused.
   need(hasattr(os,'pidfd_open') and hasattr(signal,'pidfd_send_signal'),'pidfd_required');fd=os.pidfd_open(pid,0)
   try:
-   need(self.identity(k)[0]==pid,'signal_identity_changed');signal.pidfd_send_signal(fd,signal.SIGUSR1)
+   need(self.identity(k)[0]==pid,'signal_identity_changed');self.require_fresh_mac(self.mutation_proof);signal.pidfd_send_signal(fd,signal.SIGUSR1)
   finally:os.close(fd)
   end=time.monotonic()+10
   while time.monotonic()<end:
@@ -258,7 +351,7 @@ class LiveOps:
  def verify_session(self,k):
   need(self.clients[k].process.poll() is None,'owned_transport_exited');return inspector_session_pair(self.identity(k)[0],self.clients[k].process.pid)
  def install(self,k):
-  self.verify_session(k);value=self.clients[k].call('install');self.verify_session(k);return value
+  self.verify_session(k);self.require_fresh_mac(self.mutation_proof);value=self.clients[k].call('install');self.verify_session(k);return value
  def drain(self,k):
   deadline=time.monotonic()+120
   while time.monotonic()<deadline:
@@ -267,7 +360,7 @@ class LiveOps:
    time.sleep(.25)
   raise Hold('still_draining_no_force')
  def close_inspector(self,k):
-  self.verify_session(k);self.clients[k].call('close');deadline=time.monotonic()+10
+  self.verify_session(k);self.require_fresh_mac(self.mutation_proof);self.clients[k].call('close');deadline=time.monotonic()+10
   while time.monotonic()<deadline:
    try:self.debugger_absent();return
    except Hold:time.sleep(.1)
@@ -279,13 +372,17 @@ class LiveOps:
   value=self.snap.snapshot(self.old_env,self.backup,label);value['maintenancePhase']=label;return value
  def compare(self,a,b):self.proof.same_data(a,b);self.preservation.add(b['maintenancePhase'])
  def atomic(self,path,data):
-  path=Path(path);trusted_directory(path.parent);need(not path.is_symlink(),'atomic_path_invalid');temp=path.with_name('.'+path.name+'.'+uuid.uuid4().hex);fd=os.open(temp,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
+  path=Path(path);trusted_directory(path.parent);need(not path.is_symlink(),'atomic_path_invalid');self.require_fresh_mac(self.mutation_proof);temp=path.with_name('.'+path.name+'.'+uuid.uuid4().hex);fd=os.open(temp,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
   with os.fdopen(fd,'wb') as f:f.write(data);f.flush();os.fsync(f.fileno())
-  os.chown(temp,0,0);os.replace(temp,path);directory=os.open(path.parent,os.O_RDONLY|os.O_DIRECTORY);os.fsync(directory);os.close(directory)
+  os.chown(temp,0,0);self.require_fresh_mac(self.mutation_proof);os.replace(temp,path);directory=os.open(path.parent,os.O_RDONLY|os.O_DIRECTORY);os.fsync(directory);os.close(directory)
+ def backup_payload(self,baseline):
+  value=copy_payload_bytes(self.old_env['REDX_RECEIVERS_ROOT'],self.backup,baseline);self.proof.same_data(baseline,self.snapshot('backup-verified'));self.full_payload_backup=value;return {'fullByteCopiesVerified':True,'bytes':value['bytes']}
  def configure(self):
+  need(self.full_payload_backup is not None and self.full_payload_backup['verified'] is True,'full_payload_backup_required');verify_payload_copies(self.full_payload_backup['destination'],self.full_payload_backup['rows'])
   need(all(self.status[k]['ready'] for k in KINDS),'both_drains_required');self.debugger_absent()
   for k in KINDS:self.identity(k)
-  self.config_unchanged()
+  self.config_unchanged();observed={k:self.fast_continuity(k) for k in KINDS};config=self.config_stamps();ack=self.acknowledge_mac()
+  need({k:self.fast_continuity(k) for k in KINDS}==observed and self.config_stamps()==config,'post_gate_configuration_continuity_changed');self.require_fresh_mac(ack)
   managed=[RECEIVER_ENV,OVERLAY,*DROPINS.values()];original={}
   for n,p in enumerate(managed):
    if p.exists():s=private_file(p);self.atomic(self.backup/('original-'+str(n)+'.bin'),p.read_bytes());original[str(p)]={'mode':stat.S_IMODE(s.st_mode),'uid':s.st_uid,'gid':s.st_gid}
@@ -293,13 +390,13 @@ class LiveOps:
   self.atomic(self.backup/'original-descriptors.json',json.dumps(original).encode());self.atomic(self.backup/'shared-environment-readonly.bin',SHARED_ENV.read_bytes())
   prepared=Path('/etc/red-x-ai/gendragoon-receiver.env.prepared-36');need(sha(prepared)==self.plan['privateConfig']['preparedReceiverSha256'],'prepared_environment_changed');self.prepared=prepared.read_bytes();old=self.proof.environment_values(RECEIVER_ENV.read_bytes());new=self.proof.environment_values(self.prepared);need(all(new.get(k)==v for k,v in old.items()),'prepared_environment_replaces_old_values');self.token=new['GENDRAGOON_CONTROL_INTERNAL_TOKEN'];need(re.fullmatch('[A-Za-z0-9_-]{43,128}',self.token),'private_token_invalid')
   need(new['GENDRAGOON_INTEGRATION_ENTITLEMENTS_URL']=='http://127.0.0.1:17778/internal/receiver-entitlements','private_url_invalid')
-  for k,p in DROPINS.items():p.parent.mkdir(mode=0o700,exist_ok=True);self.atomic(p,('[Service]\nKillMode=mixed\nSendSIGKILL=no\nTimeoutStopSec=infinity\n'+('EnvironmentFile=/etc/red-x-ai/gendragoon-control.env\n' if k=='control' else '')).encode())
-  self.atomic(OVERLAY,('GENDRAGOON_CONTROL_INTERNAL_TOKEN='+self.token+'\n').encode());self.command('/usr/bin/systemctl','daemon-reload')
+  for k,p in DROPINS.items():self.require_fresh_mac(self.mutation_proof);p.parent.mkdir(mode=0o700,exist_ok=True);self.atomic(p,('[Service]\nKillMode=mixed\nSendSIGKILL=no\nTimeoutStopSec=infinity\n'+('EnvironmentFile=/etc/red-x-ai/gendragoon-control.env\n' if k=='control' else '')).encode())
+  self.atomic(OVERLAY,('GENDRAGOON_CONTROL_INTERNAL_TOKEN='+self.token+'\n').encode());ack=self.acknowledge_mac();need({k:self.fast_continuity(k) for k in KINDS}==observed and self.config_stamps()==config,'post_gate_configuration_continuity_changed');self.require_fresh_mac(ack);self.command('/usr/bin/systemctl','daemon-reload')
  def config_unchanged(self):
   for p,key,uid in ((RECEIVER_ENV,'activeReceiverSha256',0),(SHARED_ENV,'sharedRedXEnvSha256',999),(Path('/etc/red-x-ai/gendragoon-receiver.env.prepared-36'),'preparedReceiverSha256',0)):
    private_file(p,uid);need(sha(p)==self.plan['privateConfig'][key],'configuration_changed')
  def stop(self,k):
-  self.identity(k);need(not self.children(k),'children_active');p=self.properties(k);need(p['KillMode']=='mixed' and p['SendSIGKILL']=='no' and p['TimeoutStopUSec']=='infinity','effective_stop_settings_invalid');self.command('/usr/bin/systemctl','stop','--no-block','gendragoon-'+k+'.service');end=time.monotonic()+120
+  self.identity(k);need(not self.children(k),'children_active');p=self.properties(k);need(p['KillMode']=='mixed' and p['SendSIGKILL']=='no' and p['TimeoutStopUSec']=='infinity','effective_stop_settings_invalid');observed=self.fast_continuity(k);ack=self.acknowledge_mac();need(self.fast_continuity(k)==observed,'post_gate_old_process_changed');self.require_fresh_mac(ack);self.command('/usr/bin/systemctl','stop','--no-block','gendragoon-'+k+'.service');end=time.monotonic()+120
   while time.monotonic()<end:
    p=self.properties(k)
    if p['MainPID']=='0' and p['ActiveState']=='inactive':
@@ -309,11 +406,11 @@ class LiveOps:
    time.sleep(.25)
   raise Hold('ordinary_stop_incomplete_no_force')
  def switch(self):
-  need('stopped' in self.preservation,'stopped_preservation_required');need(all(self.properties(k)['MainPID']=='0' for k in KINDS),'service_still_present');need(sha(SHARED_ENV)==self.plan['privateConfig']['sharedRedXEnvSha256'],'shared_environment_changed');self.config_unchanged();self.atomic(RECEIVER_ENV,self.prepared)
-  for k,p in LINKS.items():need(p.is_symlink() and os.readlink(p)==ACTIVE[k],'old_link_changed');temp=p.with_name('.current-gd36-'+self.nonce);trusted_directory(p.parent);os.symlink(TARGETS[k],temp);os.replace(temp,p);directory=os.open(p.parent,os.O_RDONLY|os.O_DIRECTORY);os.fsync(directory);os.close(directory)
+  need('stopped' in self.preservation,'stopped_preservation_required');need(all(self.properties(k)['MainPID']=='0' for k in KINDS),'service_still_present');need(sha(SHARED_ENV)==self.plan['privateConfig']['sharedRedXEnvSha256'],'shared_environment_changed');self.config_unchanged();observed=self.stopped_continuity();ack=self.acknowledge_mac();need(self.stopped_continuity()==observed,'post_gate_stopped_configuration_changed');self.require_fresh_mac(ack);self.atomic(RECEIVER_ENV,self.prepared)
+  for k,p in LINKS.items():self.require_fresh_mac(ack);need(p.is_symlink() and os.readlink(p)==ACTIVE[k],'old_link_changed');temp=p.with_name('.current-gd36-'+self.nonce);trusted_directory(p.parent);os.symlink(TARGETS[k],temp);os.replace(temp,p);directory=os.open(p.parent,os.O_RDONLY|os.O_DIRECTORY);os.fsync(directory);os.close(directory)
  def start(self,k):
   self.command('/usr/bin/systemctl','start','--no-block','gendragoon-'+k+'.service');value=self.proof.health(k);self.candidate_identity(k,allow_initial=True);return value
- def service_listeners(self,k,pid):
+ def owned_listeners(self,pid):
   sockets=set()
   for fd in (Path('/proc')/str(pid)/'fd').iterdir():
    try:v=os.readlink(fd)
@@ -324,7 +421,9 @@ class LiveOps:
    for line in Path('/proc/net/'+name).read_text().splitlines()[1:]:
     f=line.split()
     if f[9] in sockets and f[3]=='0A':found.append((name,f[1]))
-  need(found==[('tcp','0100007F:'+format(17778 if k=='control' else 17779,'04X'))],'unexpected_service_listener')
+  return found
+ def service_listeners(self,k,pid):
+  need(self.owned_listeners(pid)==[('tcp','0100007F:'+format(17778 if k=='control' else 17779,'04X'))],'unexpected_service_listener')
  def candidate_identity(self,k,allow_initial=False):
   p=self.properties(k);pid=int(p['MainPID']);folder=Path('/proc')/str(pid);need(pid>1 and pid!=self.plan['expectedPIDs'][k] and p['ActiveState']=='active' and p['ControlGroup']=='/system.slice/gendragoon-'+k+'.service','candidate_identity_invalid')
   need(folder.stat().st_uid==pwd.getpwnam('redxai').pw_uid and os.readlink(folder/'exe')=='/usr/bin/node' and sha(folder/'exe')==self.plan['expectedNodeSha256'],'candidate_executable_invalid')
@@ -341,6 +440,7 @@ class LiveOps:
   self.proof.verify_private_runtime(self.token);self.proof.verify_internal_boundary(self.token,self.old_env.get('REDXAI_ISSUER','https://red-xai.com'));self.debugger_absent()
  def cleanup_proof(self):
   identities=all(self.candidate_identity(k) for k in KINDS)
+  observed={k:self.fast_continuity(k,candidate=True) for k in KINDS};ack=self.acknowledge_mac();need({k:self.fast_continuity(k,candidate=True) for k in KINDS}==observed,'post_gate_candidate_changed');self.require_fresh_mac(ack)
   return self.net.CleanupProof(self.nonce,time.monotonic(),self.debugger_absent(),identities,'after-start' in self.preservation,healthy=True)
  def release_services(self):self.boundary.remove_service_fence(self.cleanup_proof())
  def service_probe(self):
@@ -348,7 +448,7 @@ class LiveOps:
   helper=HERE.parent/'server-activate-36.py';private_file(helper);need(sha(helper)==HELPER_HASHES[helper.name],'proof_helper_changed')
   code='import sys,json\nv=json.load(sys.stdin);scope={"__name__":"gd36_readonly_probe"};exec(compile(v["source"],"trusted_readonly_probe","exec"),scope);scope["verify_internal_boundary"](v["token"],v["issuer"])\n'
   packet={'source':helper.read_text(),'token':self.token,'issuer':self.old_env.get('REDXAI_ISSUER','https://red-xai.com')}
-  r=subprocess.run(['/usr/sbin/runuser','-u','redxai','--','/usr/bin/python3','-B','-c',code],input=json.dumps(packet),text=True,capture_output=True,timeout=20);need(r.returncode==0,'service_identity_probe_failed')
+  r=subprocess.run(['/usr/sbin/runuser','-u','redxai','--','/usr/bin/python3','-I','-S','-B','-c',code],input=json.dumps(packet),text=True,capture_output=True,timeout=20,env={'PATH':'/usr/bin:/bin','LC_ALL':'C','PYTHONDONTWRITEBYTECODE':'1'});need(r.returncode==0,'service_identity_probe_failed')
  def cleanup(self):self.boundary.remove_guard(self.cleanup_proof());need(sha(SHARED_ENV)==self.plan['privateConfig']['sharedRedXEnvSha256'],'shared_environment_changed')
 
 MAC_PROVENANCE=Path('/Users/grim-virus/GenDragoonRelease-0.22.0-36-recovery-final/build-provenance.json')
@@ -377,6 +477,26 @@ def collect_mac_proof(lifecycle,app,support,executable,challenge,lease_held):
  raw=subprocess.check_output(['/usr/sbin/ioreg','-l','-w','0'],text=True,timeout=20,env={'PATH':'/usr/bin:/bin:/usr/sbin:/sbin','LC_ALL':'C','PYTHONDONTWRITEBYTECODE':'1'});locks=re.findall(r'"IOConsoleLocked"\s*=\s*(Yes|No|true|false)',raw)
  value={'source':'native-mac-preflight','challenge':challenge,'observedAtEpoch':time.time(),'screenUnlocked':bool(locks) and all(x in ('No','false') for x in locks),'uploadWorkspaceTerminal':True,'appControlIdle':True,'nativeAppClosedVerified':not lifecycle.control.app_pids(executable),'maintenanceLeaseHeld':lease_held};validate_mac_proof(value,challenge);return value
 
+def coordinate_stream(child,proof,interval=1.0):
+ """Periodic bounded observation, fresh phase replies, no operation cancellation."""
+ next_check=time.monotonic()+interval;pending=b''
+ try:
+  while True:
+   if time.monotonic()>=next_check:proof(uuid.uuid4().hex);next_check=time.monotonic()+interval
+   if not select.select([child.stdout],[],[],min(.5,max(0,next_check-time.monotonic())))[0]:continue
+   chunk=os.read(child.stdout.fileno(),16385)
+   if not chunk:need(not pending,'remote_partial_receipt');break
+   pending+=chunk
+   while b'\n' in pending:
+    line,pending=pending.split(b'\n',1);need(0<len(line)<=16384,'remote_receipt_invalid');value=json.loads(line.decode('utf-8'))
+    if value.get('type')=='mac_gate_request':
+     child.stdin.write(json.dumps(proof(value['challenge']))+'\n');child.stdin.flush();next_check=time.monotonic()+interval
+    else:print(json.dumps(value),flush=True)
+   need(len(pending)<=16384,'remote_receipt_invalid')
+  return child.wait()
+ finally:
+  child.stdin.close() # EOF holds before the remote next phase; no cancellation.
+
 def mac_coordinate(args):
  need(sys.platform=='darwin','mac_coordinator_required');app=Path('/Applications/GenDragoon Cloud SSD.app');verify_mac_inputs(app);support=Path.home()/'Library/Application Support/GenDragoon Cloud SSD';fd=os.open(support/'AutoUpdates/update.lock',os.O_RDONLY|os.O_NOFOLLOW);info=os.fstat(fd);need(stat.S_ISREG(info.st_mode) and info.st_uid==os.getuid() and info.st_nlink==1 and info.st_mode&0o077==0,'maintenance_lease_invalid');fcntl.flock(fd,fcntl.LOCK_EX|fcntl.LOCK_NB)
  try:
@@ -387,21 +507,14 @@ def mac_coordinate(args):
    verify_mac_inputs(app)
    return collect_mac_proof(lifecycle,app,support,executable,challenge,True)
   proof(uuid.uuid4().hex);need(re.fullmatch('/root/gendragoon36-maintenance-[0-9a-f]{64}',args.remote_bundle),'remote_bundle_invalid')
-  command=args.remote_bundle+'/adapter/server-activation-controller-36.py';child=subprocess.Popen(['/usr/bin/ssh','-o','BatchMode=yes','-o','IdentitiesOnly=yes','-i',str(Path.home()/'.ssh/id_ed25519'),'root@103.54.56.220','/usr/bin/python3','-B',command,'--execute','--plan',args.remote_bundle+'/plan.json','--review-manifest',args.remote_bundle+'/review.json'],stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,text=True,env={'PATH':'/usr/bin:/bin:/usr/sbin:/sbin','LC_ALL':'C','PYTHONDONTWRITEBYTECODE':'1'})
-  try:
-   for line in child.stdout:
-    need(len(line)<=16384,'remote_receipt_invalid');v=json.loads(line)
-    if v.get('type')=='mac_gate_request':child.stdin.write(json.dumps(proof(v['challenge']))+'\n');child.stdin.flush()
-    else:print(json.dumps(v),flush=True)
-   return child.wait()
-  finally:
-   child.stdin.close() # Coordinator loss yields EOF and a remote safe hold.
+  command=args.remote_bundle+'/adapter/server-activation-controller-36.py';child=subprocess.Popen(['/usr/bin/ssh','-o','BatchMode=yes','-o','IdentitiesOnly=yes','-i',str(Path.home()/'.ssh/id_ed25519'),'root@103.54.56.220','/usr/bin/python3','-I','-S','-B',command,'--execute','--plan',args.remote_bundle+'/plan.json','--review-manifest',args.remote_bundle+'/review.json'],stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,text=True,env={'PATH':'/usr/bin:/bin:/usr/sbin:/sbin','LC_ALL':'C','PYTHONDONTWRITEBYTECODE':'1'})
+  return coordinate_stream(child,proof)
  finally:os.close(fd)
 
 def main(args):
  if args.local_coordinate:return mac_coordinate(args)
  if not args.execute:print(json.dumps({'decision':'NO_GO','defaultReadOnly':True,'executionRequiresReviewedBundleAndLiveMacCoordinator':True,'noLiveActionsPerformed':True}));return 3
- need(args.plan and args.review_manifest,'reviewed_plan_required');private_file(args.plan);private_file(args.review_manifest);plan=json.loads(Path(args.plan).read_text());review=json.loads(Path(args.review_manifest).read_text());need(review['planSha256']==sha(args.plan),'reviewed_plan_changed');verify_bundle(review);ops=LiveOps(plan,review);result=Controller(ops,MacRPCGate(),ops.journal).run();print(json.dumps(result),flush=True);return 0 if result.get('activationComplete') is True else 3
+ need(args.plan and args.review_manifest,'reviewed_plan_required');private_file(args.plan);private_file(args.review_manifest);plan=json.loads(Path(args.plan).read_text());review=json.loads(Path(args.review_manifest).read_text());need(review['planSha256']==sha(args.plan),'reviewed_plan_changed');verify_bundle(review);mac_gate=MacRPCGate();ops=LiveOps(plan,review,mac_gate=mac_gate);result=Controller(ops,mac_gate,ops.journal).run();print(json.dumps(result),flush=True);return 0 if result.get('activationComplete') is True else 3
 
 if __name__=='__main__':
  p=argparse.ArgumentParser(description=__doc__);p.add_argument('--execute',action='store_true');p.add_argument('--plan');p.add_argument('--review-manifest');p.add_argument('--local-coordinate',action='store_true');p.add_argument('--remote-bundle');args=p.parse_args()
