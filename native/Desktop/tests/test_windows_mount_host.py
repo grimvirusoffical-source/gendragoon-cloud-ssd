@@ -22,14 +22,47 @@ mounts=fixture.mounts
 MAPPED_READER=r'''
 import hashlib,json,mmap,os,sys
 source=open(sys.argv[1],"rb")
-view=mmap.mmap(source.fileno(),0,access=mmap.ACCESS_READ)
-source.close()
+view=None
+address=None
+mapping=None
 try:
-    value=view[:]
+    if sys.platform=="win32":
+        import ctypes,msvcrt
+        from ctypes import wintypes
+        kernel=ctypes.WinDLL("kernel32",use_last_error=True)
+        kernel.CreateFileMappingW.argtypes=[wintypes.HANDLE,ctypes.c_void_p,wintypes.DWORD,wintypes.DWORD,wintypes.DWORD,wintypes.LPCWSTR]
+        kernel.CreateFileMappingW.restype=wintypes.HANDLE
+        kernel.MapViewOfFile.argtypes=[wintypes.HANDLE,wintypes.DWORD,wintypes.DWORD,wintypes.DWORD,ctypes.c_size_t]
+        kernel.MapViewOfFile.restype=ctypes.c_void_p
+        kernel.CloseHandle.argtypes=[wintypes.HANDLE]
+        kernel.CloseHandle.restype=wintypes.BOOL
+        kernel.UnmapViewOfFile.argtypes=[ctypes.c_void_p]
+        kernel.UnmapViewOfFile.restype=wintypes.BOOL
+        size=os.fstat(source.fileno()).st_size
+        if size<=0:raise ValueError("A nonempty fixture is required")
+        mapping=kernel.CreateFileMappingW(msvcrt.get_osfhandle(source.fileno()),None,0x02,0,0,None)
+        if not mapping:raise ctypes.WinError(ctypes.get_last_error())
+        address=kernel.MapViewOfFile(mapping,0x04,0,0,size)
+        if not address:raise ctypes.WinError(ctypes.get_last_error())
+        if not kernel.CloseHandle(mapping):raise ctypes.WinError(ctypes.get_last_error())
+        mapping=None
+        source.close()
+        backend="win32-view-only";mapping_closed=True
+        value=ctypes.string_at(address,size)
+    else:
+        view=mmap.mmap(source.fileno(),0,access=mmap.ACCESS_READ)
+        source.close()
+        backend="python-mmap";mapping_closed=None
+        value=view[:]
     print(json.dumps({"schema":1,"pid":os.getpid(),"originalClosed":source.closed,
-        "size":len(value),"sha256":hashlib.sha256(value).hexdigest()}),flush=True)
+        "mappingHandleClosed":mapping_closed,"backend":backend,"size":len(value),
+        "sha256":hashlib.sha256(value).hexdigest()}),flush=True)
     sys.stdin.buffer.read(1)
-finally:view.close()
+finally:
+    if not source.closed:source.close()
+    if mapping and not kernel.CloseHandle(mapping):raise ctypes.WinError(ctypes.get_last_error())
+    if address and not kernel.UnmapViewOfFile(address):raise ctypes.WinError(ctypes.get_last_error())
+    if view is not None:view.close()
 '''
 
 @contextlib.contextmanager
@@ -47,8 +80,10 @@ def mapped_reader(path):
         except queue.Empty:raise AssertionError("The independent mapped-file reader did not become ready.")
         if not raw.endswith("\n") or len(raw)>4096:raise AssertionError("The mapped-file reader returned invalid metadata.")
         value=json.loads(raw)
-        if (not isinstance(value,dict) or set(value)!={"schema","pid","originalClosed","size","sha256"}
-                or value.get("schema")!=1 or value.get("pid")!=process.pid or value.get("originalClosed") is not True):
+        if (not isinstance(value,dict) or set(value)!={"schema","pid","originalClosed","mappingHandleClosed","backend","size","sha256"}
+                or value.get("schema")!=1 or value.get("pid")!=process.pid or value.get("originalClosed") is not True
+                or value.get("backend")!=("win32-view-only" if sys.platform=="win32" else "python-mmap")
+                or value.get("mappingHandleClosed") is not (True if sys.platform=="win32" else None)):
             raise AssertionError("The mapped-file reader did not retain an independent mapped view.")
         yield value,process
     finally:
@@ -174,11 +209,11 @@ class ActualOwnedHostTests(unittest.TestCase):
                         time.sleep(.05)
 
     def test_real_read_duplicate_mapping_directory_and_admission_race(self):
-        import win32api,win32con,win32file
-        checks=[];manager=mounts.WorkspaceMountManager(self.model.root);record=None
+        import ntsecuritycon,win32api,win32con,win32file
+        checks=[];mapped_proof={};manager=mounts.WorkspaceMountManager(self.model.root);record=None
         report=Path(os.environ["GD_MOUNT_HOST_REPORT"]) if os.environ.get("GD_MOUNT_HOST_REPORT") else None
         def emit(state):
-            if report:report.write_text(json.dumps({"schema":1,"platform":sys.platform,"mount":state,"checks":checks}),encoding="utf-8")
+            if report:report.write_text(json.dumps({"schema":1,"platform":sys.platform,"mount":state,"checks":checks,"mappedView":mapped_proof}),encoding="utf-8")
         def wait_closed(process):
             deadline=time.monotonic()+10
             while time.monotonic()<deadline:
@@ -205,11 +240,14 @@ class ActualOwnedHostTests(unittest.TestCase):
             finally:duplicate.Close()
             checks.append("duplicate-handle-refused");wait_closed(process)
             with mapped_reader(path) as (mapped,reader):
+                self.assertEqual(mapped["backend"],"win32-view-only")
+                self.assertIs(mapped["originalClosed"],True);self.assertIs(mapped["mappingHandleClosed"],True)
+                mapped_proof.update({key:mapped[key] for key in ("backend","originalClosed","mappingHandleClosed")})
                 self.assertEqual(mapped["size"],len(self.payload));self.assertEqual(mapped["sha256"],fixture.hashlib.sha256(self.payload).hexdigest())
                 self.assertIsNone(reader.poll());busy()
             self.assertEqual(reader.returncode,0)
             checks.append("mapped-view-refused");wait_closed(process)
-            directory=win32file.CreateFile(record["mountPath"],win32con.FILE_READ_ATTRIBUTES|win32con.FILE_LIST_DIRECTORY,
+            directory=win32file.CreateFile(record["mountPath"],ntsecuritycon.FILE_READ_ATTRIBUTES|ntsecuritycon.FILE_LIST_DIRECTORY,
                 win32con.FILE_SHARE_READ|win32con.FILE_SHARE_WRITE|win32con.FILE_SHARE_DELETE,None,win32con.OPEN_EXISTING,win32con.FILE_FLAG_BACKUP_SEMANTICS,None)
             try:busy()
             finally:directory.Close()
