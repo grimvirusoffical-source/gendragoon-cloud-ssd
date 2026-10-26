@@ -8,6 +8,7 @@ from pathlib import Path
 import re
 import shutil
 import subprocess
+import sys
 import tarfile
 
 MODULE=Path(__file__).resolve().parent/"MountHost"
@@ -39,7 +40,13 @@ def build(destination):
         if module:
             if module.get("Replace"):raise RuntimeError("Dependency replacements are forbidden in the standalone host.")
             modules[module["Path"]]=module
-    destination.mkdir(mode=0o700,parents=True)
+    if os.name=="nt":
+        # Only this fresh generated leaf is ours to create/normalize. RUNNER_TEMP
+        # may grant other accounts write access; chmod does not fix Windows ACLs.
+        sys.path.insert(0,str(Path(__file__).resolve().parent.parent/"Resources"))
+        import private_fs
+        private_fs.private_directory(destination)
+    else:destination.mkdir(mode=0o700,parents=True)
     notices=destination/"licenses";notices.mkdir(mode=0o700)
     manifest={"schema":1,"name":"GenDragoon Mount Host","version":"1.0.0","target":"windows-amd64",
         "independentFlossArtifact":True,"containsGenDragoonApp":False,"containsPrivateCodec":False,
@@ -89,6 +96,7 @@ def build(destination):
     for path in destination.rglob("*"):
         if path.is_file():manifest["files"][path.relative_to(destination).as_posix()]={"bytes":path.stat().st_size,"sha256":hashlib.sha256(path.read_bytes()).hexdigest()}
     (destination/"STANDALONE_HOST_MANIFEST.json").write_text(json.dumps(manifest,sort_keys=True,indent=2)+"\n")
+    if os.name=="nt":private_fs.protect_generated_tree(destination)
     return {"binary":str(binary),"sha256":hashlib.sha256(binary.read_bytes()).hexdigest(),"independentFlossArtifact":True}
 
 def main(argv=None):

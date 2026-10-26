@@ -1,6 +1,7 @@
 """Release boundary: compiled private codec, original notices, separate FLOSS host."""
 import importlib.util
 import json
+import os
 from pathlib import Path
 import sys
 import tempfile
@@ -75,5 +76,15 @@ class DistributionTests(unittest.TestCase):
                 self.assertTrue(all(i.uid==0 and i.gid==0 and not i.uname and not i.gname and i.mtime==0 for i in entries))
                 self.assertFalse(any(i.name.endswith((".exe",".dll",".py")) for i in entries))
             self.assertTrue(any("-mod=readonly" in a for a in seen));self.assertTrue(any("-trimpath" in a for a in seen))
+            if os.name=="nt":
+                import private_fs
+                from gendragoon_platform_ipc import modules,user_sid
+                security=modules()[-1];sid=security.ConvertSidToStringSid(user_sid())
+                for path in (output,*output.rglob("*")):
+                    private_fs.verify(path)
+                    descriptor=security.GetFileSecurity(str(path),security.OWNER_SECURITY_INFORMATION|security.DACL_SECURITY_INFORMATION)
+                    self.assertEqual(security.ConvertSidToStringSid(descriptor.GetSecurityDescriptorOwner()),sid)
+                    acl=descriptor.GetSecurityDescriptorDacl();self.assertIsNotNone(acl);self.assertEqual(acl.GetAceCount(),1)
+                    self.assertEqual(security.ConvertSidToStringSid(acl.GetAce(0)[-1]),sid)
 
 if __name__=="__main__":unittest.main()

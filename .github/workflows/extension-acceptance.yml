@@ -2,6 +2,13 @@ name: Actual extension host acceptance
 
 on:
   workflow_dispatch:
+    inputs:
+      client:
+        description: 'Run the complete client matrix or only the Firefox native boundary'
+        required: true
+        default: all
+        type: choice
+        options: [all, firefox]
   push:
     paths:
       - 'native/Extensions/**'
@@ -29,7 +36,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: extension-acceptance-${{ github.ref }}
+  group: extension-acceptance-${{ github.ref }}${{ github.event_name == 'workflow_dispatch' && inputs.client == 'firefox' && '-firefox-only' || '' }}
   cancel-in-progress: false
 
 jobs:
@@ -40,7 +47,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        client: [chromium, chrome, edge, opera, vscode, firefox]
+        client: ${{ fromJSON(github.event_name == 'workflow_dispatch' && inputs.client == 'firefox' && '["firefox"]' || '["chromium","chrome","edge","opera","vscode","firefox"]') }}
     env:
       PYTHONDONTWRITEBYTECODE: '1'
     steps:
