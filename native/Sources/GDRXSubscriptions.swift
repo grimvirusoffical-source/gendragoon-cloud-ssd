@@ -12,8 +12,8 @@ private struct GDRXControlConfig: Decodable {
 }
 struct GDRXPricing: Decodable {
     struct Projects: Decodable {
-        let firstFree: Bool
-        let additionalOneTimeCents: Int
+        let firstWorkspaceFeeWaived: Bool
+        let additionalWorkspaceMonthlyCents: Int
         let defaultLimit: Int
         let qualifiedLimit: Int
         let qualificationLabel: String
@@ -47,7 +47,8 @@ struct GDRXProject: Decodable, Identifiable, Equatable {
     let status: String
     let active: Bool
     let readOnly: Bool
-    let free: Bool
+    let feeWaived: Bool
+    let workspaceMonthlyCents: Int
     let owner: Bool
     let storageTier: String?
     let performanceTier: String?
@@ -74,7 +75,8 @@ private struct GDRXCheckoutResponse: Decodable {
     let url: String?
     let project: GDRXProject?
     let projectId: String?
-    let oneTimeCents: Int?
+    let workspaceMonthlyCents: Int?
+    let recurringCents: Int?
     let complimentary: Bool?
     let alreadyActivated: Bool?
     let message: String?
@@ -253,6 +255,22 @@ final class GDRXSubscriptionModel: ObservableObject {
         }
     }
 
+    func deleteProject(_ redX: GDRedXAIAuthSession, project: GDRXProject, confirmName: String) {
+        guard !busy else { return }
+        guard confirmName == project.name else { status = "Type the exact workspace name to confirm deletion."; return }
+        busy = true
+        Task {
+            defer { busy = false }
+            do {
+                _ = try await request(redX, "v2/projects/\(project.id)", method: "DELETE", payload: ["confirmName": confirmName])
+                status = "Workspace deleted. Its subscription was canceled and encrypted cloud data was removed."
+                projects.removeAll { $0.id == project.id }
+                await redX.refreshWorkspaces()
+                refresh(redX)
+            } catch { status = error.localizedDescription }
+        }
+    }
+
     func removeAds(_ redX: GDRedXAIAuthSession) {
         guard !busy else { return }
         busy = true
@@ -290,9 +308,11 @@ struct GDRXSubscriptionsPanel: View {
     let focus: GDRXSubscriptionFocus
     @State private var projectName = "My Cloud"
     @State private var storageTier = "100GB"
-    @State private var performanceTier = "boost"
+    @State private var performanceTier = "free"
     @State private var yearly = false
     @State private var selectedProjectID = ""
+    @State private var deleteProjectID = ""
+    @State private var deleteConfirmName = ""
 
     private func money(_ cents: Int) -> String {
         (Double(cents) / 100).formatted(.currency(code: "USD"))
@@ -332,12 +352,12 @@ struct GDRXSubscriptionsPanel: View {
                 }
                 Picker("Billing", selection: $yearly) { Text("Monthly").tag(false); Text("Yearly · 2 months free").tag(true) }.pickerStyle(.segmented)
                 Text(model.ownerBenefits
-                     ? "Owner account: every project and every storage/performance tier is included for life."
+                     ? "Owner account: every workspace, storage tier, performance tier, and ad-free entitlement is included for life."
                      : model.projects.isEmpty
-                       ? "Your first project is free with 2 GB and 1 worker. Plan choices start on paid projects."
-                       : "New paid project: \(money(pricing.projects.additionalOneTimeCents)) once + selected storage + selected performance.")
+                       ? "Your first workspace has no workspace fee forever. Storage is still subscribed; performance may be Free (1 worker) or a faster paid tier."
+                       : "Additional workspace: \(money(pricing.projects.additionalWorkspaceMonthlyCents))/month + selected storage + selected performance. Free performance is allowed.")
                     .font(.caption).foregroundStyle(.secondary)
-                Button(model.ownerBenefits ? "Create Project · Included" : model.projects.isEmpty ? "Create Free Project" : "Create Project & Open Checkout") {
+                Button(model.ownerBenefits ? "Create Workspace · Included" : "Create Workspace & Open Checkout") {
                     model.createProject(redX, name: projectName, storageTier: storageTier, performanceTier: performanceTier, yearly: yearly)
                 }.buttonStyle(.borderedProminent).tint(gdPurple)
                     .disabled(model.busy || model.usedProjectSlots >= model.projectLimit)
@@ -361,9 +381,8 @@ struct GDRXSubscriptionsPanel: View {
                             .foregroundStyle(p.active ? .green : .orange)
                         VStack(alignment: .leading, spacing: 4) {
                             Text(p.name).font(.system(size: 13, weight: .bold))
-                            Text(p.owner ? "Owner · 6 TB · Max" :
-                                 p.free ? "Free · 2 GB · 1 worker" :
-                                 "\(p.storageTier ?? "—") · \((p.performanceTier ?? "—").capitalized) · \(p.workers) workers")
+                            Text(p.owner ? "Owner · 6 TB · Max · included" :
+                                 "\(p.storageTier ?? "Plan required") · \((p.performanceTier ?? "—").capitalized) · \(p.workers) worker(s) · workspace \(p.feeWaived ? "fee waived" : money(p.workspaceMonthlyCents) + "/mo")")
                                 .font(.caption).foregroundStyle(.secondary)
                         }
                         Spacer()
@@ -372,7 +391,27 @@ struct GDRXSubscriptionsPanel: View {
                         } else {
                             Text(p.status.replacingOccurrences(of: "_", with: " ").capitalized).font(.caption2).foregroundStyle(.secondary)
                         }
+                        Button("Delete") {
+                            deleteProjectID = p.id
+                            deleteConfirmName = ""
+                        }.buttonStyle(.bordered).tint(.red).disabled(model.busy)
                     }.padding(10).background(.white.opacity(0.035), in: RoundedRectangle(cornerRadius: 10))
+                }
+                if let doomed = model.projects.first(where: { $0.id == deleteProjectID }) {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("DELETE WORKSPACE").font(.caption.bold()).foregroundStyle(.red)
+                        Text("This cancels its recurring subscription and permanently removes its encrypted Receiver data. Type \(doomed.name) exactly.")
+                            .font(.caption).foregroundStyle(.secondary)
+                        TextField(doomed.name, text: $deleteConfirmName).textFieldStyle(.roundedBorder)
+                        HStack {
+                            Button("Cancel") { deleteProjectID = ""; deleteConfirmName = "" }.buttonStyle(.bordered)
+                            Button("Delete Workspace") {
+                                model.deleteProject(redX, project: doomed, confirmName: deleteConfirmName)
+                                deleteProjectID = ""; deleteConfirmName = ""
+                            }.buttonStyle(.borderedProminent).tint(.red)
+                                .disabled(model.busy || deleteConfirmName != doomed.name)
+                        }
+                    }.padding(10).background(Color.red.opacity(0.08), in: RoundedRectangle(cornerRadius: 10))
                 }
             }
         }
@@ -383,7 +422,7 @@ struct GDRXSubscriptionsPanel: View {
             VStack(alignment: .leading, spacing: 12) {
                 Picker("Project", selection: $selectedProjectID) {
                     Text("Choose project").tag("")
-                    ForEach(model.projects.filter { !$0.free }) { p in Text(p.name).tag(p.id) }
+                    ForEach(model.projects) { p in Text(p.name).tag(p.id) }
                 }
                 if focus == .storage || focus == .plans {
                     LazyVGrid(columns: [GridItem(.adaptive(minimum: 150), spacing: 9)], spacing: 9) {
@@ -482,7 +521,7 @@ struct GDRXSubscriptionsPanel: View {
             yearly = p.interval == "year"
         }
         .onChange(of: model.projects) { _, value in
-            if selectedProjectID.isEmpty, let first = value.first(where: { !$0.free }) { selectedProjectID = first.id }
+            if selectedProjectID.isEmpty, let first = value.first { selectedProjectID = first.id }
         }
     }
 }
