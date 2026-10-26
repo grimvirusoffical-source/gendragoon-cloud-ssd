@@ -1,6 +1,6 @@
 'use strict';
 const test=require('node:test'),assert=require('node:assert/strict'),fs=require('node:fs/promises'),os=require('node:os'),path=require('node:path');
-const {BidiClient,connectBidi,registerFirefoxHost,withFirefoxLaunchEnvironment,FIREFOX_ID}=require('./firefox-native.cjs');
+const {BidiClient,connectBidi,registerFirefoxHost,withFirefoxLaunchEnvironment,installedExtensionOrigin,discoverExtensionOrigin,FIREFOX_ID}=require('./firefox-native.cjs');
 class Socket extends EventTarget{constructor(){super();this.sent=[];}send(value){this.sent.push(JSON.parse(value));}close(){this.closed=true;}reply(value){this.dispatchEvent(new MessageEvent('message',{data:JSON.stringify(value)}));}}
 test('BiDi correlates concurrent responses, rejects protocol errors and fails outstanding requests on close',async()=>{
  const socket=new Socket(),client=new BidiClient(socket),a=client.command('first'),b=client.command('second');socket.reply({type:'success',id:2,result:{second:true}});socket.reply({type:'success',id:1,result:{first:true}});assert.deepEqual(await a,{first:true});assert.deepEqual(await b,{second:true});
@@ -41,4 +41,15 @@ test('failed exclusive manifest setup removes its own partial inode and preserve
 test('only the isolated Firefox launch receives automation authority and both parent settings restore on success or throw',async()=>{
  for(const fails of [false,true]){const environment={HOME:'/unchanged/synthetic-home',XDG_STATE_HOME:'/original/state',MOZ_REMOTE_ALLOW_SYSTEM_ACCESS:'original'},before={...environment};const launching=withFirefoxLaunchEnvironment('/private/fixture/state',async()=>{assert.equal(environment.MOZ_REMOTE_ALLOW_SYSTEM_ACCESS,'1');assert.equal(environment.XDG_STATE_HOME,'/private/fixture/state');assert.equal(environment.HOME,before.HOME);await new Promise(setImmediate);if(fails)throw new Error('Synthetic launch failure');return 'launched';},environment);if(fails)await assert.rejects(launching,/launch failure/);else assert.equal(await launching,'launched');assert.deepEqual(environment,before);}
  const absent={HOME:'/unchanged/synthetic-home'};await assert.rejects(withFirefoxLaunchEnvironment('/fixture/state',async()=>{throw new Error('Launch failed before return');},absent));assert.deepEqual(absent,{HOME:'/unchanged/synthetic-home'});
+});
+test('registered Firefox page origin requires the exact active temporary RDP descriptor and canonical manifest URL',()=>{
+ const origin='moz-extension://58f6682e-47a9-4a72-8587-0c805f002a74/',addon={id:FIREFOX_ID,debuggable:true,temporarilyInstalled:true,isWebExtension:true,isSystem:false,manifestURL:origin+'manifest.json'};assert.equal(installedExtensionOrigin({addons:[addon]}),origin);
+ for(const change of [{id:'other@example.test'},{debuggable:false},{temporarilyInstalled:false},{isWebExtension:false},{isSystem:true},{manifestURL:'https://other.invalid/manifest.json'},{manifestURL:origin+'dashboard.html'},{manifestURL:origin+'manifest.json?query'},{manifestURL:undefined}])assert.throws(()=>installedExtensionOrigin({addons:[{...addon,...change}]}));
+ assert.throws(()=>installedExtensionOrigin({addons:[addon,addon]}));
+ try{installedExtensionOrigin({addons:[{...addon,manifestURL:'https://private.invalid/secret'}]});assert.fail('Invalid descriptor must fail');}catch(error){assert.match(error.message,/response keys=.*addons/);assert.match(error.message,/manifestURL/);assert.doesNotMatch(error.message,/private|secret|https:/);}
+});
+test('origin discovery uses only the pinned web-ext Firefox runner existing RDP connection and times out',async()=>{
+ const addon={id:FIREFOX_ID,debuggable:true,temporarilyInstalled:true,isWebExtension:true,isSystem:false,manifestURL:'moz-extension://58f6682e-47a9-4a72-8587-0c805f002a74/manifest.json'},calls=[];
+ const runner={extensionRunners:[{getName:()=> 'Firefox Desktop',remoteFirefox:{client:{request:async command=>{calls.push(command);return {addons:[addon]};}}}}]};assert.equal(await discoverExtensionOrigin(runner),addon.manifestURL.slice(0,-13));assert.deepEqual(calls,['listAddons']);
+ await assert.rejects(discoverExtensionOrigin({extensionRunners:[] }));runner.extensionRunners[0].remoteFirefox.client.request=()=>new Promise(()=>{});await assert.rejects(discoverExtensionOrigin(runner,{timeout:10}),/discovery timed out/);
 });

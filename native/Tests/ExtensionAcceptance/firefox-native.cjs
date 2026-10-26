@@ -5,7 +5,7 @@ const assert=require('node:assert/strict');
 const fs=require('node:fs/promises');
 const path=require('node:path');
 const net=require('node:net');
-const FIREFOX_ID='gendragoon@redxai.local',NEGATIVE_ID='unapproved-fixture@redxai.local',UUID='58f6682e-47a9-4a72-8587-0c805f002a74';
+const FIREFOX_ID='gendragoon@redxai.local',NEGATIVE_ID='unapproved-fixture@redxai.local';
 const HOST_NAME='com.redxai.gendragoon',MAX_RESPONSE=2*1024*1024;
 const FILE_LABEL='<img src=x onerror=alert(1)> café 😀.txt';
 const delay=ms=>new Promise(resolve=>setTimeout(resolve,ms));
@@ -43,6 +43,22 @@ async function withFirefoxLaunchEnvironment(stateHome,launch,environment=process
  try{Object.assign(environment,changes);return await launch();}
  finally{for(const [key,value]of Object.entries(prior)){if(value.present)environment[key]=value.value;else delete environment[key];}}
 }
+function installedExtensionOrigin(result){
+ // Firefox157 exposes the real policy URL through its RDP descriptor form;
+ // moz:listExtensions belongs to a later BiDi version, not this pinned browser.
+ // https://github.com/mozilla-firefox/firefox/blob/FIREFOX_157_0_RELEASE/devtools/server/actors/descriptors/webextension.js
+ try{assert.ok(Array.isArray(result.addons)&&result.addons.length<=100);const matching=result.addons.filter(addon=>addon.id===FIREFOX_ID);assert.equal(matching.length,1);const addon=matching[0];
+  assert.equal(addon.debuggable,true);assert.equal(addon.temporarilyInstalled,true);assert.equal(addon.isWebExtension,true);assert.equal(addon.isSystem,false);
+  assert.ok(typeof addon.manifestURL==='string'&&/^moz-extension:\/\/[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}\/manifest\.json$/.test(addon.manifestURL));return addon.manifestURL.slice(0,-'manifest.json'.length);
+ }catch{const keys=value=>value&&typeof value==='object'?Object.keys(value).filter(key=>/^[A-Za-z][A-Za-z0-9_]{0,63}$/.test(key)).sort().slice(0,40):[];const matching=Array.isArray(result?.addons)?result.addons.filter(addon=>addon?.id===FIREFOX_ID):[];
+  throw new Error('Registered Firefox extension descriptor invalid; response keys='+JSON.stringify(keys(result))+'; matching descriptor keys='+JSON.stringify(matching.map(keys).slice(0,2)));}
+}
+async function discoverExtensionOrigin(runner,{timeout=15000}={}){
+ // Pinned web-ext10.8.0 uses this existing RDP client for temporary installation
+ // and reload. No extra debugger connection or extension permissions are added.
+ const runners=runner.extensionRunners;assert.ok(Array.isArray(runners)&&runners.length===1);const desktop=runners[0];assert.equal(desktop.getName(),'Firefox Desktop');assert.equal(typeof desktop.remoteFirefox?.client?.request,'function');
+ let timer;try{return installedExtensionOrigin(await Promise.race([desktop.remoteFirefox.client.request('listAddons'),new Promise((_,reject)=>{timer=setTimeout(()=>reject(new Error('Firefox registered extension discovery timed out')),timeout);})]));}finally{clearTimeout(timer);}
+}
 async function ownedDirectory(directory,{create=false,created=[]}={}){let stat;try{stat=await fs.lstat(directory);}catch(error){if(error.code!=='ENOENT'||!create)throw error;await fs.mkdir(directory,{mode:0o700});created.push(directory);stat=await fs.lstat(directory);}assert.ok(stat.isDirectory()&&!stat.isSymbolicLink()&&stat.uid===process.getuid()&&(stat.mode&0o022)===0,'Firefox fixture registration requires owned non-writable directories');}
 async function registerFirefoxHost(root,binary,{environment=process.env,platform=process.platform,writeManifest=(handle,data)=>handle.writeFile(data)}={}){
  assert.equal(platform,'linux');assert.equal(environment.GITHUB_ACTIONS,'true');
@@ -75,16 +91,17 @@ async function firefoxNativeTest({root,directory,archive,firefoxBinary,webExt,we
   // Firefox157 requires explicit test-driver authority for moz-extension pages.
   // This reaches only the new CI process and is restored even if launch fails.
   // https://github.com/mozilla-firefox/firefox/blob/main/remote/components/RemoteAgent.sys.mjs
-  runner=await withFirefoxLaunchEnvironment(path.join(root,'state'),()=>webExt.cmd.run({sourceDir:directory,firefox:firefoxBinary,firefoxProfile:profile,keepProfileChanges:true,noReload:true,noInput:true,startUrl:['about:blank'],
-   pref:{'extensions.webextensions.uuids':JSON.stringify({[FIREFOX_ID]:UUID})},args:['-headless','--remote-debugging-port',String(port)]},{shouldExitProgram:false}));
+  runner=await withFirefoxLaunchEnvironment(path.join(root,'state'),()=>webExt.cmd.run({sourceDir:directory,firefox:firefoxBinary,firefoxProfile:profile,keepProfileChanges:true,noReload:true,noInput:true,startUrl:['about:blank'],args:['-headless','--remote-debugging-port',String(port)]},{shouldExitProgram:false}));
   const reload=await runner.reloadAllExtensions();for(const result of reload||[])assert.ok(!result.reloadError,'The actual temporary Firefox extension must reload');
   bidi=await connectBidi('ws://127.0.0.1:'+port+'/session');const session=await bidi.command('session.new',{capabilities:{alwaysMatch:{acceptInsecureCerts:false}}});assert.equal(session.capabilities.browserName,'firefox');
   await bidi.command('session.subscribe',{events:['log.entryAdded']});
+  const origin=await discoverExtensionOrigin(runner);
   // This brand-new web-ext process already owns its explicit about:blank tab.
   // Reusing it avoids coupling native messaging to browser window creation.
   const tree=await bidi.command('browsingContext.getTree',{}),blank=tree.contexts.filter(entry=>entry.url==='about:blank');assert.equal(blank.length,1,'Select only the expected new disposable Firefox tab');context=blank[0].context;
-  await bidi.command('browsingContext.navigate',{context,url:'moz-extension://'+UUID+'/dashboard.html',wait:'complete'});
+  await bidi.command('browsingContext.navigate',{context,url:origin+'dashboard.html',wait:'complete'});
   assert.equal(await bidi.evaluate(context,'browser.runtime.id'),FIREFOX_ID,'The actual loaded ID must match the native manifest and host config exactly');
+  const loadedManifest=await bidi.evaluate(context,'({version:browser.runtime.getManifest().version,manifestVersion:browser.runtime.getManifest().manifest_version})');assert.deepEqual(loadedManifest,{version:manifest.version,manifestVersion:3},'Verify the actual registered package version before native messaging');
   await bidi.wait(context,"document.querySelector('#status').textContent.includes('Approve this disposable CI fixture client first.')",'denied fixture consent');
   assert.equal(await bidi.evaluate(context,"document.querySelectorAll('#files li').length"),0);
   await atomicJSON(path.join(root,'consent.json'),{approved:true});await bidi.evaluate(context,"document.querySelector('#refresh').click()");
@@ -102,11 +119,11 @@ async function firefoxNativeTest({root,directory,archive,firefoxBinary,webExt,we
   // Navigate the real packaged Teams page; its bridge creates its own native
   // connection and must render the current policy/profile from private IPC.
   const teams=context;
-  await bidi.command('browsingContext.navigate',{context:teams,url:'moz-extension://'+UUID+'/teams/index.html?workspaceId='+'a'.repeat(32)+'&workspaceName=Fixture',wait:'complete'});
+  await bidi.command('browsingContext.navigate',{context:teams,url:origin+'teams/index.html?workspaceId='+'a'.repeat(32)+'&workspaceName=Fixture',wait:'complete'});
   await bidi.wait(teams,"document.querySelector('#username').value==='FixtureUser'&&document.querySelectorAll('#community-rules li').length>0",'packaged Teams profile and community policy');
   assert.equal(await bidi.evaluate(teams,'document.title'),'GenDragoon Teams');assert.equal(await bidi.evaluate(teams,"document.querySelector('h1').textContent"),'Build together.');
   assert.equal(await bidi.evaluate(teams,"document.querySelector('#join-team').disabled&&document.querySelector('#send-message').disabled"),true,'Participation stays disabled without current fixture rules acceptance');
-  await bidi.command('browsingContext.navigate',{context,url:'moz-extension://'+UUID+'/dashboard.html',wait:'complete'});await bidi.wait(context,"document.querySelector('#status').textContent.includes('Connected as Disposable CI fixture.')",'return to the packaged dashboard');
+  await bidi.command('browsingContext.navigate',{context,url:origin+'dashboard.html',wait:'complete'});await bidi.wait(context,"document.querySelector('#status').textContent.includes('Connected as Disposable CI fixture.')",'return to the packaged dashboard');
   const screenshot=await bidi.command('browsingContext.captureScreenshot',{context,origin:'document'});await fs.writeFile(path.join(root,'reports/firefox-dashboard.png'),Buffer.from(screenshot.data,'base64'),{mode:0o600});
   await atomicJSON(path.join(root,'consent.json'),{approved:false});
   assert.equal(await bidi.evaluate(context,"(async()=>{try{await GDCompanion.call('status');return null;}catch(error){return error.code;}})()"),'approval_required','Revoked consent must deny the already open native connection');
@@ -129,7 +146,7 @@ async function firefoxNativeTest({root,directory,archive,firefoxBinary,webExt,we
    approvalDeniedThenFixtureApproved:true,fixtureApprovalRevokedOnExistingConnection:true,exactFirefoxIDRemovalDeniesNewConnection:true,browserManifestRejectsDifferentExtensionID:true,
    readOnlyControls:true,metadataRenderedAsText:true,disallowedRoutesRejected:true,teamsPageLoaded:true,teamsCommunityPolicyRendered:true,
    syntheticAccountFreeDispatch:true,realNativeConsentUITested:false,liveAccountOrUploadTest:false,signedStoreInstallationTested:false,normalUserApprovalTested:false,otherOperatingSystemsTested:false,
-   installationMethod:'Pinned Mozilla web-ext temporary add-on, controlled by Firefox WebDriver BiDi in new disposable CI profile',
+   installationMethod:'Pinned Mozilla web-ext temporary add-on, controlled by Firefox WebDriver BiDi in new disposable CI profile',registeredExtensionOriginDiscovered:true,registeredExtensionDiscovery:'Pinned web-ext10.8.0 existing RDP listAddons descriptor manifestURL; runtime ID and manifest version verified',
    nativeHostRegistration:'Exact allowed_extensions ID in disposable Actions VM user path; no existing manifest overwritten; exact created file removed after test',
    protocol:'Mozilla WebDriver BiDi over IPv4 loopback; Node built-in WebSocket; no new test dependencies',privilegedExtensionAutomation:true,
    firefoxAutomationEnvironment:'MOZ_REMOTE_ALLOW_SYSTEM_ACCESS=1',firefoxAutomationAuthoritySource:'https://github.com/mozilla-firefox/firefox/blob/main/remote/components/RemoteAgent.sys.mjs'};
@@ -140,4 +157,4 @@ async function firefoxNativeTest({root,directory,archive,firefoxBinary,webExt,we
  }
  await report(root,'firefox',{...result,createdHostManifestRemoved:true});
 }
-module.exports={BidiClient,connectBidi,registerFirefoxHost,firefoxNativeTest,withFirefoxLaunchEnvironment,FIREFOX_ID};
+module.exports={BidiClient,connectBidi,registerFirefoxHost,firefoxNativeTest,withFirefoxLaunchEnvironment,installedExtensionOrigin,discoverExtensionOrigin,FIREFOX_ID};
