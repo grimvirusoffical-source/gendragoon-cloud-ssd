@@ -50,11 +50,52 @@ sign, publish, install, or submit them to an app store.
 - A single desktop coordinator protects writers. Profile, Jobs, keymap, staging,
   and restored files are private to the local user. Windows creates new paths with
   explicit current-user owner SID/private ACLs, including elevated processes.
+- The new workspace-drive source provides a **real read-only filesystem mount**
+  through an existing trusted rclone executable. The Files view has Mount, Open,
+  Unmount, and rclone-selection controls. Multiple MachineNotes have separate
+  account/note identities, caches, DAV credentials, and mount locations. The
+  already verified `1c6a586` candidates predate this drive feature; a new candidate
+  must pass its own platform checks before receiving a mount validation claim.
 
 Mac application bundles, extended attributes, and symbolic links must be restored
 with their original platform's client. Portable restores normalize local
-permissions to private owner access. The Mac NFS drive and managed app launcher
-are not presented as Windows/Linux features.
+permissions to private owner access. Managed macOS application launch remains
+specific to the Mac client.
+
+## Read-only workspace drives
+
+Windows needs an existing WinFsp installation; Linux needs existing permitted
+`/dev/fuse` access and `fusermount3` or `fusermount`. GenDragoon installs no driver,
+changes no kernel permissions, and never labels a download folder as a drive.
+These prerequisites follow the [official rclone mount documentation](https://rclone.org/commands/rclone_mount/).
+
+The authenticated loopback DAV adapter uses the account's current ownership and
+encrypted archive manifests. Every request checks the frozen account and note.
+Metadata, ranges, and file bytes come from verified archives in a private cache.
+Opening a folder backup can download and restore that complete archive before its
+first file read; this is not sparse archive access. macOS apps, symbolic links,
+and extended attributes still need their original platform's restore client.
+PUT, MOVE, DELETE and other mutations are rejected; edit files through GenDragoon.
+
+The rclone child receives only temporary loopback credentials in its environment,
+without an account token, refresh token, storage secret, or keymap path. Registry
+files contain mount/process identities and tool metadata only. Account switching,
+disconnect, key replacement, and Quit are blocked while any drive remains mounted,
+orphaned, preparing, or uncertain. Verified caches are retained after unmount.
+
+Linux uses normal `fusermount -u`, retaining a busy drive. Windows verifies its
+recorded volume through the opened handle and requires a successful exclusive
+[volume lock](https://learn.microsoft.com/en-us/windows/win32/api/winioctl/ni-winioctl-fsctl_lock_volume)
+before dismount/shutdown, holding that lock until the owned rclone process exits.
+Unsupported WinFsp controls fail closed and preserve the session. No force/lazy
+unmount or arbitrary process termination is provided.
+
+CI stages a hash-pinned official rclone executable only in the ephemeral runner,
+then tests real mount/read/busy refusal/normal unmount **if** that runner already
+has usable FUSE or WinFsp. The separate mount-capability report states `verified`,
+`prerequisite-unavailable`, or `failed`; a missing-driver skip is not evidence
+that a drive mounted. Windows driver compatibility remains unverified until its
+real mount gate passes. Product installation does not download this CI fixture.
 
 ## Current client installation
 

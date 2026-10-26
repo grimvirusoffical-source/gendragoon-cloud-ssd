@@ -36,6 +36,7 @@ import gendragoon_auth_broker as broker
 
 MAX_ENTRIES=1_000_000
 MARGIN=64*1024*1024
+TRANSFER_LOCK=threading.RLock()
 
 class TransferProgress:
     """Real phase/archive counters and streamed carrier bytes; memory only."""
@@ -72,10 +73,11 @@ class TransferProgress:
 def transfer_progress(function):
     @functools.wraps(function)
     def wrapped(self,*args,**kwargs):
-        previous=storage.progress;self.progress=TransferProgress();storage.progress=self.progress
-        try:
-            value=function(self,*args,**kwargs);self.progress.phase("complete");return value
-        finally:storage.progress=previous
+        with TRANSFER_LOCK:
+            previous=storage.progress;self.progress=TransferProgress();storage.progress=self.progress
+            try:
+                value=function(self,*args,**kwargs);self.progress.phase("complete");return value
+            finally:storage.progress=previous
     return wrapped
 
 def state_root():

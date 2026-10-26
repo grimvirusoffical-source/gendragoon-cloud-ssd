@@ -8,6 +8,8 @@ import queue
 import sys
 import uuid
 import webbrowser
+from workspace_mount import WorkspaceMountManager,MountError
+from mount_platform import PlatformMountError
 
 sys.dont_write_bytecode=True
 from redx_session import RedXSession, IntegrationSession, SessionError
@@ -20,6 +22,7 @@ class GenDragoonGUI:
         from tkinter import ttk
         self.instance=DesktopInstance()
         self.tk=tk;self.ttk=ttk;self.root=root;self.model=MachineNotesClient()
+        self.mounts=WorkspaceMountManager(self.model.root);self.rclone_path=None
         self.executor=concurrent.futures.ThreadPoolExecutor(max_workers=1,thread_name_prefix="gendragoon-desktop")
         self.messages=queue.Queue();self.busy=False;self.clipboard=None;self.team=None;self.team_cursor=None;self.chat_cursor=None
         self.team_values=[];self.drag=None
@@ -53,7 +56,7 @@ class GenDragoonGUI:
                 +" · carrier bytes sent "+str(int(progress.get("uploaded_bytes",0)))+" · received "+str(int(progress.get("downloaded_bytes",0))))
         self.root.after(40,self.pump)
     def _error(self,error):
-        if isinstance(error,(SessionError,VaultError,storage.RedXStorageError,ValueError)):
+        if isinstance(error,(SessionError,VaultError,storage.RedXStorageError,ValueError,MountError,PlatformMountError)):
             return str(error)[:600]
         return "The operation could not finish. Your originals and existing keys were preserved."
     def run(self,label,work,done=None,failed=None):
@@ -89,6 +92,15 @@ class GenDragoonGUI:
         self.tree.bind("<Button-3>",self.context);self.tree.bind("<Control-c>",lambda _:self.copy(False));self.tree.bind("<Control-x>",lambda _:self.copy(True));self.tree.bind("<Control-v>",lambda _:self.paste())
         self.tree.bind("<ButtonPress-1>",self.drag_start,add=True);self.tree.bind("<ButtonRelease-1>",self.drag_end,add=True)
         ttk.Label(self.files,text="Folders organize archive items. Folder backups keep their archived contents together. Uploads retain your originals; library deletion retains encrypted payload bytes and does not reclaim quota.",wraplength=980).pack(fill="x",pady=8)
+        drives=ttk.LabelFrame(self.files,text="Read-only workspace drives",padding=6);drives.pack(fill="x")
+        actions=ttk.Frame(drives);actions.pack(fill="x")
+        for title,command in (("Mount selected MachineNote",self.mount_drive),("Open drive",self.open_drive),("Unmount selected drive",self.unmount_drive),("Choose rclone…",self.choose_rclone)):
+            ttk.Button(actions,text=title,command=command).pack(side="left",padx=3)
+        self.drive_list=ttk.Treeview(drives,columns=("state","path"),height=3,selectmode="browse")
+        self.drive_list.heading("#0",text="MachineNote");self.drive_list.heading("state",text="Status");self.drive_list.heading("path",text="Actual mount path")
+        self.drive_list.column("#0",width=240);self.drive_list.column("state",width=120);self.drive_list.column("path",width=550);self.drive_list.pack(fill="x",pady=5)
+        ttk.Label(drives,text="Requires existing rclone and WinFsp (Windows) or FUSE (Linux). Files are verified in a private local cache before reading; opening a folder backup can restore its complete archive. Make changes in GenDragoon. Unmount every drive before disconnecting, changing accounts, or quitting because the OS may cache file data.",wraplength=980).pack(fill="x")
+        self.refresh_drives()
     def _teams(self):
         from tkinter import ttk
         bar=ttk.Frame(self.teams);bar.pack(fill="x")
@@ -112,7 +124,7 @@ class GenDragoonGUI:
         for title,command in (("Import encrypted vault…",self.import_vault),("Export encrypted vault…",self.export_vault),("Initialize a new empty account…",self.initialize_vault)):
             ttk.Button(self.settings,text=title,command=command).pack(anchor="w",pady=5)
         ttk.Label(self.settings,text="The exported file uses AES-256-GCM and PBKDF2-HMAC-SHA256 (600,000 iterations). Keep it and its passphrase safe. Different local keys are never replaced. New keys must be exported before uploading.",wraplength=900).pack(fill="x",pady=12)
-        ttk.Label(self.settings,text="Windows/Linux Files supports portable files and folder archives. Backups containing macOS apps, extended attributes, or symbolic links must be restored on their original platform. macOS cloud-drive mounts and managed application launch are not provided here.",wraplength=900).pack(fill="x",pady=12)
+        ttk.Label(self.settings,text="Windows/Linux supports portable files, folder archives, and read-only workspace drives when existing rclone and WinFsp/FUSE are available. Backups containing macOS apps, extended attributes, or symbolic links must be restored on their original platform. Drives do not provide writeback or managed app launch.",wraplength=900).pack(fill="x",pady=12)
         ttk.Separator(self.settings).pack(fill="x",pady=10)
         ttk.Label(self.settings,text="Browser and VS Code companion",font=("TkDefaultFont",13,"bold")).pack(anchor="w")
         ttk.Label(self.settings,text="Enable only your exact installed extension IDs. Each extension still needs native approval for the connected account. Account tokens and storage keys are never sent to a browser or editor.",wraplength=900).pack(fill="x",pady=8)
@@ -164,13 +176,15 @@ class GenDragoonGUI:
         if model.selected_note:self.refresh_tree()
     def disconnect(self):
         from tkinter import messagebox
-        if self.busy:return
+        if not self.can_switch():return
         if self.model.keys and not self.model.vault_exported:
             messagebox.showwarning("Export your vault","Export your new vault before disconnecting, so its storage key is not lost.",parent=self.root);return
         self.model.session.logout();self.model=MachineNotesClient();self.note["values"]=[];self.note.set("");self.tree.delete(*self.tree.get_children());self.clipboard=None;self.team=None;self.companion_grants.clear();self.status.set("Disconnected. Account credentials are no longer held in this session.")
     def can_switch(self):
         from tkinter import messagebox
         if self.busy:return False
+        if self.mounts.has_mounts:
+            messagebox.showwarning("Unmount workspace drives","Unmount all drives before disconnecting, changing accounts, or quitting. Retained or uncertain drives also need review; the current session was preserved.",parent=self.root);return False
         if self.model.keys and not self.model.vault_exported:
             messagebox.showwarning("Export your vault","Export your new vault before changing accounts, so its storage key is not lost.",parent=self.root);return False
         return True
@@ -198,6 +212,33 @@ class GenDragoonGUI:
                     inserted.add(key);del pending[key];progressed=True
             if not progressed:self.status.set("The library hierarchy needs review. Refresh before changing it.");break
     def selected(self):return list(self.tree.selection())
+    def refresh_drives(self):
+        self.drive_list.delete(*self.drive_list.get_children())
+        for record in self.mounts.refresh():
+            self.drive_list.insert("","end",iid=record["id"],text=record.get("name","MachineNote"),values=(record["state"],record["mountPath"]))
+        if self.mounts.unknown:self.status.set("The private drive registry needs review. Account switching and Quit remain blocked.")
+    def choose_rclone(self):
+        from tkinter import filedialog
+        if self.busy:return
+        chosen=filedialog.askopenfilename(parent=self.root,title="Select an existing trusted rclone executable")
+        if chosen:self.rclone_path=chosen;self.status.set("Selected rclone. The executable and filesystem prerequisites will be checked before mounting.")
+    def mount_drive(self):
+        if self.busy or not self.model.selected_note:return
+        model=self.model;note=model.selected_note;binary=self.rclone_path
+        self.run("Preparing an authenticated read-only filesystem drive…",lambda:self.mounts.mount(model,note,binary),lambda _:(self.refresh_drives(),self.status.set("Read-only filesystem drive mounted. Unmount every drive before changing accounts or quitting.")),lambda _:self.refresh_drives())
+    def unmount_drive(self):
+        selected=self.drive_list.selection()
+        if self.busy or len(selected)!=1:return
+        key=selected[0]
+        self.run("Requesting normal filesystem unmount…",lambda:self.mounts.unmount(key),lambda _:(self.refresh_drives(),self.status.set("The drive was normally unmounted. Its verified private cache was retained.")),lambda _:self.refresh_drives())
+    def open_drive(self):
+        import os,subprocess
+        selected=self.drive_list.selection()
+        if self.busy or len(selected)!=1:return
+        record=next((r for r in self.mounts.refresh() if r["id"]==selected[0]),None)
+        if not record or record["state"]!="mounted":self.status.set("This path is not a confirmed active filesystem drive.");return
+        if sys.platform=="win32":os.startfile(record["mountPath"])
+        else:subprocess.Popen(["xdg-open",record["mountPath"]],stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
     def folder(self):
         selected=self.selected()
         if len(selected)==1:
@@ -281,6 +322,7 @@ class GenDragoonGUI:
     def import_vault(self):
         from tkinter import filedialog,simpledialog
         if self.busy:return
+        if self.mounts.has_mounts:self.status.set("Unmount every workspace drive before importing storage keys.");return
         path=filedialog.askopenfilename(parent=self.root,title="Import encrypted vault",filetypes=[("GenDragoon vault","*.gdvault"),("JSON","*.json"),("All files","*")])
         if not path:return
         password=simpledialog.askstring("Vault passphrase","Enter this vault's passphrase",show="•",parent=self.root)
@@ -312,6 +354,7 @@ class GenDragoonGUI:
     def initialize_vault(self):
         from tkinter import messagebox
         if self.busy:return
+        if self.mounts.has_mounts:self.status.set("Unmount every workspace drive before initializing storage keys.");return
         if not messagebox.askyesno("Initialize empty storage?","This is for a new, empty account. Existing encrypted storage requires the vault from its original device. Export your new vault before uploading.",parent=self.root):return
         self.run("Verifying the account is empty before creating keys…",self.model.initialize_empty_vault,lambda _:self.export_vault())
     def username(self):
@@ -455,6 +498,8 @@ class GenDragoonGUI:
         from tkinter import messagebox
         if self.busy:
             messagebox.showwarning("Operation active","Wait for the transfer or account operation to finish. Active writers are not terminated.",parent=self.root);return
+        if self.mounts.has_mounts:
+            messagebox.showwarning("Workspace drives active","Unmount every workspace drive before quitting. Mounted, orphaned, or uncertain drives keep this account session protected.",parent=self.root);return
         if self.model.keys and not self.model.vault_exported:
             messagebox.showwarning("Export your vault","Export your new vault before quitting, so its storage key is not lost.",parent=self.root);return
         if self.companion:self.companion.close()

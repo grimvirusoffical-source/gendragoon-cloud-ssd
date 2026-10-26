@@ -97,6 +97,27 @@ jobs:
       - name: Create and verify an application-owned Windows UTF-8 interpreter without modifying Python
         if: runner.os == 'Windows'
         run: python -B native/Desktop/windows_utf8.py --destination "${{ runner.temp }}/gendragoon-python-utf8" --path "${{ runner.temp }}/gendragoon-desktop" --path "${{ runner.temp }}/gendragoon-desktop/runtime"
+      - name: Stage only an official hash-pinned rclone CI fixture without installing a driver
+        run: python -B native/Desktop/stage_ci_rclone.py --destination "${{ runner.temp }}/gendragoon-rclone-fixture"
+      - name: Verify authenticated drive reads and real Linux FUSE mounting when already permitted
+        if: runner.os == 'Linux'
+        run: python -B -m unittest discover -s native/Desktop/tests -p test_workspace_drives.py -v
+        env:
+          GD_DESKTOP_RUNTIME: ${{ runner.temp }}/gendragoon-desktop
+          GD_MOUNT_REPORT: ${{ runner.temp }}/desktop-mount-capabilities.json
+      - name: Verify private Windows drive adapter and existing WinFsp prerequisites
+        if: runner.os == 'Windows'
+        run: |
+          & "${{ runner.temp }}/gendragoon-python-utf8/python.exe" -B -m unittest discover -s native/Desktop/tests -p test_workspace_drives.py -v
+        env:
+          GD_DESKTOP_RUNTIME: ${{ runner.temp }}/gendragoon-desktop
+          GD_MOUNT_REPORT: ${{ runner.temp }}/desktop-mount-capabilities.json
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        if: always()
+        with:
+          name: GenDragoon-desktop-${{ runner.os }}-mount-capability
+          path: ${{ runner.temp }}/desktop-mount-capabilities.json
+          if-no-files-found: warn
       - name: Verify current MachineNotes, portable vault, genuine encrypted transfer, renewal and private filesystem
         if: runner.os == 'Linux'
         run: python -B -m unittest discover -s native/Desktop/tests -p test_machinenotes.py -v
@@ -243,7 +264,7 @@ jobs:
           target: google_apis_playstore_ps16k
           arch: x86_64
           cores: 2
-          ram-size: 2048M
+          ram-size: 4096M
           disk-size: 4096M
           emulator-boot-timeout: 300
           disable-animations: true
