@@ -5,6 +5,7 @@ const {ControlState}=require('./control-state.cjs');
 const {RedXState,CloudError,digest,origin}=require('./redx-state.cjs');
 const {createInternalEntitlements}=require('./internal-entitlements.cjs');
 const {createDeletionClient,createAccountDeletion,settleAccountBilling}=require('./account-deletion.cjs');
+const {createControlLifecycle,runControlCLI}=require('./control-lifecycle.cjs');
 const fs=require('node:fs/promises');
 const path=require('node:path');
 const {PRIVACY_HTML}=require('./privacy-page.cjs');
@@ -358,7 +359,9 @@ async function createControl(config){
    const q=s?.projects?.[workspaceId];if(!q||q.status==='deleting')return null;
    return {id:workspaceId,active:q.active===true,readOnly:q.readOnly===true,quotaBytes:q.quotaBytes||0,workers:q.workers||0,checkedAtMs:Date.now()};
  })});
- const server=http.createServer(async(req,res)=>{
+ const server=http.createServer();
+ const lifecycle=createControlLifecycle(server,{drain:()=>accountDeletion.drain()});
+ server.on('request',lifecycle.admit(async(req,res)=>{
    try{
      const host=req.headers.host||'',u=new URL(req.url,'http://'+host);if(req.headers.origin)throw new CloudError('invalid_origin',403);
      const legacyPath=u.pathname==='/gendragoon'?'/':u.pathname.startsWith('/gendragoon/')?u.pathname.slice('/gendragoon'.length):u.pathname;
@@ -388,13 +391,13 @@ async function createControl(config){
      throw new CloudError('not_found',404);
      });
    }catch(e){if(!res.headersSent){const code=e instanceof CloudError?e.code:'service_unavailable';send(res,e instanceof CloudError?e.status:503,{error:code,...(MACHINE_NOTE_MESSAGES[code]?{message:MACHINE_NOTE_MESSAGES[code]}:{})});}else res.destroy();}
- });
+ }));
  server.requestTimeout=60000;server.headersTimeout=10000;server.maxHeadersCount=30;
- return {server,store,accountDeletion,async listen(port=0){await new Promise((ok,no)=>{server.once('error',no);server.listen(port,'127.0.0.1',ok)});return 'http://127.0.0.1:'+server.address().port;},async close(){await accountDeletion.drain();await new Promise(r=>server.close(r));}};
+ return {server,store,accountDeletion,async listen(port=0){if(lifecycle.closing)throw new CloudError('service_closing',503);await new Promise((ok,no)=>{server.once('error',no);server.listen(port,'127.0.0.1',ok)});return 'http://127.0.0.1:'+server.address().port;},close:lifecycle.close};
 }
 if(require.main===module){
  const Stripe=require('stripe'),secret=process.env.STRIPE_SECRET_KEY||'';
  const stripe=/^(sk|rk)_(live|test)_[A-Za-z0-9]+$/.test(secret)?new Stripe(secret,{apiVersion:'2026-09-30.endive',maxNetworkRetries:2,timeout:25000}):null;
- createControl({issuer:process.env.REDXAI_ISSUER||'https://red-xai.com',redxURL:process.env.REDX_URL,redxKey:process.env.REDX_RECEIVERS_KEY,redxDB:process.env.REDX_RECEIVERS_DB||'gendragoon_receivers',redxLocal:process.env.REDX_LOCAL_LOOPBACK==='1',publicBase:process.env.GENDRAGOON_PUBLIC_BASE||'https://api.red-xai.com/gendragoon',internalEntitlementToken:process.env.GENDRAGOON_CONTROL_INTERNAL_TOKEN,stripe}).then(async c=>{await c.listen(Number(process.env.GENDRAGOON_CONTROL_PORT||17778));});
+ runControlCLI(()=>createControl({issuer:process.env.REDXAI_ISSUER||'https://red-xai.com',redxURL:process.env.REDX_URL,redxKey:process.env.REDX_RECEIVERS_KEY,redxDB:process.env.REDX_RECEIVERS_DB||'gendragoon_receivers',redxLocal:process.env.REDX_LOCAL_LOOPBACK==='1',publicBase:process.env.GENDRAGOON_PUBLIC_BASE||'https://api.red-xai.com/gendragoon',internalEntitlementToken:process.env.GENDRAGOON_CONTROL_INTERNAL_TOKEN,stripe}),{port:Number(process.env.GENDRAGOON_CONTROL_PORT||17778)});
 }
 module.exports={createControl,WORKSPACE_MONTHLY_CENTS,OWNER_EMAIL,pricing:()=>({STORAGE,PERFORMANCE})};
