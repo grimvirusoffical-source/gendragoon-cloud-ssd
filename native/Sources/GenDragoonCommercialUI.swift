@@ -336,6 +336,7 @@ private struct GDPrimary: View {
             GenDragoonAutomaticUpdateStatus()
             GDCompanionPanel()
             GDPortableVaultPanel()
+            GDAccountDeletionSection()
             GDPanel {
                 AccountResetSection(isBusy: native.maintenanceBusy,
                     acquireExclusiveOperation: { native.acquireReset() },

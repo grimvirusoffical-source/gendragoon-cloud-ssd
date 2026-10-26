@@ -69,6 +69,25 @@ async function events(root) {
   return (await fs.readFile(path.join(root, 'events.jsonl'), 'utf8')).trim().split('\n').filter(Boolean).map(JSON.parse);
 }
 
+async function operaSystemHost(root, manifest) {
+  // Opera's documented Linux lookup is system-wide. This registration exists
+  // only on the disposable Actions VM, never on a developer/customer machine.
+  // https://help.opera.com/en/extensions/message-passing/
+  assert.equal(process.platform, 'linux');
+  assert.equal(process.env.GITHUB_ACTIONS, 'true');
+  const runner = await fs.realpath(process.env.RUNNER_TEMP);
+  assert.ok(root.startsWith(runner + path.sep));
+  const target = '/etc/opt/chrome/native-messaging-hosts/' + HOST_NAME + '.json';
+  try { await fs.lstat(target); throw new Error('The isolated Opera host path must not already exist'); }
+  catch (error) { if (error.code !== 'ENOENT') throw error; }
+  const source = path.join(root, 'opera-native-host-manifest.json');
+  const data = JSON.stringify(manifest);
+  await fs.writeFile(source, data, {mode: 0o600, flag: 'wx'});
+  await execute('sudo', ['-n', 'install', '-D', '-m', '0644', source, target], {maxBuffer: 65536});
+  assert.equal(await fs.readFile(target, 'utf8'), data);
+  return {target, data};
+}
+
 async function chromiumTest(root, directory, archive, tools, python, client = 'chromium') {
   const {chromium} = tools('playwright');
   const manifest = JSON.parse(await fs.readFile(path.join(directory, 'manifest.json'), 'utf8'));
@@ -76,7 +95,7 @@ async function chromiumTest(root, directory, archive, tools, python, client = 'c
   const identifier = checksum(idInput).slice(0, 32).replace(/[0-9a-f]/g, value => String.fromCharCode(97 + parseInt(value, 16)));
   const origin = 'chrome-extension://' + identifier + '/';
   const child = await startCompanion(root, origin, python);
-  let context;
+  let context, operaRegistration;
   try {
     let opera = null;
     if (client === 'opera') {
@@ -97,7 +116,9 @@ async function chromiumTest(root, directory, archive, tools, python, client = 'c
     const hosts = path.join(profile, 'NativeMessagingHosts');
     await fs.mkdir(hosts, {recursive: true, mode: 0o700});
     const binary = path.join(root, 'state/gendragoon/NativeMessaging/gendragoon-native-host');
-    await fs.writeFile(path.join(hosts, HOST_NAME + '.json'), JSON.stringify({name: HOST_NAME, description: 'Disposable GenDragoon acceptance fixture', path: binary, type: 'stdio', allowed_origins: [origin]}), {mode: 0o600});
+    const nativeManifest = {name: HOST_NAME, description: 'Disposable GenDragoon acceptance fixture', path: binary, type: 'stdio', allowed_origins: [origin]};
+    await fs.writeFile(path.join(hosts, HOST_NAME + '.json'), JSON.stringify(nativeManifest), {mode: 0o600});
+    if (client === 'opera') operaRegistration = await operaSystemHost(root, nativeManifest);
     const branded = client !== 'chromium';
     const cdpInstall = client === 'chrome' || client === 'edge';
     context = await chromium.launchPersistentContext(profile, {
@@ -126,7 +147,16 @@ async function chromiumTest(root, directory, archive, tools, python, client = 'c
     }
     await page.goto(origin + 'dashboard.html');
     assert.equal(await page.evaluate(() => chrome.runtime.id), identifier, 'The actual loaded extension identity must match the exact native-host allowlist');
-    await page.locator('#status').filter({hasText: 'Approve this disposable CI fixture client first.'}).waitFor({timeout: 15000});
+    try {
+      await page.locator('#status').filter({hasText: 'Approve this disposable CI fixture client first.'}).waitFor({timeout: 15000});
+    } catch (error) {
+      // Account-free fixture state only; no profiles, native paths or tokens.
+      const status = (await page.locator('#status').textContent()).slice(0, 256);
+      await report(root, client + '-connection-failure', {passed: false, browserVersion, vendorVersion,
+        status, syntheticDispatchEvents: (await events(root)).length,
+        systemHostRegisteredOnDisposableCIOnly: Boolean(operaRegistration)});
+      throw error;
+    }
     assert.equal(await page.locator('#files li').count(), 0, 'Denied approval must not expose fixture metadata');
     await atomicJSON(path.join(root, 'consent.json'), {approved: true});
     await page.locator('#refresh').click();
@@ -177,6 +207,7 @@ async function chromiumTest(root, directory, archive, tools, python, client = 'c
     await report(root, client, {passed: true, browserVersion, vendorVersion, runnerImage: process.env.ImageVersion || null, operaFixture: opera, extensionVersion: manifest.version,
       extensionId: identifier, extensionArchiveSHA256: checksum(await fs.readFile(archive)), nativeHostSHA256: checksum(await fs.readFile(binary)),
       actualNativeMessaging: true, actualProductionPrivateIPC: true, approvalDeniedThenFixtureApproved: true,
+      systemHostRegisteredOnDisposableCIOnly: Boolean(operaRegistration),
       readOnlyControls: true, metadataRenderedAsText: true, disallowedRoutesRejected: true,
       fixtureApprovalRevokedOnExistingConnection: true, exactOriginRemovalDeniesNewConnection: true,
       teamsPageLoaded: true, syntheticAccountFreeDispatch: true, realNativeConsentUITested: false, liveAccountOrUploadTest: false,
@@ -185,7 +216,15 @@ async function chromiumTest(root, directory, archive, tools, python, client = 'c
       signedStoreInstallationTested: false, normalUserApprovalTested: false, otherOperatingSystemsTested: false});
   } finally {
     try { if (context) await context.close(); }
-    finally { await stopChild(child); }
+    finally {
+      try { await stopChild(child); }
+      finally {
+        if (operaRegistration) {
+          assert.equal(await fs.readFile(operaRegistration.target, 'utf8'), operaRegistration.data, 'Do not remove a changed host registration');
+          await execute('sudo', ['-n', 'rm', '--', operaRegistration.target], {maxBuffer: 65536});
+        }
+      }
+    }
   }
 }
 

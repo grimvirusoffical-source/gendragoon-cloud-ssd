@@ -233,6 +233,9 @@ class RestartWorkerTests(unittest.TestCase):
             target=self.resources/name
             target.parent.mkdir(parents=True,exist_ok=True)
             if not target.exists():target.write_bytes(b"fixture runtime resource")
+        try:from .macos_runtime_fixture import seed_compiled_runtime
+        except ImportError:from macos_runtime_fixture import seed_compiled_runtime
+        seed_compiled_runtime(package,self.resources)
         package.require_runtime_resources(self.app)
         (self.resources/"gendragoon_update_restart.py").unlink()
         with self.assertRaisesRegex(RuntimeError,"gendragoon_update_restart.py"):

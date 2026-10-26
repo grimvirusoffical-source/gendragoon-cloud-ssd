@@ -7,8 +7,11 @@ private encryption checkout, store login, or user browser profile.
 
 The driver refuses to run outside Linux GitHub Actions and requires a new
 private directory inside `RUNNER_TEMP`. Browser profiles, the extension host,
-the native-host registration, IPC locator/socket, consent fixture, and all
-downloaded tools stay within disposable test locations. It never changes HOME,
+the IPC locator/socket, consent fixture, and downloaded tools stay within
+disposable test locations. Opera additionally needs its documented system-wide
+Linux host manifest on that disposable VM; the test refuses an existing manifest,
+creates only its exact host file, verifies it before cleanup, and removes it after
+the test. Other clients use profile-local host manifests. It never changes HOME,
 registers a host in a user's browser, or launches a browser on the operator's
 Mac. Tool dependencies and their transitive integrity hashes are locked;
 `npm ci --ignore-scripts` installs them outside the source and package trees.
@@ -50,7 +53,10 @@ Mac. Tool dependencies and their transitive integrity hashes are locked;
   and extracts it into a new private CI directory without running an installer or
   changing system registrations. It retains the package's notices, removes any
   privileged permission bits, and records both package and actual ELF hashes.
-  The real Opera process must load its packaged extension and pass the same
+  Its native-host fixture uses the documented system-wide Linux registration
+  only on the disposable Actions VM, then removes that exact unchanged file.
+  This does not add a system installer to the customer package; the current-user
+  Linux installer continues to refuse Opera. The real Opera process must load its packaged extension and pass the same
   native-messaging checks. The fixture stays on Linux and does not prove Opera
   store installation or native consent UI.
 
@@ -85,6 +91,8 @@ and execution still has to pass before acceptance can be claimed.
 The host registration follows Chromium's actual
 user-data-directory lookup and Chrome's
 [native messaging contract](https://developer.chrome.com/docs/extensions/develop/concepts/native-messaging).
+Opera's Linux host registration follows its documented
+[native messaging locations](https://help.opera.com/en/extensions/message-passing/).
 
 Firefox loading follows Mozilla's
 [web-ext testing workflow](https://extensionworkshop.com/documentation/develop/getting-started-with-web-ext/)

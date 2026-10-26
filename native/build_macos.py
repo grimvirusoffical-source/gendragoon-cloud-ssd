@@ -26,6 +26,49 @@ VISUAL_MODULES=("storage_image", "_image", "rs", "decode_math", "chaff", "look",
     "stencil_decode", "glyphs", "pyramid", "chromatic", "operators", "ct_sample",
     "confidence_map", "capacity", "damage_recover", "geom_sync")
 
+def compile_private_modules(python,resources):
+    """Compile only the pinned codec packages with the target interpreter.
+
+    Adjacent bytecode is an intentional, immutable resource, not an import
+    cache. The library itself is unchanged; its source stays in the checkout.
+    Use relative code filenames so developer paths do not enter the package.
+    """
+    initializer=resources/"redsecretsxai/__init__.py"
+    initializer.write_text(
+        "from pathlib import Path as _Path\n"
+        "from gendragoon_codec_loader import install_sourceless_runtime as _install\n"
+        "_install(_Path(__file__).resolve().parent.parent)\n"
+        + initializer.read_text())
+    code="""
+import hashlib, importlib.util, json, pathlib, py_compile, sys
+root=pathlib.Path(sys.argv[1])
+files={}
+for package in ('redxai','redsecretsxai'):
+    for source in sorted((root/package).glob('*.py')):
+        if source.is_symlink() or not source.is_file():
+            raise RuntimeError('Linked or missing codec source')
+        relative=source.relative_to(root).as_posix()
+        target=source.with_suffix('.pyc')
+        if target.exists() or target.is_symlink():
+            raise RuntimeError('Codec bytecode output already exists')
+        py_compile.compile(str(source),cfile=str(target),dfile=relative,doraise=True,
+            invalidation_mode=py_compile.PycInvalidationMode.UNCHECKED_HASH)
+        data=target.read_bytes()
+        files[target.relative_to(root).as_posix()]={'bytes':len(data),'sha256':hashlib.sha256(data).hexdigest()}
+        source.unlink()
+print(json.dumps({'pythonMajorMinor':'.'.join(map(str,sys.version_info[:2])),
+    'bytecodeMagic':importlib.util.MAGIC_NUMBER.hex(),'files':files}))
+"""
+    compiled=json.loads(run([python,"-B","-c",code,resources],timeout=60))
+    if compiled["pythonMajorMinor"]!=VISUAL_PYTHON or compiled["bytecodeMagic"]!="f30d0d0a":
+        raise RuntimeError("The compiled codec requires Python 3.13 bytecode")
+    metadata=resources/"gendragoon_python_runtime.json"
+    record=json.loads(metadata.read_text())
+    record.update(pinnedLibrary=RED_SECRETS_COMMIT,bytecodeMagic=compiled["bytecodeMagic"],
+        compiledModules=compiled["files"],sourceIncluded=False)
+    metadata.write_text(json.dumps(record,indent=2)+"\n")
+    return compiled
+
 def run(args,timeout=600,env=None):
     result=subprocess.run([str(x) for x in args],capture_output=True,text=True,timeout=timeout,env=env)
     if result.returncode:raise RuntimeError(Path(args[0]).name+" failed:\n"+result.stdout[-12000:]+result.stderr[-12000:])
@@ -93,7 +136,10 @@ def stage_redsecrets_runtime(resources,output):
     native=resources/"redxai/_native";native.mkdir(mode=0o755)
     shutil.copy2(dylib,native/"librsx.dylib")
     shutil.copy2(vendor/"LICENSE",resources/"Red-SecretsXAI-LICENSE.txt")
+    shutil.copy2(vendor/"NOTICE",resources/"Red-SecretsXAI-NOTICE.txt")
+    shutil.copy2(ROOT/"Resources/gendragoon_codec_loader.py",resources/"gendragoon_codec_loader.py")
     python=stage_visual_dependencies(resources)
+    compile_private_modules(python,resources)
     env=os.environ.copy();env["PYTHONDONTWRITEBYTECODE"]="1";env["PYTHONPATH"]=str(resources)
     code=("import tempfile,numpy,PIL;from redxai import _librsx;"
           "from redsecretsxai import encode_image,decode_image,encode_storage_image,decode_storage_image;"
@@ -140,6 +186,8 @@ def build(base,output):
     if sys.platform!="darwin":raise RuntimeError("Build this target on macOS with Xcode")
     with (base/"Contents/Info.plist").open("rb") as source:info=plistlib.load(source)
     if info.get("CFBundleIdentifier")!="app.gendragoon.cloudssd":raise RuntimeError("Base bundle identity mismatch")
+    if run([base/"Contents/Resources/rclone","version"]).splitlines()[0]!="rclone v1.75.2":
+        raise RuntimeError("The licensed base runtime must contain the pinned rclone v1.75.2")
     output.mkdir(parents=True,exist_ok=True)
     app=output/NAME
     if app.exists() or app.is_symlink():raise RuntimeError("Output bundle already exists; use a fresh build folder")

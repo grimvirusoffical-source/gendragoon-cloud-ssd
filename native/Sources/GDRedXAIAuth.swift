@@ -237,6 +237,7 @@ private struct GDRXTokenSet {
     }
 
     func storageCredential() throws -> String {
+        guard try accountDeletionPending() == nil else { throw GDAccountDeletionFailure(message: "Account deletion is pending. Storage keys were retained until its verified completion.") }
         guard !subject.isEmpty else { throw GDTransferError(message: "Connect Red-XAI before cloud storage.", status: 401) }
         guard !portableVaultBusy else { throw GDTransferError(message: "Finish the portable vault operation before starting cloud work.", status: 0) }
         let account = Self.storageAccount(issuer: issuer.absoluteString, subject: subject)
@@ -249,6 +250,7 @@ private struct GDRXTokenSet {
     }
 
     private func beginPortableVault() throws -> (subject: String, receiver: String, keymap: URL) {
+        guard try accountDeletionPending() == nil else { throw GDAccountDeletionFailure(message: "Resolve this account’s pending deletion before changing or exporting its private vault.") }
         guard linked, !subject.isEmpty, GDPortableVaultCodec.validReceiver(receiverID), let keymapURL,
               !busy, !portableVaultBusy else {
             throw GDPortableVaultFailure(message: "Connect the intended Red-XAI account before using a portable vault.")
@@ -353,9 +355,13 @@ private struct GDRXTokenSet {
             }
             state = .connecting; status = "Restoring your Red-XAI app session…"
             let set = try await resume(refresh: refresh, expected: p.subject)
-            let receiver = try await provision(access: set.access, expected: p.receiverId)
+            let pending = try accountDeletionPending()
+            if let pending, !pending.matches(subject: p.subject, receiver: p.receiverId) { throw GDAccountDeletionFailure(message: "Reconnect the account associated with the saved deletion request.") }
+            let receiver: String
+            if pending == nil { receiver = try await provision(access: set.access, expected: p.receiverId) }
+            else { receiver = try await receiverForDeletion(set.subject, expected: p.receiverId) }
             try apply(set, receiver: receiver)
-            await refreshWorkspaces()
+            if pending == nil { await refreshWorkspaces() } else { status = "Same account restored · resume its saved deletion receipt in Account." }
         } catch {
             tokens = nil; linked = false; state = .disconnected
             status = "Red-XAI app approval expired or was revoked. Connect again when you need cloud storage."
@@ -386,6 +392,8 @@ private struct GDRXTokenSet {
 
     func connect() {
         guard !busy, !portableVaultBusy else { return }
+        let pending: GDAccountDeletionPending?
+        do { pending = try accountDeletionPending() } catch { status = "The saved deletion request needs review. Existing keys were retained."; return }
         guard !GDWorkspaceMounts.shared.hasMounts else { status = "Unmount all workspace drives before changing Red-XAI accounts. Refresh drive status if needed."; return }
         busy = true; state = .connecting; status = "Starting Red-XAI approval…"; approvalCode = ""
         Task {
@@ -417,10 +425,13 @@ private struct GDRXTokenSet {
                     if response.statusCode == 428 { continue }
                     if response.statusCode == 429 { delay = min(10, delay + 1); continue }
                     guard response.statusCode == 200 else { throw GDTransferError(message: "Red-XAI approval was denied or expired.", status: response.statusCode) }
-                    tokenSet = try parseTokens(data); break
+                    tokenSet = try parseTokens(data, expectedSubject: pending?.subject); break
                 }
                 guard let set = tokenSet else { throw GDTransferError(message: "Red-XAI approval timed out.", status: 408) }
-                let receiver = try await provision(access: set.access, expected: try receiverID(for: set.subject))
+                let expectedReceiver = try receiverID(for: set.subject)
+                let receiver: String
+                if pending == nil { receiver = try await provision(access: set.access, expected: expectedReceiver) }
+                else { receiver = try await receiverForDeletion(set.subject, expected: pending!.receiverID) }
                 let p = GDRXProfile(schema: 1, issuer: issuer.absoluteString, clientId: clientID,
                     authProvider: "redx-site-session", subject: set.subject, cloudApi: cloudAPI.absoluteString,
                     receiverId: receiver, storageFormat: "redsecretsxai-png-v1", development: false,
@@ -428,7 +439,7 @@ private struct GDRXTokenSet {
                 try saveProfileCreating(p)
                 try apply(set, receiver: receiver)
                 approvalCode = ""
-                await refreshWorkspaces()
+                if pending == nil { await refreshWorkspaces() } else { status = "Same account approved · resume its saved deletion receipt in Account." }
             } catch {
                 tokens = nil; linked = false; state = .error
                 status = error.localizedDescription
@@ -436,7 +447,11 @@ private struct GDRXTokenSet {
         }
     }
 
-    func accessToken(forceRefresh: Bool = false) async throws -> String {
+    func accessToken(forceRefresh: Bool = false, forAccountDeletion: Bool = false) async throws -> String {
+        let pending = try accountDeletionPending()
+        if let pending {
+            guard forAccountDeletion, pending.matches(subject: subject, receiver: receiverID) else { throw GDAccountDeletionFailure(message: "Account deletion is pending. Resume the same account’s receipt in Account; new file, mount and plan operations are paused.") }
+        } else if forAccountDeletion { throw GDAccountDeletionFailure(message: "No saved account deletion request is available.") }
         guard linked, !subject.isEmpty else { throw GDTransferError(message: "Connect Red-XAI first.", status: 401) }
         if !forceRefresh, let tokens, tokens.expiresAt.timeIntervalSinceNow > 30 { return tokens.access }
         if let refreshTask { return try await refreshTask.value }
@@ -445,13 +460,89 @@ private struct GDRXTokenSet {
         let task = Task<String, Error> {
             let set = try await self.resume(refresh: refresh, expected: expected)
             guard self.subject == expected else { throw GDTransferError(message: "Red-XAI account changed.", status: 401) }
-            let receiver = try await self.provision(access: set.access, expected: self.receiverID)
+            let receiver: String
+            if pending == nil { receiver = try await self.provision(access: set.access, expected: self.receiverID) }
+            else { receiver = try await self.receiverForDeletion(set.subject, expected: self.receiverID) }
             try self.apply(set, receiver: receiver)
             return set.access
         }
         refreshTask = task
         defer { refreshTask = nil }
         return try await task.value
+    }
+
+    private let deletionAccount = "current-account-deletion-v1"
+    func accountDeletionPending() throws -> GDAccountDeletionPending? {
+        guard let raw = try Self.keychainRead(service: authService, account: deletionAccount) else { return nil }
+        let value = try JSONDecoder().decode(GDAccountDeletionPending.self, from: Data(raw.utf8))
+        try value.validate(); return value
+    }
+    private func saveAccountDeletion(_ pending: GDAccountDeletionPending) throws {
+        try pending.validate()
+        let data = try JSONEncoder().encode(pending)
+        guard let raw = String(data: data, encoding: .utf8) else { throw GDAccountDeletionFailure(message: "Could not save the deletion recovery request.") }
+        try Self.keychainWrite(service: authService, account: deletionAccount, value: raw)
+    }
+    private func receiverForDeletion(_ subject: String, expected: String) async throws -> String {
+        guard let pending = try accountDeletionPending(), pending.matches(subject: subject, receiver: expected),
+              expected == (try receiverID(for: subject)) else { throw GDAccountDeletionFailure(message: "Approve the same Red-XAI account to recover this deletion request.") }
+        return expected // Authenticated token/user subject checked; never PUT-provision a deleted Receiver.
+    }
+    func beginAccountDeletion() throws -> GDAccountDeletionPending {
+        guard linked, !busy, !portableVaultBusy, refreshTask == nil else { throw GDAccountDeletionFailure(message: "Finish current authentication and key operations before requesting deletion.") }
+        if let saved = try accountDeletionPending() {
+            guard saved.matches(subject: subject, receiver: receiverID) else { throw GDAccountDeletionFailure(message: "Reconnect the account associated with the saved deletion request.") }
+            return saved
+        }
+        let pending = try GDAccountDeletionPending(subject: subject, receiverID: receiverID, idempotencyKey: Self.hex(try Self.random(16)))
+        try saveAccountDeletion(pending)
+        uploadProjects = []; readableProjects = []; status = "Account deletion pending · resume the saved receipt in Account."
+        return pending
+    }
+    func requestAccountDeletion(_ pending: GDAccountDeletionPending, retry: Bool) async throws -> (GDAccountDeletionPending, GDAccountDeletionResponse.Receipt?) {
+        guard pending == (try accountDeletionPending()), pending.matches(subject: subject, receiver: receiverID) else { throw GDAccountDeletionFailure(message: "Reconnect the same Red-XAI account before resuming this request.") }
+        let token = try await accessToken(forceRefresh: true, forAccountDeletion: true)
+        let body: [String: Any]? = retry ? ["confirmation": "DELETE GENDRAGOON", "idempotencyKey": pending.idempotencyKey] : nil
+        let (data, response) = try await request(cloudAPI, path: "gendragoon/v2/account/deletion", method: retry ? "POST" : "GET", json: body, bearer: token)
+        guard (retry ? [200, 202] : [200]).contains(response.statusCode) else {
+            let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+            let code = object?["error"] as? String ?? ""
+            let message: String
+            switch code {
+            case "account_deletion_busy": message = "The server still sees an active operation. Wait, then retry the same request. Local keys were retained."
+            case "idempotency_conflict": message = "Another deletion request already exists for this account. Keep this saved request and contact support; local keys were retained."
+            case "billing_review_required": message = "Deletion needs billing review. Contact support and retain this request."
+            default: message = "The deletion service did not confirm this request (HTTP \(response.statusCode)). Retry the same saved request when connected. Local keys were retained."
+            }
+            throw GDAccountDeletionFailure(message: message)
+        }
+        guard pending.matches(subject: subject, receiver: receiverID) else { throw GDAccountDeletionFailure(message: "The connected account changed. Local keys were retained.") }
+        let result = try GDAccountDeletionResponse.decode(data, pending: pending)
+        var bound = pending
+        if retry, let receipt = result.deletion { bound = try pending.binding(receipt.id); try saveAccountDeletion(bound) }
+        return (bound, result.deletion)
+    }
+    func finishAccountDeletion(_ pending: GDAccountDeletionPending, receipt: GDAccountDeletionResponse.Receipt) throws {
+        guard pending == (try accountDeletionPending()), receipt.authorizesCleanup(pending: pending, subject: subject, receiver: receiverID),
+              !busy, !portableVaultBusy, !GDWorkspaceMounts.shared.hasMounts else { throw GDAccountDeletionFailure(message: "Matching completed deletion and an idle account are required before local cleanup.") }
+        // Verify the shared profile belongs to this exact account before unlinking any file.
+        if let profile = try profileFromDisk(), !pending.matches(subject: profile.subject, receiver: profile.receiverId) { throw GDAccountDeletionFailure(message: "A different local account profile was retained. Cleanup needs review.") }
+        let oldRefresh = try loadRefresh(subject: pending.subject)
+        let account = Self.storageAccount(issuer: issuer.absoluteString, subject: pending.subject)
+        let map = storageRoot.appendingPathComponent(account + ".keymap")
+        let candidates = [map, map.appendingPathExtension("gen"), profileURL]
+        let files = try candidates.compactMap { try GDAccountDeletionOwnedFiles.inspect($0) }
+        try GDAccountDeletionOwnedFiles.remove(files)
+        for (service, name) in [(storageService, account), (authService, Self.authAccount(issuer: issuer.absoluteString, subject: pending.subject))] {
+            let result = SecItemDelete(Self.keychainQuery(service: service, account: name) as CFDictionary)
+            guard result == errSecSuccess || result == errSecItemNotFound else { throw GDAccountDeletionFailure(message: "Cloud deletion completed, but macOS Keychain cleanup needs attention. The saved receipt was retained.") }
+        }
+        tokens = nil; linked = false; subject = ""; email = ""; receiverID = ""; state = .disconnected
+        uploadProjects = []; readableProjects = []; quotaBytes = 0; usedBytes = 0
+        let result = SecItemDelete(Self.keychainQuery(service: authService, account: deletionAccount) as CFDictionary)
+        guard result == errSecSuccess || result == errSecItemNotFound else { throw GDAccountDeletionFailure(message: "Cloud deletion and local key cleanup completed; the saved receipt still needs Keychain cleanup.") }
+        status = "GenDragoon account deletion verified. This account’s keys and app session were removed; originals and unattributed local caches/jobs were retained."
+        if let oldRefresh { Task { _ = try? await request(issuer, path: "redxai-connect/revoke", method: "POST", json: ["token": oldRefresh]) } }
     }
 
     func logout() {

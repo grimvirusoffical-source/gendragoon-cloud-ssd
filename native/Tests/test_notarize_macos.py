@@ -386,6 +386,9 @@ class PackagingFailClosedTests(unittest.TestCase):
                 target = resources / name
                 target.parent.mkdir(parents=True, exist_ok=True)
                 target.write_bytes(b"bundled runtime fixture\n")
+            try:from .macos_runtime_fixture import seed_compiled_runtime
+            except ImportError:from macos_runtime_fixture import seed_compiled_runtime
+            seed_compiled_runtime(package,resources)
             with self.assertRaisesRegex(RuntimeError, "stapled Apple notarization ticket"):
                 package.package(app, Path(folder) / "unused-release", candidate=False)
         self.assertTrue(any("-R" in args for args in commands))
