@@ -622,7 +622,11 @@ class PortableAppFormatTests(unittest.TestCase):
             def restore(directory):
                 path=directory/'portable';private.write_private(path,raw);return path,records
             with patch.object(apps.sys,'platform','win32'),patch.object(apps,'host',return_value=('linux','x86_64')):
-                first=manager.prepare(binding,restore);record=first.directory.parent/'binding.json';before=record.read_bytes()
+                value=apps.uuid.UUID('00112233445546778899aabbccddeeff')
+                with patch.object(apps.uuid,'uuid4',return_value=value):first=manager.prepare(binding,restore)
+                self.assertEqual(len(first.directory.name),22);self.assertEqual(base64.urlsafe_b64decode(first.directory.name+'=='),value.bytes)
+                self.assertTrue(apps._canonical_attempt(first.directory.name))
+                record=first.directory.parent/'binding.json';before=record.read_bytes()
                 self.assertEqual(first.directory.parent,manager.root/apps.WINDOWS_LAYOUT/apps.generation(binding))
                 self.assertEqual(apps._read(record),dict(schema=apps.SCHEMA,layout=apps.WINDOWS_LAYOUT,identity=binding))
                 second=manager.prepare(binding,restore)
@@ -643,6 +647,69 @@ class PortableAppFormatTests(unittest.TestCase):
                 with self.assertRaises(apps.PortableAppError):manager.launch(first,'.',approved=True)
                 self.assertTrue(legacy.exists())
                 self.assertTrue(first.payload.exists());self.assertTrue(second.payload.exists())
+    def test_windows_attempt_creation_never_adopts_existing_or_case_colliding_uuid_cache(self):
+        first=apps.uuid.UUID('00112233445546778899aabbccddeeff')
+        folded=apps.uuid.UUID(bytes=bytes([104])+first.bytes[1:])
+        names=[base64.urlsafe_b64encode(value.bytes).decode().rstrip('=') for value in (first,folded)]
+        self.assertNotEqual(names[0],names[1]);self.assertEqual(names[0].casefold(),names[1].casefold())
+        for other in ((first,folded) if os.name=='nt' else (first,)):
+            with self.subTest(case_alias=other!=first),tempfile.TemporaryDirectory() as td:
+                manager=apps.PortableApps(Path(td).resolve()/'cache');binding=apps.identity(OWNER,NOTE,item())
+                raw=bytearray(64);raw[:7]=b'\x7fELF\x02\x01\x01';struct.pack_into('<HH',raw,16,2,62);struct.pack_into('<Q',raw,24,0x400000)
+                def restore(directory):
+                    payload=directory/'portable';private.write_private(payload,raw)
+                    return payload,[dict(path='.',type='file',size=len(raw),sha256=hashlib.sha256(raw).hexdigest(),executable=0o100)]
+                with patch.object(apps.sys,'platform','win32'),patch.object(apps,'host',return_value=('linux','x86_64')):
+                    with patch.object(apps.uuid,'uuid4',return_value=first):prepared=manager.prepare(binding,restore)
+                    before=(prepared.directory.parent/'binding.json').read_bytes()
+                    with patch.object(apps.uuid,'uuid4',return_value=other):
+                        with self.assertRaisesRegex(apps.PortableAppError,'retained'):manager.prepare(binding,lambda _:self.fail('An existing attempt must never be restored over'))
+                    self.assertEqual(prepared.payload.read_bytes(),raw);self.assertEqual((prepared.directory.parent/'binding.json').read_bytes(),before)
+    def test_legacy_v1_and_v2_uncertain_leases_independently_block_all_new_layout_actions(self):
+        for layout in ('legacy','v1','v2'):
+            with self.subTest(layout=layout),tempfile.TemporaryDirectory() as td:
+                manager=apps.PortableApps(Path(td).resolve()/'cache');binding=apps.identity(OWNER,NOTE,item())
+                raw=bytearray(64);raw[:7]=b'\x7fELF\x02\x01\x01';struct.pack_into('<HH',raw,16,2,62);struct.pack_into('<Q',raw,24,0x400000)
+                def restore(directory):
+                    payload=directory/'portable';private.write_private(payload,raw)
+                    return payload,[dict(path='.',type='file',size=len(raw),sha256=hashlib.sha256(raw).hexdigest(),executable=0o100)]
+                with patch.object(apps.sys,'platform','win32'),patch.object(apps,'host',return_value=('linux','x86_64')):
+                    prepared=manager.prepare(binding,restore)
+                    if layout=='legacy':attempt=manager.root/OWNER/NOTE/apps.generation(binding)/('b'*32)
+                    elif layout=='v1':
+                        parent=private.private_directory(manager.root/'v1'/apps.generation(binding));attempt=parent/('b'*32)
+                        apps._write(parent/'binding.json',dict(schema=apps.SCHEMA,layout='v1',identity=binding))
+                    else:attempt=prepared.directory
+                    control=private.private_directory(attempt/'control');retained=control/('lease-'+('c'*32)+'.json')
+                    apps._write(retained,dict(schema=apps.SCHEMA,id='c'*32,state='uncertain',identity=binding))
+                    before=retained.read_bytes()
+                    for uncertain_only in (False,True):
+                        with self.assertRaises(apps.PortableAppError):manager.assert_safe('change protected state',uncertain_only=uncertain_only)
+                    with self.assertRaises(apps.PortableAppError):manager.prepare(binding,lambda _:self.fail('An old uncertain lease must stop restore'))
+                    with self.assertRaises(apps.PortableAppError):manager.launch(prepared,'.',approved=True)
+                    self.assertEqual(retained.read_bytes(),before);self.assertEqual(prepared.payload.read_bytes(),raw)
+    def test_v1_v2_binding_and_attempt_names_are_strict_and_malformed_records_are_never_adopted(self):
+        canonical=base64.urlsafe_b64encode(apps.uuid.UUID('00112233445546778899aabbccddeeff').bytes).decode().rstrip('=')
+        for layout in ('v1','v2'):
+            for fault in ('missing-binding','wrong-layout-binding','unknown-layout','wrong-attempt-width','noncanonical-attempt','unreadable-generation'):
+                with self.subTest(layout=layout,fault=fault),tempfile.TemporaryDirectory() as td:
+                    manager=apps.PortableApps(Path(td).resolve()/'cache');binding=apps.identity(OWNER,NOTE,item())
+                    parent=private.private_directory(manager.root/('v3' if fault=='unknown-layout' else layout)/apps.generation(binding));record=parent/'binding.json'
+                    if fault!='missing-binding':apps._write(record,dict(schema=apps.SCHEMA,layout=('v2' if layout=='v1' else 'v1') if fault=='wrong-layout-binding' else layout,identity=binding))
+                    name='b'*32 if layout=='v1' else canonical
+                    if fault=='wrong-attempt-width':name=canonical if layout=='v1' else 'b'*32
+                    elif fault=='noncanonical-attempt':name='B'*32 if layout=='v1' else canonical[:-1]+'B'
+                    control=private.private_directory(parent/name/'control')
+                    apps._write(control/('lease-'+('c'*32)+'.json'),dict(schema=apps.SCHEMA,id='c'*32,state='failed-before-start',identity=binding))
+                    before=record.read_bytes() if record.exists() else None;original=Path.iterdir
+                    def scan(path):
+                        if fault=='unreadable-generation' and path==parent:raise PermissionError('fixture generation scan denied')
+                        return original(path)
+                    with patch.object(apps.sys,'platform','win32'),patch.object(apps,'host',return_value=('linux','x86_64')),patch.object(Path,'iterdir',scan):
+                        for uncertain_only in (False,True):
+                            with self.assertRaises(apps.PortableAppError):manager.assert_safe('change protected state',uncertain_only=uncertain_only)
+                        with self.assertRaises(apps.PortableAppError):manager.prepare(binding,lambda _:self.fail('A malformed layout must never be adopted'))
+                    self.assertEqual(record.read_bytes() if record.exists() else None,before);self.assertTrue(control.exists())
     def test_compact_windows_binding_and_reserved_inventory_fail_closed_without_replacing_cache(self):
         for fault in ('missing-binding','changed-binding','unexpected-generation-entry','unexpected-attempt-entry','unreadable-generation'):
             with self.subTest(fault=fault),tempfile.TemporaryDirectory() as td:
@@ -803,9 +870,15 @@ class PortableAppLifecycleTests(unittest.TestCase):
             # This is a terminal receipt for our own never-started legacy
             # fixture, not authority to clear an existing uncertain launch.
             apps._write(lease,dict(schema=apps.SCHEMA,id=lease_id,state='failed-before-start',identity=binding))
+            v1_parent=private.private_directory(manager.root/'v1'/apps.generation(binding))
+            apps._write(v1_parent/'binding.json',dict(schema=apps.SCHEMA,layout='v1',identity=binding))
+            v1_attempt=private.private_directory(v1_parent/('d'*32));v1_payload=private.private_directory(v1_attempt/'content'/'Disposable portable app')
+            v1_control=private.private_directory(v1_attempt/'control');apps._write(v1_control/('lease-'+('e'*32)+'.json'),dict(schema=apps.SCHEMA,id='e'*32,state='failed-before-start',identity=binding))
             old_units=len(str(legacy_payload).encode('utf-16-le'))//2
             new_units=len(str(prepared.payload).encode('utf-16-le'))//2
-            print('Disposable Windows cwd UTF16 units: '+json.dumps(dict(legacy=old_units,compact=new_units),sort_keys=True),flush=True)
+            v1_units=len(str(v1_payload).encode('utf-16-le'))//2
+            print('Disposable Windows cwd UTF16 units: '+json.dumps(dict(legacy=old_units,v1=v1_units,compact=new_units),sort_keys=True),flush=True)
+            self.assertEqual(v1_units-new_units,10);self.assertLessEqual(len(str(prepared.payload/self.binary.name).encode('utf-16-le'))//2,259)
             self.assertGreaterEqual(old_units,260);self.assertLessEqual(new_units,258)
             try:
                 receipt=launch_native_fixture(lambda:manager.launch(prepared,self.binary.name,approved=True))
@@ -821,7 +894,7 @@ class PortableAppLifecycleTests(unittest.TestCase):
                 with self.assertRaises(apps.PortableAppError):manager.assert_safe('change protected state',uncertain_only=uncertain_only)
             with self.assertRaises(apps.PortableAppError):prepare_native_fixture(manager,self.binary)
             with self.assertRaises(apps.PortableAppError):manager.launch(prepared,self.binary.name,approved=True)
-            self.assertTrue(lease.exists());self.assertTrue(legacy_payload.exists());self.assertTrue((prepared.payload/self.binary.name).exists());self.assertTrue(self.binary.exists())
+            self.assertTrue(lease.exists());self.assertTrue(legacy_payload.exists());self.assertTrue(v1_payload.exists());self.assertTrue((prepared.payload/self.binary.name).exists());self.assertTrue(self.binary.exists())
     def test_detached_grandchild_keeps_lease_after_parent_exit_and_all_cache_is_retained(self):
         with tempfile.TemporaryDirectory(prefix='gd-app-lease-') as td:
             manager=apps.PortableApps(Path(td).resolve()/'cache');prepared=prepare_native_fixture(manager,self.binary)

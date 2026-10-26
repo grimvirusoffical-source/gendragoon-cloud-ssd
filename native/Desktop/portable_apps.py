@@ -6,6 +6,7 @@ Every preparation is retained, including failures. There is deliberately no
 cache eviction, original removal, process termination, or companion IPC API.
 """
 from dataclasses import dataclass
+import base64
 import ctypes
 import hashlib
 import json
@@ -23,7 +24,8 @@ import uuid
 import private_fs as private
 
 SCHEMA="gendragoon.portable-app/v1"
-WINDOWS_LAYOUT="v1"
+WINDOWS_LAYOUT="v2"
+WINDOWS_LAYOUTS=frozenset(("v1","v2"))
 HEX=re.compile(r"[a-f0-9]+")
 ATOMIC_TEMP=re.compile(r"\.private-[a-f0-9]{32}")
 MAX_RECORD=128*1024*1024
@@ -168,13 +170,35 @@ def _replace_windows_record(temporary,path):
 
 def _binding(parent,expected=None):
     _real(parent);private.verify(parent)
+    layout=parent.parent.name
+    if layout not in WINDOWS_LAYOUTS:raise PortableAppError("The retained app layout needs review.")
     value=_read(parent/"binding.json")
     raw=value.get("identity",{})
     binding=identity(raw.get("receiverId"),raw.get("workspaceId"),raw)
-    if (value!=dict(schema=SCHEMA,layout=WINDOWS_LAYOUT,identity=binding) or generation(binding)!=parent.name
+    if (value!=dict(schema=SCHEMA,layout=layout,identity=binding) or generation(binding)!=parent.name
             or expected is not None and binding!=expected):
         raise PortableAppError("The retained app generation identity needs review.")
     return binding
+
+def _canonical_attempt(name):
+    if not re.fullmatch(r"[A-Za-z0-9_-]{22}",name):return False
+    raw=base64.urlsafe_b64decode(name+"==")
+    return len(raw)==16 and base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")==name
+
+def _new_attempt(parent):
+    value=uuid.uuid4()
+    name=base64.urlsafe_b64encode(value.bytes).decode("ascii").rstrip("=") if sys.platform=="win32" else value.hex
+    directory=parent/name
+    try:
+        # Never adopt an existing leaf, including a Windows case-fold alias.
+        if os.name=="nt":
+            modules,*_=private._windows();modules[4].CreateDirectory(str(directory),private._attributes(True))
+        else:directory.mkdir(mode=0o700)
+    except Exception as error:
+        if isinstance(error,FileExistsError) or getattr(error,"winerror",None) in (80,183):
+            raise PortableAppError("A retained app attempt already uses that directory. All cached files were retained; prepare again.") from None
+        raise
+    return private.private_directory(directory)
 
 def _check_working_directory(executable):
     # CreateProcessW still rejects a current directory beyond MAX_PATH, even
@@ -289,7 +313,7 @@ class PortableApps:
             _binding(parent,binding)
         else:private.private_directory(parent)
         _real(parent)
-        directory=private.private_directory(parent/uuid.uuid4().hex)
+        directory=_new_attempt(parent)
         content=private.private_directory(directory/"content");private.private_directory(directory/"control")
         # Each preparation re-authenticates the cloud archive through the
         # current downloader. Old verified, failed, and changed copies remain.
@@ -330,13 +354,16 @@ class PortableApps:
             return child
         directories=[]
         for account,info in children(self.root):
-            if account.name==WINDOWS_LAYOUT:
+            if account.name in WINDOWS_LAYOUTS:
                 if not stat.S_ISDIR(info.st_mode):raise PortableAppError("The retained app inventory contains an unexpected path.")
                 for parent,info in children(account):
                     reserved(parent,info,64);binding=_binding(parent)
                     for attempt,info in children(parent):
                         if attempt.name=="binding.json":continue
-                        directories.append((reserved(attempt,info,32),binding))
+                        if account.name=="v1":reserved(attempt,info,32)
+                        elif not stat.S_ISDIR(info.st_mode) or not _canonical_attempt(attempt.name):
+                            raise PortableAppError("The retained app attempt name needs review.")
+                        directories.append((attempt,binding))
                 continue
             # Keep every legacy account/note/generation/attempt tree visible,
             # including copies prepared before the compact Windows layout.
@@ -456,7 +483,7 @@ def broker(spec_path):
         payload=Path(spec["payload"])
         if spec_path.parent.name!="control" or payload.parent!=spec_path.parent.parent/"content" or spec["identity"]!=record["identity"]:raise PortableAppError("Launch cache identity changed.")
         parent=spec_path.parent.parent.parent
-        if parent.parent.name==WINDOWS_LAYOUT:_binding(parent,spec["identity"])
+        if parent.parent.name in WINDOWS_LAYOUTS:_binding(parent,spec["identity"])
         mark("verify-payload");expected=verify_payload(payload,spec["records"]);selected=spec["selected"]
         if selected not in expected or expected[selected]["type"]!="file":raise PortableAppError("Select a verified executable.")
         executable=payload if selected=="." else payload/selected
