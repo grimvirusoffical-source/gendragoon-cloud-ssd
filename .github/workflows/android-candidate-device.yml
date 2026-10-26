@@ -5,7 +5,7 @@ on:
     paths:
       - 'native/Mobile/Android/app/**'
       - 'native/Mobile/Android/dependencies/candidate*'
-      - 'native/Mobile/Android/dependencies/candidate-inputs/**'
+      - 'native/Mobile/Android/runtime/**'
       - 'native/Mobile/Android/dependencies/run_instrumentation.sh'
       - '.github/workflows/android-candidate-device.yml'
   workflow_dispatch:
@@ -50,12 +50,8 @@ jobs:
       - uses: gradle/actions/setup-gradle@07d1f8453baaff67fb503883367f8b13e6158a54 # v6
         with:
           gradle-version: '8.13'
-      - name: Retrieve only the explicitly pinned public NumPy build
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: gh run download 40282484235 --repo grimvirusoffical-source/gendragoon-cloud-ssd --pattern 'Android-NumPy-candidate-*' --dir '${{ runner.temp }}/numpy-artifacts'
       - name: Hash-verify all eight wheels and every dependency ELF before offline installation
-        run: python -B native/Mobile/Android/dependencies/candidate_profile.py --directory "$GENDRAGOON_ANDROID_CANDIDATE_WHEELS" --prepare-from '${{ runner.temp }}/numpy-artifacts'
+        run: python -B native/Mobile/Android/dependencies/candidate_profile.py --directory "$GENDRAGOON_ANDROID_CANDIDATE_WHEELS" --prepare
       - name: Compile isolated candidate APKs and run all lint and JVM gates
         working-directory: native/Mobile/Android
         run: gradle :app:assembleDebug :app:assembleRelease :app:bundleRelease :app:lint :app:testDebugUnitTest --no-daemon --console=plain --stacktrace

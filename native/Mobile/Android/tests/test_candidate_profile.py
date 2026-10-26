@@ -20,6 +20,17 @@ class CandidateTrustTests(unittest.TestCase):
         path, record = self.fixture()
         self.assertEqual(candidate.validate_wheel(path, record)['libraries'], 1)
 
+    def test_default_offline_profile_has_exact_accepted_hashes_and_complete_linkage(self):
+        proof = candidate.validate(ROOT/'runtime/wheels', shipping=True)
+        self.assertEqual(sum(row['libraries'] for row in proof), 54)
+        self.assertEqual(sum(row['explicitPythonExtensions'] for row in proof), 48)
+        self.assertEqual({row['sha256'] for row in candidate.lock()}, {row['sha256'] for row in candidate.lock(shipping=True)})
+
+    def test_isolated_profile_prepares_from_durable_inputs_without_network(self):
+        with tempfile.TemporaryDirectory() as directory:
+            proof = candidate.prepare(Path(directory)/'fresh')
+            self.assertEqual(len(proof), 8)
+
     def test_changed_binary_rejected_by_explicit_outer_pin(self):
         path, record = self.fixture()
         with tempfile.TemporaryDirectory() as directory:

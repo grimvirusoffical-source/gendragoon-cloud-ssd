@@ -29,6 +29,9 @@ for property in ro.build.fingerprint ro.build.version.sdk ro.build.version.relea
     adb shell getprop "$property" | tr -d '\r' >> "$report/device-properties.txt"
 done
 printf 'page_size=%s\n' "$pages" >> "$report/device-properties.txt"
-emulator -version 2>/dev/null | head -n 3 > "$report/emulator-version.txt" || true
+emulator_binary="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-}}/emulator/emulator"
+if test -x "$emulator_binary"; then
+    "$emulator_binary" -version 2>&1 | head -n 3 > "$report/emulator-version.txt" || true
+fi
 adb shell cat /proc/meminfo > "$report/memory-before.txt"
 timeout 10m gradle :app:connectedDebugAndroidTest --rerun-tasks --no-daemon --console=plain --stacktrace

@@ -1,16 +1,16 @@
 plugins { id 'com.android.application'; id 'com.chaquo.python' }
 def compiledRuntime = System.getenv('GENDRAGOON_ANDROID_RUNTIME') ?: rootProject.file('runtime/gendragoon-android-runtime-9235941b431b.zip').path
 def useCompiledRuntime = file(compiledRuntime).isFile()
-// Explicit test-only dependency profile. Production pins remain unchanged until
-// the candidate passes the complete packaged 4/16 KiB device gates.
+// Both profiles use the complete reviewed offline wheel set. The explicit
+// candidate mode retains its isolated app ID for future dependency validation.
 def candidateWheels = System.getenv('GENDRAGOON_ANDROID_CANDIDATE_WHEELS')
-if (candidateWheels) {
- if (!new File(candidateWheels).isAbsolute()) { throw new GradleException('Candidate wheel directory must be absolute') }
- providers.exec {
-  workingDir rootProject.projectDir
-  commandLine(System.getenv('PYTHON') ?: 'python3.13', '-B', 'dependencies/candidate_profile.py', '--directory', candidateWheels)
- }.standardOutput.asText.get()
-}
+def dependencyWheels = candidateWheels ?: rootProject.file('runtime/wheels').path
+if (!new File(dependencyWheels).isAbsolute()) { throw new GradleException('Reviewed wheel directory must be absolute') }
+providers.exec {
+ workingDir rootProject.projectDir
+ commandLine(([System.getenv('PYTHON') ?: 'python3.13', '-B', 'dependencies/candidate_profile.py', '--directory', dependencyWheels] + (candidateWheels ? [] : ['--shipping'])) as List)
+}.standardOutput.asText.get()
+
 android {
  namespace 'app.gendragoon.cloudssd.mobile'
  compileSdk 36
@@ -31,8 +31,8 @@ chaquopy {
  defaultConfig {
   version '3.13'
   pip {
-   if (candidateWheels) { options '--no-index', '--find-links', candidateWheels; install 'numpy==2.5.4' }
-   else { install 'numpy==1.26.2' }
+   options '--no-index', '--find-links', dependencyWheels
+   install 'numpy==2.5.4'
    install 'Pillow==11.0.0'
   }
   extractPackages 'redxai', 'redsecretsxai'

@@ -1,6 +1,6 @@
 # Android NumPy candidate builds
 
-The current Chaquopy NumPy 1.26.2 wheels depend on external OpenBLAS 0.2.20 and gfortran 4.9 libraries whose actual ELF load segments are 4 KiB aligned. `check_native_pages.py` rejects those dependencies even when GenDragoon's own `librsx.so` files pass. No compatibility fallback or weakened audit is used.
+The replaced Chaquopy NumPy 1.26.2 wheels depended on external OpenBLAS 0.2.20 and gfortran 4.9 libraries whose actual ELF load segments are 4 KiB aligned. `check_native_pages.py` rejects those dependencies even when GenDragoon's own `librsx.so` files pass. No compatibility fallback or weakened audit is used.
 
 This isolated recipe builds the complete official NumPy 2.5.4 source release, SHA-256 `9a94cf751c9ad8ebaa835bcd3d40dacf8534ad086b88c38029b65123c7999d2a`, with cibuildwheel 4.3.4's supported Python 3.13 Android crossbuild. The NumPy version matches the tested Mac runtime. External BLAS/LAPACK are disabled through documented Meson options. NumPy's own LAPACK-lite and all required core, linalg, FFT and random modules remain present. The pinned encryption library/source is neither modified nor included in the dependency build.
 
@@ -21,17 +21,17 @@ A candidate wheel is **not** the shipping dependency pin. Before adoption, both 
 
 ## Explicit complete-app candidate profile
 
-`candidate-lock.json` binds exactly eight public wheels: both complete NumPy 2.5.4 builds, the unchanged official Pillow 11.0.0 binaries, and both rebuilt FreeType 2.9.1 and JPEG 1.5.3 runtimes. The four small replacement runtimes are compiled-only inputs in `candidate-inputs/`; their reproducible builder, original recipe/source pins, configuration, preserved exports and licenses are recorded in `pillow-runtime/`. The NumPy wheels include the exact builder NDK 27.3 and LLVM redistribution notices and a freshly generated wheel RECORD. No private encryption source is included.
+`candidate-lock.json` binds exactly eight public wheels: both complete NumPy 2.5.4 builds, the unchanged official Pillow 11.0.0 binaries, and both rebuilt FreeType 2.9.1 and JPEG 1.5.3 runtimes. The complete durable set is checked in as compiled-only inputs in `../runtime/wheels/`; their reproducible builder, original recipe/source pins, configuration, preserved exports and licenses are recorded in `pillow-runtime/`. The NumPy wheels include the exact builder NDK 27.3 and LLVM redistribution notices and a freshly generated wheel RECORD. No private encryption source is included.
 
-The NumPy artifacts are pinned to successful workflow run `40282484235` at source `793603cfb0a2ffb39ed4aa5adf1a43f0ae02cf19`. They are temporary GitHub Actions artifacts with a 14-day retention period. An expired or absent artifact fails this test profile; the workflow never substitutes an unreviewed wheel. Successful candidates need a durable, hash-bound distribution before any eventual shipping adoption.
+The NumPy inputs originated from successful workflow run `40282484235` at source `793603cfb0a2ffb39ed4aa5adf1a43f0ae02cf19`. Their original provenance is retained in `../runtime/dependency-lock.json`, but normal or candidate builds no longer download expiring Actions artifacts. Both profiles validate every whole-wheel hash, byte count, internal RECORD, native architecture, direct Python linkage and 16 KiB load alignment before pip runs offline against exactly eight files. Default builds use this reviewed set with the normal application ID. Setting `GENDRAGOON_ANDROID_CANDIDATE_WHEELS` explicitly retains a separate `.runtimecandidate` application ID for future validation.
 
-The separate `android-candidate-device.yml` workflow downloads those exact public artifacts with the workflow's temporary read-only token, downloads the two SHA-pinned official Pillow wheels over verified TLS, and validates every whole-wheel hash, byte count, internal RECORD, native architecture and 16 KiB load alignment. Pip then runs offline against that exact set. Setting `GENDRAGOON_ANDROID_CANDIDATE_WHEELS` explicitly enables the profile and produces a separate `.runtimecandidate` application ID and version suffix. Default builds retain their existing dependency pins.
+The accepted isolated candidate at `f59f7c72ae992dac121cdd34d96cf327c3a58d4e`, workflow `40287386074`, passed six actual tests on each API 36 page-size image and verified all 190 packaged native ELFs. This acceptance allowed default dependency adoption; normal application-ID builds, current deletion UI, signing, physical-device and store gates remain separate.
 
-To prepare and inspect the isolated profile locally after obtaining the public artifacts:
+To validate default offline inputs or prepare the isolated profile:
 
 ```sh
-gh run download 40282484235 --repo grimvirusoffical-source/gendragoon-cloud-ssd --pattern 'Android-NumPy-candidate-*' --dir /absolute/new/numpy-artifacts
-python3.13 -B native/Mobile/Android/dependencies/candidate_profile.py --directory /absolute/new/candidate-wheels --prepare-from /absolute/new/numpy-artifacts
+python3.13 -B native/Mobile/Android/dependencies/candidate_profile.py --directory native/Mobile/Android/runtime/wheels --shipping
+python3.13 -B native/Mobile/Android/dependencies/candidate_profile.py --directory /absolute/new/candidate-wheels --prepare
 cd native/Mobile/Android
 GENDRAGOON_ANDROID_CANDIDATE_WHEELS=/absolute/new/candidate-wheels gradle :app:assembleDebug :app:lint :app:testDebugUnitTest
 ```

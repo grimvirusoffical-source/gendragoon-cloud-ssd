@@ -17,9 +17,10 @@ import zipfile
 ROOT = Path(__file__).resolve().parent
 
 
-def lock():
-    value = json.loads((ROOT / 'candidate-lock.json').read_text())
-    if value.get('schema') != 1 or value.get('shipping') is not False or len(value.get('files', [])) != 8:
+def lock(shipping=False):
+    path = ROOT.parent / 'runtime/dependency-lock.json' if shipping else ROOT / 'candidate-lock.json'
+    value = json.loads(path.read_text())
+    if value.get('schema') != 1 or value.get('shipping') is not shipping or len(value.get('files', [])) != 8:
         raise RuntimeError('Invalid explicit candidate dependency lock')
     return value['files']
 
@@ -70,16 +71,17 @@ def validate_wheel(path, record):
     return {'wheel': path.name, 'sha256': record['sha256'], 'libraries': libraries, 'explicitPythonExtensions': python_extensions}
 
 
-def validate(directory):
+def validate(directory, shipping=False):
     directory = Path(directory).resolve(strict=True)
-    expected = lock()
+    expected = lock(shipping)
     if not directory.is_dir() or {p.name for p in directory.iterdir()} != {r['name'] for r in expected}:
         raise RuntimeError('Candidate folder must contain exactly the eight reviewed wheels')
     return [validate_wheel(directory / record['name'], record) for record in expected]
 
 
-def prepare(destination, artifacts):
-    destination, artifacts = Path(destination).resolve(), Path(artifacts).resolve(strict=True)
+def prepare(destination, artifacts=None):
+    destination = Path(destination).resolve()
+    artifacts = Path(artifacts).resolve(strict=True) if artifacts is not None else None
     if destination.exists():
         raise RuntimeError('Prepare candidates in a fresh isolated directory')
     destination.mkdir(mode=0o700, parents=True)
@@ -89,6 +91,8 @@ def prepare(destination, artifacts):
         if source['kind'] == 'bundled':
             shutil.copyfile(ROOT / source['path'], target)
         elif source['kind'] == 'actions':
+            if artifacts is None:
+                raise RuntimeError('Pinned Actions inputs must be provided explicitly')
             found = list(artifacts.rglob(record['name']))
             if len(found) != 1:
                 raise RuntimeError('Exactly one pinned NumPy workflow artifact is required')
@@ -112,5 +116,9 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--directory', type=Path, required=True)
     parser.add_argument('--prepare-from', type=Path)
+    parser.add_argument('--prepare', action='store_true', help='Copy the exact bundled candidate profile into a fresh folder')
+    parser.add_argument('--shipping', action='store_true', help='Validate the durable default dependency lock')
     args = parser.parse_args()
-    print(json.dumps(prepare(args.directory, args.prepare_from) if args.prepare_from else validate(args.directory), indent=2))
+    if args.shipping and (args.prepare or args.prepare_from):
+        parser.error('Default shipping inputs are checked in place, never prepared from candidate sources')
+    print(json.dumps(prepare(args.directory, args.prepare_from) if args.prepare or args.prepare_from else validate(args.directory, args.shipping), indent=2))
