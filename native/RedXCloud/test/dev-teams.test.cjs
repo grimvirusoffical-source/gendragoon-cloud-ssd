@@ -196,6 +196,12 @@ test('actual scoped RedX records persist independent teams, bounded pages and CA
  const page=await rows.list(scope,'invite',{limit:2});assert.equal(page.rows.length,2);assert.ok(page.after);const next=await rows.list(scope,'invite',{limit:2,after:page.after});assert.equal(next.rows.length,2);assert.ok(next.rows[0].position>page.after);
  const old=await rows.get('fixture:0'),results=await Promise.allSettled([rows.write('fixture:0',{claimed:'a'},{scope,kind:'invite'},old),rows.write('fixture:0',{claimed:'b'},{scope,kind:'invite'},old)]);
  assert.equal(results.filter(x=>x.status==='fulfilled').length,1);assert.equal(results.find(x=>x.status==='rejected').reason.status,409);
+ const claimed=await rows.get('fixture:0');
+ const retained=await rows.list(scope,'invite',{limit:10});
+ assert.ok(retained.rows.some(row=>row.key===claimed.key),'updated rows retain their scope, kind and position indexes');
+ await rows.write('fixture:0',{claimed:claimed.value.claimed,revoked:true},{scope,kind:'invite'},claimed);
+ const revoked=await rows.get('fixture:0');assert.equal(revoked.value.revoked,true);
+ await rows.remove(revoked);assert.equal(await rows.get('fixture:0'),null);
  await rows.write('expiring',{expiresAtMs:123},{scope,kind:'signal'},null);
  const expired=await rows.list(scope,'signal',{expiredBefore:124,limit:10});assert.equal(expired.rows.length,1);await rows.remove(expired.rows[0]);assert.equal(await rows.get('expiring'),null);
 });

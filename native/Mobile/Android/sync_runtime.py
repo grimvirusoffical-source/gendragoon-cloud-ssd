@@ -101,6 +101,17 @@ def sync():
         compile_python(VENDOR,generated)
     for name in HELPERS:
         shutil.copyfile(NATIVE / "Resources" / name, python / name)
+    # Chaquopy deliberately discards precompiled .pyc app source. Ship these as
+    # explicit data assets and extract them with the verified sourceless loader.
+    compiled={item.relative_to(python).as_posix():item.read_bytes() for package in ('redxai','redsecretsxai') for item in sorted((python/package).rglob('*.pyc'))}
+    compiled_manifest={'schema':1,'vendorCommit':current,'files':{name:{'sha256':hashlib.sha256(value).hexdigest(),'bytes':len(value)}for name,value in compiled.items()}}
+    asset=generated/'cryptoAssets/gendragoon-crypto/compiled-python.zip'
+    asset.parent.mkdir(parents=True,exist_ok=True)
+    with zipfile.ZipFile(asset,'w',compression=zipfile.ZIP_DEFLATED,compresslevel=9)as package:
+        for name,value in sorted({**compiled,'manifest.json':json.dumps(compiled_manifest,separators=(',',':')).encode()}.items()):
+            info=zipfile.ZipInfo(name,(2026,10,26,0,0,0));info.compress_type=zipfile.ZIP_DEFLATED;package.writestr(info,value)
+    for package in ('redxai','redsecretsxai'):
+        shutil.rmtree(python/package)
     teams = generated / "teamsAssets/teams"
     teams.mkdir(parents=True, exist_ok=True)
     for name in ("index.html", "teams.css", "teams-ui.js", "dev-peer.js"):

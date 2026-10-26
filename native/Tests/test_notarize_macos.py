@@ -106,11 +106,17 @@ class NotarizationSafetyTests(unittest.TestCase):
         self.assertEqual(self.commands, [])
 
     def test_storage_shortfall_blocks_before_credentials(self):
-        with patch.object(notary.shutil, "disk_usage", return_value=SimpleNamespace(free=8*1024**3)):
+        with patch.object(notary.shutil, "disk_usage", return_value=SimpleNamespace(free=1)):
             with self.assertRaisesRegex(notary.NotarizationError, "insufficient free storage"):
                 self.invoke()
         self.assertEqual(self.commands, [])
         self.assertFalse(self.receipt.exists())
+
+    def test_measured_submission_space_can_proceed_below_advisory_ten_gb(self):
+        with patch.object(notary.shutil,"disk_usage",return_value=SimpleNamespace(free=1024**3)):
+            result=self.invoke()
+        self.assertTrue(result['notarized'])
+        self.assertEqual(self.count('submit'),1)
 
     def test_bad_credentials_never_submit_staple_or_leak_diagnostics(self):
         self.fail_command = "history"

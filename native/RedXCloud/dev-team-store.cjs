@@ -30,7 +30,9 @@ class DevTeamRecords{
   const state=JSON.stringify(row);if(Buffer.byteLength(state)>MAX_RECORD)throw new CloudError('team_record_too_large',413);
   if(prior){
    if(prior.key!==key||prior.scope!==scope||prior.kind!==kind)throw new CloudError('team_metadata_invalid',503);
-   await this.receiver.call('POST','bx',{q:`{Tx[]} = [ {Require[]} = "${FILE}":${TABLE}[ID=$id, K=$key, Revision=$previous], {Set[]} = "${FILE}":${TABLE}[ID=$id] = [ {Revision[]} = $next, {ExpiresAtMs[]} = $expires, {State[]} = $state ] ]`,params:{id,key,previous:prior.revision,next:row.revision,expires:value.expiresAtMs||0,state}});
+   // RedX Set replaces the row. Retain every indexed/addressing column so
+   // claimed invitations and updated members remain queryable and mutable.
+   await this.receiver.call('POST','bx',{q:`{Tx[]} = [ {Require[]} = "${FILE}":${TABLE}[ID=$id, K=$key, Revision=$previous], {Set[]} = "${FILE}":${TABLE}[ID=$id] = [ {K[]} = $key, {Scope[]} = $scope, {Kind[]} = $kind, {Position[]} = $position, {Revision[]} = $next, {ExpiresAtMs[]} = $expires, {State[]} = $state ] ]`,params:{id,key,scope,kind,position:row.position,previous:prior.revision,next:row.revision,expires:value.expiresAtMs||0,state}});
   }else await this.receiver.call('POST','bx',{q:`{Add[]} = "${FILE}":${TABLE}[ID=$id] = [ {K[]} = $key, {Scope[]} = $scope, {Kind[]} = $kind, {Position[]} = $position, {Revision[]} = 0, {ExpiresAtMs[]} = $expires, {State[]} = $state ]`,params:{id,key,scope,kind,position:row.position,expires:value.expiresAtMs||0,state}});
   return row;
  }

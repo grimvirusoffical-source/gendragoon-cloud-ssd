@@ -11,7 +11,7 @@ android {
  }
  if (!useCompiledRuntime) { externalNativeBuild { cmake { path file('../CMakeLists.txt'); version '3.22.1' } } }
  packaging { jniLibs { useLegacyPackaging true } }
- sourceSets { main { assets.srcDirs += ['build/generated/teamsAssets', 'build/generated/licenses']; jniLibs.srcDirs += ['build/generated/jniLibs'] }; test { resources.srcDirs += ['build/generated/testResources'] }; androidTest { assets.srcDirs += ['build/generated/androidTestAssets'] } }
+ sourceSets { main { assets.srcDirs += ['build/generated/teamsAssets', 'build/generated/licenses', 'build/generated/cryptoAssets']; jniLibs.srcDirs += ['build/generated/jniLibs'] }; test { resources.srcDirs += ['build/generated/testResources'] }; androidTest { assets.srcDirs += ['build/generated/androidTestAssets'] } }
  compileOptions { coreLibraryDesugaringEnabled true; sourceCompatibility JavaVersion.VERSION_17; targetCompatibility JavaVersion.VERSION_17 }
  buildTypes { release { minifyEnabled false } }
  lint { abortOnError true; error 'NewApi' }
@@ -37,6 +37,7 @@ tasks.register('syncGenDragoonRuntime', Exec) {
  outputs.dir('build/generated/jniLibs')
  outputs.dir('build/generated/testResources')
  outputs.dir('build/generated/androidTestAssets')
+ outputs.dir('build/generated/cryptoAssets')
 }
 tasks.matching {
  it.name != 'syncGenDragoonRuntime' && (it.name.contains('Python') || it.name == 'preBuild' ||

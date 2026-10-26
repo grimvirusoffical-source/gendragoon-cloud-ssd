@@ -8,6 +8,8 @@ import sys
 sys.dont_write_bytecode = True
 os.environ["PYTHONDONTWRITEBYTECODE"] = "1"
 import hashlib
+import base64
+import io
 import json
 from pathlib import Path
 import shutil
@@ -16,6 +18,7 @@ import tempfile
 import threading
 import time
 import zipfile
+import re
 
 _runtime_lock = threading.Lock()
 _operation_lock = threading.Lock()
@@ -39,7 +42,55 @@ def sourceless_imports():
     _loader_installed=True
 
 
-def initialize(library, temporary):
+def compiled_modules(encoded, temporary):
+    """Validate and privately extract bytecode which Chaquopy skips as source."""
+    import importlib.util
+    if not isinstance(encoded,str) or len(encoded)>12*1024*1024:
+        raise RuntimeError("Invalid bounded packaged crypto modules")
+    raw=base64.b64decode(encoded,validate=True)
+    if len(raw)>8*1024*1024:raise RuntimeError("Packaged crypto module archive is too large")
+    files={}
+    with zipfile.ZipFile(io.BytesIO(raw))as archive:
+        names=archive.namelist()
+        if len(names)>1000 or len(names)!=len(set(names)) or 'manifest.json'not in names or archive.getinfo('manifest.json').file_size>65536:
+            raise RuntimeError("Invalid packaged crypto module manifest")
+        manifest=json.loads(archive.read('manifest.json'))
+        records=manifest.get('files')
+        if manifest.get('schema')!=1 or manifest.get('vendorCommit')!='9235941b431bc1c23c34286b82052f845121592f' or not isinstance(records,dict) or set(names)!={'manifest.json',*records}:
+            raise RuntimeError("Packaged crypto modules do not match the pinned library")
+        total=0
+        for name,record in records.items():
+            if not re.fullmatch(r'(?:redxai|redsecretsxai)/[A-Za-z0-9_/]+\.pyc',name):raise RuntimeError("Private source and unsafe module paths are forbidden")
+            size=archive.getinfo(name).file_size;total+=size
+            if not isinstance(record,dict) or record.get('bytes')!=size or not 0<size<=4*1024*1024 or total>8*1024*1024:
+                raise RuntimeError("Packaged crypto module exceeds its limit")
+            data=archive.read(name)
+            if data[:4]!=importlib.util.MAGIC_NUMBER or hashlib.sha256(data).hexdigest()!=record.get('sha256'):
+                raise RuntimeError("Packaged crypto bytecode integrity check failed")
+            files[name]=data
+        if not {'redxai/__init__.pyc','redxai/_librsx.pyc','redsecretsxai/__init__.pyc','redsecretsxai/_image.pyc'}.issubset(files):
+            raise RuntimeError("Packaged crypto modules are incomplete")
+    root=Path(temporary)/('compiled-'+hashlib.sha256(raw).hexdigest())
+    if root.is_symlink():raise RuntimeError("Linked packaged module directory rejected")
+    if root.exists():
+        for name,data in files.items():
+            item=root/name
+            if item.is_symlink() or item.parent.is_symlink() or not item.is_file() or item.read_bytes()!=data:
+                raise RuntimeError("Existing packaged bytecode differs from its verified input")
+    else:
+        staging=Path(tempfile.mkdtemp(prefix='.compiled-',dir=temporary))
+        try:
+            for name,data in files.items():
+                item=staging/name;item.parent.mkdir(parents=True,exist_ok=True,mode=0o700)
+                with item.open('xb')as output:output.write(data)
+                item.chmod(0o600)
+            staging.rename(root)
+        finally:
+            if staging.exists():shutil.rmtree(staging)
+    return root
+
+
+def initialize(library, temporary, compiled=None):
     library, temporary = Path(library), Path(temporary)
     if not library.is_absolute() or not library.is_file() or library.name != "librsx.so":
         raise RuntimeError("The packaged encryption library is unavailable; no upload was sent")
@@ -47,6 +98,11 @@ def initialize(library, temporary):
     with _runtime_lock:
         os.environ["RSX_LIB"] = str(library)
         tempfile.tempdir = str(temporary)
+        if compiled is not None:
+            package_root=compiled_modules(compiled,temporary)
+            if str(package_root)not in sys.path:sys.path.insert(0,str(package_root))
+            import importlib
+            importlib.invalidate_caches()
         sourceless_imports()
         from redxai import _librsx
         if _librsx.abi_version() != 2:

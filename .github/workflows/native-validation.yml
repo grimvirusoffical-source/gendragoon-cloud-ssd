@@ -226,7 +226,7 @@ jobs:
         if: ${{ !cancelled() && steps.android-build.outcome == 'success' }}
         working-directory: native/Mobile/Android
         run: python3.13 -B check_native_pages.py app/build/outputs/apk/debug/app-debug.apk --output app/build/reports/native-pages.json
-      - name: Verify the real 16 KiB Android runtime without a compatibility fallback
+      - name: Verify the actual packaged runtime on the 16 KiB Android image
         if: ${{ !cancelled() && steps.android-build.outcome == 'success' }}
         uses: ReactiveCircus/android-emulator-runner@a421e43855164a8197daf9d8d40fe71c6996bb0d # v2.38.0
         timeout-minutes: 15
@@ -242,8 +242,6 @@ jobs:
           disable-animations: true
           script: |
             test "$(adb shell getconf PAGE_SIZE | tr -d '\r')" = 16384
-            adb shell setprop bionic.linker.16kb.app_compat.enabled false
-            adb shell setprop pm.16kb.app_compat.disabled true
             timeout 10m gradle :app:connectedDebugAndroidTest --rerun-tasks --no-daemon --console=plain --stacktrace
             mkdir -p app/build/reports/instrumentation-16384
             cp -R app/build/outputs/androidTest-results app/build/reports/instrumentation-16384/

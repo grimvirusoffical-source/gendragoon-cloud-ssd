@@ -32,7 +32,7 @@ import portable_vault as vault
 import machinenotes_client as client
 import private_fs as private
 
-FIXTURE=json.loads((NATIVE/"Tests/fixtures/portable-vault-v1.json").read_text())
+FIXTURE=json.loads((NATIVE/"Tests/fixtures/portable-vault-v1.json").read_text(encoding="utf-8"))
 OWNER=FIXTURE["receiverId"]
 NOTE="a"*32
 OTHER="b"*32
@@ -280,10 +280,10 @@ class ActualCodecTests(unittest.TestCase):
             if os.environ.get("GD_DESKTOP_RUNTIME"):self.fail("Mandatory native desktop runtime or image dependencies missing")
             self.skipTest("Pinned native desktop runtime and image dependencies required")
         session=MemorySession()
-        with tempfile.TemporaryDirectory(prefix="gd-desktop-codec-") as td:
+        with tempfile.TemporaryDirectory(prefix="gd-desktop-codec-測試-📦-") as td:
             root=Path(td).resolve();model=client.MachineNotesClient(session,root/"state");model.refresh_notes()
             model.import_vault(json.dumps(FIXTURE["envelope"]).encode(),FIXTURE["password"])
-            source=root/"original.bin";payload=os.urandom(70_000);source.write_bytes(payload)
+            source=root/"original-測試-📦.bin";payload=os.urandom(70_000);source.write_bytes(payload)
             with patch.object(client,"DesktopReceiver",MemoryReceiver):
                 result=model.upload(source)
                 self.assertTrue(result["verified"]);self.assertTrue(result["originalRetained"]);self.assertEqual(source.read_bytes(),payload)
@@ -294,10 +294,10 @@ class ActualCodecTests(unittest.TestCase):
                     while offset<len(png):
                         size=struct.unpack(">I",png[offset:offset+4])[0];types.append(png[offset+4:offset+8]);offset+=size+12
                     self.assertNotIn(b"rxAI",types)
-                copied=dict(session.rows[0],key="f"*18,displayName="Renamed copy.bin",archiveKey=session.rows[0]["key"])
+                copied=dict(session.rows[0],key="f"*18,displayName="Renamed copy-測試-📦.bin",archiveKey=session.rows[0]["key"])
                 session.rows.append(copied);session.revision+=1
                 output=root/"download";output.mkdir();downloaded=model.download(copied["key"],output)
-                self.assertTrue(downloaded["verified"]);self.assertEqual((output/"Renamed copy.bin").read_bytes(),payload)
+                self.assertTrue(downloaded["verified"]);self.assertEqual((output/"Renamed copy-測試-📦.bin").read_bytes(),payload)
                 self.assertEqual(source.read_bytes(),payload)
 
 class PrivateFilesystemTests(unittest.TestCase):

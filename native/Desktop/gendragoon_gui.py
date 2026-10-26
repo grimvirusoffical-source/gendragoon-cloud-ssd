@@ -15,7 +15,7 @@ from machinenotes_client import MachineNotesClient, DesktopInstance, storage
 from portable_vault import VaultError, ENVELOPE_LIMIT
 
 class GenDragoonGUI:
-    def __init__(self,root):
+    def __init__(self,root,*,companion_directory=None):
         import tkinter as tk
         from tkinter import ttk
         self.instance=DesktopInstance()
@@ -39,7 +39,7 @@ class GenDragoonGUI:
         root.protocol("WM_DELETE_WINDOW",self.close);root.after(40,self.pump)
         try:
             from companion_server import CompanionServer
-            self.companion=CompanionServer(self.companion_dispatch);self.companion.start()
+            self.companion=CompanionServer(self.companion_dispatch,socket_directory=companion_directory);self.companion.start()
         except (ImportError,RuntimeError,OSError):
             self.status.set("Desktop Files and Teams are ready. Browser companion is unavailable in this runtime.")
     def pump(self):
@@ -460,12 +460,43 @@ class GenDragoonGUI:
         if self.companion:self.companion.close()
         self.model.session.logout();self.executor.shutdown(wait=False);self.instance.close();self.root.destroy()
 
+def check_gui():
+    """Exercise bundled Tk and local IPC with a disposable, signed-out profile."""
+    import os
+    import tempfile
+    import tkinter as tk
+    with tempfile.TemporaryDirectory(prefix="gd-gui-check-") as temporary:
+        directory=Path(temporary).resolve()
+        variables={"XDG_DATA_HOME":str(directory/"data"),"XDG_STATE_HOME":str(directory/"state"),"LOCALAPPDATA":str(directory/"local")}
+        previous={key:os.environ.get(key) for key in variables}
+        os.environ.update(variables)
+        root=None;app=None
+        try:
+            root=tk.Tk();root.withdraw()
+            app=GenDragoonGUI(root,companion_directory=directory/"ipc")
+            root.update_idletasks();root.update()
+            if ([app.tabs.tab(tab,"text") for tab in app.tabs.tabs()]!=["Files","Teams","Storage keys"]
+                    or app.companion is None or app.model.session.receiver is not None
+                    or app.model.keys is not None or app.tree.get_children()):
+                raise RuntimeError("The packaged desktop window or private companion could not start.")
+        finally:
+            try:
+                if app is not None:app.close()
+                elif root is not None:root.destroy()
+            finally:
+                for key,value in previous.items():
+                    if value is None:os.environ.pop(key,None)
+                    else:os.environ[key]=value
+
 def main(argv=None):
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--check",action="store_true",help="Check the GUI and encryption runtime without signing in or opening a window")
+    parser.add_argument("--check-gui",action="store_true",help="Construct and close the actual window and private companion using a disposable signed-out profile")
     parser.add_argument("--check-idle",action="store_true",help="Refuse installation while this user's desktop coordinator is active")
     arguments=parser.parse_args(argv)
     import tkinter as tk
+    if arguments.check_gui:
+        check_gui();return
     if arguments.check_idle:
         instance=DesktopInstance();instance.close();return
     if arguments.check:
