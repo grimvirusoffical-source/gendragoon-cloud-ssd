@@ -659,9 +659,9 @@ class PortableAppFormatTests(unittest.TestCase):
                         with self.assertRaises(apps.PortableAppError):manager.assert_safe('change protected state',uncertain_only=uncertain_only)
                     # Complete the real stalled publication after enumeration,
                     # then let the actual metadata lookup observe its absence.
-                    real=apps._real
+                    real=apps._real;reader=threading.current_thread()
                     def vanished(path):
-                        if Path(path)==temporary[0]:
+                        if threading.current_thread() is reader and Path(path)==temporary[0]:
                             release.set();writer.join(3)
                             self.assertFalse(writer.is_alive());self.assertEqual(errors,[])
                         return real(path)
