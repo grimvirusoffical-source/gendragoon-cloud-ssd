@@ -45,9 +45,13 @@ jobs:
           }
           $signature = Get-AuthenticodeSignature -LiteralPath $installer
           if ($signature.Status -ne 'Valid') { throw 'Official WinFsp Authenticode signature is not valid' }
-          $result = Start-Process msiexec.exe -ArgumentList @('/i', "`"$installer`"", '/qn', '/norestart', 'ADDLOCAL=Core') -Wait -PassThru
+          $log = Join-Path $env:RUNNER_TEMP 'gendragoon-ci-winfsp-install.log'
+          $result = Start-Process msiexec.exe -ArgumentList @('/i', "`"$installer`"", '/qn', '/norestart', '/L*v', "`"$log`"") -Wait -PassThru
           @{schema=1; officialRelease='https://github.com/winfsp/winfsp/releases/tag/v2.1'; sha256=$hash; bytes=2191360; signatureStatus=[string]$signature.Status; signer=$signature.SignerCertificate.Subject; installerExitCode=$result.ExitCode; ephemeralHostedRunner=$true} | ConvertTo-Json | Set-Content -Encoding utf8 (Join-Path $env:RUNNER_TEMP 'ci-winfsp-install.json')
-          if ($result.ExitCode -ne 0) { throw "The disposable WinFsp installation did not complete without reboot: $($result.ExitCode)" }
+          if ($result.ExitCode -ne 0) {
+            Get-Content -LiteralPath $log | Select-String -Pattern 'Return value 3|error [0-9]|Error [0-9]|MainEngineThread is returning' -Context 5,5 | Select-Object -Last 12 | ForEach-Object { $_.ToString() }
+            throw "The disposable WinFsp installation did not complete without reboot: $($result.ExitCode)"
+          }
       - name: Stage the genuine compiled Windows codec and private UTF-8 interpreter
         shell: pwsh
         run: |
