@@ -440,6 +440,40 @@ class CompiledRuntimeTests(unittest.TestCase):
             self.assertTrue(all(str(root) in p for p in result["manifests"]))
 
 class PortableAppFormatTests(unittest.TestCase):
+    def test_stalled_atomic_receipt_writer_keeps_status_readable_and_both_guards_blocked(self):
+        with tempfile.TemporaryDirectory() as td:
+            manager=apps.PortableApps(Path(td).resolve()/'cache');binding=apps.identity(OWNER,NOTE,item())
+            control=private.private_directory(manager.root/OWNER/NOTE/apps.generation(binding)/('b'*32)/'control');lease_id='c'*32
+            lease=control/('lease-'+lease_id+'.json');record=dict(schema=apps.SCHEMA,id=lease_id,state='running',identity=binding,brokerPid=123,brokerIdentity='fixture-live')
+            apps._write(lease,record);ready=threading.Event();release=threading.Event();errors=[];temporary=[];replace=private.os.replace
+            def stalled(source,destination):
+                if Path(destination)==lease:
+                    temporary.append(Path(source));ready.set()
+                    if not release.wait(5):raise AssertionError('Fixture writer release timed out')
+                return replace(source,destination)
+            def write():
+                try:apps._write(lease,dict(record,state='complete',mainExitCode=7))
+                except BaseException as error:errors.append(type(error).__name__)
+            with patch.object(private.os,'replace',stalled),patch.object(apps,'process_identity',return_value='fixture-live'):
+                writer=threading.Thread(target=write);writer.start()
+                try:
+                    self.assertTrue(ready.wait(3));self.assertTrue(temporary[0].exists());private.verify(temporary[0])
+                    rows=manager.leases();self.assertEqual(rows[0]['state'],'running');self.assertTrue(any(row['state']=='uncertain' for row in rows))
+                    for uncertain_only in (False,True):
+                        with self.assertRaises(apps.PortableAppError):manager.assert_safe('change protected state',uncertain_only=uncertain_only)
+                    # Simulate the exact leaf disappearing after enumeration,
+                    # as can happen when os.replace finishes during a scan.
+                    real=apps._real
+                    def vanished(path):
+                        if Path(path)==temporary[0]:raise FileNotFoundError('fixture atomic rename completed')
+                        return real(path)
+                    with patch.object(apps,'_real',vanished):
+                        self.assertEqual(manager.leases()[0]['state'],'running')
+                        self.assertTrue(any(row['state']=='uncertain' for row in manager.leases()))
+                        with self.assertRaises(apps.PortableAppError):manager.assert_safe('launch another app',uncertain_only=True)
+                finally:release.set();writer.join(3)
+            self.assertFalse(writer.is_alive());self.assertEqual(errors,[])
+            self.assertEqual(manager.leases()[0]['state'],'complete');self.assertFalse(temporary[0].exists());manager.assert_safe('change accounts')
     def test_private_fixed_diagnostic_survives_unreplaceable_lease_without_raw_error_text(self):
         with tempfile.TemporaryDirectory() as td:
             manager=apps.PortableApps(Path(td).resolve()/'cache');binding=apps.identity(OWNER,NOTE,item())
@@ -527,7 +561,9 @@ class PortableAppFormatTests(unittest.TestCase):
                 path=directory/'portable';private.write_private(path,raw);return path,records
             with patch.object(apps,'host',return_value=('linux','x86_64')):
                 prepared=manager.prepare(binding,restore)
-                self.assertIn(OWNER,str(prepared.directory));self.assertIn(NOTE,str(prepared.directory));self.assertIn(apps.generation(binding),str(prepared.directory))
+                if sys.platform=='win32':self.assertEqual(apps._binding(prepared.directory.parent),binding)
+                else:self.assertIn(OWNER,str(prepared.directory));self.assertIn(NOTE,str(prepared.directory))
+                self.assertIn(apps.generation(binding),str(prepared.directory))
                 for selected,approved in (('.',False),('../escape',True)):
                     with self.assertRaises(apps.PortableAppError):manager.launch(prepared,selected,approved=approved)
                 prepared.payload.write_bytes(b'changed')
@@ -538,6 +574,79 @@ class PortableAppFormatTests(unittest.TestCase):
                 replacement=manager.prepare(dict(binding,archiveSha256='f'*64),restore)
                 self.assertNotEqual(prepared.directory.parent,replacement.directory.parent)
                 self.assertTrue(prepared.payload.exists());self.assertTrue(second.payload.exists())
+    def test_compact_windows_generation_has_immutable_full_binding_and_separate_generations(self):
+        with tempfile.TemporaryDirectory() as td:
+            manager=apps.PortableApps(Path(td).resolve()/'cache');binding=apps.identity(OWNER,NOTE,item())
+            raw=bytearray(64);raw[:7]=b'\x7fELF\x02\x01\x01';struct.pack_into('<HH',raw,16,2,62);struct.pack_into('<Q',raw,24,0x400000)
+            records=[dict(path='.',type='file',size=len(raw),sha256=hashlib.sha256(raw).hexdigest(),executable=0o100)]
+            def restore(directory):
+                path=directory/'portable';private.write_private(path,raw);return path,records
+            with patch.object(apps.sys,'platform','win32'),patch.object(apps,'host',return_value=('linux','x86_64')):
+                first=manager.prepare(binding,restore);record=first.directory.parent/'binding.json';before=record.read_bytes()
+                self.assertEqual(first.directory.parent,manager.root/apps.WINDOWS_LAYOUT/apps.generation(binding))
+                self.assertEqual(apps._read(record),dict(schema=apps.SCHEMA,layout=apps.WINDOWS_LAYOUT,identity=binding))
+                second=manager.prepare(binding,restore)
+                self.assertEqual(first.directory.parent,second.directory.parent);self.assertNotEqual(first.directory,second.directory)
+                self.assertEqual(record.read_bytes(),before)
+                for field in binding:
+                    changed=dict(binding);changed[field]='f'*len(binding[field])
+                    other=manager.prepare(changed,restore)
+                    self.assertNotEqual(first.directory.parent,other.directory.parent,field)
+                    self.assertEqual(apps._binding(other.directory.parent),changed)
+                # A pre-upgrade uncertain lease remains authoritative beside
+                # new compact generations on every platform's inventory scan.
+                control=private.private_directory(manager.root/OWNER/NOTE/apps.generation(binding)/('b'*32)/'control');lease_id='c'*32
+                legacy=control/('lease-'+lease_id+'.json');apps._write(legacy,dict(schema=apps.SCHEMA,id=lease_id,state='uncertain',identity=binding))
+                for uncertain_only in (False,True):
+                    with self.assertRaises(apps.PortableAppError):manager.assert_safe('change protected state',uncertain_only=uncertain_only)
+                with self.assertRaises(apps.PortableAppError):manager.prepare(binding,lambda _:self.fail('Legacy uncertainty must stop restore'))
+                with self.assertRaises(apps.PortableAppError):manager.launch(first,'.',approved=True)
+                self.assertTrue(legacy.exists())
+                self.assertTrue(first.payload.exists());self.assertTrue(second.payload.exists())
+    def test_compact_windows_binding_and_reserved_inventory_fail_closed_without_replacing_cache(self):
+        for fault in ('missing-binding','changed-binding','unexpected-generation-entry','unexpected-attempt-entry','unreadable-generation'):
+            with self.subTest(fault=fault),tempfile.TemporaryDirectory() as td:
+                manager=apps.PortableApps(Path(td).resolve()/'cache');binding=apps.identity(OWNER,NOTE,item())
+                raw=bytearray(64);raw[:7]=b'\x7fELF\x02\x01\x01';struct.pack_into('<HH',raw,16,2,62);struct.pack_into('<Q',raw,24,0x400000)
+                def restore(directory):
+                    path=directory/'portable';private.write_private(path,raw)
+                    return path,[dict(path='.',type='file',size=len(raw),sha256=hashlib.sha256(raw).hexdigest(),executable=0o100)]
+                with patch.object(apps.sys,'platform','win32'),patch.object(apps,'host',return_value=('linux','x86_64')):
+                    prepared=manager.prepare(binding,restore);parent=prepared.directory.parent;record=parent/'binding.json'
+                    if fault=='missing-binding':record.unlink()
+                    elif fault=='changed-binding':
+                        changed=dict(binding,workspaceId='f'*32)
+                        apps._write(record,dict(schema=apps.SCHEMA,layout=apps.WINDOWS_LAYOUT,identity=changed))
+                    elif fault=='unexpected-generation-entry':private.write_private(parent/'unexpected',b'fixture only')
+                    elif fault=='unexpected-attempt-entry':private.write_private(prepared.directory/'unexpected',b'fixture only')
+                    original=Path.iterdir
+                    def scan(path):
+                        if fault=='unreadable-generation' and path==parent:raise PermissionError('generated fixture inaccessible')
+                        return original(path)
+                    with patch.object(Path,'iterdir',scan),patch.object(apps.subprocess,'Popen',side_effect=AssertionError('No broker may start')):
+                        for uncertain_only in (False,True):
+                            with self.assertRaises(apps.PortableAppError):manager.assert_safe('change protected state',uncertain_only=uncertain_only)
+                        with self.assertRaises(apps.PortableAppError):manager.prepare(binding,lambda _:self.fail('Invalid generation must not be adopted'))
+                        with self.assertRaises(apps.PortableAppError):manager.launch(prepared,'.',approved=True)
+                    self.assertEqual(prepared.payload.read_bytes(),raw)
+    def test_windows_working_directory_limit_counts_utf16_and_rejects_before_creating_a_lease(self):
+        with tempfile.TemporaryDirectory() as td:
+            manager=apps.PortableApps(Path(td).resolve()/'cache');binding=apps.identity(OWNER,NOTE,item())
+            raw=bytearray(64);raw[:7]=b'\x7fELF\x02\x01\x01';struct.pack_into('<HH',raw,16,2,62);struct.pack_into('<Q',raw,24,0x400000)
+            def restore(directory):
+                payload=private.private_directory(directory/'deep portable app')
+                for _ in range(5):payload=private.private_directory(payload/('nested-'+('x'*25)))
+                binary=payload/'portable';private.write_private(binary,raw)
+                root=directory/'deep portable app'
+                return root,client.manifest(root)['manifest']
+            with patch.object(apps.sys,'platform','win32'),patch.object(apps,'host',return_value=('linux','x86_64')):
+                prepared=manager.prepare(binding,restore);selected=prepared.candidates[0]
+                with patch.object(apps.subprocess,'Popen',side_effect=AssertionError('Long cwd must fail before a broker starts')):
+                    with self.assertRaisesRegex(apps.PortableAppError,'working-directory limit'):manager.launch(prepared,selected,approved=True)
+                self.assertEqual(manager.leases(),[]);self.assertTrue((prepared.payload/selected).exists())
+                self.assertEqual(list((prepared.directory/'control').iterdir()),[])
+                # A non-BMP character occupies two Windows WCHAR units.
+                with self.assertRaisesRegex(apps.PortableAppError,'working-directory limit'):apps._check_working_directory(Path('/')/('📦'*130)/'fixture.exe')
 
 NATIVE_PORTABLE_SOURCE=r'''
 #ifdef _WIN32
@@ -628,6 +737,37 @@ class PortableAppLifecycleTests(unittest.TestCase):
         cls.fixture=tempfile.TemporaryDirectory(prefix='gd-native-portable-fixture-');cls.binary=compile_portable_fixture(Path(cls.fixture.name).resolve())
     @classmethod
     def tearDownClass(cls):cls.fixture.cleanup()
+    @unittest.skipUnless(sys.platform=='win32','Actual Windows old/new working-directory length and native launch required')
+    def test_windows_compact_cwd_native_launch_and_legacy_uncertainty_barrier(self):
+        with tempfile.TemporaryDirectory(prefix='gd-app-cwd-') as td:
+            manager=apps.PortableApps(Path(td).resolve()/'cache');prepared=prepare_native_fixture(manager,self.binary)
+            binding=prepared.identity
+            legacy=private.private_directory(manager.root/binding['receiverId']/binding['workspaceId']/apps.generation(binding)/('b'*32))
+            legacy_payload=private.private_directory(legacy/'content'/'Disposable portable app')
+            control=private.private_directory(legacy/'control');lease_id='c'*32
+            lease=control/('lease-'+lease_id+'.json')
+            # This is a terminal receipt for our own never-started legacy
+            # fixture, not authority to clear an existing uncertain launch.
+            apps._write(lease,dict(schema=apps.SCHEMA,id=lease_id,state='failed-before-start',identity=binding))
+            old_units=len(str(legacy_payload).encode('utf-16-le'))//2
+            new_units=len(str(prepared.payload).encode('utf-16-le'))//2
+            print('Disposable Windows cwd UTF16 units: '+json.dumps(dict(legacy=old_units,compact=new_units),sort_keys=True),flush=True)
+            self.assertGreaterEqual(old_units,260);self.assertLessEqual(new_units,258)
+            receipt=launch_native_fixture(lambda:manager.launch(prepared,self.binary.name,approved=True))
+            try:
+                wait_fixture(lambda:(prepared.payload/'child-started').exists())
+                wait_fixture(lambda:any(row.get('id')==receipt['id'] and row.get('mainExitCode')==7 for row in manager.leases()))
+                with self.assertRaises(apps.PortableAppError):manager.assert_safe('change accounts')
+            finally:(prepared.payload/'release-child').write_text('release only this compact cwd fixture')
+            wait_fixture(lambda:any(row.get('id')==receipt['id'] and row['state']=='complete' for row in manager.leases()))
+            # Add an independent historical unknown process after proving the
+            # new launch. No missing PID can erase the old account barrier.
+            apps._write(lease,dict(schema=apps.SCHEMA,id=lease_id,state='uncertain',identity=binding))
+            for uncertain_only in (False,True):
+                with self.assertRaises(apps.PortableAppError):manager.assert_safe('change protected state',uncertain_only=uncertain_only)
+            with self.assertRaises(apps.PortableAppError):prepare_native_fixture(manager,self.binary)
+            with self.assertRaises(apps.PortableAppError):manager.launch(prepared,self.binary.name,approved=True)
+            self.assertTrue(lease.exists());self.assertTrue(legacy_payload.exists());self.assertTrue((prepared.payload/self.binary.name).exists());self.assertTrue(self.binary.exists())
     def test_detached_grandchild_keeps_lease_after_parent_exit_and_all_cache_is_retained(self):
         with tempfile.TemporaryDirectory(prefix='gd-app-lease-') as td:
             manager=apps.PortableApps(Path(td).resolve()/'cache');prepared=prepare_native_fixture(manager,self.binary)

@@ -23,9 +23,11 @@ import uuid
 import private_fs as private
 
 SCHEMA="gendragoon.portable-app/v1"
+WINDOWS_LAYOUT="v1"
 HEX=re.compile(r"[a-f0-9]+")
+ATOMIC_TEMP=re.compile(r"\.private-[a-f0-9]{32}")
 MAX_RECORD=128*1024*1024
-FAILURE_STAGES=frozenset(("read-spec","read-lease","validate-spec","verify-payload","binary-header","broker-identity","receipt-owner","native-imports","job-create","job-limits","dll-reset","process-create","job-assign","process-resume","receipt-running","job-accounting","main-exit","receipt-main-exit","linux-subreaper","linux-process-create","linux-wait","receipt-complete","broker-create","unreported"))
+FAILURE_STAGES=frozenset(("read-spec","read-lease","validate-spec","verify-payload","binary-header","working-directory","broker-identity","receipt-owner","native-imports","job-create","job-limits","dll-reset","process-create","job-assign","process-resume","receipt-running","job-accounting","main-exit","receipt-main-exit","linux-subreaper","linux-process-create","linux-wait","receipt-complete","broker-create","unreported"))
 ERROR_TYPES=frozenset(("ImportError","ModuleNotFoundError","AttributeError","KeyError","PermissionError","OSError","ValueError","PortableAppError","TypeError","RuntimeError","SystemExit","KeyboardInterrupt","error"))
 
 class PortableAppError(ValueError):pass
@@ -102,6 +104,22 @@ def _read(path):
 def _write(path,value):
     _real(path.parent);private.verify(path.parent)
     private.write_private(path,json.dumps(value,sort_keys=True,separators=(",",":"),ensure_ascii=True).encode("ascii"),replace=path.exists())
+
+def _binding(parent,expected=None):
+    _real(parent);private.verify(parent)
+    value=_read(parent/"binding.json")
+    raw=value.get("identity",{})
+    binding=identity(raw.get("receiverId"),raw.get("workspaceId"),raw)
+    if (value!=dict(schema=SCHEMA,layout=WINDOWS_LAYOUT,identity=binding) or generation(binding)!=parent.name
+            or expected is not None and binding!=expected):
+        raise PortableAppError("The retained app generation identity needs review.")
+    return binding
+
+def _check_working_directory(executable):
+    # CreateProcessW still rejects a current directory beyond MAX_PATH, even
+    # with longPathAware. Reserve its appended backslash and terminating NUL.
+    if sys.platform=="win32" and len(str(executable.parent).encode("utf-16-le"))//2+2>260:
+        raise PortableAppError("The selected app folder exceeds the Windows working-directory limit. Its verified cache was retained; choose an app with a shorter folder structure.")
 
 def _digest(path):
     digest=hashlib.sha256()
@@ -191,11 +209,24 @@ def process_identity(pid,*,required=False):
 
 class PortableApps:
     def __init__(self,root):self.root=Path(root).absolute()
+    def _parent(self,binding):
+        if sys.platform=="win32":return self.root/WINDOWS_LAYOUT/generation(binding)
+        return self.root/binding["receiverId"]/binding["workspaceId"]/generation(binding)
     def prepare(self,binding,restore):
         binding=identity(binding.get("receiverId"),binding.get("workspaceId"),binding)
         host();self.assert_safe("prepare another app",uncertain_only=True)
         _safe_ancestors(self.root)
-        parent=private.private_directory(self.root/binding["receiverId"]/binding["workspaceId"]/generation(binding))
+        parent=self._parent(binding)
+        if sys.platform=="win32":
+            # New Windows copies use one full binding hash instead of the
+            # deeply nested legacy account/note/hash path. Never adopt or
+            # rewrite an existing generation missing its immutable identity.
+            try:_real(parent)
+            except FileNotFoundError:
+                private.private_directory(parent)
+                private.write_private(parent/"binding.json",json.dumps(dict(schema=SCHEMA,layout=WINDOWS_LAYOUT,identity=binding),sort_keys=True,separators=(",",":")).encode("ascii"))
+            _binding(parent,binding)
+        else:private.private_directory(parent)
         _real(parent)
         directory=private.private_directory(parent/uuid.uuid4().hex)
         content=private.private_directory(directory/"content");private.private_directory(directory/"control")
@@ -213,37 +244,70 @@ class PortableApps:
         if not candidates:raise PortableAppError("This archive has no verified native executable matching this computer. Choose a recognized portable native app; scripts and installation packages are unsupported.")
         return PreparedApp(directory,payload,dict(binding),records,tuple(sorted(candidates)))
     def leases(self):
-        if not self.root.exists() and not self.root.is_symlink():return []
+        try:self.root.lstat()
+        except FileNotFoundError:return []
         _real(self.root);private.verify(self.root);result=[]
         # Path.glob suppresses directory scan errors on Python 3.13. Explicit
         # traversal must fail closed if any reserved cache level is unreadable.
-        directories=[self.root];visited=0
-        for width in (64,32,64,32):
-            following=[]
-            for directory in directories:
-                for child in directory.iterdir():
-                    visited+=1
-                    if visited>100000:raise PortableAppError("The retained app inventory needs review.")
-                    info=_real(child);private.verify(child)
-                    if not stat.S_ISDIR(info.st_mode) or len(child.name)!=width or not HEX.fullmatch(child.name):
-                        raise PortableAppError("The retained app inventory contains an unexpected path.")
-                    following.append(child)
-            directories=following
-        paths=[]
-        for directory in directories:
+        visited=0
+        def children(directory,atomic=False):
+            nonlocal visited
+            for child in directory.iterdir():
+                visited+=1
+                if visited>100000:raise PortableAppError("The retained app inventory needs review.")
+                try:info=_real(child);private.verify(child)
+                except FileNotFoundError:
+                    # A known atomic-write leaf can be renamed between the
+                    # enumeration and metadata read. It still blocks guards;
+                    # it never becomes evidence that a lease completed.
+                    if not atomic or not ATOMIC_TEMP.fullmatch(child.name):raise
+                    info=None
+                yield child,info
+        def reserved(child,info,width):
+            if not stat.S_ISDIR(info.st_mode) or len(child.name)!=width or not HEX.fullmatch(child.name):
+                raise PortableAppError("The retained app inventory contains an unexpected path.")
+            return child
+        directories=[]
+        for account,info in children(self.root):
+            if account.name==WINDOWS_LAYOUT:
+                if not stat.S_ISDIR(info.st_mode):raise PortableAppError("The retained app inventory contains an unexpected path.")
+                for parent,info in children(account):
+                    reserved(parent,info,64);binding=_binding(parent)
+                    for attempt,info in children(parent):
+                        if attempt.name=="binding.json":continue
+                        directories.append((reserved(attempt,info,32),binding))
+                continue
+            # Keep every legacy account/note/generation/attempt tree visible,
+            # including copies prepared before the compact Windows layout.
+            following=[reserved(account,info,64)]
+            for width in (32,64,32):
+                following=[reserved(child,info,width) for directory in following for child,info in children(directory)]
+            directories.extend((directory,None) for directory in following)
+        paths=[];unsettled=[]
+        for directory,binding in directories:
+            for child,info in children(directory):
+                if child.name not in ("content","control") or not stat.S_ISDIR(info.st_mode):
+                    raise PortableAppError("The retained app attempt inventory needs review.")
             control=directory/"control";_real(control);private.verify(control)
-            for child in control.iterdir():
-                if child.name.startswith("lease-") and child.suffix==".json":paths.append(child)
+            for child,info in children(control,atomic=True):
+                if ATOMIC_TEMP.fullmatch(child.name):
+                    if info is not None and (not stat.S_ISREG(info.st_mode) or info.st_nlink!=1):
+                        raise PortableAppError("The retained app control inventory needs review.")
+                    unsettled.append(dict(state="uncertain",path=str(child)));continue
+                if not stat.S_ISREG(info.st_mode) or not re.fullmatch(r"(?:lease|launch|diagnostic)-[a-f0-9]{32}\.json",child.name):
+                    raise PortableAppError("The retained app control inventory needs review.")
+                if child.name.startswith("lease-"):paths.append((child,binding))
         # Authority records are siblings of content; app-owned similarly named
         # files inside a restored payload can never be interpreted as leases.
-        for path in paths:
+        for path,binding in paths:
             try:
                 value=_read(path)
                 if (value.get("schema")!=SCHEMA or value.get("state") not in ("pending","running","complete","failed-before-start","uncertain")
                         or value.get("id")!=path.stem.removeprefix("lease-")
                         or not isinstance(value.get("id"),str) or len(value["id"])!=32 or not HEX.fullmatch(value["id"])
                         or "mainExitCode" in value and (type(value["mainExitCode"]) is not int or not -255<=value["mainExitCode"]<=0xffffffff)
-                        or value.get("state")=="complete" and "mainExitCode" not in value):
+                        or value.get("state")=="complete" and "mainExitCode" not in value
+                        or binding is not None and value.get("identity")!=binding):
                     raise PortableAppError("Invalid portable lease")
                 state=value["state"]
                 if state in ("pending","running"):
@@ -251,7 +315,7 @@ class PortableApps:
                     if type(pid) is not int or not start or process_identity(pid)!=start:state="uncertain"
                 result.append(dict(value,state=state,path=str(path)))
             except Exception:result.append(dict(state="uncertain",path=str(path)))
-        return result
+        return result+unsettled
     def assert_safe(self,action,*,uncertain_only=False):
         blocked={"uncertain"} if uncertain_only else {"pending","running","uncertain"}
         try:unsafe=any(row["state"] in blocked for row in self.leases())
@@ -262,11 +326,13 @@ class PortableApps:
         if approved is not True:raise PortableAppError("Explicit local approval is required to launch a portable app.")
         self.assert_safe("launch another app",uncertain_only=True)
         if selected not in prepared.candidates:raise PortableAppError("Select one verified executable from this archive.")
-        expected_parent=self.root/prepared.identity["receiverId"]/prepared.identity["workspaceId"]/generation(prepared.identity)
+        expected_parent=self._parent(prepared.identity)
         if prepared.directory.parent!=expected_parent:raise PortableAppError("The launch belongs to a different account or archive generation.")
+        if sys.platform=="win32":_binding(expected_parent,prepared.identity)
         verify_payload(prepared.payload,prepared.records)
         executable=prepared.payload if selected=="." else prepared.payload/selected
         if binary_kind(executable)!=host():raise PortableAppError("The selected bytes are not a matching native executable.")
+        _check_working_directory(executable)
         control=prepared.directory/"control";_real(control);private.verify(control)
         launch_id=uuid.uuid4().hex;lease=control/("lease-"+launch_id+".json");spec=control/("launch-"+launch_id+".json")
         record=dict(schema=SCHEMA,id=launch_id,state="pending",identity=prepared.identity,createdAt=time.time(),cacheRetained=True)
@@ -328,11 +394,14 @@ def broker(spec_path):
         if spec.get("schema")!=SCHEMA or record.get("schema")!=SCHEMA or record.get("state")!="pending":raise PortableAppError("Invalid launch specification.")
         payload=Path(spec["payload"])
         if spec_path.parent.name!="control" or payload.parent!=spec_path.parent.parent/"content" or spec["identity"]!=record["identity"]:raise PortableAppError("Launch cache identity changed.")
+        parent=spec_path.parent.parent.parent
+        if parent.parent.name==WINDOWS_LAYOUT:_binding(parent,spec["identity"])
         mark("verify-payload");expected=verify_payload(payload,spec["records"]);selected=spec["selected"]
         if selected not in expected or expected[selected]["type"]!="file":raise PortableAppError("Select a verified executable.")
         executable=payload if selected=="." else payload/selected
         mark("binary-header")
         if binary_kind(executable)!=host():raise PortableAppError("Executable format or architecture changed.")
+        mark("working-directory");_check_working_directory(executable)
         mark("broker-identity");record.update(brokerPid=os.getpid(),brokerIdentity=process_identity(os.getpid(),required=True))
         if not record["brokerIdentity"]:raise PortableAppError("The app broker identity could not be verified.")
         # Publish ownership before any executable can run; a crash at any later
