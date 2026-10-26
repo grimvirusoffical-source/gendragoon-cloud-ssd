@@ -317,7 +317,9 @@ def archive_bound(source, manifest):
 
 def android_origin(config):
     """Reuse the account's private random ID; Chaquopy's Linux host is Android."""
-    from gendragoon_device_origin import current_origin, validate_origin
+    import fcntl
+    import secrets
+    from gendragoon_device_origin import _directory, current_origin, validate_origin
     receiver = config.get("receiverId")
     if not isinstance(receiver, str) or not re.fullmatch(r"[a-f0-9]{64}", receiver):
         raise ValueError("A verified account is required for device origin")
@@ -327,7 +329,43 @@ def android_origin(config):
     info = keymap.lstat()
     if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077 or info.st_nlink != 1:
         raise ValueError("Device origin requires a private owned vault profile")
-    value = current_origin(receiver, state_dir=keymap.parent / "DeviceOrigins")
+    directory = keymap.parent / "DeviceOrigins"
+    _directory(directory)
+    # Android SELinux denies link(2), even inside the app's private directory.
+    # Every Android writer uses this account-private flock and atomic rename;
+    # the shared reader still validates the published record without changes.
+    lock = directory / ".android-origin.lock"
+    descriptor = os.open(lock, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    try:
+        opened = os.fstat(descriptor)
+        if (not stat.S_ISREG(opened.st_mode) or opened.st_uid != os.getuid()
+                or opened.st_mode & 0o077 or opened.st_nlink != 1 or opened.st_size):
+            raise ValueError("Device origin requires a private owned lock")
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        _directory(directory)
+        current = lock.lstat()
+        if (current.st_dev, current.st_ino) != (opened.st_dev, opened.st_ino):
+            raise ValueError("Device origin lock changed")
+        record = directory / (receiver + ".json")
+        if not record.exists() and not record.is_symlink():
+            temporary = directory / (".android-origin-" + secrets.token_hex(16))
+            output_descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+            try:
+                with os.fdopen(output_descriptor, "wb") as output:
+                    output.write(json.dumps({"schema": 1, "deviceId": secrets.token_hex(16)}, separators=(",", ":")).encode("ascii"))
+                    output.flush()
+                    os.fsync(output.fileno())
+                os.rename(temporary, record)
+                directory_descriptor = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+                try:
+                    os.fsync(directory_descriptor)
+                finally:
+                    os.close(directory_descriptor)
+            finally:
+                temporary.unlink(missing_ok=True)
+        value = current_origin(receiver, state_dir=directory)
+    finally:
+        os.close(descriptor)
     # Only the random deviceId is persisted by the shared helper. This explicit
     # application platform does not alter a host-global sys.platform value.
     return validate_origin(dict(value, platform="android"))

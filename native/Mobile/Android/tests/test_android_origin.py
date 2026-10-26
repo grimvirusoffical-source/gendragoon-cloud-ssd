@@ -6,6 +6,7 @@ from pathlib import Path
 import sys
 import tempfile
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -81,6 +82,35 @@ class AndroidOriginTests(unittest.TestCase):
         keymap.chmod(0o600)
         self.assertFalse((keymap.parent / "DeviceOrigins").exists())
         self.assertEqual(keymap.read_bytes(), original)
+
+    def test_android_publish_never_uses_hardlinks_and_concurrent_creators_agree(self):
+        profile = self.profile()
+        with patch.object(origin.os, "link", side_effect=PermissionError("Android SELinux denies hardlinks")):
+            with ThreadPoolExecutor(max_workers=8) as pool:
+                values = list(pool.map(lambda _: adapter.android_origin(profile), range(24)))
+        self.assertTrue(all(value == values[0] for value in values))
+        directory = Path(profile["keymapPath"]).parent / "DeviceOrigins"
+        self.assertEqual(sorted(path.name for path in directory.iterdir()), [".android-origin.lock", profile["receiverId"] + ".json"])
+        self.assertEqual((directory / ".android-origin.lock").stat().st_mode & 0o777, 0o600)
+
+    def test_interrupted_publish_retains_existing_records_and_rejects_shared_lock(self):
+        profile = self.profile()
+        with patch.object(adapter.os, "rename", side_effect=OSError("disposable publication interruption")):
+            with self.assertRaises(OSError):
+                adapter.android_origin(profile)
+        directory = Path(profile["keymapPath"]).parent / "DeviceOrigins"
+        self.assertEqual([path.name for path in directory.iterdir()], [".android-origin.lock"])
+        expected = adapter.android_origin(profile)
+        record = directory / (profile["receiverId"] + ".json")
+        original = record.read_bytes()
+        with patch.object(adapter.os, "rename", side_effect=AssertionError("existing record must not be replaced")):
+            self.assertEqual(adapter.android_origin(profile), expected)
+        self.assertEqual(record.read_bytes(), original)
+        lock = directory / ".android-origin.lock"
+        os.link(lock, directory / "shared-lock")
+        with self.assertRaises(ValueError):
+            adapter.android_origin(profile)
+        self.assertEqual(record.read_bytes(), original)
 
     def test_upload_adapter_passes_account_origin_and_keeps_verified_source(self):
         with patch.object(sys, "path", [str(RESOURCES), *sys.path]):
