@@ -238,6 +238,40 @@ async function createCloud(config) {
         });
         return json(res, 200, state.workspaces[id]);
       }
+      const workspaceDelete = /^\/v1\/receivers\/me\/workspaces\/([a-f0-9]{32})$/.exec(u.pathname);
+      if (workspaceDelete && req.method === 'DELETE') {
+        const workspace = workspaceDelete[1];
+        if (req.headers['x-confirm-workspace'] !== workspace) throw new CloudError('workspace_delete_confirmation_required', 409);
+        const ws = state.workspaces[workspace];
+        if (!ws) throw new CloudError('not_found', 404);
+        if ([...busy].some(key => key.startsWith(owner + '/' + workspace + '/'))) throw new CloudError('workspace_busy', 409);
+        const dir = path.join(root, owner, workspace);
+        try {
+          const st = await fs.lstat(dir);
+          if (!st.isDirectory() || st.isSymbolicLink()) throw new CloudError('stored_object_corrupt', 503);
+          await fs.rm(dir, {recursive: true, force: true});
+          await fsyncDirectory(path.join(root, owner));
+        } catch(e) { if (e.code !== 'ENOENT') throw e; }
+        const legacy = Object.values(state.objects || {}).filter(o => o.workspace === workspace);
+        for (const object of legacy) {
+          const file = path.join(root, owner, object.id + '.png');
+          await fs.unlink(file).catch(e => {if (e.code !== 'ENOENT') throw e;});
+        }
+        const freed = Number.isSafeInteger(ws.usedBytes) && ws.usedBytes >= 0 ? ws.usedBytes : 0;
+        state = await store.change(owner, s => {
+          const current = s.workspaces[workspace];
+          if (!current) throw new CloudError('not_found', 404);
+          const currentUsed = Number.isSafeInteger(current.usedBytes) && current.usedBytes >= 0 ? current.usedBytes : 0;
+          if (s.used < currentUsed) throw new CloudError('quota_state_corrupt', 503);
+          s.used -= currentUsed;
+          for (const [id,o] of Object.entries(s.objects || {})) if (o.workspace === workspace) delete s.objects[id];
+          for (const [key,item] of Object.entries(s.library || {})) if (item.workspace === workspace) delete s.library[key];
+          for (const [id,r] of Object.entries(s.reservations || {})) if (r.workspace === workspace) delete s.reservations[id];
+          for (const [id,d] of Object.entries(s.deletions || {})) if (d.workspace === workspace) delete s.deletions[id];
+          delete s.workspaces[workspace];
+        });
+        return json(res, 200, {ok:true, workspace, freedBytes:freed, usedBytes:state.used});
+      }
       const libraryBase = base + '/library';
       if (u.pathname === libraryBase && req.method === 'GET') {
         return json(res, 200, {items: Object.values(state.library || {}).sort((a,b) => String(a.name).localeCompare(String(b.name)))});
