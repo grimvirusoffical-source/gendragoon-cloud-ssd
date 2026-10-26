@@ -4,8 +4,11 @@ import os
 import sys
 sys.dont_write_bytecode=True
 import argparse
+import base64
+import csv
 import hashlib
 import importlib.metadata
+import io
 import json
 from pathlib import Path
 import subprocess
@@ -18,6 +21,32 @@ SOURCE_URL='https://files.pythonhosted.org/packages/95/b0/c7453d0b6e2073c3264468
 SOURCE_SHA256='9a94cf751c9ad8ebaa835bcd3d40dacf8534ad086b88c38029b65123c7999d2a'
 VERSION='2.5.4'
 CIBW='4.3.4'
+NDK='27.3.13750724'
+
+
+def include_runtime_notices(path):
+    """Retain LLVM's redistribution terms for auditwheel's libc++ copy."""
+    sdk=Path(os.environ.get('ANDROID_HOME')or os.environ.get('ANDROID_SDK_ROOT')or '')
+    ndk=sdk/'ndk'/NDK
+    if not ndk.is_absolute() or NDK not in (ndk/'source.properties').read_text():
+        raise RuntimeError('The exact builder NDK is required for its redistribution notices')
+    llvm=list((ndk/'toolchains/llvm/prebuilt').glob('*/NOTICE'))
+    if len(llvm)!=1:raise RuntimeError('Official LLVM runtime notice is unavailable')
+    with zipfile.ZipFile(path)as archive:
+        files={name:archive.read(name)for name in archive.namelist()if not name.endswith('/')}
+    prefix='numpy-'+VERSION+'.dist-info/'
+    if any(name.endswith(('.jws','.p7s'))for name in files):raise RuntimeError('Do not rewrite a separately signed wheel')
+    notices={prefix+'licenses/Android-NDK-NOTICE.txt':(ndk/'NOTICE').read_bytes(),prefix+'licenses/Android-NDK-LLVM-NOTICE.txt':llvm[0].read_bytes()}
+    files.update(notices);record=prefix+'RECORD';stream=io.StringIO(newline='');writer=csv.writer(stream,lineterminator='\n')
+    for name,data in sorted(files.items()):
+        if name!=record:writer.writerow([name,'sha256='+base64.urlsafe_b64encode(hashlib.sha256(data).digest()).decode().rstrip('='),len(data)])
+    writer.writerow([record,'','']);files[record]=stream.getvalue().encode()
+    temporary=path.with_suffix('.repack')
+    with zipfile.ZipFile(temporary,'w',compression=zipfile.ZIP_DEFLATED,compresslevel=9)as archive:
+        for name,data in sorted(files.items()):
+            info=zipfile.ZipInfo(name,(2026,10,26,0,0,0));info.compress_type=zipfile.ZIP_DEFLATED;info.external_attr=0o100644<<16;archive.writestr(info,data)
+    temporary.replace(path)
+    return {'version':NDK,'notices':{name:hashlib.sha256(data).hexdigest()for name,data in notices.items()}}
 
 
 def verify_wheel(path,abi):
@@ -71,7 +100,8 @@ def build(work,abi):
     subprocess.run([sys.executable,'-m','cibuildwheel',str(project),'--platform','android','--archs',abi,'--config-file',str(ROOT/'cibuildwheel.toml'),'--output-dir',str(output)],env=env,cwd=ROOT.parents[3],check=True,timeout=3600)
     wheels=list(output.glob('numpy-'+VERSION+'-cp313-cp313-android_*_'+abi+'.whl'))
     if len(wheels)!=1:raise RuntimeError('Expected exactly one architecture-bound NumPy candidate')
-    result={'schema':1,'numpyVersion':VERSION,'pythonVersion':'3.13','abi':abi,'sourceURL':SOURCE_URL,'sourceSHA256':SOURCE_SHA256,'cibuildwheelVersion':CIBW,'configSHA256':hashlib.sha256((ROOT/'cibuildwheel.toml').read_bytes()).hexdigest(),'candidate':verify_wheel(wheels[0],abi)}
+    notices=include_runtime_notices(wheels[0])
+    result={'schema':1,'numpyVersion':VERSION,'pythonVersion':'3.13','abi':abi,'sourceURL':SOURCE_URL,'sourceSHA256':SOURCE_SHA256,'cibuildwheelVersion':CIBW,'configSHA256':hashlib.sha256((ROOT/'cibuildwheel.toml').read_bytes()).hexdigest(),'ndkRuntime':notices,'candidate':verify_wheel(wheels[0],abi)}
     (output/'provenance.json').write_text(json.dumps(result,indent=2)+'\n')
     (output/'SHA256SUMS').write_text(result['candidate']['sha256']+'  '+wheels[0].name+'\n')
     # No source archive, private vendor, credentials or build cache is published.
