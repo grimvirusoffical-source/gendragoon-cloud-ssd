@@ -20,6 +20,8 @@ class NativeUploadPlayKeyUI(unittest.TestCase):
         self.assertIn('func playRow(_ sender: GDLibraryPlayButton)', content)
         self.assertIn('item.kind == "app", item.canRestoreOnMac', content)
         self.assertIn('parent.action(.open, [key], item.parentKey)', content)
+        self.assertIn('(parent.busy ? "busy" : "ready")', content)
+        self.assertIn('(parent.canEdit ? "writable" : "readOnly")', content)
         self.assertIn('if item.kind == "app" { library.smartLaunch(item) }', content)
         self.assertIn('This does not run on a remote macOS server', content)
 

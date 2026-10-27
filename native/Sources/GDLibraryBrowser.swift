@@ -98,7 +98,7 @@ private struct GDLibraryOutline: NSViewRepresentable {
         init(_ parent: GDLibraryOutline) { self.parent = parent }
         func rebuild(_ items: [StoredApp]) {
             guard let outline else { return }
-            let next = parent.destination + "|" + items.map { "\($0.key):\($0.label):\($0.parentKey ?? ""): \($0.kind ?? ""): \($0.deviceLabel): \($0.applicationPlatformCode ?? "")" }.joined(separator: "|")
+            let next = parent.destination + "|" + (parent.busy ? "busy" : "ready") + "|" + (parent.canEdit ? "writable" : "readOnly") + "|" + items.map { "\($0.key):\($0.label):\($0.parentKey ?? ""): \($0.kind ?? ""): \($0.deviceLabel): \($0.applicationPlatformCode ?? "")" }.joined(separator: "|")
             if signature != next {
                 let expanded = Set(nodes.values.filter { outline.isItemExpanded($0) }.map { $0.item.key })
                 rebuilding = true
