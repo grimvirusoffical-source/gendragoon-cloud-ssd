@@ -3,7 +3,7 @@
   "requestedAt": "2026-10-26",
   "baseCommit": "98eb1020d0a16340675a38cb99a8b5667b73b4d6",
   "scope": "GenDragoon repository only; pinned vendor and external programs unchanged",
-  "stage": "platform-runtime-verification",
+  "stage": "signed-and-notarized-mac37-awaiting-server-rollout",
   "work": {
     "reliableTransfers": "native-held credential renewal, bounded resumable retries, durable sanitized errors; receiver_finish",
     "teams": "per-workspace dev peers, unlimited invitation count, required usernames, quick chat and P2P signaling, no shared file rights; billing_finish",
@@ -40,14 +40,14 @@
     "CUA native pipe disconnected during safe UI refresh attempt; one user request for normal refresh/quit is pending.",
     "Opera connector requires reauthentication; no store submission has been attempted."
   ],
-  "storeStatus": "No store submission or GitHub release. Mozilla and Opera authentication currently include explicit Terms acceptance; action-time user confirmation will be required before proceeding through those forms. Concrete packages and runtime gates remain in progress.",
-  "iosStatus": "deferred until all other requested targets are finished and submitted",
-  "targetVersion": "0.22.0",
-  "targetBuild": 36,
+  "storeStatus": "A notarized macOS 0.22.1 (37) package is local-only; GitHub release and store publication remain pending. Receiver fast PNG support is not confirmed active. Do not auto-update customers yet.",
+  "iosStatus": "No new iOS submission; original plan defers iOS until all other targets verified.",
+  "targetVersion": "0.22.1",
+  "targetBuild": 37,
   "spacePolicy": "10 GB is advisory per latest human instruction. Check measured operation/staging requirements with a small bounded filesystem allowance; do not block solely below 10 GB.",
   "validation": {
     "sourceOnly": false,
-    "installedVersion": "0.21.0 (35)",
+    "installedVersion": "0.22.0 (36)",
     "focusedCacheQueueUpdateTests": "138 passed",
     "teamsFrontendAndPeerUnitTests": "9 passed",
     "actualSwiftCompanionSocket": "3 passed including 48 concurrent status requests",
@@ -66,6 +66,29 @@
     "installerSpace": "73 installer and updater tests passed with resolved local fixture paths, including successful staging below the advisory 10 GB and safe real-space-shortage refusal.",
     "receiverIsolation": "CAS retry rechecks current library workspace; stalled Teams mutation JSON is read before locks. Focused 16 passed, 1 optional actual RedX fixture skipped.",
     "macPackage": {
+      "version": "0.22.1 (37)",
+      "signed": true,
+      "notarized": true,
+      "stapled": true,
+      "gatekeeperAccepted": true,
+      "installed": false,
+      "submission": "163e2793-24b9-49a4-b4a4-1ec1d8e73a7c",
+      "zipSha256": "dc3d2dcf0b40a338e026c64f4945ea26aa0c7f76bb45ff7f8d865546e500494c",
+      "zipBytes": 82656339,
+      "nodeRuntime": "24.22.1 (2026-10-21 security release)",
+      "path": "/Users/grim-virus/GenDragoonRelease-0.22.1-37-checkbox-notary/package/GenDragoon-Cloud-SSD-Mac-v0.22.1.zip",
+      "installationGate": "Installed version 0.22.0 (36) remains untouched; active Receiver must support fast PNG before publishing or installing this release."
+    },
+    "androidDeviceCandidate": "Reviewed eight-wheel aligned NumPy/Pillow dependency profile passed a573cf6 on both page sizes. Latest da653b9 memory instrumentation run40286028999 passed4KiB but16KiB failed; exact diagnostics under investigation before promotion. Default shipping pins must not ship.",
+    "receiverActualRedX": "Isolated actual RedX seven-row CAS/query/revocation/expiry/cleanup probe passed; all seven fixtures removed and account-state fingerprint unchanged. Replacement Set preserves K/Scope/Kind/Position physical indexes.",
+    "backendDeployment": "Receiver and Control36-45de7e8 immutable releases and private env prepared, source hashes/syntax verified; NOT activated. Live Receiver35 and Control33 unchanged.",
+    "serverPreactivation": "Private logical metadata export and a full stored encrypted PNG checksum scan passed. Account metadata remained stable across the scan, with zero pending reservations. No records, source files, active writer locks or service links changed.",
+    "billingLiveReadOnly": "All 31 offered live prices match the configured account, active status, USD amounts and monthly/yearly recurrence. Live billing health reports ready. No charges, Checkout creation, customer retrieval or subscription mutation occurred. This is not a live payment test of every tier.",
+    "guide": "Detailed how-to Page updated and native block readback verified. The platform matrix distinguishes installed build 35, held Mac 36, staged backend 36, runtime candidates and no store publication.",
+    "extensionRuntime": "Exact b84ea6313c5fc7d47cb10ea049ef503fbb2e705e run40284952720 passed real Chromium nativeMessaging/compiled ELF/private IPC, real VSIX installation/activation/commands/status in VS Code, and Firefox temporary addon load/reload plus lint. Fixtures are synthetic account-free dispatch. Native approval, live transfers, Firefox nativeMessaging and brand-specific Chrome/Opera/Edge remain open.",
+    "desktopMountCandidate": "57c06ff contains isolated account/note readonly DAV/rclone drives, normal safe unmount and protected account/Quit guards.22 host drive tests pass with target driver skipped on Mac; actualWindows/Linux run40286765483 pending. Existing trusted rclone plusWinFsp/FUSE required; no drivers or permissions installed.",
+    "accountDeletion": "Current authenticated Control/Receiver durable deletion API and external support-request page under implementation, then Android in-app receipt-based deletion. Legacy Firebase/v2 client does not establish current-path compliance. No real account deletion or billing cancellation tested on production.",
+    "priorMacPackage36": {
       "version": "0.22.0 (36)",
       "signed": true,
       "notarized": true,
@@ -76,22 +99,31 @@
       "zipSha256": "85cb41453463046aaf08ff7e14ec4b0f0adbb6dc73f52b7dd7ee2754419dc858",
       "installationGate": "Native installed35 activity protection unresolved; normal Quit required."
     },
-    "androidDeviceCandidate": "Reviewed eight-wheel aligned NumPy/Pillow dependency profile passed a573cf6 on both page sizes. Latest da653b9 memory instrumentation run40286028999 passed4KiB but16KiB failed; exact diagnostics under investigation before promotion. Default shipping pins must not ship.",
-    "receiverActualRedX": "Isolated actual RedX seven-row CAS/query/revocation/expiry/cleanup probe passed; all seven fixtures removed and account-state fingerprint unchanged. Replacement Set preserves K/Scope/Kind/Position physical indexes.",
-    "backendDeployment": "Receiver and Control36-45de7e8 immutable releases and private env prepared, source hashes/syntax verified; NOT activated. Live Receiver35 and Control33 unchanged.",
-    "serverPreactivation": "Private logical metadata export and a full stored encrypted PNG checksum scan passed. Account metadata remained stable across the scan, with zero pending reservations. No records, source files, active writer locks or service links changed.",
-    "billingLiveReadOnly": "All 31 offered live prices match the configured account, active status, USD amounts and monthly/yearly recurrence. Live billing health reports ready. No charges, Checkout creation, customer retrieval or subscription mutation occurred. This is not a live payment test of every tier.",
-    "guide": "Detailed how-to Page updated and native block readback verified. The platform matrix distinguishes installed build 35, held Mac 36, staged backend 36, runtime candidates and no store publication.",
-    "extensionRuntime": "Exact b84ea6313c5fc7d47cb10ea049ef503fbb2e705e run40284952720 passed real Chromium nativeMessaging/compiled ELF/private IPC, real VSIX installation/activation/commands/status in VS Code, and Firefox temporary addon load/reload plus lint. Fixtures are synthetic account-free dispatch. Native approval, live transfers, Firefox nativeMessaging and brand-specific Chrome/Opera/Edge remain open.",
-    "desktopMountCandidate": "57c06ff contains isolated account/note readonly DAV/rclone drives, normal safe unmount and protected account/Quit guards.22 host drive tests pass with target driver skipped on Mac; actualWindows/Linux run40286765483 pending. Existing trusted rclone plusWinFsp/FUSE required; no drivers or permissions installed.",
-    "accountDeletion": "Current authenticated Control/Receiver durable deletion API and external support-request page under implementation, then Android in-app receipt-based deletion. Legacy Firebase/v2 client does not establish current-path compliance. No real account deletion or billing cancellation tested on production."
+    "encryptionCheckbox": {
+      "platform": "macOS",
+      "label": "Use Red-SecretsXAI encryption",
+      "defaultChecked": true,
+      "unchecked": "verified, intentionally unencrypted PNG carriers; 1 MiB data chunks",
+      "queuedModeFrozen": true,
+      "encryptedTransportModuleSha256Unchanged": "6b5ef4a7a9741451bac1cf82e11acc8716acbc6a63e2aa12aa66bdc2edeaeab8",
+      "transferTests": "37 passed/2 conditional skips in prior focused suite",
+      "receiverBackendSuite": "29 passed",
+      "billingLegacySuite": "42 passed",
+      "vendorRefreshSuite": "15 passed",
+      "notarizeToolSuite": "34 passed",
+      "liveFastCarrierActivated": false
+    },
+    "livePublicHealth": "2026-10-27: Receiver HTTP 200 productionReady=true; billing control HTTP 200; pricing version4 with 10 storage and six performance tiers, second MachineNote fee 500 cents. No charged payment/activation transaction."
   },
   "limitations": [
     "RottenApple current caller pairs successfully but its storageBind returns unavailable before network; complete file binding requires changes outside this authorized repository.",
     "QuickLauncher pairing and health contract supported; external program has no file-transfer consumer.",
     "Internet direct-peer reachability through NAT/TURN pending; team group chat uses server relay.",
     "Platform build/runtime, signatures, store submission and acceptance remain separate release gates.",
-    "10GB is advisory; current installed build35 is unchanged until a new verified installation."
+    "10GB is advisory; current installed build35 is unchanged until a new verified installation.",
+    "Fast PNG requires a Receiver deployment advertising gendragoon-plaintext-png-v1; app refuses unchecked uploads against an older Receiver rather than silently falling back.",
+    "Local billing and entitlement tests do not verify a real Stripe charge, webhook delivery or a real plan activation.",
+    "Mac staging is signed, notarized and package checksum-verified; the installed 0.22.0 (36) app was not replaced."
   ],
   "sourceStatus": {
     "base": "98eb1020d0a16340675a38cb99a8b5667b73b4d6",
@@ -101,7 +133,8 @@
     "uncommittedCandidates": "Current Control/Receiver account deletion and Android client integration are under implementation. Desktop drives and extension acceptance are committed.",
     "androidDependencyRepair": "793603cfb0a2ffb39ed4aa5adf1a43f0ae02cf19",
     "androidDeviceCandidate": "a890d9a",
-    "desktopMountCandidate": "57c06ff4f1f5ecce329de4a3ad9e8e547bf5734a"
+    "desktopMountCandidate": "57c06ff4f1f5ecce329de4a3ad9e8e547bf5734a",
+    "currentReleaseBranch": "feature/fast-carrier-optional-encryption"
   },
-  "updatedAt": "2026-10-26T07:37:19.275110+00:00"
+  "updatedAt": "2026-10-27T04:05:31.642054+00:00"
 }

@@ -221,7 +221,8 @@ struct ProjectUploadSection: View {
                         }
                     }.frame(maxHeight: 180)
                 }
-                Toggle("Encrypt uploads (recommended)", isOn: $workspace.encryptionEnabled)
+                Toggle("Use Red-SecretsXAI encryption", isOn: $workspace.encryptionEnabled)
+                    .toggleStyle(.checkbox)
                     .disabled(workspace.controlsLocked(externalBusy: externalBusy))
                 Text(workspace.encryptionEnabled ? "Red-SecretsXAI encryption and red-X barcode protection are enabled. This option stays intact." : "Fast unencrypted upload: files, folder archives and apps can be read by anyone with server storage access. Never use this mode for sensitive data. Existing encrypted backups are unchanged.")
                     .font(.caption).foregroundStyle(workspace.encryptionEnabled ? Color.secondary : Color.orange)
