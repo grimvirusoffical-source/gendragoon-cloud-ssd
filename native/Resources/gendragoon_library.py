@@ -777,13 +777,31 @@ def _upload(source,remote,folder,offload=False,project=None,bucket=None,parent_k
         try:
             progress.phase("offloading")
             trash(src)
-            prior=json.loads(json.dumps(entry))
-            entry["offloaded"]=True;entry["trashedAt"]=time.time();store_revision(key,entry,prior)
+            mark_offloaded(key,entry)
             reply(message=f"Verified cloud backup of {src.name}; moved original to Trash. Empty Trash to reclaim space.",offloaded=True,**result)
         except Exception as exc:
             reply(message=f"Cloud backup verified. Finder could not confirm moving the original to Trash; inspect it before retrying.",offloaded=False,**result)
     else:
         reply(message=f"Verified cloud copy of {src.name}. Original kept locally.",offloaded=False,**result)
+
+def mark_offloaded(key, verified_entry):
+    """Commit a verified Trash move without overwriting a concurrent metadata refresh.
+
+    A Receiver listing may update the local index after the complete readback.
+    Only the exact immutable archive revision can acquire its offloaded flag;
+    unrelated refreshed fields are preserved.
+    """
+    immutable=("name","kind","remote","folder","file","sha256","project","bucket","redxManifestId")
+    with library_lock():
+        entries=_load();current=entries.get(key)
+        if not current or any(current.get(name)!=verified_entry.get(name) for name in immutable):
+            raise RuntimeError("Cloud archive revision changed after the Trash move; recover the source from Trash and refresh the library")
+        current["offloaded"]=True
+        current["trashedAt"]=time.time()
+        entries[key]=current
+        _save(entries)
+
+
 def check_name(name):
     if not isinstance(name,str) or not name or len(name)>255 or name in (".","..") or "/" in name or "\\" in name or any(ord(c)<32 or ord(c)==127 for c in name):raise ValueError("Invalid item name")
 def item_path(data):

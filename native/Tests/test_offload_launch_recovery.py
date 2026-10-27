@@ -139,6 +139,24 @@ class OffloadedAppRecovery(unittest.TestCase):
                 library.quit_app_for_upload(app)
         signaled.assert_not_called()
 
+    def test_offload_flag_survives_a_concurrent_metadata_only_library_refresh(self):
+        latest = library.load()[self.key]
+        latest["displayName"] = "New display name"
+        library.store(self.key, latest)
+        library.mark_offloaded(self.key, self.entry)
+        result = library.load()[self.key]
+        self.assertTrue(result["offloaded"])
+        self.assertEqual(result["displayName"], "New display name")
+        self.assertIn("trashedAt", result)
+
+    def test_offload_flag_rejects_a_different_archive_revision(self):
+        latest = library.load()[self.key]
+        latest["sha256"] = "e" * 64
+        library.store(self.key, latest)
+        with self.assertRaisesRegex(RuntimeError, "revision changed"):
+            library.mark_offloaded(self.key, self.entry)
+        self.assertEqual(library.load()[self.key]["sha256"], "e" * 64)
+
     def test_workspace_refuses_force_quit_without_macos_opt_in(self):
         with self.assertRaisesRegex(upload.WorkspaceError, "macOS"):
             upload.enqueue(0, False, home=self.home, close_running_apps=True)

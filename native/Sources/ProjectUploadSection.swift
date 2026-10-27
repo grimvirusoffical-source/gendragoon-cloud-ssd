@@ -783,6 +783,11 @@ final class UploadWorkspaceModel: ObservableObject {
         Task { [self] in
             var succeeded = false
             do {
+                // A stale CAS may be retried only while the actual selected
+                // sources and destination remain identical. Never enqueue
+                // another process's changed selection by accident.
+                let intendedSourceIDs = snapshot?.sources.map(\.id) ?? []
+                let intendedDestination = snapshot?.destination
                 var revisionToUse = revision
                 for attempt in 0..<2 {
                     let response = try await call(arguments + ["--expected-revision", String(revisionToUse)])
@@ -798,8 +803,11 @@ final class UploadWorkspaceModel: ObservableObject {
                     // at most once against a fresh authoritative snapshot.
                     if response.error == "revision_conflict" && attempt == 0 {
                         await refresh(showError: false)
-                        guard !hasRunningJob, let latest = snapshot?.revision else {
-                            throw UploadFailure("An upload started while you were editing the selection. Review the queue before retrying.")
+                        guard !hasRunningJob,
+                              (snapshot?.sources.map(\.id) ?? []) == intendedSourceIDs,
+                              snapshot?.destination == intendedDestination,
+                              let latest = snapshot?.revision else {
+                            throw UploadFailure("The selection or MachineNote changed. Review it before retrying this upload.")
                         }
                         revisionToUse = latest
                         continue
