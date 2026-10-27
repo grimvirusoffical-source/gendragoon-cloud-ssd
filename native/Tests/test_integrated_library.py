@@ -21,7 +21,7 @@ library=importlib.util.module_from_spec(spec);spec.loader.exec_module(library)
 class LibraryTests(unittest.TestCase):
     def setUp(self):
         self.temporary=tempfile.TemporaryDirectory(prefix="gd-library-")
-        self.home=Path(self.temporary.name);self.home.chmod(0o700)
+        self.home=Path(self.temporary.name).resolve();self.home.chmod(0o700)
         self.support=self.home/"Library/Application Support/GenDragoon Cloud SSD"
         self.support.mkdir(parents=True,mode=0o700)
         self.config=self.support/"gendragoon-rclone.conf";self.config.write_text("[fixture]\ntype = gcs\n");self.config.chmod(0o600)
@@ -31,6 +31,7 @@ class LibraryTests(unittest.TestCase):
         self.remote={};self.hook=None;self.bad_readback=False;self.bad_restore=False;self.restored=False
         self.fake_run=patch.object(library,"run",side_effect=self.fake_command);self.fake_run.start();self.patches.append(self.fake_run)
         item=patch.object(library,"is_running",return_value=False);item.start();self.patches.append(item)
+        item=patch.object(library,"cache_in_use",return_value=False);item.start();self.patches.append(item)
         self.trash=patch.object(library,"trash");self.mock_trash=self.trash.start();self.patches.append(self.trash)
         self.reply=patch.object(library,"reply");self.mock_reply=self.reply.start();self.patches.append(self.reply)
 
@@ -93,7 +94,9 @@ class LibraryTests(unittest.TestCase):
 
     def test_file_folder_and_atomic_app_roundtrip_preserves_manifest(self):
         for kind in ("file","folder","app"):
-            with self.subTest(kind=kind):
+            # This fixture deliberately models Mac archive restoration, even
+            # when its fake transport and filesystem run on a Linux CI host.
+            with self.subTest(kind=kind), patch.object(library.device_origin,"current_platform",return_value="macos"):
                 source=self.source(kind);before=library.snapshot(source)
                 result=self.upload(source)
                 self.assertTrue(result["verified"]);self.assertFalse(result["offloaded"])

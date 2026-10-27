@@ -30,7 +30,9 @@ import uuid
 DEPENDENCIES = (
     "gendragoon_update_restart.py", "gendragoon_auto_update.py",
     "gendragoon_app_control.py", "gendragoon_app_launch.py", "gendragoon_library.py",
-    "gendragoon_upload_workspace.py", "gendragoon_performance.py",
+    "gendragoon_upload_workspace.py", "gendragoon_performance.py", "gendragoon_redx_storage.py", "gendragoon_fast_png.py", "gendragoon_storage_mode.py", "gendragoon_progress.py",
+    "gendragoon_device_origin.py", "gendragoon_auth_broker.py",
+    "gendragoon_transfer_errors.py", "gendragoon_platform_ipc.py",
     "gendragoon_performance_profiles.json",
 )
 MAX_SOURCE = 2 * 1024**2
@@ -45,14 +47,19 @@ auto = control = launcher = None
 
 
 def load_runtime(directory):
-    """Called after snapshot hashes are verified; all lazy helpers are retained."""
+    """Load only verified retained modules for local lifecycle inspection."""
     global auto, control, launcher
     directory = Path(directory)
     sys.path.insert(0, str(directory))
     auto = importlib.import_module("gendragoon_auto_update")
     control = importlib.import_module("gendragoon_app_control")
     launcher = importlib.import_module("gendragoon_app_launch")
-    for module in (auto, control, launcher, launcher.lib, launcher.lib.performance):
+    transport = importlib.import_module("gendragoon_redx_storage")
+    errors = importlib.import_module("gendragoon_transfer_errors")
+    ipc = importlib.import_module("gendragoon_platform_ipc")
+    for module in (auto, control, launcher, launcher.lib, launcher.lib.performance,
+                   launcher.lib.progress, launcher.lib.device_origin, transport,
+                   transport.auth_broker, errors, ipc):
         if Path(module.__file__).absolute().parent != directory.absolute():
             raise RuntimeError("Update worker dependency escaped its verified snapshot")
 

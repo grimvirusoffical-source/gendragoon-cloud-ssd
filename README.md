@@ -1,13 +1,13 @@
 # GenDragoon Cloud SSD
 
-GenDragoon Cloud SSD turns your own Google Cloud storage into a drive you can upload to, restore from and run applications out of. This repository holds the clients, the backend service, the release tooling and the storage SDKs.
+GenDragoon Cloud SSD stores encrypted files, folders and applications in **MachineNotes** on your Red-XAI server. The macOS app uses your Red-XAI account and the pinned Red-SecretsXAI library to encrypt archives locally and encode them as red-X barcode PNGs before upload. This repository holds the clients, backend services, release tooling and storage SDKs.
 
 ## Features
 
 - Upload files, folders and applications with verified read-back, optional removal of the local original only after verification, and protected restores.
 - Managed launch of applications from a local cache, bounded preloading, and cache cleanup that never touches user data.
 - Drive cleanup: preview and sort a folder into Applications, Videos, Audio, Pictures, Files and Folders, with an undo journal.
-- Accounts, projects, storage and performance plans with server-verified billing.
+- Account-isolated MachineNotes, storage and performance plans with server-verified billing. The verified service owner can list MachineNote and library metadata across accounts; regular accounts can list only their own.
 - Clients for macOS, iOS, Android, Windows and Linux, plus Python and JavaScript storage SDKs.
 - Self-update on the direct macOS download with pinned checksums and signature checks. Store builds do not self-update.
 
@@ -47,9 +47,14 @@ More detail: [native/README.md](native/README.md), [native/Backend/README.md](na
 
 ## Configuration
 
-The backend reads its settings from the environment. Variable names, and which ones are secrets, are listed in [native/Backend/README.md](native/Backend/README.md#configuration-and-deployment), including accounts (`ACCOUNTS_SEAL_KEY`) and phone two-factor codes through Twilio (`TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN` or `TWILIO_API_KEY_SID` with `TWILIO_API_KEY_SECRET`, and `TWILIO_MESSAGING_SERVICE_SID` or `TWILIO_FROM_NUMBER`). Secret values live in Secret Manager, never in this repository.
+The backend reads its settings from the environment. Variable names, and which ones are secrets, are listed in [native/Backend/README.md](native/Backend/README.md#configuration-and-deployment), including accounts (`ACCOUNTS_SEAL_KEY`) and phone two-factor codes through Twilio (`TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN` or `TWILIO_API_KEY_SID` with `TWILIO_API_KEY_SECRET`, and `TWILIO_MESSAGING_SERVICE_SID` or `TWILIO_FROM_NUMBER`). Secret values live in the deployment's private credential configuration, never in this repository.
 
 ## Security
+
+The current macOS storage flow offers only server-backed MachineNotes. Legacy Google/provider helpers remain for compatibility with older clients and tests; the app does not enumerate Google projects, offer Google buckets, or send new uploads to a saved Google destination. Removing those choices does not delete any existing Google Cloud buckets.
+
+MachineNote ownership is enforced by the Receiver API. Owner-wide enumeration requires the current identity provider to verify the configured owner email on every request; a saved owner flag cannot grant access. Administrative inventory exposes names, plans, usage and library metadata. It does not expose storage secrets or grant decryption of another account's encrypted archives. Archive decryption remains dependent on the account's client-held encryption secret.
+
 
 Please report vulnerabilities privately; see [SECURITY.md](SECURITY.md). No user data, private API keys or cloud credentials belong in this repository.
 

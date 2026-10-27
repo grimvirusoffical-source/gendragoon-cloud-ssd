@@ -4,7 +4,7 @@ import Dispatch
 import Foundation
 import SwiftUI
 
-/// Populate these values from the authenticated CloudModel, never a default project.
+/// Populate these values only from the authenticated Red-XAI MachineNotes response.
 public struct UploadCloudProject: Identifiable, Hashable, Sendable {
     public let id: String
     public let displayName: String
@@ -21,12 +21,14 @@ public struct UploadCloudBucket: Identifiable, Hashable, Sendable {
     public let displayName: String
     public let remote: String
     public let prefix: String
+    public let workers: Int
     /// remote is the configured rclone section name, without a colon or path.
-    public init(id: String, displayName: String, remote: String, prefix: String) {
+    public init(id: String, displayName: String, remote: String, prefix: String, workers: Int = 1) {
         self.id = id
         self.displayName = displayName
         self.remote = remote
         self.prefix = prefix
+        self.workers = max(1, min(24, workers))
     }
 }
 
@@ -38,6 +40,8 @@ struct ProjectUploadSection: View {
     private let onRefreshCloudChoices: @MainActor () async -> Void
     private let content: GDProjectContent?
     @ObservedObject private var workspace: UploadWorkspaceModel
+    @State private var showLocalBrowser = false
+    @State private var dropTarget = false
 
     init(workspace: UploadWorkspaceModel, externalBusy: Bool, content: GDProjectContent? = nil,
          onRefreshCloudChoices: @escaping @MainActor () async -> Void) {
@@ -51,7 +55,7 @@ struct ProjectUploadSection: View {
         VStack(alignment: .leading, spacing: 18) {
             destinationPicker
             sourcePicker
-            sourceTree
+            DisclosureGroup("Browse local folders", isExpanded: $showLocalBrowser) { sourceTree }
             uploadQueue
         }
         .task {
@@ -65,22 +69,22 @@ struct ProjectUploadSection: View {
     }
 
     private var destinationPicker: some View {
-        GroupBox("Google Cloud destination") {
+        GroupBox("MachineNote on your Red-XAI server") {
             VStack(alignment: .leading, spacing: 8) {
-                Picker("Project / bucket", selection: Binding(
+                Picker("MachineNote", selection: Binding(
                     get: { workspace.snapshot?.destination },
                     set: { destination in
                         if let destination { workspace.select(destination, externalBusy: externalBusy) }
                     }
                 )) {
-                    Text("Choose a project and bucket").tag(Optional<UploadDestination>.none).disabled(true)
+                    Text("Choose a MachineNote").tag(Optional<UploadDestination>.none).disabled(true)
                     if let saved = workspace.snapshot?.destination, !workspace.destinationIsListed {
-                        Text(workspace.destinationAvailable ? saved.label : "Unavailable: \(saved.label)")
+                        Text("Choose an available MachineNote")
                             .tag(Optional(saved)).disabled(true)
                     }
-                    ForEach(workspace.projects) { project in
+                    ForEach(workspace.readableProjects) { project in
                         ForEach(project.buckets) { bucket in
-                            Text("\(project.displayName) / \(bucket.displayName)")
+                            Text(bucket.displayName + (workspace.isAuthorized(UploadDestination(project: project.id, bucket: bucket.id, remote: bucket.remote, prefix: bucket.prefix)) ? "" : " · Read only"))
                                 .tag(Optional(UploadDestination(project: project.id, bucket: bucket.id,
                                                                remote: bucket.remote, prefix: bucket.prefix)))
                         }
@@ -89,13 +93,13 @@ struct ProjectUploadSection: View {
                 .disabled(workspace.controlsLocked(externalBusy: externalBusy))
                 destinationBadge
                 if workspace.snapshot?.destination != nil && !workspace.destinationAvailable {
-                    Text("The saved destination is unavailable in the current authorized cloud choices. It stays selected; refresh access or choose another destination before uploading.")
+                    Text(workspace.snapshot?.destination.map(workspace.isReadable) == true ? "This MachineNote is read only. You can download existing files; activate its storage plan to upload." : "Choose an available MachineNote before uploading. Previous provider destinations cannot be used here.")
                         .font(.caption).foregroundStyle(.red)
                 } else if workspace.projects.isEmpty && !workspace.destinationAvailable {
-                    Text("No authorized cloud destinations are available. Connect Google Cloud and refresh its projects and buckets.")
+                    Text("No active MachineNotes are available. Create one in MachineNotes, then refresh this list.")
                         .font(.caption).foregroundStyle(.secondary)
                 }
-                Button("Refresh cloud projects and upload state") {
+                Button("Refresh MachineNotes and upload state") {
                     Task { await workspace.refreshChoices(using: onRefreshCloudChoices) }
                 }
                 .disabled(workspace.isMutationPending || workspace.isRefreshingChoices)
@@ -105,22 +109,21 @@ struct ProjectUploadSection: View {
     }
 
     private var sourcePicker: some View {
-        GroupBox(content == .applications ? "Select applications" : content == .files ? "Select files and complete folders" : "Applications, files, and folders") {
+        GroupBox("Select items, then Upload") {
             VStack(alignment: .leading, spacing: 10) {
                 HStack {
-                    if content != .files { Button("Add Applications…", systemImage: "app.badge") {
-                        workspace.chooseSources(startingAt: URL(fileURLWithPath: "/Applications", isDirectory: true),
-                                                externalBusy: externalBusy, content: .applications)
+                    Button("Select Apps, Files or Folders…", systemImage: "folder.badge.plus") {
+                        workspace.chooseSources(startingAt: content == .applications ? URL(fileURLWithPath: "/Applications", isDirectory: true) : nil,
+                                                externalBusy: externalBusy)
                     }.buttonStyle(.borderedProminent)
-                    Button("My Applications…") {
-                        workspace.chooseSources(startingAt: FileManager.default.homeDirectoryForCurrentUser
-                            .appendingPathComponent("Applications", isDirectory: true), externalBusy: externalBusy, content: .applications)
-                    } }
-                    if content != .applications { Button("Add Files or Folders…", systemImage: "plus") {
-                        workspace.chooseSources(startingAt: nil, externalBusy: externalBusy, content: .files)
-                    }.buttonStyle(.borderedProminent) }
+                    Button("Paste", systemImage: "doc.on.clipboard") { workspace.pasteSources(externalBusy: externalBusy) }
+                    if workspace.snapshot?.sources.isEmpty == false {
+                        Button("Clear selection") { workspace.clearSelection(externalBusy: externalBusy) }
+                    }
                 }.disabled(workspace.controlsLocked(externalBusy: externalBusy))
-                Text(content == .applications ? "Applications are selected as complete bundles. The managed library verifies the archive before launch or offload." : "Select any file type or a complete folder. Nested files, empty folders and Mac metadata are preserved.")
+                Text("Select multiple items together, drop them here, or paste files copied in Finder. Applications stay complete; folders include all nested contents and Mac metadata.")
+                    .font(.caption).foregroundStyle(.secondary)
+                Label("New selections: " + workspace.uploadTargetName, systemImage: "folder")
                     .font(.caption).foregroundStyle(.secondary)
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 8) {
@@ -131,6 +134,9 @@ struct ProjectUploadSection: View {
                                     Text(source.name)
                                     Text(source.path).font(.caption).foregroundStyle(.secondary)
                                         .lineLimit(1).truncationMode(.middle)
+                                    if source.parentKey != nil {
+                                        Text(workspace.parentLabel(for: source)).font(.caption2).foregroundStyle(.secondary)
+                                    }
                                 }
                                 Spacer()
                                 Button("Remove") { workspace.remove(sourceID: source.id, externalBusy: externalBusy) }
@@ -144,18 +150,24 @@ struct ProjectUploadSection: View {
                 }
             }.frame(maxWidth: .infinity, alignment: .leading)
         }
+        .overlay(RoundedRectangle(cornerRadius: 8).stroke(dropTarget ? Color.accentColor : .clear, lineWidth: 2))
+        .dropDestination(for: URL.self) { urls, _ in
+            guard !workspace.controlsLocked(externalBusy: externalBusy) else { return false }
+            workspace.addDroppedURLs(urls, content: nil, externalBusy: externalBusy, parentKey: workspace.uploadTargetParentKey)
+            return true
+        } isTargeted: { dropTarget = $0 }
     }
 
     private var sourceTree: some View {
-        GroupBox("Upload tree") {
+        GroupBox("Local files") {
             VStack(alignment: .leading, spacing: 8) {
                 HStack {
                     Button("Selected items") { Task { await workspace.browse(path: nil) } }
-                    if content != .files { ForEach(workspace.quickEntries) { entry in
+                    ForEach(workspace.quickEntries) { entry in
                         Button(entry.path == "/Applications" ? "Applications" : "My Applications") {
                             Task { await workspace.browse(path: entry.path) }
                         }
-                    } }
+                    }
                     if let path = workspace.tree?.path {
                         Button("Parent folder", systemImage: "arrow.up") {
                             Task { await workspace.browse(path: URL(fileURLWithPath: path).deletingLastPathComponent().path) }
@@ -168,10 +180,14 @@ struct ProjectUploadSection: View {
                     if tree.atomic { Label("Application bundle — uploaded as one item", systemImage: "app") }
                     ScrollView {
                         LazyVStack(alignment: .leading, spacing: 8) {
-                            ForEach(tree.children.filter { content == .files ? $0.kind != "app" : content == .applications ? $0.kind != "file" : true }) { node in
+                            ForEach(tree.children) { node in
                                 HStack {
-                                    Image(systemName: uploadIcon(node.kind))
-                                    Text(node.name)
+                                    Toggle(isOn: Binding(get: { workspace.includes(path: node.path) },
+                                                         set: { _ in workspace.toggleTreeNode(node, externalBusy: externalBusy) })) {
+                                        Label(node.name, systemImage: uploadIcon(node.kind))
+                                    }.toggleStyle(.checkbox)
+                                        .disabled(!node.selectable || node.symlink || workspace.controlsLocked(externalBusy: externalBusy)
+                                                  || (workspace.includes(path: node.path) && workspace.selectedSource(path: node.path) == nil))
                                     if node.kind == "app" { Text("Application").font(.caption).foregroundStyle(.secondary) }
                                     if node.symlink { Text("Link").font(.caption).foregroundStyle(.secondary) }
                                     Spacer()
@@ -179,15 +195,12 @@ struct ProjectUploadSection: View {
                                         Button("Browse") { Task { await workspace.browse(path: node.path) } }
                                             .disabled(workspace.isTreeLoading)
                                     }
-                                    Button("Add") { workspace.addTreeNode(node, externalBusy: externalBusy) }
-                                        .disabled(!node.selectable || workspace.controlsLocked(externalBusy: externalBusy))
-                                        .disabled(content == .applications && node.kind != "app")
                                 }
                             }
                         }
                     }.frame(maxHeight: 280)
                     if tree.truncated {
-                        Text("This folder contains more items than the preview limit. Add the folder to include its complete contents.")
+                        Text("This folder contains more items than the preview limit. Select the complete folder in the picker to include everything.")
                             .font(.caption).foregroundStyle(.secondary)
                     }
                 } else if workspace.isTreeLoading { ProgressView("Loading folder…") }
@@ -208,14 +221,20 @@ struct ProjectUploadSection: View {
                         }
                     }.frame(maxHeight: 180)
                 }
+                Toggle("Use Red-SecretsXAI encryption", isOn: $workspace.encryptionEnabled)
+                    .toggleStyle(.checkbox)
+                    .disabled(workspace.controlsLocked(externalBusy: externalBusy))
+                Text(workspace.encryptionEnabled ? "Red-SecretsXAI encryption and red-X barcode protection are enabled. This option stays intact." : "Fast unencrypted upload: files, folder archives and apps can be read by anyone with server storage access. Never use this mode for sensitive data. Existing encrypted backups are unchanged.")
+                    .font(.caption).foregroundStyle(workspace.encryptionEnabled ? Color.secondary : Color.orange)
                 Toggle("Move originals to Trash after a verified cloud backup and restore check", isOn: $workspace.offload)
                     .disabled(workspace.controlsLocked(externalBusy: externalBusy))
                 Text("Leave unchecked to keep originals on this computer. Verification failures keep originals in place.")
                     .font(.caption).foregroundStyle(.secondary)
                 HStack {
-                    Button("Upload selected items", systemImage: "icloud.and.arrow.up") {
+                    Button("Upload", systemImage: "icloud.and.arrow.up") {
+                        workspace.progressVisible = true
                         workspace.enqueueAndStart(externalBusy: externalBusy)
-                    }.disabled(workspace.controlsLocked(externalBusy: externalBusy)
+                    }.buttonStyle(.borderedProminent).disabled(workspace.controlsLocked(externalBusy: externalBusy)
                                || workspace.snapshot?.sources.isEmpty != false || !workspace.destinationAvailable)
                     if workspace.hasQueuedJobs {
                         Button("Start queued uploads") { workspace.startQueuedUploads(externalBusy: externalBusy) }
@@ -223,8 +242,13 @@ struct ProjectUploadSection: View {
                     }
                     if workspace.workerPending || workspace.hasRunningJob {
                         ProgressView().controlSize(.small)
-                        Text("Preparing or uploading…").font(.caption)
+                        Button(workspace.progressVisible ? "Upload in background" : "Show progress") { workspace.progressVisible.toggle() }
+                        if workspace.progressVisible { Button("Hide progress") { workspace.progressVisible = false } }
                     }
+                }
+                if !workspace.progressVisible && (workspace.workerPending || workspace.hasRunningJob) {
+                    Text("Uploading in the background. You can browse other views; keep GenDragoon open until verification finishes.")
+                        .font(.caption).foregroundStyle(.secondary)
                 }
                 ForEach(workspace.snapshot?.jobs ?? []) { job in
                     VStack(alignment: .leading, spacing: 5) {
@@ -233,9 +257,15 @@ struct ProjectUploadSection: View {
                             Spacer()
                             Text("\(job.completedItems) / \(job.totalItems) items").font(.caption)
                         }
-                        Text(job.destination.label).font(.caption).foregroundStyle(.secondary)
-                        if job.totalItems > 0 {
-                            ProgressView(value: Double(job.completedItems), total: Double(job.totalItems))
+                        HStack {
+                            Text(workspace.displayLabel(for: job.destination)).font(.caption).foregroundStyle(.secondary)
+                            if job.state == "queued" {
+                                Button("Cancel queued upload") { workspace.cancelQueued(jobID: job.id, externalBusy: externalBusy) }
+                                    .disabled(workspace.controlsLocked(externalBusy: externalBusy))
+                            }
+                        }
+                        if workspace.progressVisible || job.state != "running", job.totalItems > 0 {
+                            uploadProgress(job)
                         }
                         DisclosureGroup("\(job.sources.count) source items") {
                             let items = Dictionary(job.items.map { ($0.sourceID, $0) }, uniquingKeysWith: { _, newer in newer })
@@ -258,19 +288,81 @@ struct ProjectUploadSection: View {
                         if let error = job.error, !error.isEmpty {
                             Text(UploadMessage.safe(error)).font(.caption).foregroundStyle(.red)
                         }
+                        Label((job.encrypted ?? true) ? "Encrypted red-X barcode transfer" : "Fast unencrypted PNG transfer", systemImage: (job.encrypted ?? true) ? "lock.shield.fill" : "lock.open.fill")
+                            .font(.caption).foregroundStyle(.secondary)
                         Text(job.offload ? "Originals policy: Trash only after verification" : "Originals policy: kept on this computer")
                             .font(.caption).foregroundStyle(.secondary)
                     }.padding(.vertical, 6)
                 }
-                Text("Progress updates when each item finishes. Uploads cannot be cancelled from this screen.")
+                Text("Progress updates while uploads run. Hiding progress keeps the worker running. Queued uploads can be cancelled before they start.")
                     .font(.caption).foregroundStyle(.secondary)
             }.frame(maxWidth: .infinity, alignment: .leading)
         }
     }
 
+    @ViewBuilder private func uploadProgress(_ job: UploadJob) -> some View {
+        let rawFraction = job.state == "succeeded" ? 1 : job.progress?.fraction ?? Double(job.completedItems) / Double(max(1, job.totalItems))
+        let fraction = rawFraction.isFinite ? min(1, max(0, rawFraction)) : 0
+        let percent = Int((fraction * 100).rounded(.down))
+        GeometryReader { geometry in
+            ZStack {
+                Capsule().fill(Color.secondary.opacity(0.2))
+                HStack(spacing: 0) {
+                    Capsule().fill(Color.purple).frame(width: geometry.size.width * fraction)
+                    Spacer(minLength: 0)
+                }
+                Text("\(percent) / 100").font(.caption.monospacedDigit().bold()).foregroundStyle(.primary)
+            }
+            .animation(.linear(duration: 0.5), value: fraction)
+        }.frame(height: 26)
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel("Upload progress")
+            .accessibilityValue("\(percent) percent")
+        HStack {
+            Text("\(percent)% · \(percent) / 100")
+            Spacer()
+            if job.state == "running" {
+                if let eta = job.progress?.overallETASeconds, eta.isFinite, eta >= 0 {
+                    Text("Est. total remaining: \(duration(eta))")
+                } else if let eta = job.progress?.etaSeconds, eta.isFinite, eta >= 0 {
+                    Text("About \(duration(eta)) left in this phase")
+                } else { Text("Estimating ETA…") }
+            }
+        }.font(.caption).foregroundStyle(.secondary)
+        Text(job.state == "succeeded" ? "Complete" : job.progress?.phaseLabel ?? (job.state == "queued" ? "Waiting" : "Preparing"))
+            .font(.caption).foregroundStyle(.secondary)
+        if let progress = job.progress {
+            if let total = progress.totalBytes, total.isFinite, total > 0 {
+                Text("\(byteCount(progress.completedBytes ?? 0)) / \(byteCount(total)) in this phase")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            if let objects = progress.objectsDone, let total = progress.objectsTotal {
+                Text("\(objects) / \(total) barcode objects transferred").font(.caption).foregroundStyle(.secondary)
+            }
+            if let sent = progress.uploadedBytes, sent.isFinite, sent > 0 {
+                Text("Sent \(byteCount(sent))" + ((progress.downloadedBytes ?? 0) > 0 ? " · Received \(byteCount(progress.downloadedBytes ?? 0))" : ""))
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            if let saved = progress.savedNetworkSeconds, saved.isFinite, saved >= 1, (progress.workers ?? 1) > 1 {
+                Text("Estimated network time saved with \(progress.workers ?? 1) workers: \(duration(saved)). Encoding and verification time are excluded.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    private func duration(_ seconds: Double) -> String {
+        guard seconds.isFinite else { return "Estimating…" }
+        if seconds > 31_536_000 { return "over a year" }
+        let value = max(0, Int(min(31_536_000, seconds).rounded(.up)))
+        return value < 60 ? "\(value)s" : value < 3600 ? "\((value + 59) / 60) min" : "\(value / 3600)h \((value % 3600) / 60)m"
+    }
+    private func byteCount(_ value: Double) -> String {
+        ByteCountFormatter.string(fromByteCount: Int64(value.isFinite ? min(9_000_000_000_000_000_000, max(0, value)) : 0), countStyle: .file)
+    }
+
     @ViewBuilder private var destinationBadge: some View {
-        if let destination = workspace.snapshot?.destination {
-            Label(destination.label, systemImage: "externaldrive.badge.icloud").font(.caption).textSelection(.enabled)
+        if workspace.snapshot?.destination != nil {
+            Label(workspace.displayLabel(for: workspace.snapshot?.destination), systemImage: "lock.shield").font(.caption).textSelection(.enabled)
         } else {
             Text("No upload destination selected.").font(.caption).foregroundStyle(.secondary)
         }
@@ -298,6 +390,46 @@ struct UploadSource: Decodable, Identifiable, Sendable {
     let path: String
     let name: String
     let kind: String
+    let parentKey: String?
+    enum CodingKeys: String, CodingKey { case id, path, name, kind; case parentKey = "parent_key" }
+}
+struct UploadProgress: Decodable, Sendable {
+    let fraction: Double
+    let phase: String
+    let completedBytes: Double?
+    let totalBytes: Double?
+    let etaSeconds: Double?
+    let overallETASeconds: Double?
+    let workers: Int?
+    let savedNetworkSeconds: Double?
+    let objectsDone: Int?
+    let objectsTotal: Int?
+    let uploadedBytes: Double?
+    let downloadedBytes: Double?
+    var phaseLabel: String {
+        switch phase {
+        case "preparing": return "Preparing"
+        case "snapshot", "snapshotting": return "Checking files"
+        case "archiving": return "Creating archive"
+        case "encoding": return "Encoding barcodes"
+        case "uploading": return "Uploading"
+        case "publishing": return "Saving archive index"
+        case "readback", "downloading": return "Downloading verification copy"
+        case "decoding": return "Decoding verification copy"
+        case "restoring": return "Restoring verification copy"
+        case "verifying": return "Verifying"
+        case "offloading": return "Moving verified originals to Trash"
+        case "complete": return "Complete"
+        default: return "Preparing"
+        }
+    }
+    enum CodingKeys: String, CodingKey {
+        case fraction, phase, workers
+        case completedBytes = "completed_bytes", totalBytes = "total_bytes", etaSeconds = "eta_seconds"
+        case overallETASeconds = "overall_eta_seconds"
+        case savedNetworkSeconds = "saved_network_seconds", objectsDone = "objects_done", objectsTotal = "objects_total"
+        case uploadedBytes = "uploaded_bytes", downloadedBytes = "downloaded_bytes"
+    }
 }
 struct UploadJobItem: Decodable, Sendable {
     let sourceID: String
@@ -312,12 +444,14 @@ struct UploadJob: Decodable, Identifiable, Sendable {
     let destination: UploadDestination
     let sources: [UploadSource]
     let offload: Bool
+    let encrypted: Bool?
     let items: [UploadJobItem]
     let completedItems: Int
     let totalItems: Int
     let error: String?
+    let progress: UploadProgress?
     enum CodingKeys: String, CodingKey {
-        case id, state, destination, sources, offload, items, error
+        case id, state, destination, sources, offload, encrypted, items, error, progress
         case completedItems = "completed_items"
         case totalItems = "total_items"
     }
@@ -370,6 +504,7 @@ struct UploadEnvelope: Decodable, Sendable {
 @MainActor
 final class UploadWorkspaceModel: ObservableObject {
     @Published private(set) var projects: [UploadCloudProject]
+    @Published private(set) var readableProjects: [UploadCloudProject] = []
     @Published private(set) var snapshot: UploadWorkspaceSnapshot?
     @Published private(set) var tree: UploadTree?
     @Published private(set) var quickEntries: [UploadTreeNode] = []
@@ -378,8 +513,15 @@ final class UploadWorkspaceModel: ObservableObject {
     @Published private(set) var workerPending = false
     @Published private(set) var isRefreshingChoices = false
     @Published private(set) var pickerPending = false
+    @Published private(set) var preflightingApplications = false
     @Published private(set) var verifiedDestination: UploadDestination?
     @Published var offload = false
+    @Published var encryptionEnabled: Bool {
+        didSet { UserDefaults.standard.set(encryptionEnabled, forKey: "gd.upload.encryptionEnabled") }
+    }
+    @Published var progressVisible = true
+    @Published private(set) var uploadTargetParentKey: String?
+    @Published private(set) var uploadTargetName = "MachineNote root"
     @Published var failure: UploadFailure?
     private var treeEpoch: UInt64 = 0
     private var refreshEpoch: UInt64 = 0
@@ -387,10 +529,12 @@ final class UploadWorkspaceModel: ObservableObject {
     private var reportedBusy = false
     private let onBusyStateChange: @MainActor (Bool) -> Void
     private let sourceAccess: UploadSourceAccess
+    private var targetNames: [String: String] = [:]
 
     init(projects: [UploadCloudProject], requiresSecurityScopedAccess: Bool,
          onBusyStateChange: @escaping @MainActor (Bool) -> Void) {
         self.projects = projects
+        encryptionEnabled = UserDefaults.standard.object(forKey: "gd.upload.encryptionEnabled") as? Bool ?? true
         self.onBusyStateChange = onBusyStateChange
         sourceAccess = UploadSourceAccess(required: requiresSecurityScopedAccess)
     }
@@ -400,26 +544,46 @@ final class UploadWorkspaceModel: ObservableObject {
     var hasQueuedJobs: Bool { snapshot?.jobs.contains { $0.state == "queued" } == true }
     var destinationIsListed: Bool {
         guard let saved = snapshot?.destination else { return false }
-        return projects.contains { project in
+        return readableProjects.contains { project in
             project.id == saved.project && project.buckets.contains { bucket in
                 bucket.id == saved.bucket && bucket.remote == saved.remote && bucket.prefix == saved.prefix
             }
         }
     }
-    var destinationAvailable: Bool {
-        guard let destination = snapshot?.destination else { return false }
-        if verifiedDestination == destination { return true }
+    func isAuthorized(_ destination: UploadDestination) -> Bool {
+        guard destination.remote == "redxai", destination.project == "redxai" else { return false }
         return projects.contains { project in
             project.id == destination.project && project.buckets.contains { bucket in
                 bucket.id == destination.bucket && bucket.remote == destination.remote && bucket.prefix == destination.prefix
             }
         }
     }
+    func isReadable(_ destination: UploadDestination) -> Bool {
+        guard destination.remote == "redxai", destination.project == "redxai" else { return false }
+        return readableProjects.contains { project in
+            project.id == destination.project && project.buckets.contains { bucket in
+                bucket.id == destination.bucket && bucket.remote == destination.remote && bucket.prefix == destination.prefix
+            }
+        }
+    }
+    func replaceReadableProjects(_ projects: [UploadCloudProject]) {
+        readableProjects = projects.filter { $0.id == "redxai" }
+    }
+    func displayLabel(for destination: UploadDestination?) -> String {
+        guard let destination, destination.remote == "redxai" else { return "Choose a MachineNote" }
+        let note = readableProjects.first(where: { $0.id == destination.project })?.buckets.first(where: { $0.id == destination.bucket })
+        return note.map { "MachineNotes / " + $0.displayName } ?? "MachineNote unavailable"
+    }
+    var destinationAvailable: Bool {
+        guard let destination = snapshot?.destination else { return false }
+        return isAuthorized(destination)
+    }
     func controlsLocked(externalBusy: Bool) -> Bool {
-        snapshot == nil || externalBusy || !GDUpdateActivity.shared.canStart(excluding: self) || isMutationPending || workerPending || hasRunningJob || pickerPending
+        snapshot == nil || externalBusy || !GDUpdateActivity.shared.canStart(excluding: self) || isMutationPending || workerPending || hasRunningJob || pickerPending || preflightingApplications
     }
     func replaceProjects(_ projects: [UploadCloudProject]) {
-        self.projects = projects
+        self.projects = projects.filter { $0.id == "redxai" }
+        if let verifiedDestination, !isAuthorized(verifiedDestination) { self.verifiedDestination = nil }
         // The persisted destination is deliberately never changed here.
     }
     func refreshChoices(using refreshCloud: @MainActor () async -> Void) async {
@@ -477,18 +641,52 @@ final class UploadWorkspaceModel: ObservableObject {
         }
     }
     func select(_ destination: UploadDestination, externalBusy: Bool) {
+        guard isReadable(destination) else { failure = UploadFailure("Choose an available MachineNote."); return }
         mutate(["select-destination", "--project", destination.project, "--bucket", destination.bucket,
                 "--remote", destination.remote, "--prefix", destination.prefix], externalBusy: externalBusy)
+    }
+    func cancelQueued(jobID: String, externalBusy: Bool) {
+        mutate(["cancel-job", "--id", jobID], externalBusy: externalBusy)
     }
     func remove(sourceID: String, externalBusy: Bool) {
         mutate(["remove-source", "--id", sourceID], externalBusy: externalBusy)
     }
+    func clearSelection(externalBusy: Bool) { mutate(["clear-sources"], externalBusy: externalBusy) }
+    func setUploadTarget(parentKey: String?, displayName: String? = nil) {
+        guard parentKey == nil || parentKey?.range(of: #"^[a-f0-9]{18}$"#, options: .regularExpression) != nil else { return }
+        uploadTargetParentKey = parentKey
+        uploadTargetName = parentKey == nil ? "MachineNote root" : displayName ?? "Selected cloud folder"
+        if let parentKey { targetNames[parentKey] = uploadTargetName }
+    }
+    func parentLabel(for source: UploadSource) -> String {
+        guard let parentKey = source.parentKey else { return "MachineNote root" }
+        return targetNames[parentKey] ?? "Folder saved with this selection"
+    }
+    func selectedSource(path: String) -> UploadSource? {
+        let canonical = URL(fileURLWithPath: path).resolvingSymlinksInPath().standardizedFileURL.path
+        return snapshot?.sources.first { $0.path == canonical }
+    }
+    func includes(path: String) -> Bool {
+        let canonical = URL(fileURLWithPath: path).resolvingSymlinksInPath().standardizedFileURL.path
+        return snapshot?.sources.contains { source in
+            source.path == canonical || (source.kind == "folder" && canonical.hasPrefix(source.path + "/"))
+        } == true
+    }
+    func toggleTreeNode(_ node: UploadTreeNode, externalBusy: Bool) {
+        if let source = selectedSource(path: node.path) { remove(sourceID: source.id, externalBusy: externalBusy) }
+        else { addTreeNode(node, externalBusy: externalBusy) }
+    }
+    func pasteSources(externalBusy: Bool) {
+        let urls = NSPasteboard.general.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL] ?? []
+        guard !urls.isEmpty else { failure = UploadFailure("Copy applications, files or folders in Finder, then choose Paste."); return }
+        addURLs(urls, externalBusy: externalBusy, parentKey: uploadTargetParentKey)
+    }
     func chooseSources(startingAt directory: URL?, externalBusy: Bool, content: GDProjectContent? = nil) {
         guard !controlsLocked(externalBusy: externalBusy) else { return }
         let panel = NSOpenPanel()
-        panel.title = "Add applications, files, or folders"
+        panel.title = "Select apps, files or folders"
         panel.message = "Select whole applications, any file type, or complete folders."
-        panel.prompt = "Add"
+        panel.prompt = "Select"
         panel.canChooseFiles = true
         panel.canChooseDirectories = true
         panel.allowsMultipleSelection = true
@@ -496,6 +694,7 @@ final class UploadWorkspaceModel: ObservableObject {
         panel.showsHiddenFiles = true
         panel.canCreateDirectories = false
         panel.directoryURL = directory
+        let selectedParentKey = uploadTargetParentKey
         // No extension/content-type restriction excludes application bundles.
         pickerPending = true
         updateBusyGate()
@@ -504,9 +703,7 @@ final class UploadWorkspaceModel: ObservableObject {
                 guard let self else { return }
                 self.pickerPending = false
                 if response == .OK {
-                    if content == .applications && !panel.urls.allSatisfy({ $0.pathExtension.lowercased() == "app" }) {
-                        self.failure = UploadFailure("Choose complete .app bundles here. Use Files for other files or folders.")
-                    } else { self.addURLs(panel.urls, externalBusy: false) }
+                    self.addURLs(panel.urls, externalBusy: false, parentKey: selectedParentKey)
                 }
                 self.updateBusyGate()
             }
@@ -514,31 +711,108 @@ final class UploadWorkspaceModel: ObservableObject {
     }
     func addTreeNode(_ node: UploadTreeNode, externalBusy: Bool) {
         guard node.selectable else { return }
-        addURLs([URL(fileURLWithPath: node.path)], externalBusy: externalBusy)
+        addURLs([URL(fileURLWithPath: node.path)], externalBusy: externalBusy, parentKey: uploadTargetParentKey)
     }
-    func addDroppedURLs(_ urls: [URL], content: GDProjectContent?, externalBusy: Bool) {
+    func addDroppedURLs(_ urls: [URL], content: GDProjectContent?, externalBusy: Bool, parentKey: String? = nil) {
         guard !urls.isEmpty, urls.allSatisfy({ $0.isFileURL }) else { return }
-        if content == .applications && !urls.allSatisfy({ $0.pathExtension.lowercased() == "app" }) {
-            failure = UploadFailure("Drop complete .app bundles in Applications. Use Files for other content.")
-            return
-        }
-        addURLs(urls, externalBusy: externalBusy)
+        addURLs(urls, externalBusy: externalBusy, parentKey: parentKey)
     }
-    private func addURLs(_ urls: [URL], externalBusy: Bool) {
+    private func addURLs(_ urls: [URL], externalBusy: Bool, parentKey: String?) {
         guard !controlsLocked(externalBusy: externalBusy) else { return }
         do {
             try sourceAccess.remember(urls)
             let json = String(decoding: try JSONEncoder().encode(urls.map { $0.standardizedFileURL.path }), as: UTF8.self)
-            mutate(["add-sources", "--paths-json", json], externalBusy: externalBusy)
+            var arguments = ["add-sources", "--paths-json", json]
+            if let parentKey { arguments += ["--parent-key", parentKey] }
+            mutate(arguments, externalBusy: externalBusy)
         } catch { failure = UploadFailure(error.localizedDescription) }
     }
     func enqueueAndStart(externalBusy: Bool) {
         guard destinationAvailable else {
-            failure = UploadFailure("Choose an available authorized project and bucket before uploading.")
+            failure = UploadFailure("Choose an available MachineNote before uploading.")
             return
         }
-        mutate(["enqueue", "--offload", offload ? "true" : "false"],
-               externalBusy: externalBusy, startAfterSuccess: true)
+        guard !controlsLocked(externalBusy: externalBusy) else { return }
+        // NSRunningApplication identifies the exact selected bundle on this Mac;
+        // an app with the same display name in another location is never touched.
+        let selectedApps = Set((snapshot?.sources ?? []).filter { $0.kind == "app" }
+            .map { URL(fileURLWithPath: $0.path).standardizedFileURL.path })
+        let running = NSWorkspace.shared.runningApplications.filter { candidate in
+            guard let bundle = candidate.bundleURL else { return false }
+            return !candidate.isTerminated && selectedApps.contains(bundle.standardizedFileURL.path)
+        }
+        let arguments = ["enqueue", "--offload", offload ? "true" : "false", "--encryption", encryptionEnabled ? "true" : "false"]
+        guard !running.isEmpty else {
+            mutate(arguments, externalBusy: externalBusy, startAfterSuccess: true)
+            return
+        }
+        let warning = NSAlert()
+        warning.alertStyle = .warning
+        warning.messageText = "Quit running applications before uploading?"
+        warning.informativeText = "GenDragoon found \(running.count) selected app(s) still running. Save your work first. Quitting keeps the verified cloud backup and offload checks reliable."
+        warning.addButton(withTitle: "Quit and Upload")
+        warning.addButton(withTitle: "Cancel")
+        guard warning.runModal() == .alertFirstButtonReturn else { return }
+        preflightingApplications = true
+        updateBusyGate()
+        Task { [weak self] in
+            guard let self else { return }
+            for app in running { _ = app.terminate() }
+            for _ in 0..<25 {
+                if running.allSatisfy({ $0.isTerminated }) { break }
+                try? await Task.sleep(for: .milliseconds(200))
+            }
+            let stubborn = running.filter { !$0.isTerminated }
+            if !stubborn.isEmpty {
+                let confirmation = NSAlert()
+                confirmation.alertStyle = .critical
+                confirmation.messageText = "Force quit \(stubborn.count) app(s)?"
+                confirmation.informativeText = "The apps did not quit normally. Force quitting may discard unsaved changes. Cancel to keep the originals untouched."
+                confirmation.addButton(withTitle: "Force Quit and Upload")
+                confirmation.addButton(withTitle: "Cancel")
+                if confirmation.runModal() == .alertFirstButtonReturn {
+                    for app in stubborn { _ = app.forceTerminate() }
+                    for _ in 0..<25 {
+                        if running.allSatisfy({ $0.isTerminated }) { break }
+                        try? await Task.sleep(for: .milliseconds(200))
+                    }
+                }
+            }
+            self.preflightingApplications = false
+            self.updateBusyGate()
+            guard running.allSatisfy({ $0.isTerminated }) else {
+                self.failure = UploadFailure("An application is still running. Its files were not uploaded or offloaded. Quit it and try again.")
+                return
+            }
+            self.mutate(arguments, externalBusy: false, startAfterSuccess: true)
+        }
+    }
+    /// A companion selection is its own immutable job. Retained selections,
+    /// folder targets and the native offload checkbox are never repurposed.
+    func enqueueCompanion(_ urls: [URL], destination: UploadDestination) async throws -> String {
+        guard !controlsLocked(externalBusy: false), isAuthorized(destination),
+              let revision = snapshot?.revision, !urls.isEmpty, urls.count <= 64,
+              urls.allSatisfy({ $0.isFileURL && $0.path.hasPrefix("/") }) else {
+            throw UploadFailure("Wait for current work, then choose an available MachineNote and local sources.")
+        }
+        isMutationPending = true; updateBusyGate()
+        defer { isMutationPending = false; updateBusyGate() }
+        try sourceAccess.remember(urls)
+        let paths = String(decoding: try JSONEncoder().encode(urls.map(\.path)), as: UTF8.self)
+        let target = String(decoding: try JSONEncoder().encode(destination), as: UTF8.self)
+        let known = Set(snapshot?.jobs.map(\.id) ?? [])
+        let response = try await call(["enqueue-selection", "--paths-json", paths, "--destination-json", target,
+                                       "--expected-revision", String(revision)])
+        apply(response.state)
+        guard response.ok, let job = response.state?.jobs.first(where: { !known.contains($0.id) && $0.state == "queued" }) else {
+            throw UploadFailure(response.message ?? "The companion upload was not queued. Existing selections were retained.")
+        }
+        // Start after the mutation lease has ended, using the normal durable worker.
+        Task { @MainActor [weak self] in
+            await Task.yield()
+            self?.startQueuedUploads(externalBusy: false)
+        }
+        return job.id
     }
     private func mutate(_ arguments: [String], externalBusy: Bool, startAfterSuccess: Bool = false) {
         guard !controlsLocked(externalBusy: externalBusy), let revision = snapshot?.revision else { return }
@@ -547,14 +821,26 @@ final class UploadWorkspaceModel: ObservableObject {
         Task { [self] in
             var succeeded = false
             do {
-                let response = try await call(arguments + ["--expected-revision", String(revision)])
-                apply(response.state)
-                guard response.ok else {
+                var expectedRevision = revision
+                for attempt in 0..<2 {
+                    let response = try await call(arguments + ["--expected-revision", String(expectedRevision)])
+                    apply(response.state)
+                    if response.ok {
+                        succeeded = true
+                        if arguments.first == "select-destination" { verifiedDestination = response.state?.destination }
+                        await browse(path: tree?.path)
+                        break
+                    }
+                    // A polling/read race must not force the user to repeat a click.
+                    // Retry once against fresh authoritative state; never retry a
+                    // failed upload/offload worker or a conflicting active job.
+                    if attempt == 0, response.error == "revision_conflict",
+                       let fresh = response.state, fresh.activeJobID == nil {
+                        expectedRevision = fresh.revision
+                        continue
+                    }
                     throw UploadFailure(response.message ?? response.error ?? "Upload settings were not changed.")
                 }
-                succeeded = true
-                if arguments.first == "select-destination" { verifiedDestination = response.state?.destination }
-                await browse(path: tree?.path)
             } catch { failure = UploadFailure(error.localizedDescription) }
             isMutationPending = false
             if succeeded && startAfterSuccess { startQueuedUploads(externalBusy: false) }
@@ -597,7 +883,7 @@ final class UploadWorkspaceModel: ObservableObject {
         updateBusyGate()
     }
     private func updateBusyGate() {
-        let busy = isMutationPending || pickerPending || workerPending || hasRunningJob
+        let busy = isMutationPending || pickerPending || workerPending || hasRunningJob || preflightingApplications
         guard busy != reportedBusy else { return }
         reportedBusy = busy
         GDUpdateActivity.shared.set(self, key: "upload", active: busy)
@@ -608,17 +894,28 @@ final class UploadWorkspaceModel: ObservableObject {
               FileManager.default.isReadableFile(atPath: helper.path) else {
             throw UploadFailure("The upload workspace helper is missing from this app build.")
         }
-        let isMutation = ["select-destination", "add-sources", "remove-source", "clear-sources", "enqueue"]
+        let isMutation = ["select-destination", "add-sources", "remove-source", "clear-sources", "enqueue", "cancel-job"]
             .contains(arguments.first ?? "")
-        let privateInput = arguments.first == "run-next" ? await GDNativePerformance.shared.helperInput() : nil
+        let privateInput: Data?
+        if arguments.first == "run-next" {
+            guard let destination = snapshot?.jobs.first(where: { $0.state == "queued" })?.destination,
+                  isAuthorized(destination) else {
+                throw UploadFailure("A queued upload targets a previous provider or unavailable MachineNote. Cancel that queued upload, then select an available MachineNote.")
+            }
+            privateInput = try await GDRedXAIAuthSession.shared.privateWorkerInput(
+                workspaceID: destination.bucket, constrained: false, requireWrite: true)
+        } else {
+            privateInput = nil
+        }
         let helperArguments = arguments + (privateInput == nil ? [] : ["--performance-stdin"])
+        let authChannel = try GDWorkerAuthChannel.make(privateInput)
         let response = try await Task.detached(priority: worker ? .utility : .userInitiated) {
             // Await mutation completion: killing its parent can leave a bounded
             // Configure Cloud child running and committing the chosen context.
             try UploadHelperProcess.run(
                 arguments: ["python3", helper.path] + helperArguments,
                 timeout: (worker || isMutation) ? nil : 120,
-                standardInput: privateInput
+                standardInput: privateInput, authChannel: authChannel
             )
         }.value
         guard !response.ok || response.state != nil else {
@@ -636,7 +933,9 @@ struct UploadFailure: Error, LocalizedError, Identifiable {
 }
 private enum UploadHelperProcess {
     /// File-backed capture cannot deadlock on full pipes. All waits occur off-main.
-    static func run(arguments: [String], timeout: Double?, standardInput: Data? = nil) throws -> UploadEnvelope {
+    static func run(arguments: [String], timeout: Double?, standardInput: Data? = nil,
+                    authChannel: GDWorkerAuthChannel? = nil) throws -> UploadEnvelope {
+        defer { authChannel?.close() }
         guard (standardInput?.count ?? 0) <= 32 * 1024 else { throw UploadFailure("Private helper input exceeded its safety limit.") }
         let manager = FileManager.default
         let directory = manager.temporaryDirectory.appendingPathComponent("gendragoon-upload-\(UUID().uuidString)", isDirectory: true)
@@ -655,14 +954,17 @@ private enum UploadHelperProcess {
         guard let python = GDRuntime.pythonURL else { throw UploadFailure("A supported Python 3 runtime is unavailable. Run the GenDragoon installer.") }
         process.executableURL = python
         GDRuntime.configurePython(process, arguments: arguments.first == "python3" ? Array(arguments.dropFirst()) : arguments)
-        let input = standardInput == nil ? nil : Pipe()
-        if let input { process.standardInput = input } else { process.standardInput = FileHandle.nullDevice }
+        let input = standardInput == nil || authChannel != nil ? nil : Pipe()
+        if let authChannel { authChannel.attach(to: process) }
+        else if let input { process.standardInput = input }
+        else { process.standardInput = FileHandle.nullDevice }
         process.standardOutput = output
         process.standardError = errors
         let completed = DispatchSemaphore(value: 0)
         process.terminationHandler = { _ in completed.signal() }
         try process.run()
-        if let input, let standardInput {
+        if let authChannel { try authChannel.start() }
+        else if let input, let standardInput {
             try input.fileHandleForWriting.write(contentsOf: standardInput)
             try input.fileHandleForWriting.close()
         }
@@ -711,7 +1013,7 @@ private final class UploadSourceAccess {
             // Keep the original scoped URL, but use that canonical lookup key.
             let path = canonicalPath(url)
             guard started || activeURLs[path] != nil else {
-                throw UploadFailure("Use Add Applications or Add Files or Folders to grant access to \(url.lastPathComponent).")
+                throw UploadFailure("Use Select Apps, Files or Folders to grant access to \(url.lastPathComponent).")
             }
             if started {
                 if activeURLs[path] == nil { activeURLs[path] = url }

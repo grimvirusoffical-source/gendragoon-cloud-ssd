@@ -55,8 +55,8 @@ async function fixture(t){
  return {db,runtime,request,webhook,two,pay,plansSub,amounts,sessions,intents,subs,calls,path,markers,record:id=>db.rows.get(path(id))};
 }
 
-const FEE_PRICES=new Set(["price_project","price_wsfee","price_byofee"]);
-const noFee=f=>{for(const c of f.calls)for(const item of c.args.line_items)assert.ok(!FEE_PRICES.has(item.price),"workspace fee line item charged: "+item.price);};
+const RETIRED_RECURRING_FEE_PRICES=new Set(["price_wsfee","price_byofee"]);
+const noRetiredFee=f=>{for(const c of f.calls)for(const item of c.args.line_items)assert.ok(!RETIRED_RECURRING_FEE_PRICES.has(item.price),"retired recurring workspace/BYO fee charged: "+item.price);};
 test("rule 1: the first workspace is free with 2 GB storage and the free performance plan, and needs no checkout",async t=>{
  const f=await fixture(t),first=await f.request("/v2/projects",{name:"First",intentId:idFor(1),plans:{storageTier:"2TB",performanceTier:"turbo"}});
  assert.equal(first.status,201);assert.equal(first.body.isFree,true);assert.equal(first.body.oneTimeCents,0);assert.equal(first.body.url,undefined);
@@ -73,7 +73,7 @@ test("rule 2: every additional workspace requires BOTH a storage plan and a perf
  }
  assert.equal(f.calls.length,0);assert.equal(f.db.rows.has(f.path(idFor(2))),false);
  const ok=await f.request("/v2/projects",{name:"Second",intentId:idFor(2),plans:{storageTier:"100GB",performanceTier:"boost",interval:"year"}});
- assert.equal(ok.status,201);assert.deepEqual(f.calls[0].args.line_items,[{price:"price_100y",quantity:1},{price:"price_boosty",quantity:1}]);
+ assert.equal(ok.status,201);assert.deepEqual(f.calls[0].args.line_items,[{price:"price_100y",quantity:1},{price:"price_boosty",quantity:1},{price:"price_project",quantity:1}]);
  assert.equal(f.calls[0].args.metadata.kind,"workspace_plans");assert.equal(f.calls[0].args.mode,"subscription");assert.ok(ok.body.totalCents>0);
  assert.equal(effectiveStorageQuota(f.record(idFor(2))),0);assert.equal(effectiveWorkers(f.record(idFor(2))),0);
 });
@@ -87,32 +87,38 @@ test("rule 3: custom storage skips the storage plan but still requires a paid pe
  assert.equal(withStorage.status,400);assert.equal(withStorage.body.error,"INVALID_SELECTION","a storage plan cannot be bought for custom storage");
  const created=await f.request("/v2/projects",{name:"Own S3",intentId:idFor(3),storage:"custom",plans:{performanceTier:"lite",interval:"month"}});
  assert.equal(created.status,201);assert.equal(created.body.isFree,false,"custom storage never takes the free slot");
- assert.deepEqual(f.calls[0].args.line_items,[{price:"price_lite",quantity:1}]);
+ assert.deepEqual(f.calls[0].args.line_items,[{price:"price_lite",quantity:1},{price:"price_project",quantity:1}]);
  const register=()=>f.request("/v2/workspaces/"+idFor(3)+"/byo/register",{provider:"s3",endpoint:"https://bucket.s3.us-east-1.amazonaws.com",bucketFingerprint:"ab".repeat(8)});
  const blocked=await register();assert.equal(blocked.status,402);assert.equal(blocked.body.error,"PERFORMANCE_PLAN_REQUIRED");
  const manual=()=>f.request("/v2/workspaces/"+idFor(3)+"/manual-provider",{provider:"s3",label:"my-remote",connectionTested:true});
  const manualBlocked=await manual();assert.equal(manualBlocked.status,402);assert.equal(manualBlocked.body.error,"PERFORMANCE_PLAN_REQUIRED");
  const sub={id:"sub_custom",customer:"cus_own",status:"active",metadata:{kind:"workspace_plans",accountHash:owner,workspaceId:idFor(3)},items:{data:[{price:{id:"price_lite"},quantity:1}]}};
- f.subs.set(sub.id,sub);assert.equal((await f.webhook("customer.subscription.created",{id:sub.id})).status,200);
+ f.subs.set(sub.id,sub);
+ const paidSession=f.sessions.get(f.record(idFor(3)).plansCheckoutSessionId);paidSession.status="complete";paidSession.payment_status="paid";paidSession.subscription=sub.id;
+ assert.equal((await f.webhook("checkout.session.completed",structuredClone(paidSession))).status,200);
+ assert.equal((await f.webhook("customer.subscription.created",{id:sub.id})).status,200);
  assert.equal(f.record(idFor(3)).projectStatus,"active");
  assert.equal((await manual()).status,200,"desktop wizard finish step (local rclone remote, credentials stay on device)");
  const ok=await register();assert.equal(ok.status,200,JSON.stringify(ok.body));assert.equal(ok.body.byoRegistered,true);assert.equal(ok.body.monthlyPriceCents,0);assert.equal(ok.body.lapsed,false);
  assert.ok(!f.record(idFor(3)).workspaceFeeModel);assert.ok(!f.record(idFor(3)).workspaceFeeCents);
  const free=await f.request("/v2/projects",{name:"Hosted",intentId:idFor(4)});assert.equal(free.body.isFree,true,"free slot still available after a custom workspace");
- noFee(f);
+ noRetiredFee(f);
 });
-test("rule 4: the workspace fee is never charged on top of plans, on any path",async t=>{
+test("rule 4: no recurring workspace fee is charged; exactly one project activation is included until paid",async t=>{
  const f=await fixture(t);await f.request("/v2/projects",{name:"First",intentId:idFor(1)});
  await f.two();
  await f.request("/v2/projects/"+idFor(2)+"/checkout",{plans:{storageTier:"2TB",performanceTier:"lite",interval:"month"}});
  for(const kind of ["storage","performance","byo"])await f.request("/v2/workspaces/"+idFor(2)+"/checkout/"+kind,{tier:"2TB",mode:"standard",interval:"month"});
  await f.request("/v2/workspaces/"+idFor(1)+"/checkout/storage",{tier:"2TB",mode:"standard",interval:"month"});
- assert.ok(f.calls.length>=2);noFee(f);
- for(const c of f.calls)assert.equal(c.args.line_items.reduce((n,x)=>n+f.amounts[x.price],0)%500===0&&c.args.line_items.length===1&&c.args.line_items[0].price==="price_project",false);
+ assert.ok(f.calls.length>=2);noRetiredFee(f);
+ for(const c of f.calls){
+   assert.equal(c.args.line_items.some(x=>RETIRED_RECURRING_FEE_PRICES.has(x.price)),false);
+   assert.ok(c.args.line_items.filter(x=>x.price==="price_project").length<=1);
+ }
  const pricing=await f.request("/v2/pricing");
- assert.equal(pricing.body.projects.additionalOneTimeCents,0);assert.equal(pricing.body.projects.workspaceMonthlyCents,0);
+ assert.equal(pricing.body.projects.additionalOneTimeCents,500);assert.equal(pricing.body.projects.workspaceMonthlyCents,0);
  assert.equal(pricing.body.customStorage.extraFeeCents,0);assert.equal(pricing.body.customStorage.performancePlanRequired,true);
- const quote=await f.request("/v2/projects",undefined);assert.equal(quote.body.policy.newProjectOneTimeCents,0);assert.equal(quote.body.policy.workspaceMonthlyCents,0);
+ const quote=await f.request("/v2/projects",undefined);assert.equal(quote.body.policy.newProjectOneTimeCents,500);assert.equal(quote.body.policy.workspaceMonthlyCents,0);
 });
 test("changing plans before payment replaces the open checkout instead of stacking a second charge",async t=>{
  const f=await fixture(t);await f.two();const firstSession=f.record(idFor(2)).plansCheckoutSessionId;

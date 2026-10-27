@@ -168,6 +168,7 @@ private struct MobileLibrary:View {
     @State private var confirmReset=false
     @State private var settings=false
     @State private var grid=false
+    @State private var workspaceActivated=false
     @State private var removing:GDCloudItem?
     @State private var deleteAccount=false
     private func size(_ n:Int64)->String{ByteCountFormatter.string(fromByteCount:n,countStyle:.file)}
@@ -200,7 +201,26 @@ private struct MobileLibrary:View {
                     if let url=cloud.paymentCheckout {UIApplication.shared.open(url)} else {cloud.status=WorkspacePolicy.paymentDue}
                 }
             }
-            if let c=cloud.config{
+            if !workspaceActivated {
+                VStack(alignment:.leading,spacing:14){
+                    Label("Connect your workspace",systemImage:"externaldrive.badge.plus")
+                        .font(.title2.bold()).foregroundStyle(GDTheme.kicker)
+                    Text("Choose your MachineNote above, then open it to access your library. iOS uses a secure in-app connection, not a mounted desktop filesystem.")
+                        .font(.subheadline).foregroundStyle(GDTheme.muted)
+                    if cloud.config == nil {
+                        Text("Your first workspace includes 2 GB and the free performance tier. Additional plans are checked by the server.")
+                            .font(.caption).foregroundStyle(GDTheme.muted)
+                        Button("Create free workspace"){cloud.create()}
+                            .buttonStyle(GDButtonStyle()).disabled(cloud.busy)
+                    } else {
+                        Button("Open selected workspace"){workspaceActivated=true}
+                            .buttonStyle(GDButtonStyle()).disabled(cloud.busy || cloud.selectedLocked)
+                    }
+                    Text("Account and settings stay available before opening a workspace.")
+                        .font(.caption).foregroundStyle(GDTheme.muted)
+                }.frame(maxWidth:.infinity,alignment:.leading).padding(20)
+                    .background(GDTheme.surface,in:RoundedRectangle(cornerRadius:18))
+            } else if let c=cloud.config{
                 HStack(spacing:12){metric("Used / total",size(c.usedBytes)+" / "+size(c.quotaBytes));metric("Parallel transfers",String((cloud.dataSaver||cloud.constrainedNetwork) ? 1:min(4,c.transfer.workers)))}
                 ProgressView(value:min(1,Double(c.usedBytes+c.reservedBytes)/Double(max(1,c.quotaBytes)))).tint(violet)
                 VStack(alignment:.leading,spacing:12){
@@ -226,7 +246,7 @@ private struct MobileLibrary:View {
         .background(canvas).navigationBarTitleDisplayMode(.inline).searchable(text:$search,prompt:"Find a file…")
         .toolbar{ToolbarItem(placement:.topBarLeading){Text("GENDRAGOON").font(.system(size:10,weight:.bold,design:.monospaced)).tracking(1.4)};ToolbarItem(placement:.topBarTrailing){Button{settings=true}label:{Image(systemName:"person.crop.circle")}.accessibilityLabel("Account and settings")}}
         .refreshable{await cloud.refreshAndWait()}.task{await cloud.connect(session)}
-        .onChange(of:cloud.selected){_ in cloud.refresh()}
+        .onChange(of:cloud.selected){_ in workspaceActivated=false;cloud.refresh()}
         .onChange(of:phase){value in if value == .background{cloud.pause()}}
         .fileImporter(isPresented:$importing,allowedContentTypes:importFolders ? [.folder] : [.item],allowsMultipleSelection:true){result in switch result{case .success(let urls):if cloud.removeOriginals{pendingUpload=urls;confirmOriginalRemoval=true}else{cloud.upload(urls)};case .failure(let error):cloud.status=error.localizedDescription}}
         .confirmationDialog("Upload and remove originals?",isPresented:$confirmOriginalRemoval,titleVisibility:.visible){Button("Verify then remove \(pendingUpload.count) selected items",role:.destructive){cloud.upload(pendingUpload);pendingUpload=[]};Button("Keep originals and upload"){cloud.removeOriginals=false;cloud.upload(pendingUpload);pendingUpload=[]};Button("Cancel",role:.cancel){pendingUpload=[]}}message:{Text("Originals are removed only after a complete cloud read-back and archive restore check. Some providers delete permanently.")}

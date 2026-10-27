@@ -59,20 +59,25 @@ function filePrefix(uid){return "customer/"+accountKey(uid)+"/free"}
 function accountURL(uid){return "https://firestore.googleapis.com/v1/projects/gendragoonssd/databases/(default)/documents/accepted_terms/"+encodeURIComponent(uid)}
 // Gendragoon accounts (/v1/accounts): sign-up rules, Terms, 2FA, and Red-XAI Accounts tokens when REDXAI_ISSUER is set.
 const accounts=require("./accounts").installAccounts({app,db,accountKey,firebaseAuth:()=>{firestore();return getAuth();}});
+async function decorateCustomer(req){
+ req.workspaceRef=workspaceRef(req.user.uid);
+ req.pathPrefix=filePrefix(req.user.uid);
+ req.authKind=req.authKind||"firebase";
+ req.ownerBenefits=await require("./owner_benefits").grantOwnerBenefits({user:req.user,db,hash:accountKey,stamp:()=>FieldValue.serverTimestamp()});
+}
 const loginGate=createLoginGate({
  verifyIdToken:token=>accounts.identity.verifyForGate(token),
  accountsGate:user=>accounts.gate(user),
  // Consent is verified against the *auth project's* Firestore rules, using the user's JWT.
  fetchTerms:(uid,token)=>fetch(accountURL(uid),{headers:{"Authorization":"Bearer "+token},signal:AbortSignal.timeout(8000)}),
- async decorate(req){
-  req.workspaceRef=workspaceRef(req.user.uid);
-  req.pathPrefix=filePrefix(req.user.uid);
-  req.authKind="firebase";
-  req.ownerBenefits=await require("./owner_benefits").grantOwnerBenefits({user:req.user,db,hash:accountKey,stamp:()=>FieldValue.serverTimestamp()});
- },
+ decorate:decorateCustomer,
 });
 const firebaseAuth=loginGate.firebaseAuth;
 const firebaseAuthWithoutTerms=loginGate.firebaseAuthWithoutTerms;
+const {createRedXAppAuth,hybridAuth}=require("./redx_app_auth");
+const redXAppAuth=createRedXAppAuth({issuer:process.env.REDX_SITE_SESSION_ISSUER||"https://red-xai.com",accounts,decorate:decorateCustomer});
+const billingAuth=hybridAuth({redx:redXAppAuth,fallback:firebaseAuth});
+const billingAuthWithoutTerms=hybridAuth({redx:redXAppAuth,fallback:firebaseAuthWithoutTerms});
 async function auth(req,res,next){
  const raw=(req.headers.authorization||"").replace(/^Bearer /,"");
  if(!raw.startsWith("gdsk_"))return firebaseAuth(req,res,next);
@@ -96,7 +101,7 @@ const requireWrite=apiKeys.requireScope("files:write");
 // are registered here, but charging is OFF until secrets, webhooks and
 // server-verified workspace provisioning have passed acceptance tests.
 app.use("/v2",express.json({limit:"16kb"}));
-require("./billing_bootstrap").installBillingBootstrap({app,db,bucket,admin:{firestore:{FieldValue}},firebaseAuth,firebaseAuthWithoutTerms,accountKey,adminAuth:getAuth()});
+require("./billing_bootstrap").installBillingBootstrap({app,db,bucket,admin:{firestore:{FieldValue}},firebaseAuth:billingAuth,firebaseAuthWithoutTerms:billingAuthWithoutTerms,accountKey,adminAuth:getAuth()});
 require("./key_envelope").registerKeyEnvelope({app,db,firebaseAuth,hash:accountKey});
 require("./storage_urls").registerStorageUrls({app,db,bucket,firebaseAuth,hash:accountKey,now:()=>Date.now()});
 const paidStorage=require("./paid_storage").registerPaidStorage({app,db,bucket,firebaseAuth,accountKey,FieldValue,apiKeys,getAuth});

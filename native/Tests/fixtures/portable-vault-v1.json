@@ -1,0 +1,21 @@
+{
+  "notice": "PUBLIC TEST-ONLY dummy keys; never use for real storage",
+  "password": "GenDragoon TEST-ONLY vault passphrase 🔐",
+  "receiverId": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+  "storageSecret": "0123456789abcdefghijklmnopqrstuvwxyzABCDEFG",
+  "keymap": "S1hBSQMDBAAEAAAAAAAAAAAAARTQZEUYC5gwW87xMIJfxQ379FLvLZTSq1E32IvULsRtwYLzSzY_xp9U_QFRrxgVEgOSGrnmYKsf28Fv7DWg9GEpin3pqjki5tARelM",
+  "envelope": {
+    "cipher": {
+      "name": "AES-256-GCM",
+      "nonce": "EBESExQVFhcYGRob"
+    },
+    "ciphertext": "oJYYh4obE0HzpM70L18R5c7LqIwIGXCqUTXzvFnzGIfe0ucjKq2z_G5Ba6P3S7VqXanDZo0y0XcNCy6TM7b8IgboGTyjutt9DocrBG5XV3fmCyFMIesVlm6_pNmbrGEKxJ2KqNZgHljOCut05Ol1W24CSQZBeoBzPrad-is3WVjrPkgF6uDDjjt_lkMI2T2XUHlJ041wcusK06DEKLVmrZfI_1D7SQ9r8kLTiFEGnNu2-Gh-2c-1iPZzRq8b9gqOSIsK8_b6yOVz_mDO7rcyGh1__8M0EbvFvelhBh91I4O8ORKwJaYL23QJAaFcTA41LWukl9kWcSA-sPVurJ-PN8VQgaVjjH9Z26msytRcoaadC70ZlTpZ5JIk_ILJh5zXOztaf0wz5kvWzNy-UYcjgVmTx9oBWjXd_8ZAItZHlXBof2oFZkN29jPwFm3DuA",
+    "kdf": {
+      "iterations": 600000,
+      "name": "PBKDF2-HMAC-SHA256",
+      "salt": "AAECAwQFBgcICQoLDA0ODw"
+    },
+    "receiverId": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    "schema": "gendragoon.portable-vault/v1"
+  }
+}

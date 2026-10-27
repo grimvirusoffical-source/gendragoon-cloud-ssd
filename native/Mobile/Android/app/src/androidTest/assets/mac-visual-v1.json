@@ -1,0 +1,13 @@
+{
+  "schema": 1,
+  "notice": "PUBLIC TEST-ONLY; encrypted with portable-vault-v1.json dummy keys. No user or authentication data.",
+  "producer": "macOS arm64, unchanged pinned core ABI2",
+  "vendorCommit": "9235941b431bc1c23c34286b82052f845121592f",
+  "numpy": "2.5.4",
+  "Pillow": "13.0.0",
+  "aad": "gendragoon-android-cross-platform-v1",
+  "plainBytes": 2048,
+  "plainSHA256": "136aceac98d7c4bcf8c32929247375b3cba728b4eac818b962b061c8bb276afe",
+  "pngSHA256": "a772d2843a57b972b550995154549623f7317b5666aadbd2b72c2c8d0955660d",
+  "pngBytes": 237356
+}
