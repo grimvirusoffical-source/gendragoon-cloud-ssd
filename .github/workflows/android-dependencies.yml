@@ -1,0 +1,49 @@
+name: Android aligned dependency candidates
+
+on:
+  push:
+    paths:
+      - 'native/Mobile/Android/dependencies/**'
+      - '.github/workflows/android-dependencies.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: android-dependency-candidates-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  numpy-candidate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        abi: [arm64_v8a, x86_64]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: '3.13'
+      - uses: android-actions/setup-android@be39fa834029ff78f1a44aa3bb0819b8fc2bd8fd # v4.0.4
+        with:
+          packages: 'platform-tools platforms;android-36 build-tools;35.0.0'
+      - name: Install the version-pinned public Android wheel builder
+        run: python -m pip install cibuildwheel==4.3.4
+      - name: Verify explicit Android Python linkage and preserved safety flags
+        run: python -B -m unittest discover -s native/Mobile/Android/dependencies/tests -p 'test_*.py' -v
+      - name: Build a complete NumPy candidate without external BLAS or Fortran
+        run: python -B native/Mobile/Android/dependencies/build_numpy.py --abi '${{ matrix.abi }}' --work-dir '${{ runner.temp }}/gendragoon-numpy-${{ matrix.abi }}'
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: Android-NumPy-candidate-${{ matrix.abi }}
+          path: ${{ runner.temp }}/gendragoon-numpy-${{ matrix.abi }}/wheelhouse/
+          if-no-files-found: error
+          retention-days: 14

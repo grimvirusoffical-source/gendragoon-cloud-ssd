@@ -49,6 +49,20 @@ class PreloadTests(unittest.TestCase):
         self.assertEqual(result['skipped'],'low-disk-space')
     def test_expired_planning_deadline_returns_no_work(self):
         self.assertEqual(preload.plan(self.app,1024,time.monotonic()-1),[])
+
+    def test_large_budget_extends_executable_reads_but_stays_bounded(self):
+        executable=self.app/'Contents/MacOS/Example'
+        with executable.open('wb') as handle:handle.truncate(160*1024*1024)
+        jobs=preload.plan(self.app,256*1024*1024,time.monotonic()+5)
+        warmed=sum(n for p,_,n in jobs if p==executable)
+        self.assertGreater(warmed,16*1024*1024)
+        self.assertLessEqual(warmed,64*1024*1024)
+        self.assertLessEqual(sum(n for _,_,n in jobs),256*1024*1024)
+
+    def test_larger_warm_requires_its_actual_cache_budget_before_reading(self):
+        low=type('Usage',(),{'free':preload.MIN_FREE+512*1024**2-1})()
+        with patch.object(preload.shutil,'disk_usage',return_value=low),patch.object(preload,'candidates',side_effect=AssertionError('must not read')):
+            self.assertEqual(preload.warm(self.app,mb=512)['skipped'],'low-disk-space')
     def test_escaping_registered_cloud_path_is_rejected(self):
         library=self.root/'library.json';library.write_text(json.dumps({'evil':{'format':'raw','remote':'gendragoon','cloudPath':'gen-dragoon-ssd/../escape.app'}}))
         mount=self.root/'mount';mount.mkdir()
