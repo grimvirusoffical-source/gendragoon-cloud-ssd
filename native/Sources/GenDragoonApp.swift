@@ -483,6 +483,7 @@ struct GDManagedAppSession: Identifiable {
     let cleanupPending: Bool
     let mode: String
     let active: Bool
+    let cachePath: String
     var id: String { key }
     var message: String {
         if cleanupPending { return mode == "streamed" ? "Streaming from a verified cloud mount · cache cleanup follows exit." : "Running locally · managed cache cleanup follows application exit." }
@@ -506,6 +507,7 @@ struct GDManagedAppSession: Identifiable {
         didSet { UserDefaults.standard.set(cleanupAfterExit, forKey: "gd.library.cleanupAfterExit") }
     }
     @Published private(set) var sessions: [GDManagedAppSession] = []
+    @Published private(set) var stoppingKey: String?
     private var projectID: String?
     private var bucket: String?
     private var monitor: Task<Void, Never>?
@@ -624,6 +626,100 @@ struct GDManagedAppSession: Identifiable {
             Task { @MainActor in await self.refreshSessions() }
         }
     }
+    private func runningManagedApplications(for session: GDManagedAppSession) -> [NSRunningApplication] {
+        // Only control a process whose actual bundle path matches our verified
+        // session cache. Never terminate a same-named local installation.
+        guard session.active, session.cachePath.hasPrefix("/") else { return [] }
+        let path = URL(fileURLWithPath: session.cachePath).standardizedFileURL.path
+        return NSWorkspace.shared.runningApplications.filter { process in
+            guard !process.isTerminated, let bundle = process.bundleURL else { return false }
+            return bundle.standardizedFileURL.path == path
+        }
+    }
+    private func waitUntilExited(_ apps: [NSRunningApplication]) async {
+        for _ in 0..<25 {
+            if apps.allSatisfy({ $0.isTerminated }) { return }
+            try? await Task.sleep(for: .milliseconds(200))
+        }
+    }
+    func stop(_ app: StoredApp) {
+        guard !busy, stoppingKey == nil, let active = session(for: app.key), active.active else { return }
+        let running = runningManagedApplications(for: active)
+        guard !running.isEmpty else {
+            message = "No verified application process is available to stop yet. Refresh the session status; no other apps were touched."
+            startSessionMonitoring()
+            return
+        }
+        stoppingKey = app.key
+        message = "Asking \(app.name) to quit…"
+        Task { [weak self] in
+            guard let self else { return }
+            for process in running { _ = process.terminate() }
+            await self.waitUntilExited(running)
+            let remaining = running.filter { !$0.isTerminated }
+            if !remaining.isEmpty {
+                let confirm = NSAlert()
+                confirm.alertStyle = .critical
+                confirm.messageText = "Force quit \(app.name)?"
+                confirm.informativeText = "The app did not quit normally. Force quitting may discard unsaved work."
+                confirm.addButton(withTitle: "Force Quit")
+                confirm.addButton(withTitle: "Keep Running")
+                if confirm.runModal() == .alertFirstButtonReturn {
+                    for process in remaining { _ = process.forceTerminate() }
+                    await self.waitUntilExited(remaining)
+                }
+            }
+            self.stoppingKey = nil
+            self.startSessionMonitoring()
+            await self.refreshSessions()
+            self.message = running.allSatisfy({ $0.isTerminated })
+                ? "Application stopped. The managed cache will be cleaned after its helpers exit; your cloud copy remains available."
+                : "Application is still running. No cloud files or local originals were removed."
+        }
+    }
+    func play(_ app: StoredApp) {
+        guard !busy, stoppingKey == nil else { return }
+        let others = sessions.filter { $0.active && $0.key != app.key }
+        guard !others.isEmpty else { smartLaunch(app); return }
+        let warning = NSAlert()
+        warning.alertStyle = .warning
+        warning.messageText = "Run multiple cloud applications?"
+        warning.informativeText = "You have \(others.count) other active cloud app session(s). Running more apps at once shares CPU, memory and cloud bandwidth, which may reduce performance."
+        warning.addButton(withTitle: "Continue")
+        warning.addButton(withTitle: "Cancel")
+        guard warning.runModal() == .alertFirstButtonReturn else { return }
+        let question = NSAlert()
+        question.alertStyle = .warning
+        question.messageText = "Close the other running cloud applications?"
+        question.informativeText = "Keep them running, or force quit verified cloud app processes before starting \(app.name). Force quitting can discard unsaved changes."
+        question.addButton(withTitle: "Keep Both Running")
+        question.addButton(withTitle: "Force Quit Other Apps")
+        question.addButton(withTitle: "Cancel")
+        switch question.runModal() {
+        case .alertFirstButtonReturn:
+            smartLaunch(app)
+        case .alertSecondButtonReturn:
+            let processes = others.map { runningManagedApplications(for: $0) }
+            guard processes.allSatisfy({ !$0.isEmpty }) else {
+                message = "Could not verify every other app process. No apps were terminated; choose Keep Both Running to start without closing them."
+                return
+            }
+            let targets = processes.flatMap { $0 }
+            stoppingKey = app.key
+            Task { [weak self] in
+                guard let self else { return }
+                for process in targets { _ = process.forceTerminate() }
+                await self.waitUntilExited(targets)
+                self.stoppingKey = nil
+                guard targets.allSatisfy({ $0.isTerminated }) else {
+                    self.message = "Some cloud applications could not be closed; no new app was started."
+                    return
+                }
+                self.smartLaunch(app)
+            }
+        default: break
+        }
+    }
     func preload(_ app: StoredApp) { smartLaunch(app) }
     func restore(_ app: StoredApp) { invoke(["restore", "--key", app.key] + context) }
     func evict(_ app: StoredApp) {
@@ -656,7 +752,8 @@ struct GDManagedAppSession: Identifiable {
                 guard let key = item["key"] as? String, let state = item["state"] as? String else { return nil }
                 return GDManagedAppSession(key: key, name: item["name"] as? String ?? key, state: state,
                     pid: (item["pid"] as? NSNumber)?.intValue ?? 0, cleanupPending: item["cleanupPending"] as? Bool ?? false,
-                    mode: item["mode"] as? String ?? "managed-local", active: item["active"] as? Bool ?? false)
+                    mode: item["mode"] as? String ?? "managed-local", active: item["active"] as? Bool ?? false,
+                    cachePath: item["cachePath"] as? String ?? "")
             }
             let active = result["active"] as? Bool ?? sessions.contains(where: \.active)
             sessionStatusKnown = true
@@ -723,9 +820,14 @@ struct GDManagedAppSession: Identifiable {
                     }
                     Spacer()
                     if app.kind == "app" {
-                        Button("Preload") { library.preload(app) }.disabled(library.busy || app.format != "raw")
-                        Button("Smart Launch") { library.smartLaunch(app) }.disabled(library.busy || app.format != "raw")
-                        Button("Run Local Copy") { library.launch(app) }.disabled(library.busy)
+                        let active = library.session(for: app.key)?.active == true
+                        Button(active ? "Stop" : "Play", systemImage: active ? "stop.fill" : "play.fill") {
+                            if active { library.stop(app) } else { library.play(app) }
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .disabled(library.busy || library.stoppingKey != nil)
+                        Button("Preload") { library.preload(app) }
+                            .disabled(library.busy || library.stoppingKey != nil || active)
                     } else {
                         Button("Open") { library.launch(app) }.disabled(library.busy)
                     }
