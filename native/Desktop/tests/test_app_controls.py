@@ -8,6 +8,7 @@ from unittest.mock import patch, Mock
 
 ROOT=Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(ROOT))
+sys.path.insert(0,str(ROOT.parent/"Resources"))
 import app_platform
 import portable_control as control
 import portable_apps as apps
@@ -58,11 +59,11 @@ class StopRequestTests(unittest.TestCase):
         def identity(pid):return 'stable' if pid==current else 'first' if calls.pop() else 'second'
         calls=[False,True]
         self.controller.identity=identity
-        with patch.object(control,'linux_descendants',return_value=[44]),patch.object(control.os,'pidfd_open',return_value=55,create=True),patch.object(control.signal,'pidfd_send_signal',create=True) as send,patch.object(control.os,'close'):
+        with patch.object(control.signal,'SIGKILL',9,create=True),patch.object(control,'linux_descendants',return_value=[44]),patch.object(control.os,'pidfd_open',return_value=55,create=True),patch.object(control.signal,'pidfd_send_signal',create=True) as send,patch.object(control.os,'close'):
             control.stop_linux(self.controller)
             send.assert_not_called()
     def test_only_owned_descendants_get_bound_signals_once_per_mode(self):
-        with patch.object(control,'linux_descendants',return_value=[44]),patch.object(control.os,'pidfd_open',return_value=55,create=True),patch.object(control.signal,'pidfd_send_signal',create=True) as send,patch.object(control.os,'close'):
+        with patch.object(control.signal,'SIGKILL',9,create=True),patch.object(control,'linux_descendants',return_value=[44]),patch.object(control.os,'pidfd_open',return_value=55,create=True),patch.object(control.signal,'pidfd_send_signal',create=True) as send,patch.object(control.os,'close'):
             control.stop_linux(self.controller);control.stop_linux(self.controller)
             self.assertEqual(send.call_count,1)
             self.message.update(mode='force',nonce='e'*32)
@@ -70,7 +71,7 @@ class StopRequestTests(unittest.TestCase):
             self.assertEqual(send.call_count,2)
     def test_stop_writer_requires_consent_and_known_session(self):
         with tempfile.TemporaryDirectory() as td:
-            root=Path(td).resolve();os.chmod(root,0o700)
+            root=apps.private.private_directory(Path(td).resolve()/"private")
             manager=apps.PortableApps(root);record=dict(self.record,path=str(root/('lease-'+self.id+'.json')))
             with patch.object(manager,'leases',return_value=[record]),patch.object(apps,'process_identity',return_value='stable'):
                 with self.assertRaises(apps.PortableAppError):manager.request_stop(self.id)
