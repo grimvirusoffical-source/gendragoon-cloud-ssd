@@ -260,11 +260,28 @@ enum GDNativeHelper {
                 Spacer()
                 Button { showUpload = true; native.upload.chooseSources(startingAt: nil, externalBusy: native.externalUploadBusy, content: nil) } label: { Label("Select Apps, Files or Folders…", systemImage: "plus") }
                     .buttonStyle(.borderedProminent).tint(.purple).disabled(locked)
+                Button { showUpload.toggle() } label: {
+                    Label(showUpload ? "Hide Upload Options" : "Upload & Encryption Options", systemImage: "slider.horizontal.3")
+                }
+                .help("Open the upload queue and choose encrypted or fast unencrypted transfers, even when another protected operation is active.")
                 Button { showCleanup.toggle() } label: { Label("Cleanup Drive", systemImage: "folder.badge.gearshape") }
                     .disabled(native.maintenanceBusy)
             }
-            Text("Your MachineNotes live on the Red-XAI server. Files are encrypted on this Mac and encoded into red-X barcode PNGs before upload. Only your account can access its notes; the verified owner can view account and library metadata across the service.")
+            Text("Your MachineNotes live on the Red-XAI server. Uploads use Red-SecretsXAI encryption by default; Upload & Encryption Options also offers faster unencrypted PNG storage with a clear warning. Cloud app Play runs on this Mac through verified streaming or cache, not on a remote Mac.")
                 .font(.system(size: 11)).foregroundStyle(.secondary)
+            if locked {
+                HStack(alignment: .firstTextBaseline) {
+                    Label(native.upload.workerPending || native.upload.hasRunningJob
+                          ? "An upload is still running or being verified. Open Upload & Encryption Options to see its progress."
+                          : "Another protected operation is preventing new uploads. Review the operation status and retry.",
+                          systemImage: "info.circle")
+                        .font(.caption).foregroundStyle(.orange)
+                    Spacer()
+                    Button("Check Upload State") {
+                        Task { await native.upload.refresh(); await native.refreshCloudChoices() }
+                    }
+                }
+            }
             DisclosureGroup("MachineNotes connection", isExpanded: $showConnection) {
                 HStack {
                     Label(redX.linked ? "Red-XAI connected" : "Connect your Red-XAI account", systemImage: "lock.shield.fill")
@@ -289,7 +306,7 @@ enum GDNativeHelper {
             }
             DisclosureGroup("Managed local cache") {
                 VStack(alignment: .leading, spacing: 12) {
-                    Label("Encrypted MachineNotes on your Red-XAI server", systemImage: "lock.shield.fill")
+                    Label("Account-scoped MachineNotes on your Red-XAI server", systemImage: "externaldrive.fill")
                     Text("Files and applications are decrypted into a verified local cache when you download or launch them. Keeping 10 GB free is recommended; GenDragoon checks the actual space needed and retains caches that changed or are still in use.")
                         .font(.caption).foregroundStyle(.secondary)
                     if cloud.mounted {

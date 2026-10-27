@@ -10,6 +10,10 @@ private struct GDLibraryClipboard: Codable {
 
 private enum GDLibraryAction { case open, download, barcode, rename, delete, copy, cut, paste, newFolder, upload, evict, refresh }
 
+private final class GDLibraryPlayButton: NSButton {
+    var libraryKey = ""
+}
+
 /// A native outline keeps desktop selection, disclosure triangles, keyboard
 /// navigation and drag feedback consistent while the backing snapshot changes.
 private final class GDLibraryNode: NSObject {
@@ -155,8 +159,26 @@ private struct GDLibraryOutline: NSViewRepresentable {
             image.widthAnchor.constraint(equalToConstant: 21).isActive = true
             let name = NSTextField(labelWithString: node.item.label)
             name.lineBreakMode = .byTruncatingMiddle; name.font = .systemFont(ofSize: 13)
+            name.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
             stack.addArrangedSubview(image); stack.addArrangedSubview(name)
+            if node.item.kind == "app" {
+                let play = GDLibraryPlayButton(title: "Play", target: self, action: #selector(playRow(_:)))
+                play.libraryKey = node.item.key
+                play.controlSize = .small; play.bezelStyle = .rounded
+                play.image = NSImage(systemSymbolName: "play.fill", accessibilityDescription: "Play")
+                play.imagePosition = .imageLeading
+                play.isEnabled = node.item.canRestoreOnMac && !parent.busy
+                play.toolTip = node.item.canRestoreOnMac
+                    ? "Play this cloud-backed app on this Mac using verified streaming or local cache. This does not run on a remote macOS server."
+                    : node.item.compatibilityMessage
+                stack.addArrangedSubview(play)
+            }
             return stack
+        }
+        @objc func playRow(_ sender: GDLibraryPlayButton) {
+            let key = sender.libraryKey
+            guard !parent.busy, let item = nodes[key]?.item, item.kind == "app", item.canRestoreOnMac else { return }
+            parent.action(.open, [key], item.parentKey)
         }
         var keys: [String] { parent.selection.sorted() }
         var target: String? {
@@ -373,7 +395,11 @@ private final class GDMenuActionBox: NSObject {
             if !library.canOrganize && library.hasDestination && !library.busy {
                 Text("Library changes require active upload access and a refreshed MachineNote. Existing backups remain available to download.").font(.caption).foregroundStyle(.secondary)
             }
-            if content == .applications { Toggle("Remove managed application cache after the app exits", isOn: $library.cleanupAfterExit).font(.caption) }
+            if content == .applications {
+                Text("Play launches a verified cloud-backed Mac app on this Mac. Actual execution on a remote Mac requires a separate macOS cloud runner; storing the backup alone does not provide one.")
+                    .font(.caption).foregroundStyle(.secondary)
+                Toggle("Remove managed application cache after the app exits", isOn: $library.cleanupAfterExit).font(.caption)
+            }
             Text("Drag items onto folders to move them; hold Option to copy. Right-click for actions. Folder backups retain their complete archived contents; library folders organize backups.")
                 .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             Text("Applications and installers are separated by platform within this MachineNote. Upload-device labels are reported by the uploading client; older backups show an unknown device. Restore applications on their original platform. Ordinary documents remain available across devices.")

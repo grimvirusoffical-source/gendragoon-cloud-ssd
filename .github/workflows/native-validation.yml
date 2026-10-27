@@ -58,6 +58,8 @@ jobs:
       - name: Verify read-only Darwin filesystem inventory and failure handling
         run: python -m unittest discover -s native/Tests -p test_darwin_mount_inventory.py
       - run: python native/Tests/stress_native.py
+      - name: Verify native app Play controls, upload recovery, encryption choices and API-key issuance UX
+        run: python -B -m unittest discover -s native/Tests -p test_native_ui_workflows.py -v
       - name: Test Mac notarization guardrails without Apple credentials
         run: python -m unittest discover -s native/Tests -p test_notarize_macos.py
       - name: Verify the Mac installer and reference update helpers
