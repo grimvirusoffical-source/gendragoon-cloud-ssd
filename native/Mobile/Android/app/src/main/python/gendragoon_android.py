@@ -138,7 +138,7 @@ class NativeAuth:
 
 
 def client_type(java_auth):
-    import gendragoon_redx_storage as storage
+    import gendragoon_storage_mode as storage
     class Receiver(storage.RedXReceiver):
         def __init__(self, config):
             super().__init__(config)
@@ -377,7 +377,7 @@ def upload(config_json, source, cache, java_auth, callback):
 
 def _upload(config_json, source, cache, callback, receiver):
     """Shared operation; callers supply a class, never a route or global override."""
-    import gendragoon_redx_storage as storage
+    import gendragoon_storage_mode as storage
     with _operation_lock:
         config = json.loads(config_json)
         progress = Progress(callback)
@@ -415,7 +415,7 @@ def download(config_json, item_json, cache, java_auth, callback):
 
 
 def _download(config_json, item_json, cache, callback, receiver):
-    import gendragoon_redx_storage as storage
+    import gendragoon_storage_mode as storage
     with _operation_lock:
         config, item = json.loads(config_json), json.loads(item_json)
         if item.get("workspace") != config["workspaceId"]:
@@ -447,7 +447,7 @@ def codec_selftest(directory, plain_bytes=2048):
     from gendragoon_android_codec import file_api
     _librsx = file_api()
     from redsecretsxai import encode_image, decode_image
-    import gendragoon_redx_storage as storage
+    import gendragoon_storage_mode as storage
     path = Path(directory)
     path.mkdir(mode=0o700, parents=True, exist_ok=True)
     secret = "Android-instrumentation-test-only-secret-43A"

@@ -98,6 +98,48 @@ class UploadWorkspaceTests(unittest.TestCase):
             workspace.enqueue(result["revision"],True,self.home,
                 explicit_selection=[str(explicit)],explicit_destination=SECOND)
 
+    def test_mode_is_persisted_per_job_and_encryption_defaults_on(self):
+        redx = {"project": "redxai", "bucket": "a" * 32,
+                "remote": "redxai", "prefix": "uploads"}
+        self.select(redx)
+        source = self.source("fast.dat")
+        state = workspace.read_state(self.home)
+        state = workspace.add_sources([str(source)], state["revision"], self.home)
+        queued, job_id = workspace.enqueue(state["revision"], False, self.home, encryption=False)
+        self.assertFalse(queued["jobs"][0]["encrypted"])
+        persisted = workspace.read_state(self.home)
+        self.assertFalse(persisted["jobs"][0]["encrypted"])
+        captured = []
+        with self.fake_library(lambda command, maintenance_fd=None:
+                               (captured.append(command), self.outcome(command, maintenance_fd))[1]), \
+                mock.patch.object(workspace, "_performance_input", b"fixture"):
+            state, completed = workspace.run_next(self.home)
+        self.assertEqual(completed, job_id)
+        self.assertEqual(state["jobs"][0]["state"], "succeeded")
+        self.assertIn("--no-encryption", captured[0])
+        self.assertTrue(source.is_file())
+
+        source2 = self.source("default.dat")
+        state = workspace.read_state(self.home)
+        state = workspace.clear_sources(state["revision"], self.home)
+        state = workspace.add_sources([str(source2)], state["revision"], self.home)
+        state, second = workspace.enqueue(state["revision"], False, self.home)
+        self.assertTrue(state["jobs"][-1]["encrypted"])
+        with self.fake_library() as child, mock.patch.object(workspace, "_performance_input", b"fixture"):
+            final, completed = workspace.run_next(self.home)
+        self.assertEqual(completed, second)
+        self.assertEqual(final["jobs"][-1]["state"], "succeeded")
+        self.assertNotIn("--no-encryption", child.call_args.args[0])
+
+    def test_plain_mode_refuses_external_storage_before_queueing(self):
+        source = self.source("normal.txt")
+        state = self.select()
+        state = workspace.add_sources([str(source)], state["revision"], self.home)
+        with self.assertRaises(workspace.WorkspaceError) as error:
+            workspace.enqueue(state["revision"], False, self.home, encryption=False)
+        self.assertEqual(error.exception.code, "invalid_option")
+        self.assertFalse(workspace.read_state(self.home)["jobs"])
+
     def test_app_bundle_is_atomic_and_quick_entries_are_present(self):
         app = self.sources / "Game.app"
         (app / "Contents").mkdir(parents=True)

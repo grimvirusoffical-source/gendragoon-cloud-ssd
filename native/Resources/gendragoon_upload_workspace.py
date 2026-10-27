@@ -152,6 +152,7 @@ def validate_state(value):
     for job in value["jobs"]:
         if (not isinstance(job, dict) or not isinstance(job.get("id"), str) or not re.fullmatch(r"[a-f0-9]{32}", job["id"]) or job["id"] in job_ids
                 or job.get("state") not in JOB_STATES or type(job.get("offload")) is not bool
+                or type(job.get("encrypted",True)) is not bool
                 or not isinstance(job.get("sources"), list) or not job["sources"]
                 or not isinstance(job.get("items"), list) or len(job["items"]) != len(job["sources"])):
             raise WorkspaceError("invalid_state", "A saved upload job is invalid")
@@ -435,9 +436,9 @@ def unchanged(source):
         raise WorkspaceError("source_changed", "A source changed after selection; remove it and select it again")
 
 
-def enqueue(expected_revision, offload, home=None, *, explicit_selection=None, explicit_destination=None):
-    if type(offload) is not bool:
-        raise WorkspaceError("invalid_option", "Offload must be explicitly true or false")
+def enqueue(expected_revision, offload, home=None, *, encryption=True, explicit_selection=None, explicit_destination=None):
+    if type(offload) is not bool or type(encryption) is not bool:
+        raise WorkspaceError("invalid_option", "Upload options must be explicitly true or false")
     state = read_state(home)
     require_revision(state, expected_revision)
     require_idle(state)
@@ -451,6 +452,8 @@ def enqueue(expected_revision, offload, home=None, *, explicit_selection=None, e
         state["sources"]=[selected_source(path) for path in dict.fromkeys(explicit_selection)]
     if state["destination"] is None:
         raise WorkspaceError("destination_required", "Choose a project and bucket before uploading", state)
+    if encryption is False and state["destination"]["remote"] != "redxai":
+        raise WorkspaceError("invalid_option", "Fast unencrypted uploads require a Red-XAI MachineNote", state)
     if not state["sources"]:
         raise WorkspaceError("source_required", "Select applications, files, or folders to upload", state)
     names = set()
@@ -477,7 +480,7 @@ def enqueue(expected_revision, offload, home=None, *, explicit_selection=None, e
             raise WorkspaceError("workspace_full", "The upload queue/history is full; existing jobs were retained")
         now = time.time()
         job = {"id": uuid.uuid4().hex, "state": "queued", "destination": copy.deepcopy(state["destination"]),
-               "sources": copy.deepcopy(state["sources"]), "offload": offload,
+               "sources": copy.deepcopy(state["sources"]), "offload": offload, "encrypted": encryption,
                "items": [{"source_id": source["id"], "state": "pending", "key": None,
                           "offloaded": None, "message": "Waiting to upload"} for source in state["sources"]],
                "completed_items": 0, "total_items": len(state["sources"]),
@@ -791,6 +794,8 @@ def run_next(home=None):
                     raise WorkspaceError("redxai_auth_required", "Connect Red-XAI in the app or with REDXAI Auth-CLI before uploading")
                 if job["offload"]:
                     command.append("--offload")
+                if job.get("encrypted",True) is False:
+                    command.append("--no-encryption")
                 with progress_scope(job, index, home):
                     outcome = child_result(command, maintenance_fd)
                 validate_upload_result(outcome, destination, source, job["offload"])
@@ -907,6 +912,7 @@ def main(argv=None):
     clear = sub.add_parser("clear-sources")
     queue = sub.add_parser("enqueue")
     queue.add_argument("--offload", choices=("true", "false"), required=True)
+    queue.add_argument("--encryption", choices=("true", "false"), default="true")
     companion = sub.add_parser("enqueue-selection")
     companion.add_argument("--paths-json", required=True)
     companion.add_argument("--destination-json", required=True)
@@ -936,7 +942,7 @@ def main(argv=None):
         elif args.action == "clear-sources":
             state = clear_sources(args.expected_revision)
         elif args.action == "enqueue":
-            state, extra["job_id"] = enqueue(args.expected_revision, args.offload == "true")
+            state, extra["job_id"] = enqueue(args.expected_revision, args.offload == "true", encryption=args.encryption == "true")
         elif args.action == "enqueue-selection":
             state, extra["job_id"] = enqueue(args.expected_revision, False,
                 explicit_selection=strict_json(args.paths_json), explicit_destination=strict_json(args.destination_json))

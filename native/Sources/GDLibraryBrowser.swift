@@ -8,7 +8,7 @@ private struct GDLibraryClipboard: Codable {
     static let type = NSPasteboard.PasteboardType("app.gendragoon.library-items.v1")
 }
 
-private enum GDLibraryAction { case open, download, rename, delete, copy, cut, paste, newFolder, upload, evict, refresh }
+private enum GDLibraryAction { case open, download, barcode, rename, delete, copy, cut, paste, newFolder, upload, evict, refresh }
 
 /// A native outline keeps desktop selection, disclosure triangles, keyboard
 /// navigation and drag feedback consistent while the backing snapshot changes.
@@ -185,6 +185,7 @@ private struct GDLibraryOutline: NSViewRepresentable {
             let compatible = keys.allSatisfy { nodes[$0]?.item.canRestoreOnMac == true }
             add("Open", .open, enabled: one && compatible && !parent.busy)
             add("Download", .download, enabled: selected && compatible && !parent.busy)
+            add("View encrypted barcode…", .barcode, enabled: one && nodes[keys[0]]?.item.redxManifestId != nil && !parent.busy)
             menu.addItem(.separator())
             add("Cut", .cut, enabled: selected && editable); add("Copy", .copy, enabled: selected)
             add("Paste", .paste, enabled: editable); add("Rename…", .rename, enabled: one && editable)
@@ -263,6 +264,7 @@ private final class GDMenuActionBox: NSObject {
     @State private var deleting = false
     @State private var deleteKeys: [String] = []
     @State private var deleteNames: [String] = []
+    @State private var barcodeItem: StoredApp?
     @State private var pendingDestination = ""
     private var busy: Bool { library.busy || !GDUpdateActivity.shared.canStart(excluding: library) }
     private var selectedItems: [StoredApp] { library.apps.filter { selection.contains($0.key) } }
@@ -333,6 +335,10 @@ private final class GDMenuActionBox: NSObject {
             }
         case .download:
             if !busy { library.performOnItems("restore", items: items) }
+        case .barcode:
+            if !busy, items.count == 1, items[0].redxManifestId != nil, library.remote == "redxai" {
+                barcodeItem = items[0]
+            }
         case .evict:
             if !busy { library.performOnItems("evict", items: items) }
         }
@@ -375,9 +381,12 @@ private final class GDMenuActionBox: NSObject {
             if library.busy { ProgressView().controlSize(.small) }
             Label(library.message, systemImage: "info.circle").font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
         }
+        .sheet(item: $barcodeItem) { item in
+            GDEncryptedBarcodePreview(item: item)
+        }
         .onAppear { if content == .applications { platformFilter = "macos" } }
         .onChange(of: platformFilter) { _, _ in selection = [] }
-        .onChange(of: library.destinationIdentity) { _, _ in selection = []; upload.setUploadTarget(parentKey: nil) }
+        .onChange(of: library.destinationIdentity) { _, _ in selection = []; barcodeItem = nil; upload.setUploadTarget(parentKey: nil) }
         .onChange(of: search) { _, _ in selection = [] }
         .onChange(of: library.apps.map(\.key)) { _, keys in selection.formIntersection(Set(keys)) }
         .onChange(of: selection) { _, _ in upload.setUploadTarget(parentKey: targetFolder, displayName: library.apps.first { $0.key == targetFolder }?.label) }
@@ -402,7 +411,7 @@ private final class GDMenuActionBox: NSObject {
             Button { perform(.newFolder, keys: [], target: targetFolder) } label: { Label("New Folder", systemImage: "folder.badge.plus") }.disabled(busy || !library.canOrganize)
             Button { paste(into: targetFolder) } label: { Label("Paste", systemImage: "doc.on.clipboard") }.disabled(busy || !library.canOrganize)
             Button { library.loadApps() } label: { Label("Refresh", systemImage: "arrow.clockwise") }.disabled(busy || !library.hasDestination)
-            Menu { Button("Open") { perform(.open, keys: selection.sorted(), target: targetFolder) }.disabled(selection.count != 1); Button("Download") { perform(.download, keys: selection.sorted(), target: targetFolder) }; Button("Copy") { writeClipboard(keys: selection.sorted(), cut: false) }; Button("Cut") { perform(.cut, keys: selection.sorted(), target: targetFolder) }.disabled(!library.canOrganize); Button("Rename…") { perform(.rename, keys: selection.sorted(), target: targetFolder) }.disabled(!library.canOrganize || selection.count != 1); Button("Delete…", role: .destructive) { perform(.delete, keys: selection.sorted(), target: targetFolder) }.disabled(!library.canOrganize) } label: { Image(systemName: "ellipsis.circle") }.disabled(busy || selection.isEmpty)
+            Menu { Button("Open") { perform(.open, keys: selection.sorted(), target: targetFolder) }.disabled(selection.count != 1); Button("Download") { perform(.download, keys: selection.sorted(), target: targetFolder) }; Button("Encrypted barcode…") { perform(.barcode, keys: selection.sorted(), target: targetFolder) }.disabled(selection.count != 1 || selectedItems.first?.redxManifestId == nil); Button("Copy") { writeClipboard(keys: selection.sorted(), cut: false) }; Button("Cut") { perform(.cut, keys: selection.sorted(), target: targetFolder) }.disabled(!library.canOrganize); Button("Rename…") { perform(.rename, keys: selection.sorted(), target: targetFolder) }.disabled(!library.canOrganize || selection.count != 1); Button("Delete…", role: .destructive) { perform(.delete, keys: selection.sorted(), target: targetFolder) }.disabled(!library.canOrganize) } label: { Image(systemName: "ellipsis.circle") }.disabled(busy || selection.isEmpty)
         }
     }
     private func saveName() {

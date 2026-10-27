@@ -477,6 +477,8 @@ struct StoredApp: Decodable, Identifiable {
     let parentKey: String?
     let virtualFolder: Bool?
     let archiveKey: String?
+    let bucket: String?
+    let redxManifestId: String?
     let origin: GDDeviceOrigin?
     let applicationPlatform: String?
     var id: String { key }

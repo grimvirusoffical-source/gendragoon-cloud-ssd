@@ -232,8 +232,8 @@ def scan(remote,root,project=None,bucket=None):
 def present(entries,context):
     return [dict(key=k,kind=v.get("kind","app"),format=v.get("format","archive"),previousVersionCount=len(v.get("previousVersions",[])),**{a:b for a,b in v.items() if a not in ("kind","format","manifest","previousVersions","previousVersionCount")}) for k,v in sorted(entries.items()) if in_context(v,context) and not(v.get("format")=="redxai" and v.get("cloudMissing"))]
 def redx_module():
-    import gendragoon_redx_storage
-    return gendragoon_redx_storage
+    import gendragoon_storage_mode
+    return gendragoon_storage_mode
 
 def redx_config():
     value=performance.private_payload()
@@ -579,13 +579,13 @@ def validate_archive(path,name):
                     if hops>40:raise ValueError("Archive symlink loop")
                     resolved.pop();pending=links[candidate].split("/")+pending
             if not resolved or resolved[0]!=expected_root:raise ValueError("Archive symlink escapes its bundle")
-def upload(source,remote,folder,offload=False,project=None,bucket=None,parent_key=None):
+def upload(source,remote,folder,offload=False,project=None,bucket=None,parent_key=None,encryption=True):
     original=Path(source).expanduser().absolute()
     resolved=original.resolve(strict=True)
     ensure_not_cloud(resolved)
     key=keyfor(remote,pathpart(folder),resolved.name,project,bucket,parent_key)
-    with upload_lease(key):return _upload(original,remote,folder,offload,project,bucket,parent_key)
-def _upload(source,remote,folder,offload=False,project=None,bucket=None,parent_key=None):
+    with upload_lease(key):return _upload(original,remote,folder,offload,project,bucket,parent_key,encryption)
+def _upload(source,remote,folder,offload=False,project=None,bucket=None,parent_key=None,encryption=True):
     original=Path(source).expanduser().absolute()
     src=original.resolve(strict=True)
     ensure_not_cloud(src)
@@ -595,6 +595,8 @@ def _upload(source,remote,folder,offload=False,project=None,bucket=None,parent_k
     if typ=="app" and not (src/"Contents/Info.plist").is_file():raise ValueError("Not a valid macOS .app bundle")
     if offload and is_running(src):raise ValueError("Quit this application before offloading it")
     folder=pathpart(folder);check_remote(remote)
+    if type(encryption) is not bool or (not encryption and remote!="redxai"):
+        raise ValueError("Unencrypted uploads are available only for Red-XAI MachineNotes")
     context=selected_context(project,bucket,remote,folder)
     redx=redx_config() if remote=="redxai" else None
     if redx and redx["workspaceId"]!=bucket:raise ValueError("Red-XAI workspace changed; refresh the destination")
@@ -634,7 +636,7 @@ def _upload(source,remote,folder,offload=False,project=None,bucket=None,parent_k
             origin=device_origin.current_origin(redx["receiverId"],state_dir=SUPPORT/"DeviceOrigins")
             options={"origin":origin,**({"parent_key":parent_key} if parent_key is not None else {})}
             redx_result=redx_module().upload_archive(redx,archive,key,src.name,typ,
-                "zip-root" if zipped else "flat",original_hash,baseline["manifest"],**options)
+                "zip-root" if zipped else "flat",original_hash,baseline["manifest"],encryption=encryption,**options)
             cloud_item={"key":key,"name":src.name,"kind":typ,"workspace":bucket,
                 "manifestId":redx_result["manifestId"],"archiveBytes":archive.stat().st_size,
                 "archiveSha256":original_hash}
@@ -951,6 +953,7 @@ def main():
     p.add_argument("--project")
     p.add_argument("--bucket")
     p.add_argument("--offload",action="store_true")
+    p.add_argument("--no-encryption",action="store_true")
     p.add_argument("--key",default="")
     p.add_argument("--operation",choices=["create-folder","rename","move","copy","delete"])
     p.add_argument("--keys-json",default="[]")
@@ -968,7 +971,7 @@ def main():
     if a.action=="list":return listing(a.project,a.bucket,a.remote)
     with maintenance_lock(a.maintenance_fd):
         if a.action=="scan":scan(a.remote,a.root or DEFAULT_ROOT,a.project,a.bucket)
-        elif a.action=="upload":upload(a.source or a.app,a.remote,a.folder or DEFAULT_ROOT+"/"+ARCHIVE_DIR,a.offload,a.project,a.bucket,a.parent_key)
+        elif a.action=="upload":upload(a.source or a.app,a.remote,a.folder or DEFAULT_ROOT+"/"+ARCHIVE_DIR,a.offload,a.project,a.bucket,a.parent_key,encryption=not a.no_encryption)
         elif a.action=="launch":stage_item(a.key,True,a.project,a.bucket,a.remote)
         elif a.action=="restore":stage_item(a.key,False,a.project,a.bucket,a.remote)
         elif a.action=="evict":clear_cache(a.key,a.project,a.bucket,a.remote)

@@ -33,7 +33,7 @@ RESOURCE=Path(__file__).resolve().parent/"runtime"
 if not RESOURCE.is_dir():RESOURCE=Path(__file__).resolve().parent.parent/"Resources"
 sys.path.insert(0,str(RESOURCE))
 install_sourceless_runtime(RESOURCE)
-import gendragoon_redx_storage as storage
+import gendragoon_storage_mode as storage
 import gendragoon_auth_broker as broker
 from gendragoon_device_origin import current_origin,ensure_restore_compatible
 

@@ -221,6 +221,10 @@ struct ProjectUploadSection: View {
                         }
                     }.frame(maxHeight: 180)
                 }
+                Toggle("Encrypt uploads (recommended)", isOn: $workspace.encryptionEnabled)
+                    .disabled(workspace.controlsLocked(externalBusy: externalBusy))
+                Text(workspace.encryptionEnabled ? "Red-SecretsXAI encryption and red-X barcode protection are enabled. This option stays intact." : "Fast unencrypted upload: files, folder archives and apps can be read by anyone with server storage access. Never use this mode for sensitive data. Existing encrypted backups are unchanged.")
+                    .font(.caption).foregroundStyle(workspace.encryptionEnabled ? Color.secondary : Color.orange)
                 Toggle("Move originals to Trash after a verified cloud backup and restore check", isOn: $workspace.offload)
                     .disabled(workspace.controlsLocked(externalBusy: externalBusy))
                 Text("Leave unchecked to keep originals on this computer. Verification failures keep originals in place.")
@@ -283,6 +287,8 @@ struct ProjectUploadSection: View {
                         if let error = job.error, !error.isEmpty {
                             Text(UploadMessage.safe(error)).font(.caption).foregroundStyle(.red)
                         }
+                        Label((job.encrypted ?? true) ? "Encrypted red-X barcode transfer" : "Fast unencrypted PNG transfer", systemImage: (job.encrypted ?? true) ? "lock.shield.fill" : "lock.open.fill")
+                            .font(.caption).foregroundStyle(.secondary)
                         Text(job.offload ? "Originals policy: Trash only after verification" : "Originals policy: kept on this computer")
                             .font(.caption).foregroundStyle(.secondary)
                     }.padding(.vertical, 6)
@@ -437,13 +443,14 @@ struct UploadJob: Decodable, Identifiable, Sendable {
     let destination: UploadDestination
     let sources: [UploadSource]
     let offload: Bool
+    let encrypted: Bool?
     let items: [UploadJobItem]
     let completedItems: Int
     let totalItems: Int
     let error: String?
     let progress: UploadProgress?
     enum CodingKeys: String, CodingKey {
-        case id, state, destination, sources, offload, items, error, progress
+        case id, state, destination, sources, offload, encrypted, items, error, progress
         case completedItems = "completed_items"
         case totalItems = "total_items"
     }
@@ -507,6 +514,9 @@ final class UploadWorkspaceModel: ObservableObject {
     @Published private(set) var pickerPending = false
     @Published private(set) var verifiedDestination: UploadDestination?
     @Published var offload = false
+    @Published var encryptionEnabled: Bool {
+        didSet { UserDefaults.standard.set(encryptionEnabled, forKey: "gd.upload.encryptionEnabled") }
+    }
     @Published var progressVisible = true
     @Published private(set) var uploadTargetParentKey: String?
     @Published private(set) var uploadTargetName = "MachineNote root"
@@ -522,6 +532,7 @@ final class UploadWorkspaceModel: ObservableObject {
     init(projects: [UploadCloudProject], requiresSecurityScopedAccess: Bool,
          onBusyStateChange: @escaping @MainActor (Bool) -> Void) {
         self.projects = projects
+        encryptionEnabled = UserDefaults.standard.object(forKey: "gd.upload.encryptionEnabled") as? Bool ?? true
         self.onBusyStateChange = onBusyStateChange
         sourceAccess = UploadSourceAccess(required: requiresSecurityScopedAccess)
     }
@@ -719,7 +730,7 @@ final class UploadWorkspaceModel: ObservableObject {
             failure = UploadFailure("Choose an available MachineNote before uploading.")
             return
         }
-        mutate(["enqueue", "--offload", offload ? "true" : "false"],
+        mutate(["enqueue", "--offload", offload ? "true" : "false", "--encryption", encryptionEnabled ? "true" : "false"],
                externalBusy: externalBusy, startAfterSuccess: true)
     }
     /// A companion selection is its own immutable job. Retained selections,

@@ -20,7 +20,7 @@ ROOT=Path(__file__).resolve().parent
 REQUIRED_RESOURCES=("gendragoon_update_restart.py", "gendragoon_auto_update.py",
     "RCLONE-COPYING.txt",
     "gendragoon_app_control.py", "gendragoon_app_launch.py", "gendragoon_library.py",
-    "gendragoon_upload_workspace.py", "gendragoon_performance.py", "gendragoon_redx_storage.py", "gendragoon_progress.py",
+    "gendragoon_upload_workspace.py", "gendragoon_performance.py", "gendragoon_redx_storage.py", "gendragoon_fast_png.py", "gendragoon_storage_mode.py", "gendragoon_progress.py",
     "gendragoon_auth_broker.py", "gendragoon_transfer_errors.py",
     "gendragoon_workspace_mount.py", "gendragoon_redx_pack.py", "gendragoon_native_bridge.py",
     "gendragoon_vault.py", "gendragoon_byo_vault.py", "gendragoon_device_origin.py",
