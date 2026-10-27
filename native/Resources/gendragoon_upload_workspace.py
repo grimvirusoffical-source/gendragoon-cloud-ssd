@@ -793,12 +793,26 @@ def run_next(home=None):
             job = copy.deepcopy(queued)
         try:
             for index, source in enumerate(job["sources"]):
+                destination = job["destination"]
+                if destination["remote"] == "redxai" and _performance_input is None:
+                    raise WorkspaceError("redxai_auth_required", "Connect Red-XAI before uploading; no app was closed.")
                 if job.get("close_running_apps", False) and source["kind"] == "app":
-                    # Only the explicitly opted-in selected Mac application may
-                    # be closed. The helper verifies UID, executable and PID
-                    # start identity before sending bounded signals.
+                    import gendragoon_library as library
+                    # Check write entitlement *before* closing a live app.
+                    # A lapsed subscription or expired session must never
+                    # discard an app's unsaved work merely to fail an upload.
+                    if destination["remote"] == "redxai":
+                        try:
+                            config = library.redx_config()
+                            if config["workspaceId"] != destination["bucket"]:
+                                raise ValueError("MachineNote changed")
+                            library.redx_module().RedXReceiver(config).verified_workers(write=True)
+                        except Exception as exc:
+                            raise WorkspaceError("redxai_auth_required",
+                                "The MachineNote could not authorize uploads. No running app was closed.") from exc
+                    # The option is frozen by the upload job; helper verifies
+                    # exact UID, executable path and PID start identity.
                     try:
-                        import gendragoon_library as library
                         library.quit_app_for_upload(source["path"])
                     except Exception as exc:
                         raise WorkspaceError("source_in_use", "Could not safely close the selected app. Quit it manually or disable automatic app quitting.") from exc

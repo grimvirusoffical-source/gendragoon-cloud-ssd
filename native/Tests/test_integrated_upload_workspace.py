@@ -325,6 +325,25 @@ class UploadWorkspaceTests(unittest.TestCase):
         child.assert_not_called()
         self.assertTrue(replacement.exists())
 
+    def test_expired_redx_authority_never_force_quits_selected_app(self):
+        app = self.sources / "Running.app"
+        (app / "Contents").mkdir(parents=True)
+        (app / "Contents/Info.plist").write_bytes(b"fixture")
+        state = workspace.select_destination("redxai", "d"*32, "redxai", "Library", 0, self.home)
+        state = workspace.add_sources([str(app)], state["revision"], self.home)
+        with mock.patch.object(workspace.sys, "platform", "darwin"):
+            queued, _ = workspace.enqueue(state["revision"], True, self.home,
+                                          close_running_apps=True)
+        self.assertTrue(queued["jobs"][0]["close_running_apps"])
+        import gendragoon_library as library
+        with mock.patch.object(library, "quit_app_for_upload") as stopped, self.fake_library() as worker:
+            with self.assertRaises(workspace.WorkspaceError) as caught:
+                workspace.run_next(self.home)
+        self.assertEqual(caught.exception.code, "redxai_auth_required")
+        stopped.assert_not_called()
+        worker.assert_not_called()
+        self.assertTrue(app.is_dir())
+
     def test_same_name_roots_fail_before_any_job_or_offload(self):
         first = self.source("A/report.txt")
         second = self.source("B/report.txt")
