@@ -50,6 +50,16 @@ class NativeUploadPlayKeyUI(unittest.TestCase):
         self.assertIn('self.oneTimeKey = key', view)
         self.assertLess(view.index('self.oneTimeKey = key'), view.index('try await self.readMetadata(expected)', view.index('self.oneTimeKey = key')))
 
+    def test_app_quit_requires_new_explicit_upload_consent(self):
+        view = swift("ProjectUploadSection.swift")
+        self.assertIn('Toggle("Close running selected Mac apps before upload (force quit if needed)"', view)
+        self.assertIn('@Published var closeRunningApps = false', view)
+        self.assertIn('"--close-running-apps", closeRunningApps ? "true" : "false"', view)
+        self.assertIn('response.error == "revision_conflict" && attempt == 0', view)
+        self.assertIn('revisionToUse = latest', view)
+        self.assertIn('force quit can discard unsaved work', view)
+        self.assertIn('let closeRunningApps: Bool?', view)
+
     def test_api_creation_errors_are_explained_without_leaking_service_body(self):
         auth = swift("GDRedXAIAuth.swift")
         self.assertIn('path == "/v1/integrations/keys" && method == "POST"', auth)

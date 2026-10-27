@@ -60,6 +60,10 @@ jobs:
       - run: python native/Tests/stress_native.py
       - name: Verify native app Play controls, upload recovery, encryption choices and API-key issuance UX
         run: python -B -m unittest discover -s native/Tests -p test_native_ui_workflows.py -v
+      - name: Verify safe offload, app auto-quit ownership and metadata recovery without the original file
+        run: python -B -m unittest discover -s native/Tests -p test_offload_launch_recovery.py -v
+      - name: Verify opt-in fast PNG, full readback and metadata-only restore planning
+        run: python -B -m unittest discover -s native/Tests -p test_fast_png_mode.py -v
       - name: Test Mac notarization guardrails without Apple credentials
         run: python -m unittest discover -s native/Tests -p test_notarize_macos.py
       - name: Verify the Mac installer and reference update helpers

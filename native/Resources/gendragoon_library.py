@@ -7,7 +7,7 @@ sys.dont_write_bytecode = True
 os.environ["PYTHONDONTWRITEBYTECODE"] = "1"
 import argparse, hashlib, json, os, plistlib, re, shutil, subprocess, sys, tempfile
 from contextlib import contextmanager
-import ctypes, errno, fcntl, posixpath, stat, time, unicodedata, uuid, zipfile
+import ctypes, errno, fcntl, posixpath, signal, stat, time, unicodedata, uuid, zipfile
 from pathlib import Path
 import gendragoon_performance as performance
 import gendragoon_progress as progress
@@ -313,6 +313,56 @@ def is_running(app):
     result=run(["/bin/ps","-axo","command"],timeout=20)
     p=str(app)
     return any(line.strip()==p or line.strip().startswith(p+" ") or (line.strip().startswith(p+"/") and "/Contents/MacOS/" in line) for line in result.splitlines())
+
+
+def quit_app_for_upload(app):
+    """Explicit opt-in: close only owned, identity-verified bundle processes.
+
+    SIGTERM gives apps a chance to quit. SIGKILL is a last resort *only* for
+    the per-upload UI option that warns about unsaved work. Do not use names,
+    arbitrary PIDs or shell scripts to decide which process to terminate.
+    """
+    if sys.platform!="darwin":
+        raise RuntimeError("Automatic application quit requires macOS")
+    target=Path(app).absolute()
+    if target.is_symlink() or target.suffix.lower()!=".app" or not (target/"Contents/Info.plist").is_file():
+        raise ValueError("Choose an actual macOS application bundle")
+    import gendragoon_app_launch as monitor
+    prefix=str(target)+"/Contents/MacOS/"
+    seen={}
+    for pid,executable in monitor.process_paths().items():
+        if pid==os.getpid() or not executable.startswith(prefix):
+            continue
+        record=monitor.process_identity(pid)
+        if record is None or record.get("executable")!=executable or record.get("uid")!=os.getuid():
+            raise RuntimeError("Application process identity cannot be verified; quit it manually")
+        seen[pid]=record
+    if len(seen)>16:
+        raise RuntimeError("Too many running application helpers; quit this app manually")
+    if not seen:
+        return False
+    def alive():
+        active={}
+        for pid,identity in seen.items():
+            current=monitor.process_identity(pid)
+            if current is None:
+                continue
+            if current!=identity:
+                raise RuntimeError("Application PID was reused; no additional signal sent")
+            active[pid]=identity
+        return active
+    for term,rounds in ((signal.SIGTERM,40),(signal.SIGKILL,20)):
+        for pid in alive():
+            try:os.kill(pid,term)
+            except ProcessLookupError:pass
+        for _ in range(rounds):
+            if not alive():return True
+            time.sleep(.25)
+    if alive():
+        raise RuntimeError("Selected application did not close; original retained")
+    return True
+
+
 def trash(src):
     # Finder moves items into Trash without deleting them permanently.
     program=['/usr/bin/osascript',
@@ -321,7 +371,31 @@ def trash(src):
        '-e','delete (POSIX file (item 1 of argv))',
        '-e','end tell',
        '-e','end run',str(src)]
-    run(program,timeout=150)
+    try:
+        run(program,timeout=150)
+        if not src.exists() and not src.is_symlink():
+            return
+    except Exception:
+        if not src.exists() and not src.is_symlink():
+            return
+    # Finder scripting can be unavailable even for an explicitly authorized
+    # offload. Use only an atomic same-volume move into this user's private
+    # Trash; never copy+delete, overwrite an existing name or cross volumes.
+    home_trash=HOME/".Trash"
+    safe_path(home_trash,directory=True)
+    if not home_trash.exists():
+        home_trash.mkdir(mode=0o700)
+    safe_path(home_trash,directory=True)
+    if home_trash.stat().st_dev!=src.lstat().st_dev:
+        raise RuntimeError("Finder could not move this other-volume item to Trash; original retained")
+    target=home_trash/(src.name+".GenDragoon-"+uuid.uuid4().hex)
+    if target.exists() or target.is_symlink():
+        raise RuntimeError("Trash destination already exists; original retained")
+    os.rename(src,target)
+    if src.exists() or src.is_symlink() or not target.exists():
+        raise RuntimeError("Trash move was not verified; inspect the original and Trash")
+
+
 # Python.org macOS builds do not necessarily expose os.listxattr/getxattr.
 # The libc fallback uses Darwin's ABI and never follows a changed symlink.
 XATTR_NOFOLLOW=0x0001
@@ -393,7 +467,9 @@ def macos_xattrs(path):
         raise RuntimeError("Invalid or excessive extended attributes; original retained")
     attributes={};total=0
     for name in sorted(names):
-        if name=="com.apple.provenance":continue
+        # Last-used time is Finder/LaunchServices bookkeeping, not user data.
+        # Keep quarantine, FinderInfo, resource forks and ACLs verified.
+        if name in {"com.apple.provenance", "com.apple.lastuseddate#PS"}:continue
         value=get_api(path,name,follow_symlinks=False)
         total+=len(value)
         if len(value)>MAX_XATTR_VALUE_BYTES or total>MAX_XATTR_TOTAL_BYTES:
@@ -441,7 +517,18 @@ def snapshot(source):
     visit(source,".")
     return {"manifest":sorted(records,key=lambda x:x["path"]),"guard":guards}
 def unchanged(source,baseline):
-    if snapshot(source)!=baseline:raise RuntimeError("Source changed since the verified archive; original retained")
+    """Ignore incidental timestamps, never file content, permissions or identity.
+
+    The strict before/after fstat checks in snapshot still detect concurrent
+    writes. This separately compares signed-restorable metadata, SHA-256 and
+    the device/inode/type of each entry before authorized offload.
+    """
+    observed=snapshot(source)
+    if observed["manifest"]!=baseline["manifest"] or set(observed["guard"])!=set(baseline["guard"]):
+        raise RuntimeError("Source content or important metadata changed since backup; original retained")
+    for path,initial in baseline["guard"].items():
+        if tuple(observed["guard"][path][:3])!=tuple(initial[:3]):
+            raise RuntimeError("Source item was replaced since backup; original retained")
 def verify_restored(path,manifest):
     verified=snapshot(path);actual=verified["manifest"]
     # Older library manifests predate xattr recording. Do not fabricate it for
@@ -720,6 +807,58 @@ def cache_record(path,data):
         safe_path(destination);os.replace(temporary,destination)
     finally:
         if os.path.exists(temporary):os.unlink(temporary)
+
+
+def hydrate_launch_manifest(key, data, project, bucket, remote):
+    """Recover authenticated archive sizing when an offloaded app has no cache.
+
+    Receiver library metadata alone has no uncompressed file sizes. Never
+    authorize an unbounded download based only on compressed archiveBytes.
+    The original encryption module is untouched; the adapter verifies root
+    and metadata pages before this manifest is accepted.
+    """
+    if remote!="redxai" or data.get("manifest"):
+        return data
+    config=redx_config()
+    if config["workspaceId"]!=bucket:
+        raise RuntimeError("Red-XAI MachineNote changed before app launch")
+    item=redx_module().find_item(config,key)
+    if (item.get("name")!=data.get("name") or item.get("kind")!="app"
+            or item.get("manifestId")!=data.get("redxManifestId")
+            or item.get("archiveSha256")!=data.get("sha256")):
+        raise RuntimeError("Cloud application revision changed; refresh before launch")
+    inspected=redx_module().read_archive_manifest(config,item)
+    root=inspected["root"];manifest=inspected["manifest"]
+    if (root.get("kind")!="app" or root.get("name")!=data.get("name")
+            or root.get("archiveSha256")!=item["archiveSha256"]
+            or root.get("archiveBytes")!=item["archiveBytes"]):
+        raise RuntimeError("Cloud application source manifest does not match its archive")
+    sizes=0
+    for row in manifest:
+        if not isinstance(row,dict) or row.get("type") not in {"file","directory","symlink"}:
+            raise RuntimeError("Cloud application metadata includes an invalid filesystem entry")
+        if row["type"]=="file":
+            size=row.get("size")
+            if type(size) is not int or size<0 or size>64*1024**3:
+                raise RuntimeError("Cloud application file size exceeds its safe limit")
+            sizes+=size
+            if sizes>64*1024**3:
+                raise RuntimeError("Cloud application exceeds the supported cache budget")
+    if not any(row.get("path")=="." and row.get("type")=="directory" for row in manifest):
+        raise RuntimeError("Cloud application metadata is missing its bundle root")
+    with library_lock():
+        entries=_load();current=entries.get(key)
+        if (not current or current.get("redxManifestId")!=item["manifestId"]
+                or current.get("sha256")!=item["archiveSha256"]):
+            raise RuntimeError("Local application library changed; refresh before launching")
+        if not current.get("manifest"):
+            current["manifest"]=manifest
+            current["sizeBytes"]=sizes
+            entries[key]=current
+            _save(entries)
+        return current
+
+
 def _cache_display_destination(key,data):
     name=data.get("displayName") or data["name"];check_name(name)
     destination=CACHE/key/name
@@ -817,6 +956,8 @@ def stage_item(key,open_after=False,project=None,bucket=None,remote="gendragoon"
     prepare_cache();dest=_cache_display_destination(key,data);safe_path(dest.parent,directory=True)
     if dest.is_symlink():raise ValueError("Unsafe linked local cache")
     if not dest.exists():
+        if kind=="app" and remote=="redxai" and not data.get("manifest"):
+            data=hydrate_launch_manifest(key,data,project,bucket,remote)
         expected=sum(x.get("size",0) for x in data.get("manifest",[]))
         require_space(expected*2+64*1024**2)
         with tempfile.TemporaryDirectory(prefix="gd-restore-",dir=CACHE) as tmp:

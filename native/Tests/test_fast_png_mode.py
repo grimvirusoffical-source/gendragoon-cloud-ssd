@@ -136,6 +136,52 @@ class FastCarrierTests(unittest.TestCase):
             with self.assertRaisesRegex(legacy.RedXStorageError, "immutable object identity"):
                 mode.download_archive(cfg, changed, Path(temp)/"bad", client_factory=FixtureReceiver)
 
+    def test_offloaded_app_manifest_can_be_read_without_archive_payload(self):
+        with tempfile.TemporaryDirectory() as temp:
+            cfg = config(temp)
+            FixtureReceiver.blobs = {}
+            FixtureReceiver.items = {}
+            FixtureReceiver.allowance = 2
+            source = Path(temp) / "offloaded.zip"
+            content = os.urandom(128 * 1024)
+            source.write_bytes(content)
+            manifest = [
+                {"path": ".", "type": "directory", "executable": 0},
+                {"path": "Contents/Info.plist", "type": "file", "size": 4096, "sha256": "d"*64}]
+            key = "a"*18
+            mode.upload_archive(cfg, source, key, "Offloaded.app", "app", "zip-root",
+                                hashlib.sha256(content).hexdigest(), manifest,
+                                client_factory=FixtureReceiver, encryption=False)
+            item = FixtureReceiver.items[key]
+            root_id = item["manifestId"]
+            fetched = []
+            actual = FixtureReceiver.get_png
+            def get_png(self, oid):
+                fetched.append(oid)
+                return actual(self, oid)
+            with patch.object(FixtureReceiver, "get_png", get_png):
+                value = mode.read_archive_manifest(cfg, item, client_factory=FixtureReceiver)
+            self.assertEqual(value["manifest"], manifest)
+            self.assertEqual(value["root"]["kind"], "app")
+            self.assertIn(root_id, fetched)
+            self.assertLess(len(fetched), 8, "Manifest-only recovery must not download archive data")
+
+    def test_metadata_only_read_rejects_rebound_plain_app(self):
+        with tempfile.TemporaryDirectory() as temp:
+            cfg = config(temp)
+            FixtureReceiver.blobs = {}
+            FixtureReceiver.items = {}
+            source = Path(temp) / "app.zip"
+            source.write_bytes(b"archive")
+            mode.upload_archive(cfg, source, "a"*18, "Sample.app", "app", "zip-root",
+                                hashlib.sha256(b"archive").hexdigest(),
+                                [{"path": ".", "type": "directory"}],
+                                client_factory=FixtureReceiver, encryption=False)
+            item = dict(FixtureReceiver.items["a"*18])
+            item["key"] = "b"*18
+            with self.assertRaisesRegex(legacy.RedXStorageError, "identity"):
+                mode.read_archive_manifest(cfg, item, client_factory=FixtureReceiver)
+
 
 if __name__ == "__main__":
     unittest.main()

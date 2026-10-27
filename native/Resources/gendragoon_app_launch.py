@@ -445,6 +445,8 @@ def launch(key, project, bucket, remote, keep_cache=False):
             previous_path = lib.CACHE / key / previous_name
             if not preflight_path.exists() and previous_path.exists():
                 preflight_path = previous_path
+            if not preflight_path.exists() and data.get("format") == "redxai" and not data.get("manifest"):
+                data = lib.hydrate_launch_manifest(key, data, project, bucket, remote)
             record["cachePreflight"] = local_cache_preflight(data, preflight_path)
             save(record)
             with contextlib.redirect_stdout(io.StringIO()):

@@ -276,6 +276,78 @@ def download_archive(config, item, destination, client_factory=None):
         return {"root": root, "manifest": manifest, "archive": str(target)}
 
 
+def read_archive_manifest(config, item, client_factory=None):
+    """Read an authenticated source manifest *without* downloading its app bytes.
+
+    Offloaded apps and a new device may have no local size manifest. Fetching
+    only the root and metadata pages permits a conservative cache-budget check
+    before downloading anything large. Both legacy Red-SecretsXAI and opt-out
+    plaintext carriers use their original immutable, authenticated identity.
+    """
+    client = (client_factory or encrypted.RedXReceiver)(config)
+    client.verified_workers()
+    manifest_id = item.get("manifestId")
+    if not isinstance(manifest_id, str) or not encrypted.ID.fullmatch(manifest_id):
+        raise encrypted.RedXStorageError("Invalid cloud manifest id")
+    carrier = client.get_png(manifest_id)
+    plain_mode = fast.is_plain_carrier(carrier)
+    if plain_mode and manifest_id != _expected_plain_manifest(item):
+        raise encrypted.RedXStorageError("Unencrypted cloud manifest identity mismatch")
+
+    def metadata(codec, root):
+        detail = root.get("metadata")
+        if not isinstance(detail, dict) or detail.get("schema") != encrypted.METADATA_SCHEMA or detail.get("encoding") != "zlib-json":
+            raise encrypted.RedXStorageError("Cloud app metadata index is invalid")
+        references = detail.get("partPages")
+        parts = encrypted._load_pages(client, codec, references) if references is not None else detail.get("parts")
+        if not isinstance(parts, list) or len(parts) > 8192:
+            raise encrypted.RedXStorageError("Cloud app metadata parts are invalid")
+        expected = detail.get("jsonBytes")
+        if type(expected) is not int or not 1 <= expected <= 256 * 1024 * 1024:
+            raise encrypted.RedXStorageError("Cloud app metadata size exceeds its limit")
+        compressed = bytearray()
+        for record in parts:
+            compressed.extend(encrypted._get_plain(client, codec, record))
+            if len(compressed) > 256 * 1024 * 1024:
+                raise encrypted.RedXStorageError("Cloud app compressed metadata exceeds its limit")
+        decoder = zlib.decompressobj()
+        try:
+            raw = decoder.decompress(bytes(compressed), expected + 1)
+            if not decoder.eof or decoder.unused_data or decoder.unconsumed_tail:
+                raise encrypted.RedXStorageError("Cloud app metadata compression is invalid")
+        except zlib.error as error:
+            raise encrypted.RedXStorageError("Cloud app metadata decompression failed") from error
+        if len(raw) != expected or encrypted.sha256_bytes(raw) != detail.get("jsonSha256"):
+            raise encrypted.RedXStorageError("Cloud app metadata SHA-256 failed")
+        try:
+            manifest = json.loads(raw)
+        except (ValueError, TypeError) as error:
+            raise encrypted.RedXStorageError("Cloud app source manifest is invalid") from error
+        if not isinstance(manifest, list) or not 1 <= len(manifest) <= 1000000 or any(
+                not isinstance(part, dict) or not isinstance(part.get("path"), str)
+                for part in manifest):
+            raise encrypted.RedXStorageError("Cloud app source manifest is invalid")
+        return {"root": root, "manifest": manifest}
+
+    if plain_mode:
+        with PlainCodec(client) as codec:
+            try:
+                root = json.loads(codec.open(carrier, manifest_id))
+            except (ValueError, TypeError) as error:
+                raise encrypted.RedXStorageError("Unencrypted cloud root index is invalid") from error
+            if (not isinstance(root, dict) or root.get("schema") != encrypted.ROOT_SCHEMA
+                    or root.get("storageProfile") != fast.PROFILE
+                    or root.get("encryptionMode") != "off"
+                    or any(root.get(name) != item.get(name) for name in
+                           ("name", "kind", "archiveBytes", "archiveSha256"))
+                    or not isinstance(root.get("chunkPages"), list)):
+                raise encrypted.RedXStorageError("Unencrypted cloud root does not match library")
+            return metadata(codec, root)
+    with encrypted.Codec(client) as codec:
+        root, _ = encrypted._root_for_item(client, codec, item)
+        return metadata(codec, root)
+
+
 if __name__ == "__main__":
     # Production clients import this module as a library; expose only help as
     # a standalone signed helper. No cloud request or file content is touched.
