@@ -301,7 +301,6 @@ struct ProjectUploadSection: View {
                             Text("Running selected apps: close automatically (force quit if necessary)")
                                 .font(.caption).foregroundStyle(.orange)
                         }
-                            .font(.caption).foregroundStyle(.secondary)
                     }.padding(.vertical, 6)
                 }
                 Text("Progress updates while uploads run. Hiding progress keeps the worker running. Queued uploads can be cancelled before they start.")
