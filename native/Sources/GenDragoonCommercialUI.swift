@@ -238,7 +238,7 @@ private struct GDPrimary: View {
     }
     private var plansPage:some View {
         VStack(alignment:.leading,spacing:20) {
-            GDHeading(kicker:"MACHINENOTES",title:"Storage that matches how you work.",subtitle:"Encrypted files, folders and applications on the Red-XAI server, organized in your MachineNotes.")
+            GDHeading(kicker:"MACHINENOTES",title:"Storage that matches how you work.",subtitle:"Files, folders and applications organized in your MachineNotes. Encryption is on by default; fast unencrypted transfers are optional.")
             if redXSession.linked {
                 redXStoragePanel
                 GDRXSubscriptionsPanel(focus:.plans)
@@ -248,7 +248,7 @@ private struct GDPrimary: View {
     }
     private var storagePage: some View {
         VStack(alignment:.leading,spacing:20) {
-            GDHeading(kicker:"STORAGE",title:"Your cloud space.",subtitle:"Choose the server storage capacity for each encrypted MachineNote.")
+            GDHeading(kicker:"STORAGE",title:"Your cloud space.",subtitle:"Choose server storage capacity for your MachineNotes. Each upload can use encrypted or explicitly unencrypted storage.")
             if redXSession.linked {
                 redXStoragePanel
                 GDRXSubscriptionsPanel(focus:.storage)
@@ -260,8 +260,8 @@ private struct GDPrimary: View {
             GDHeading(kicker:"PERFORMANCE",title:"Tune your transfer workload.",subtitle:"Keep 10 GB free for comfortable operation. GenDragoon checks the actual staging space required for each transfer.")
             if redXSession.linked {
                 GDPanel {
-                    Label("Red-XAI encrypted transfers",systemImage:"bolt.shield.fill").font(.headline)
-                    Text("Archives use resumable encrypted red-X barcode PNG chunks. Verified chunks are reused after an interruption instead of starting over. Storage usage includes the encoded images.")
+                    Label("Encrypted or faster unencrypted transfers",systemImage:"bolt.shield.fill").font(.headline)
+                    Text("Uploads use encrypted red-X PNGs by default, or faster, explicitly unencrypted PNGs for non-sensitive content when you switch encryption off before uploading. Verified chunks are reused after interruption. Storage usage includes PNG carriers.")
                         .font(.caption).foregroundStyle(gdSecondary)
                     Text(redXSession.usageSummary).font(.caption.monospaced()).foregroundStyle(.secondary)
                 }
@@ -288,7 +288,7 @@ private struct GDPrimary: View {
     }
     private var redXStoragePanel: some View {
         GDPanel {
-            Label("MachineNotes · Encrypted server storage",systemImage:"lock.shield.fill")
+            Label("MachineNotes · Encryption optional per upload",systemImage:"lock.shield.fill")
                 .font(.system(size:16,weight:.bold)).foregroundStyle(.green)
             Text(redXSession.usageSummary).font(.system(size:12,design:.monospaced)).foregroundStyle(gdSecondary)
             Text(redXSession.email.isEmpty ? redXSession.subject : redXSession.email)
@@ -306,7 +306,7 @@ private struct GDPrimary: View {
     }
     private var accountPage:some View {
         VStack(alignment:.leading,spacing:20) {
-            GDHeading(kicker:"ACCOUNT & SECURITY",title:"Your Red-XAI account",subtitle:"One account for your encrypted server storage and MachineNote subscriptions.")
+            GDHeading(kicker:"ACCOUNT & SECURITY",title:"Your Red-XAI account",subtitle:"One account for your MachineNote subscriptions and optional encrypted server storage.")
             if redXSession.linked {
                 GDPanel {
                     Label("Red-XAI account connected",systemImage:"checkmark.shield.fill")

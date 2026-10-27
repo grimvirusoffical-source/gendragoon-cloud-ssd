@@ -98,6 +98,48 @@ class UploadWorkspaceTests(unittest.TestCase):
             workspace.enqueue(result["revision"],True,self.home,
                 explicit_selection=[str(explicit)],explicit_destination=SECOND)
 
+    def test_mode_is_persisted_per_job_and_encryption_defaults_on(self):
+        redx = {"project": "redxai", "bucket": "a" * 32,
+                "remote": "redxai", "prefix": "uploads"}
+        self.select(redx)
+        source = self.source("fast.dat")
+        state = workspace.read_state(self.home)
+        state = workspace.add_sources([str(source)], state["revision"], self.home)
+        queued, job_id = workspace.enqueue(state["revision"], False, self.home, encryption=False)
+        self.assertFalse(queued["jobs"][0]["encrypted"])
+        persisted = workspace.read_state(self.home)
+        self.assertFalse(persisted["jobs"][0]["encrypted"])
+        captured = []
+        with self.fake_library(lambda command, maintenance_fd=None:
+                               (captured.append(command), self.outcome(command, maintenance_fd))[1]), \
+                mock.patch.object(workspace, "_performance_input", b"fixture"):
+            state, completed = workspace.run_next(self.home)
+        self.assertEqual(completed, job_id)
+        self.assertEqual(state["jobs"][0]["state"], "succeeded")
+        self.assertIn("--no-encryption", captured[0])
+        self.assertTrue(source.is_file())
+
+        source2 = self.source("default.dat")
+        state = workspace.read_state(self.home)
+        state = workspace.clear_sources(state["revision"], self.home)
+        state = workspace.add_sources([str(source2)], state["revision"], self.home)
+        state, second = workspace.enqueue(state["revision"], False, self.home)
+        self.assertTrue(state["jobs"][-1]["encrypted"])
+        with self.fake_library() as child, mock.patch.object(workspace, "_performance_input", b"fixture"):
+            final, completed = workspace.run_next(self.home)
+        self.assertEqual(completed, second)
+        self.assertEqual(final["jobs"][-1]["state"], "succeeded")
+        self.assertNotIn("--no-encryption", child.call_args.args[0])
+
+    def test_plain_mode_refuses_external_storage_before_queueing(self):
+        source = self.source("normal.txt")
+        state = self.select()
+        state = workspace.add_sources([str(source)], state["revision"], self.home)
+        with self.assertRaises(workspace.WorkspaceError) as error:
+            workspace.enqueue(state["revision"], False, self.home, encryption=False)
+        self.assertEqual(error.exception.code, "invalid_option")
+        self.assertFalse(workspace.read_state(self.home)["jobs"])
+
     def test_app_bundle_is_atomic_and_quick_entries_are_present(self):
         app = self.sources / "Game.app"
         (app / "Contents").mkdir(parents=True)
@@ -212,32 +254,31 @@ class UploadWorkspaceTests(unittest.TestCase):
         with self.assertRaises(workspace.WorkspaceError):
             workspace.cancel_job(other_id, final["revision"], self.home)
 
-    def test_source_change_before_enqueue_is_rejected_without_job(self):
+    def test_normal_edit_after_selection_is_rebased_when_queued(self):
         source = self.source()
         state = self.select()
         state = workspace.add_sources([str(source)], state["revision"], self.home)
+        original = state["sources"][0]["identity"]
         source.write_bytes(b"changed after selection")
-        with self.assertRaises(workspace.WorkspaceError) as failure:
-            workspace.enqueue(state["revision"], True, self.home)
-        self.assertEqual(failure.exception.code, "source_changed")
-        self.assertEqual(workspace.read_state(self.home)["jobs"], [])
+        queued, identifier = workspace.enqueue(state["revision"], True, self.home)
+        self.assertNotEqual(queued["sources"][0]["identity"], original)
+        self.assertEqual(queued["jobs"][0]["id"], identifier)
+        self.assertEqual(queued["jobs"][0]["sources"][0]["identity"], workspace.fingerprint(source))
         self.assertTrue(source.exists())
 
-    def test_source_change_before_worker_never_calls_library_or_offloads(self):
+    def test_normal_edit_before_worker_uses_current_content_and_keeps_path(self):
         source = self.source()
         self.prepare([source], offload=True)
         source.write_bytes(b"changed while queued")
-        with self.fake_library() as child, self.assertRaises(workspace.WorkspaceError) as failure:
-            workspace.run_next(self.home)
-        self.assertEqual(failure.exception.code, "source_changed")
-        child.assert_not_called()
-        state = workspace.read_state(self.home)
-        self.assertEqual(state["jobs"][0]["state"], "failed")
-        self.assertIsNone(state["active_job_id"])
-        self.assertEqual(len(state["sources"]), 1)
+        with self.fake_library() as child:
+            completed, identifier = workspace.run_next(self.home)
+        self.assertEqual(completed["jobs"][0]["state"], "succeeded")
+        self.assertEqual(completed["jobs"][0]["id"], identifier)
+        self.assertEqual(completed["jobs"][0]["sources"][0]["identity"], workspace.fingerprint(source))
+        self.assertEqual(child.call_count, 1)
         self.assertEqual(source.read_bytes(), b"changed while queued")
 
-    def test_nested_folder_changes_are_detected(self):
+    def test_nested_folder_edits_before_worker_are_rebased(self):
         folder = self.sources / "Folder"
         (folder / "nested").mkdir(parents=True)
         child = folder / "nested/child.data"
@@ -247,10 +288,61 @@ class UploadWorkspaceTests(unittest.TestCase):
         # Same-size rewrite: advance mtime so a coarse filesystem clock tick cannot hide it (flaky ~1 in 5 otherwise).
         stamp = child.stat().st_mtime_ns + 2_000_000_000
         os.utime(child, ns=(stamp, stamp))
-        with self.fake_library() as helper, self.assertRaises(workspace.WorkspaceError):
-            workspace.run_next(self.home)
-        helper.assert_not_called()
+        with self.fake_library() as helper:
+            final, _ = workspace.run_next(self.home)
+        helper.assert_called_once()
+        self.assertEqual(final["jobs"][0]["state"], "succeeded")
         self.assertTrue(child.exists())
+
+    def test_opted_in_app_close_is_frozen_and_only_targets_selected_bundle(self):
+        app = self.sources / "Playable.app"
+        (app / "Contents/MacOS").mkdir(parents=True)
+        (app / "Contents/Info.plist").write_bytes(b"test plist")
+        (app / "Contents/MacOS/Player").write_bytes(b"test executable")
+        with mock.patch.object(workspace.sys, "platform", "darwin"):
+            state = self.select()
+            state = workspace.add_sources([str(app)], state["revision"], self.home)
+            state, identifier = workspace.enqueue(state["revision"], True, self.home,
+                                                   close_running_apps=True)
+            self.assertTrue(state["jobs"][0]["close_running_apps"])
+            import gendragoon_library as library
+            with mock.patch.object(library, "quit_app_for_upload") as stopped, self.fake_library() as worker:
+                completed, finished = workspace.run_next(self.home)
+            self.assertEqual(finished, identifier)
+            self.assertEqual(completed["jobs"][0]["state"], "succeeded")
+            stopped.assert_called_once_with(str(app))
+            worker.assert_called_once()
+
+    def test_changed_source_root_symlink_still_cannot_upload(self):
+        source = self.source()
+        replacement = self.source("replacement.bin", b"different")
+        self.prepare([source], offload=True)
+        source.unlink()
+        source.symlink_to(replacement)
+        with self.fake_library() as child, self.assertRaises(workspace.WorkspaceError) as caught:
+            workspace.run_next(self.home)
+        self.assertEqual(caught.exception.code, "source_changed")
+        child.assert_not_called()
+        self.assertTrue(replacement.exists())
+
+    def test_expired_redx_authority_never_force_quits_selected_app(self):
+        app = self.sources / "Running.app"
+        (app / "Contents").mkdir(parents=True)
+        (app / "Contents/Info.plist").write_bytes(b"fixture")
+        state = workspace.select_destination("redxai", "d"*32, "redxai", "Library", 0, self.home)
+        state = workspace.add_sources([str(app)], state["revision"], self.home)
+        with mock.patch.object(workspace.sys, "platform", "darwin"):
+            queued, _ = workspace.enqueue(state["revision"], True, self.home,
+                                          close_running_apps=True)
+        self.assertTrue(queued["jobs"][0]["close_running_apps"])
+        import gendragoon_library as library
+        with mock.patch.object(library, "quit_app_for_upload") as stopped, self.fake_library() as worker:
+            with self.assertRaises(workspace.WorkspaceError) as caught:
+                workspace.run_next(self.home)
+        self.assertEqual(caught.exception.code, "redxai_auth_required")
+        stopped.assert_not_called()
+        worker.assert_not_called()
+        self.assertTrue(app.is_dir())
 
     def test_same_name_roots_fail_before_any_job_or_offload(self):
         first = self.source("A/report.txt")

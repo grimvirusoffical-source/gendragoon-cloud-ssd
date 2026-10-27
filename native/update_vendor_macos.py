@@ -2,8 +2,8 @@
 """Refresh a stopped, explicitly supplied staging bundle; never install an app.
 
 Node's exact archive digest is from the signed SHASUMS section of its official
-24.22.0 release page. This update does not resolve the announced Oct 21, 2026
-Node security release. See VENDOR_REFRESH.md for the release sequence.
+24.22.1 October 21, 2026 security release. See VENDOR_REFRESH.md for the
+release sequence.
 """
 import argparse
 import gzip
@@ -24,10 +24,10 @@ import tempfile
 import time
 import urllib.request
 
-VERSION = "24.22.0"
+VERSION = "24.22.1"
 ARCHIVE = f"node-v{VERSION}-darwin-arm64.tar.gz"
 ARCHIVE_URL = f"https://nodejs.org/dist/v{VERSION}/{ARCHIVE}"
-ARCHIVE_SHA256 = "6a9724d9b50a5f22b4816cded441b5a8d9ddae546191a5e5b7efa5a5e2ee26d5"
+ARCHIVE_SHA256 = "89c682593d76cd44233fa53b1563264e7de9cbb189cad169135c5b4fadfbc0a7"
 CHECKSUM_SOURCE = f"https://nodejs.org/en/blog/release/v{VERSION}#shasums"
 SECURITY_NOTICE = "https://nodejs.org/en/blog/vulnerability/october-2026-security-releases"
 NAME = "GenDragoon Cloud SSD.app"
@@ -45,7 +45,8 @@ RESERVE = 1024**3
 
 def run(command, timeout=60, accepted=(0,)):
     result = subprocess.run([str(x) for x in command], capture_output=True,
-                            timeout=timeout, env={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "LANG": "C"})
+                            timeout=timeout, env={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "LANG": "C",
+                                                  "HOME": str(Path.home())})
     if result.returncode not in accepted:
         detail = (result.stdout + result.stderr).decode("utf-8", "replace")[-3000:]
         raise RuntimeError(f"{Path(command[0]).name} failed ({result.returncode}): {detail}")
@@ -271,7 +272,7 @@ def refresh(app):
             "license": "gendragoon_node.LICENSE", "developer_id": IDENTITY, "team": TEAM,
             "refreshed_at_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             "security_notice": SECURITY_NOTICE,
-            "security_limit": "As of 2026-10-17, HIGH-severity fixes for Node 24.x are announced for on/after 2026-10-21; this refresh does not claim those unreleased fixes."}
+            "security_limit": "Node 24.22.1 contains the Node.js October 21, 2026 security fixes for the 24.x release line."}
         (resources/"node-vendor-provenance.json").write_text(json.dumps(provenance, indent=2)+"\n", encoding="utf-8")
         sign(candidate, BUNDLE_ID, app_rights, work)
         signature(candidate, deep=True)
@@ -281,7 +282,7 @@ def refresh(app):
         succeeded = True
         print("Verified staged bundle: " + str(app), flush=True)
         print("Node " + VERSION + "; provenance: Contents/Resources/node-vendor-provenance.json", flush=True)
-        print("Notarization, stapling and Gatekeeper acceptance remain required. The announced Oct 21 security release remains pending.", flush=True)
+        print("Notarization, stapling and Gatekeeper acceptance remain required. The October 21 Node.js security update is included.", flush=True)
     finally:
         # A failed rollback must never cause the only previous bundle to be deleted.
         if succeeded or not (work/"previous.app").exists():

@@ -757,6 +757,28 @@ private struct GDRXTokenSet {
             }
             if http.statusCode == 401 && attempt == 0 { continue }
             guard (200..<300).contains(http.statusCode) else {
+                if path == "/v1/integrations/keys" && method == "POST" {
+                    let failure = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+                    let code = failure?["error"] as? String ?? ""
+                    let explanation: String
+                    switch code {
+                    case "integration_workspace_invalid", "integration_workspace_forbidden":
+                        explanation = "Choose a valid, active MachineNote."
+                    case "integration_entitlements_unavailable":
+                        explanation = "The service could not validate the MachineNote subscription. Try again after entitlement recovery."
+                    case "integration_key_limit":
+                        explanation = "The maximum number of active integration keys has been reached. Revoke an old key first."
+                    case "integration_service_unavailable":
+                        explanation = "The selected integration service is not currently available."
+                    case "integration_scope_invalid", "integration_name_invalid":
+                        explanation = "Check the key name and requested read/write permissions."
+                    case "integration_busy_retry", "rate_limited":
+                        explanation = "The integration service is busy. Refresh existing keys before retrying."
+                    default:
+                        explanation = "The service did not confirm a new key. Refresh the key list before trying again."
+                    }
+                    throw GDTransferError(message: explanation + " (HTTP \(http.statusCode))", status: http.statusCode)
+                }
                 throw GDTransferError(message: "Red-XAI service request failed (HTTP \(http.statusCode)).", status: http.statusCode)
             }
             if data.isEmpty { return [:] }

@@ -8,7 +8,11 @@ private struct GDLibraryClipboard: Codable {
     static let type = NSPasteboard.PasteboardType("app.gendragoon.library-items.v1")
 }
 
-private enum GDLibraryAction { case open, download, rename, delete, copy, cut, paste, newFolder, upload, evict, refresh }
+private enum GDLibraryAction { case open, download, barcode, rename, delete, copy, cut, paste, newFolder, upload, evict, refresh }
+
+private final class GDLibraryPlayButton: NSButton {
+    var libraryKey = ""
+}
 
 /// A native outline keeps desktop selection, disclosure triangles, keyboard
 /// navigation and drag feedback consistent while the backing snapshot changes.
@@ -94,7 +98,7 @@ private struct GDLibraryOutline: NSViewRepresentable {
         init(_ parent: GDLibraryOutline) { self.parent = parent }
         func rebuild(_ items: [StoredApp]) {
             guard let outline else { return }
-            let next = parent.destination + "|" + items.map { "\($0.key):\($0.label):\($0.parentKey ?? ""): \($0.kind ?? ""): \($0.deviceLabel): \($0.applicationPlatformCode ?? "")" }.joined(separator: "|")
+            let next = parent.destination + "|" + (parent.busy ? "busy" : "ready") + "|" + (parent.canEdit ? "writable" : "readOnly") + "|" + items.map { "\($0.key):\($0.label):\($0.parentKey ?? ""): \($0.kind ?? ""): \($0.deviceLabel): \($0.applicationPlatformCode ?? "")" }.joined(separator: "|")
             if signature != next {
                 let expanded = Set(nodes.values.filter { outline.isItemExpanded($0) }.map { $0.item.key })
                 rebuilding = true
@@ -155,8 +159,26 @@ private struct GDLibraryOutline: NSViewRepresentable {
             image.widthAnchor.constraint(equalToConstant: 21).isActive = true
             let name = NSTextField(labelWithString: node.item.label)
             name.lineBreakMode = .byTruncatingMiddle; name.font = .systemFont(ofSize: 13)
+            name.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
             stack.addArrangedSubview(image); stack.addArrangedSubview(name)
+            if node.item.kind == "app" {
+                let play = GDLibraryPlayButton(title: "Play", target: self, action: #selector(playRow(_:)))
+                play.libraryKey = node.item.key
+                play.controlSize = .small; play.bezelStyle = .rounded
+                play.image = NSImage(systemSymbolName: "play.fill", accessibilityDescription: "Play")
+                play.imagePosition = .imageLeading
+                play.isEnabled = node.item.canRestoreOnMac && !parent.busy
+                play.toolTip = node.item.canRestoreOnMac
+                    ? "Play this cloud-backed app on this Mac using verified streaming or local cache. This does not run on a remote macOS server."
+                    : node.item.compatibilityMessage
+                stack.addArrangedSubview(play)
+            }
             return stack
+        }
+        @objc func playRow(_ sender: GDLibraryPlayButton) {
+            let key = sender.libraryKey
+            guard !parent.busy, let item = nodes[key]?.item, item.kind == "app", item.canRestoreOnMac else { return }
+            parent.action(.open, [key], item.parentKey)
         }
         var keys: [String] { parent.selection.sorted() }
         var target: String? {
@@ -185,6 +207,7 @@ private struct GDLibraryOutline: NSViewRepresentable {
             let compatible = keys.allSatisfy { nodes[$0]?.item.canRestoreOnMac == true }
             add("Open", .open, enabled: one && compatible && !parent.busy)
             add("Download", .download, enabled: selected && compatible && !parent.busy)
+            add("View encrypted barcode…", .barcode, enabled: one && nodes[keys[0]]?.item.redxManifestId != nil && !parent.busy)
             menu.addItem(.separator())
             add("Cut", .cut, enabled: selected && editable); add("Copy", .copy, enabled: selected)
             add("Paste", .paste, enabled: editable); add("Rename…", .rename, enabled: one && editable)
@@ -263,6 +286,7 @@ private final class GDMenuActionBox: NSObject {
     @State private var deleting = false
     @State private var deleteKeys: [String] = []
     @State private var deleteNames: [String] = []
+    @State private var barcodeItem: StoredApp?
     @State private var pendingDestination = ""
     private var busy: Bool { library.busy || !GDUpdateActivity.shared.canStart(excluding: library) }
     private var selectedItems: [StoredApp] { library.apps.filter { selection.contains($0.key) } }
@@ -333,6 +357,10 @@ private final class GDMenuActionBox: NSObject {
             }
         case .download:
             if !busy { library.performOnItems("restore", items: items) }
+        case .barcode:
+            if !busy, items.count == 1, items[0].redxManifestId != nil, library.remote == "redxai" {
+                barcodeItem = items[0]
+            }
         case .evict:
             if !busy { library.performOnItems("evict", items: items) }
         }
@@ -367,7 +395,11 @@ private final class GDMenuActionBox: NSObject {
             if !library.canOrganize && library.hasDestination && !library.busy {
                 Text("Library changes require active upload access and a refreshed MachineNote. Existing backups remain available to download.").font(.caption).foregroundStyle(.secondary)
             }
-            if content == .applications { Toggle("Remove managed application cache after the app exits", isOn: $library.cleanupAfterExit).font(.caption) }
+            if content == .applications {
+                Text("Play launches a verified cloud-backed Mac app on this Mac. Actual execution on a remote Mac requires a separate macOS cloud runner; storing the backup alone does not provide one.")
+                    .font(.caption).foregroundStyle(.secondary)
+                Toggle("Remove managed application cache after the app exits", isOn: $library.cleanupAfterExit).font(.caption)
+            }
             Text("Drag items onto folders to move them; hold Option to copy. Right-click for actions. Folder backups retain their complete archived contents; library folders organize backups.")
                 .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             Text("Applications and installers are separated by platform within this MachineNote. Upload-device labels are reported by the uploading client; older backups show an unknown device. Restore applications on their original platform. Ordinary documents remain available across devices.")
@@ -375,9 +407,12 @@ private final class GDMenuActionBox: NSObject {
             if library.busy { ProgressView().controlSize(.small) }
             Label(library.message, systemImage: "info.circle").font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
         }
+        .sheet(item: $barcodeItem) { item in
+            GDEncryptedBarcodePreview(item: item)
+        }
         .onAppear { if content == .applications { platformFilter = "macos" } }
         .onChange(of: platformFilter) { _, _ in selection = [] }
-        .onChange(of: library.destinationIdentity) { _, _ in selection = []; upload.setUploadTarget(parentKey: nil) }
+        .onChange(of: library.destinationIdentity) { _, _ in selection = []; barcodeItem = nil; upload.setUploadTarget(parentKey: nil) }
         .onChange(of: search) { _, _ in selection = [] }
         .onChange(of: library.apps.map(\.key)) { _, keys in selection.formIntersection(Set(keys)) }
         .onChange(of: selection) { _, _ in upload.setUploadTarget(parentKey: targetFolder, displayName: library.apps.first { $0.key == targetFolder }?.label) }
@@ -402,7 +437,7 @@ private final class GDMenuActionBox: NSObject {
             Button { perform(.newFolder, keys: [], target: targetFolder) } label: { Label("New Folder", systemImage: "folder.badge.plus") }.disabled(busy || !library.canOrganize)
             Button { paste(into: targetFolder) } label: { Label("Paste", systemImage: "doc.on.clipboard") }.disabled(busy || !library.canOrganize)
             Button { library.loadApps() } label: { Label("Refresh", systemImage: "arrow.clockwise") }.disabled(busy || !library.hasDestination)
-            Menu { Button("Open") { perform(.open, keys: selection.sorted(), target: targetFolder) }.disabled(selection.count != 1); Button("Download") { perform(.download, keys: selection.sorted(), target: targetFolder) }; Button("Copy") { writeClipboard(keys: selection.sorted(), cut: false) }; Button("Cut") { perform(.cut, keys: selection.sorted(), target: targetFolder) }.disabled(!library.canOrganize); Button("Rename…") { perform(.rename, keys: selection.sorted(), target: targetFolder) }.disabled(!library.canOrganize || selection.count != 1); Button("Delete…", role: .destructive) { perform(.delete, keys: selection.sorted(), target: targetFolder) }.disabled(!library.canOrganize) } label: { Image(systemName: "ellipsis.circle") }.disabled(busy || selection.isEmpty)
+            Menu { Button("Open") { perform(.open, keys: selection.sorted(), target: targetFolder) }.disabled(selection.count != 1); Button("Download") { perform(.download, keys: selection.sorted(), target: targetFolder) }; Button("Encrypted barcode…") { perform(.barcode, keys: selection.sorted(), target: targetFolder) }.disabled(selection.count != 1 || selectedItems.first?.redxManifestId == nil); Button("Copy") { writeClipboard(keys: selection.sorted(), cut: false) }; Button("Cut") { perform(.cut, keys: selection.sorted(), target: targetFolder) }.disabled(!library.canOrganize); Button("Rename…") { perform(.rename, keys: selection.sorted(), target: targetFolder) }.disabled(!library.canOrganize || selection.count != 1); Button("Delete…", role: .destructive) { perform(.delete, keys: selection.sorted(), target: targetFolder) }.disabled(!library.canOrganize) } label: { Image(systemName: "ellipsis.circle") }.disabled(busy || selection.isEmpty)
         }
     }
     private func saveName() {

@@ -221,9 +221,19 @@ struct ProjectUploadSection: View {
                         }
                     }.frame(maxHeight: 180)
                 }
+                Toggle("Use Red-SecretsXAI encryption", isOn: $workspace.encryptionEnabled)
+                    .toggleStyle(.checkbox)
+                    .disabled(workspace.controlsLocked(externalBusy: externalBusy))
+                Text(workspace.encryptionEnabled ? "Red-SecretsXAI encryption and red-X barcode protection are enabled. This option stays intact." : "Fast unencrypted upload: files, folder archives and apps can be read by anyone with server storage access. Never use this mode for sensitive data. Existing encrypted backups are unchanged.")
+                    .font(.caption).foregroundStyle(workspace.encryptionEnabled ? Color.secondary : Color.orange)
                 Toggle("Move originals to Trash after a verified cloud backup and restore check", isOn: $workspace.offload)
                     .disabled(workspace.controlsLocked(externalBusy: externalBusy))
                 Text("Leave unchecked to keep originals on this computer. Verification failures keep originals in place.")
+                    .font(.caption).foregroundStyle(.secondary)
+                Toggle("Close running selected Mac apps before upload (force quit if needed)", isOn: $workspace.closeRunningApps)
+                    .toggleStyle(.checkbox)
+                    .disabled(workspace.controlsLocked(externalBusy: externalBusy))
+                Text("Only apps you selected are affected. A normal terminate is attempted first; force quit can discard unsaved work. This choice is frozen for each upload job and is off by default.")
                     .font(.caption).foregroundStyle(.secondary)
                 HStack {
                     Button("Upload", systemImage: "icloud.and.arrow.up") {
@@ -283,8 +293,14 @@ struct ProjectUploadSection: View {
                         if let error = job.error, !error.isEmpty {
                             Text(UploadMessage.safe(error)).font(.caption).foregroundStyle(.red)
                         }
+                        Label((job.encrypted ?? true) ? "Encrypted red-X barcode transfer" : "Fast unencrypted PNG transfer", systemImage: (job.encrypted ?? true) ? "lock.shield.fill" : "lock.open.fill")
+                            .font(.caption).foregroundStyle(.secondary)
                         Text(job.offload ? "Originals policy: Trash only after verification" : "Originals policy: kept on this computer")
                             .font(.caption).foregroundStyle(.secondary)
+                        if job.closeRunningApps == true {
+                            Text("Running selected apps: close automatically (force quit if necessary)")
+                                .font(.caption).foregroundStyle(.orange)
+                        }
                     }.padding(.vertical, 6)
                 }
                 Text("Progress updates while uploads run. Hiding progress keeps the worker running. Queued uploads can be cancelled before they start.")
@@ -437,13 +453,16 @@ struct UploadJob: Decodable, Identifiable, Sendable {
     let destination: UploadDestination
     let sources: [UploadSource]
     let offload: Bool
+    let encrypted: Bool?
+    let closeRunningApps: Bool?
     let items: [UploadJobItem]
     let completedItems: Int
     let totalItems: Int
     let error: String?
     let progress: UploadProgress?
     enum CodingKeys: String, CodingKey {
-        case id, state, destination, sources, offload, items, error, progress
+        case id, state, destination, sources, offload, encrypted, items, error, progress
+        case closeRunningApps = "close_running_apps"
         case completedItems = "completed_items"
         case totalItems = "total_items"
     }
@@ -507,6 +526,11 @@ final class UploadWorkspaceModel: ObservableObject {
     @Published private(set) var pickerPending = false
     @Published private(set) var verifiedDestination: UploadDestination?
     @Published var offload = false
+    /// Explicit per-upload choice; never silently persist force-quit consent.
+    @Published var closeRunningApps = false
+    @Published var encryptionEnabled: Bool {
+        didSet { UserDefaults.standard.set(encryptionEnabled, forKey: "gd.upload.encryptionEnabled") }
+    }
     @Published var progressVisible = true
     @Published private(set) var uploadTargetParentKey: String?
     @Published private(set) var uploadTargetName = "MachineNote root"
@@ -522,6 +546,7 @@ final class UploadWorkspaceModel: ObservableObject {
     init(projects: [UploadCloudProject], requiresSecurityScopedAccess: Bool,
          onBusyStateChange: @escaping @MainActor (Bool) -> Void) {
         self.projects = projects
+        encryptionEnabled = UserDefaults.standard.object(forKey: "gd.upload.encryptionEnabled") as? Bool ?? true
         self.onBusyStateChange = onBusyStateChange
         sourceAccess = UploadSourceAccess(required: requiresSecurityScopedAccess)
     }
@@ -719,7 +744,9 @@ final class UploadWorkspaceModel: ObservableObject {
             failure = UploadFailure("Choose an available MachineNote before uploading.")
             return
         }
-        mutate(["enqueue", "--offload", offload ? "true" : "false"],
+        mutate(["enqueue", "--offload", offload ? "true" : "false",
+                "--encryption", encryptionEnabled ? "true" : "false",
+                "--close-running-apps", closeRunningApps ? "true" : "false"],
                externalBusy: externalBusy, startAfterSuccess: true)
     }
     /// A companion selection is its own immutable job. Retained selections,
@@ -756,14 +783,38 @@ final class UploadWorkspaceModel: ObservableObject {
         Task { [self] in
             var succeeded = false
             do {
-                let response = try await call(arguments + ["--expected-revision", String(revision)])
-                apply(response.state)
-                guard response.ok else {
+                // A stale CAS may be retried only while the actual selected
+                // sources and destination remain identical. Never enqueue
+                // another process's changed selection by accident.
+                let intendedSourceIDs = snapshot?.sources.map(\.id) ?? []
+                let intendedDestination = snapshot?.destination
+                var revisionToUse = revision
+                for attempt in 0..<2 {
+                    let response = try await call(arguments + ["--expected-revision", String(revisionToUse)])
+                    apply(response.state)
+                    if response.ok {
+                        succeeded = true
+                        if arguments.first == "select-destination" { verifiedDestination = response.state?.destination }
+                        break
+                    }
+                    // Background state polling can legitimately advance a
+                    // revision between clicking Upload and worker admission.
+                    // The server rejects stale CAS without applying it. Retry
+                    // at most once against a fresh authoritative snapshot.
+                    if response.error == "revision_conflict" && attempt == 0 {
+                        await refresh(showError: false)
+                        guard !hasRunningJob,
+                              (snapshot?.sources.map(\.id) ?? []) == intendedSourceIDs,
+                              snapshot?.destination == intendedDestination,
+                              let latest = snapshot?.revision else {
+                            throw UploadFailure("The selection or MachineNote changed. Review it before retrying this upload.")
+                        }
+                        revisionToUse = latest
+                        continue
+                    }
                     throw UploadFailure(response.message ?? response.error ?? "Upload settings were not changed.")
                 }
-                succeeded = true
-                if arguments.first == "select-destination" { verifiedDestination = response.state?.destination }
-                await browse(path: tree?.path)
+                if succeeded { await browse(path: tree?.path) }
             } catch { failure = UploadFailure(error.localizedDescription) }
             isMutationPending = false
             if succeeded && startAfterSuccess { startQueuedUploads(externalBusy: false) }

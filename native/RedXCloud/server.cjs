@@ -152,15 +152,31 @@ async function createCloud(config) {
     if (!bytes) throw new CloudError('stored_object_missing', 503);
     return {record, bytes, file, meta, dir};
   }
-  async function validatePNG(file) {
+  async function validatePNG(file, objectId) {
     if (decoders >= decoderLimit) await new Promise(resolve => decoderWaiters.push(resolve));
     else decoders++;
     try {
-      const {stdout} = await exec(config.python || 'python3', [path.join(__dirname, 'png-carrier.py'), file], {
-        timeout: 25000, maxBuffer: 16384, env: {...process.env, OPENBLAS_NUM_THREADS: '1', OMP_NUM_THREADS: '1'},
+      // Explicit marker selection only. Plain PNG validation checks every PNG
+      // chunk, raster, SHA-256, length, object identity and bound on output.
+      // The original encrypted codec/validator remains a separate untouched path.
+      const fd = await fs.open(file, 'r'), header = Buffer.alloc(80);
+      let headerSize = 0;
+      try { ({bytesRead:headerSize} = await fd.read(header, 0, header.length, 0)); }
+      finally { await fd.close(); }
+      const marker = Buffer.concat([Buffer.from('GenDragoon', 'ascii'), Buffer.from([0]), Buffer.from('Unencrypted-v1', 'ascii')]);
+      const plain = headerSize >= 41 + marker.length && header.readUInt32BE(33) === marker.length
+        && header.toString('ascii', 37, 41) === 'tEXt'
+        && header.subarray(41, 41 + marker.length).equals(marker);
+      const expected = plain ? 'gendragoon-plaintext-png-v1' : 'redsecretsxai-png-v1';
+      const command = plain ? 'fast-png-validate.py' : 'png-carrier.py';
+      const args = [path.join(__dirname, command), file, ...(plain ? [objectId] : [])];
+      const {stdout} = await exec(config.python || 'python3', args, {
+        timeout: 25000, maxBuffer: 16384,
+        env: {...process.env, OPENBLAS_NUM_THREADS: '1', OMP_NUM_THREADS: '1'},
       });
       const v = JSON.parse(stdout);
-      if (v.format !== 'redsecretsxai-png-v1') throw new Error('format');
+      if (v.format !== expected || plain && v.verified !== true) throw new Error('format');
+      return expected;
     } catch(e) { throw new CloudError('invalid_redx_png_carrier', 422); }
     finally { const next = decoderWaiters.shift(); if (next) next(); else decoders--; }
   }
@@ -275,7 +291,7 @@ async function createCloud(config) {
   function publicState(s) {
     const workspaces = Object.values(s.workspaces || {}).filter(w => !s.workspaceDeletions?.[w.id] && !s.deletedWorkspaces?.[w.id] && (!entitlementURL || w.billingManaged === true));
     const entitledQuota = entitlementURL ? workspaces.reduce((n,w) => n + (Number.isSafeInteger(w.quotaBytes) ? w.quotaBytes : 0), 0) : s.quota;
-    return {id: s.id, state: 'ready', developmentOnly, storageFormat: 'redsecretsxai-png-v1', quotaBytes: entitledQuota,
+    return {id: s.id, state: 'ready', developmentOnly, storageFormat: 'redsecretsxai-png-v1', supportedStorageFormats: ['redsecretsxai-png-v1', 'gendragoon-plaintext-png-v1'], quotaBytes: entitledQuota,
       usedBytes: s.used, projectLimit:s.projectLimit || 10, ownerBenefits:s.ownerBenefits === true, workspaces, machineNotes:workspaces,
       objects: Object.values(s.objects || {}).filter(o => o.status === 'ready'), libraryItems: Object.keys(s.library || {}).length};
   }
@@ -644,9 +660,9 @@ async function createCloud(config) {
           temporary = path.join(dir, '.' + id + '.' + crypto.randomBytes(8).toString('hex') + '.partial');
           const output = await fs.open(temporary, 'wx', 0o600);
           try { await output.writeFile(body); await output.sync(); } finally { await output.close(); }
-          await validatePNG(temporary);
+          const encoding = await validatePNG(temporary, id);
           await fs.link(temporary, file); blobLinked = true;
-          const record = {schema: 1, id, workspace, bytes, sha256, encoding: 'redsecretsxai-png-v1'};
+          const record = {schema: 1, id, workspace, bytes, sha256, encoding};
           metaTemporary = path.join(dir, '.' + id + '.' + crypto.randomBytes(8).toString('hex') + '.json.partial');
           const mf = await fs.open(metaTemporary, 'wx', 0o600);
           try { await mf.writeFile(JSON.stringify(record)); await mf.sync(); } finally { await mf.close(); }

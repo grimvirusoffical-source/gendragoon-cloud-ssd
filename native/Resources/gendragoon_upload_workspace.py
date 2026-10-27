@@ -152,6 +152,8 @@ def validate_state(value):
     for job in value["jobs"]:
         if (not isinstance(job, dict) or not isinstance(job.get("id"), str) or not re.fullmatch(r"[a-f0-9]{32}", job["id"]) or job["id"] in job_ids
                 or job.get("state") not in JOB_STATES or type(job.get("offload")) is not bool
+                or type(job.get("encrypted",True)) is not bool
+                or type(job.get("close_running_apps", False)) is not bool
                 or not isinstance(job.get("sources"), list) or not job["sources"]
                 or not isinstance(job.get("items"), list) or len(job["items"]) != len(job["sources"])):
             raise WorkspaceError("invalid_state", "A saved upload job is invalid")
@@ -424,20 +426,31 @@ def cancel_job(identifier, expected_revision, home=None):
         return commit(descriptor, state)
 
 
-def unchanged(source):
+def refreshed_source(source):
+    """Refresh content at upload time without changing the selected path."""
     try:
         path = source_path(source["path"])
-        equal = (str(path) == source["path"] and kindof(path) == source["kind"]
-                 and fingerprint(path) == source["identity"])
-    except (OSError, WorkspaceError):
-        equal = False
-    if not equal:
-        raise WorkspaceError("source_changed", "A source changed after selection; remove it and select it again")
+        if str(path) != source["path"] or kindof(path) != source["kind"]:
+            raise WorkspaceError("source_changed", "The selected source moved or changed type; select it again")
+        return {**source, "identity": fingerprint(path)}
+    except WorkspaceError as exc:
+        if exc.code == "invalid_source":
+            raise WorkspaceError("source_changed", "The selected root is no longer an ordinary, unlinked source; select it again") from exc
+        raise
+    except OSError as exc:
+        raise WorkspaceError("source_changed", "The selected source is no longer accessible; select it again") from exc
 
 
-def enqueue(expected_revision, offload, home=None, *, explicit_selection=None, explicit_destination=None):
-    if type(offload) is not bool:
-        raise WorkspaceError("invalid_option", "Offload must be explicitly true or false")
+def unchanged(source):
+    if refreshed_source(source)["identity"] != source["identity"]:
+        raise WorkspaceError("source_changed", "The source changed while uploading. Originals were retained; retry when edits finish.")
+
+
+def enqueue(expected_revision, offload, home=None, *, encryption=True, close_running_apps=False, explicit_selection=None, explicit_destination=None):
+    if type(offload) is not bool or type(encryption) is not bool or type(close_running_apps) is not bool:
+        raise WorkspaceError("invalid_option", "Upload options must be explicitly true or false")
+    if close_running_apps and sys.platform != "darwin":
+        raise WorkspaceError("invalid_option", "Automatic app quit is available on macOS only")
     state = read_state(home)
     require_revision(state, expected_revision)
     require_idle(state)
@@ -451,6 +464,8 @@ def enqueue(expected_revision, offload, home=None, *, explicit_selection=None, e
         state["sources"]=[selected_source(path) for path in dict.fromkeys(explicit_selection)]
     if state["destination"] is None:
         raise WorkspaceError("destination_required", "Choose a project and bucket before uploading", state)
+    if encryption is False and state["destination"]["remote"] != "redxai":
+        raise WorkspaceError("invalid_option", "Fast unencrypted uploads require a Red-XAI MachineNote", state)
     if not state["sources"]:
         raise WorkspaceError("source_required", "Select applications, files, or folders to upload", state)
     names = set()
@@ -468,8 +483,11 @@ def enqueue(expected_revision, offload, home=None, *, explicit_selection=None, e
             if any(old["name"] == new["name"] and old.get("parent_key") == new.get("parent_key") and old["path"] != new["path"]
                    for old in existing["sources"] for new in state["sources"]):
                 raise WorkspaceError("name_conflict", "Another queued source already uses this name in the selected cloud folder", state)
-    for source in state["sources"]:
-        unchanged(source)
+    # A file or app can legitimately change between picker selection and
+    # pressing Upload. Freeze its current tree when the worker actually starts.
+    # An opted-in running app is closed by run-next before fingerprinting it.
+    refreshed = [source if close_running_apps and source["kind"] == "app"
+                 else refreshed_source(source) for source in state["sources"]]
     with locked_state(home) as (descriptor, current):
         require_revision(current, expected_revision)
         require_idle(current)
@@ -477,11 +495,14 @@ def enqueue(expected_revision, offload, home=None, *, explicit_selection=None, e
             raise WorkspaceError("workspace_full", "The upload queue/history is full; existing jobs were retained")
         now = time.time()
         job = {"id": uuid.uuid4().hex, "state": "queued", "destination": copy.deepcopy(state["destination"]),
-               "sources": copy.deepcopy(state["sources"]), "offload": offload,
+               "sources": copy.deepcopy(refreshed), "offload": offload, "encrypted": encryption,
+               "close_running_apps": close_running_apps,
                "items": [{"source_id": source["id"], "state": "pending", "key": None,
-                          "offloaded": None, "message": "Waiting to upload"} for source in state["sources"]],
-               "completed_items": 0, "total_items": len(state["sources"]),
+                          "offloaded": None, "message": "Waiting to upload"} for source in refreshed],
+               "completed_items": 0, "total_items": len(refreshed),
                "created_at": now, "updated_at": now, "error": None}
+        if explicit_selection is None:
+            current["sources"] = copy.deepcopy(refreshed)
         current["jobs"].append(job)
         return commit(descriptor, current), job["id"]
 
@@ -772,13 +793,38 @@ def run_next(home=None):
             job = copy.deepcopy(queued)
         try:
             for index, source in enumerate(job["sources"]):
+                destination = job["destination"]
+                if destination["remote"] == "redxai" and _performance_input is None:
+                    raise WorkspaceError("redxai_auth_required", "Connect Red-XAI before uploading; no app was closed.")
+                if job.get("close_running_apps", False) and source["kind"] == "app":
+                    import gendragoon_library as library
+                    # Check write entitlement *before* closing a live app.
+                    # A lapsed subscription or expired session must never
+                    # discard an app's unsaved work merely to fail an upload.
+                    if destination["remote"] == "redxai":
+                        try:
+                            config = library.redx_config()
+                            if config["workspaceId"] != destination["bucket"]:
+                                raise ValueError("MachineNote changed")
+                            library.redx_module().RedXReceiver(config).verified_workers(write=True)
+                        except Exception as exc:
+                            raise WorkspaceError("redxai_auth_required",
+                                "The MachineNote could not authorize uploads. No running app was closed.") from exc
+                    # The option is frozen by the upload job; helper verifies
+                    # exact UID, executable path and PID start identity.
+                    try:
+                        library.quit_app_for_upload(source["path"])
+                    except Exception as exc:
+                        raise WorkspaceError("source_in_use", "Could not safely close the selected app. Quit it manually or disable automatic app quitting.") from exc
+                fresh = refreshed_source(source)
+                job["sources"][index] = fresh
                 def starting(current, state):
-                    current["items"][index].update(state="running", message="Checking source and uploading")
+                    current["sources"][index] = copy.deepcopy(fresh)
+                    current["items"][index].update(state="running", message="Checking current source and uploading")
                     previous = current.get("progress", {}).get("fraction", 0)
                     current["progress"] = {"phase": "preparing", "fraction": max(previous, index / len(job["sources"])),
                                            "source_index": index}
                 job_mutation(job["id"], starting, home)
-                unchanged(source)
                 destination = job["destination"]
                 folder = destination["bucket"] + ("/" + destination["prefix"] if destination["prefix"] else "")
                 command = [sys.executable, "-B", str(helper_path("gendragoon_library.py")), "upload",
@@ -791,6 +837,8 @@ def run_next(home=None):
                     raise WorkspaceError("redxai_auth_required", "Connect Red-XAI in the app or with REDXAI Auth-CLI before uploading")
                 if job["offload"]:
                     command.append("--offload")
+                if job.get("encrypted",True) is False:
+                    command.append("--no-encryption")
                 with progress_scope(job, index, home):
                     outcome = child_result(command, maintenance_fd)
                 validate_upload_result(outcome, destination, source, job["offload"])
@@ -907,6 +955,8 @@ def main(argv=None):
     clear = sub.add_parser("clear-sources")
     queue = sub.add_parser("enqueue")
     queue.add_argument("--offload", choices=("true", "false"), required=True)
+    queue.add_argument("--encryption", choices=("true", "false"), default="true")
+    queue.add_argument("--close-running-apps", choices=("true", "false"), default="false")
     companion = sub.add_parser("enqueue-selection")
     companion.add_argument("--paths-json", required=True)
     companion.add_argument("--destination-json", required=True)
@@ -936,7 +986,8 @@ def main(argv=None):
         elif args.action == "clear-sources":
             state = clear_sources(args.expected_revision)
         elif args.action == "enqueue":
-            state, extra["job_id"] = enqueue(args.expected_revision, args.offload == "true")
+            state, extra["job_id"] = enqueue(args.expected_revision, args.offload == "true",
+                    encryption=args.encryption == "true", close_running_apps=args.close_running_apps == "true")
         elif args.action == "enqueue-selection":
             state, extra["job_id"] = enqueue(args.expected_revision, False,
                 explicit_selection=strict_json(args.paths_json), explicit_destination=strict_json(args.destination_json))

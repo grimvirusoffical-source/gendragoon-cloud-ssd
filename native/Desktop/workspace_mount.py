@@ -43,7 +43,7 @@ def identity(item):
     return tuple(item.get(k) for k in ("key","archiveKey","manifestId","archiveBytes","archiveSha256","name","kind"))
 
 def metadata(client,item):
-    with model_api.TRANSFER_LOCK,storage.Codec(client) as codec:
+    with model_api.TRANSFER_LOCK,storage.codec_for_item(client,item) as codec:
         root,_=storage._root_for_item(client,codec,item)
         meta=root["metadata"];expected=meta.get("jsonBytes")
         if (meta.get("schema")!=storage.METADATA_SCHEMA or meta.get("encoding")!="zlib-json"

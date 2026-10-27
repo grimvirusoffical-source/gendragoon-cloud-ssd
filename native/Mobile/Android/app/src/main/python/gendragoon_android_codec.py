@@ -103,7 +103,7 @@ class FileAPI:
 def file_api():
     global _installed
     if _installed is None:
-        import gendragoon_redx_storage as storage
+        import gendragoon_storage_mode as storage
         core, *_ = storage._crypto_runtime()
         _installed = FileAPI(core)
         # Platform injection changes only GenDragoon's transport reference.

@@ -229,8 +229,15 @@ private enum GDBYOKeychain {
             guard let key = result["apiKey"] as? String, key.range(of: "^gdpk_[a-f0-9]{16}_[A-Za-z0-9_-]{43}$", options: .regularExpression) != nil else { throw GDNativeFailure(message: "The service returned no valid one-time integration key.") }
             self.oneTimeKey = key
             self.oneTimeTitle = "API key"
-            try await self.readMetadata(expected)
-            self.message = "Key created. Copy it now; the service stores its hash and cannot show it again."
+            // Keep a successfully issued secret visible if the subsequent list
+            // refresh fails. The service cannot retrieve that one-time token.
+            do {
+                try await self.readMetadata(expected)
+                self.message = "Key created. Copy it now; the service stores its hash and cannot show it again."
+            } catch {
+                try self.verify(expected)
+                self.message = "Key created, but the key list could not refresh. Copy the one-time key now; refresh the list separately."
+            }
         }
     }
     func issueGrant(name: String, service: String, workspace: String, write: Bool) {
@@ -569,6 +576,12 @@ private enum GDBYOKeychain {
     @State private var pendingRevoke: GDIntegrationKeySummary?
     @State private var pendingDisconnect: GDBYOConnection?
     private var buckets: [UploadCloudBucket] { auth.readableProjects.flatMap(\.buckets) }
+    private var keyBuckets: [UploadCloudBucket] { auth.uploadProjects.flatMap(\.buckets) }
+    private func reconcileKeySelection() {
+        if !keyBuckets.contains(where: { $0.id == workspace }) { workspace = keyBuckets.first?.id ?? "" }
+        let available = model.availableServices
+        if !available.contains(where: { $0.id == service }) { service = available.first?.id ?? "" }
+    }
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
@@ -583,7 +596,9 @@ private enum GDBYOKeychain {
                 if !model.message.isEmpty { Text(model.message).font(.callout).textSelection(.enabled) }
             }.padding(24).frame(maxWidth: 1050, alignment: .leading)
         }
-        .task { model.accountChanged(); if model.services.isEmpty { model.refresh() } }
+        .task { model.accountChanged(); reconcileKeySelection(); if model.services.isEmpty { model.refresh() } }
+        .onChange(of: auth.uploadProjects) { _, _ in reconcileKeySelection() }
+        .onChange(of: model.services.map(\.id)) { _, _ in reconcileKeySelection() }
         .onChange(of: auth.receiverID) { _, _ in externalKey = ""; clearVaultPassword(); model.accountChanged(); if auth.linked { model.refresh() } }
         .onChange(of: origin) { _, _ in model.clearConnectCode(); externalKey = ""; redXCode = ""; clearVaultPassword() }
         .onChange(of: database) { _, _ in model.clearConnectCode(); externalKey = ""; redXCode = ""; clearVaultPassword() }
@@ -622,13 +637,26 @@ private enum GDBYOKeychain {
                 TextField("Key name", text: $keyName)
                 HStack {
                     Picker("Service", selection: $service) { ForEach(model.availableServices) { Text($0.name).tag($0.id) } }
-                    Picker("MachineNote", selection: $workspace) { Text("Choose a MachineNote").tag(""); ForEach(buckets) { Text($0.displayName).tag($0.id) } }
+                    Picker("MachineNote", selection: $workspace) {
+                        Text("Choose an active MachineNote").tag("")
+                        ForEach(keyBuckets) { Text($0.displayName).tag($0.id) }
+                    }
+                }
+                if keyBuckets.isEmpty {
+                    Text("API keys require an active, writable MachineNote with storage entitlement. Check Storage and Performance, then refresh MachineNotes.")
+                        .font(.caption).foregroundStyle(.orange)
+                }
+                if model.availableServices.isEmpty {
+                    Text("The integration service catalog is unavailable. Refresh Integrations before creating a key.")
+                        .font(.caption).foregroundStyle(.orange)
                 }
                 Toggle("Allow uploads and file changes", isOn: $allowWrite)
                 HStack {
                     Button("Create API Key") { model.issue(name: keyName, service: service, workspace: workspace, write: allowWrite) }
                     Button("Create Connection Grant") { model.issueGrant(name: keyName, service: service, workspace: workspace, write: allowWrite) }
-                }.disabled(!model.canStart || workspace.isEmpty || keyName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                }.disabled(!model.canStart || !keyBuckets.contains(where: { $0.id == workspace })
+                           || !model.availableServices.contains(where: { $0.id == service })
+                           || keyName.trimmingCharacters(in: .whitespacesAndNewlines).count < 2)
                 ForEach(model.keys) { key in
                     HStack {
                         VStack(alignment: .leading) {

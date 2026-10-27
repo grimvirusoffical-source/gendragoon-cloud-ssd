@@ -7,7 +7,7 @@ sys.dont_write_bytecode = True
 os.environ["PYTHONDONTWRITEBYTECODE"] = "1"
 import argparse, hashlib, json, os, plistlib, re, shutil, subprocess, sys, tempfile
 from contextlib import contextmanager
-import ctypes, errno, fcntl, posixpath, stat, time, unicodedata, uuid, zipfile
+import ctypes, errno, fcntl, posixpath, signal, stat, time, unicodedata, uuid, zipfile
 from pathlib import Path
 import gendragoon_performance as performance
 import gendragoon_progress as progress
@@ -232,8 +232,8 @@ def scan(remote,root,project=None,bucket=None):
 def present(entries,context):
     return [dict(key=k,kind=v.get("kind","app"),format=v.get("format","archive"),previousVersionCount=len(v.get("previousVersions",[])),**{a:b for a,b in v.items() if a not in ("kind","format","manifest","previousVersions","previousVersionCount")}) for k,v in sorted(entries.items()) if in_context(v,context) and not(v.get("format")=="redxai" and v.get("cloudMissing"))]
 def redx_module():
-    import gendragoon_redx_storage
-    return gendragoon_redx_storage
+    import gendragoon_storage_mode
+    return gendragoon_storage_mode
 
 def redx_config():
     value=performance.private_payload()
@@ -313,6 +313,56 @@ def is_running(app):
     result=run(["/bin/ps","-axo","command"],timeout=20)
     p=str(app)
     return any(line.strip()==p or line.strip().startswith(p+" ") or (line.strip().startswith(p+"/") and "/Contents/MacOS/" in line) for line in result.splitlines())
+
+
+def quit_app_for_upload(app):
+    """Explicit opt-in: close only owned, identity-verified bundle processes.
+
+    SIGTERM gives apps a chance to quit. SIGKILL is a last resort *only* for
+    the per-upload UI option that warns about unsaved work. Do not use names,
+    arbitrary PIDs or shell scripts to decide which process to terminate.
+    """
+    if sys.platform!="darwin":
+        raise RuntimeError("Automatic application quit requires macOS")
+    target=Path(app).absolute()
+    if target.is_symlink() or target.suffix.lower()!=".app" or not (target/"Contents/Info.plist").is_file():
+        raise ValueError("Choose an actual macOS application bundle")
+    import gendragoon_app_launch as monitor
+    prefix=str(target)+"/Contents/MacOS/"
+    seen={}
+    for pid,executable in monitor.process_paths().items():
+        if pid==os.getpid() or not executable.startswith(prefix):
+            continue
+        record=monitor.process_identity(pid)
+        if record is None or record.get("executable")!=executable or record.get("uid")!=os.getuid():
+            raise RuntimeError("Application process identity cannot be verified; quit it manually")
+        seen[pid]=record
+    if len(seen)>16:
+        raise RuntimeError("Too many running application helpers; quit this app manually")
+    if not seen:
+        return False
+    def alive():
+        active={}
+        for pid,identity in seen.items():
+            current=monitor.process_identity(pid)
+            if current is None:
+                continue
+            if current!=identity:
+                raise RuntimeError("Application PID was reused; no additional signal sent")
+            active[pid]=identity
+        return active
+    for term,rounds in ((signal.SIGTERM,40),(signal.SIGKILL,20)):
+        for pid in alive():
+            try:os.kill(pid,term)
+            except ProcessLookupError:pass
+        for _ in range(rounds):
+            if not alive():return True
+            time.sleep(.25)
+    if alive():
+        raise RuntimeError("Selected application did not close; original retained")
+    return True
+
+
 def trash(src):
     # Finder moves items into Trash without deleting them permanently.
     program=['/usr/bin/osascript',
@@ -321,7 +371,31 @@ def trash(src):
        '-e','delete (POSIX file (item 1 of argv))',
        '-e','end tell',
        '-e','end run',str(src)]
-    run(program,timeout=150)
+    try:
+        run(program,timeout=150)
+        if not src.exists() and not src.is_symlink():
+            return
+    except Exception:
+        if not src.exists() and not src.is_symlink():
+            return
+    # Finder scripting can be unavailable even for an explicitly authorized
+    # offload. Use only an atomic same-volume move into this user's private
+    # Trash; never copy+delete, overwrite an existing name or cross volumes.
+    home_trash=HOME/".Trash"
+    safe_path(home_trash,directory=True)
+    if not home_trash.exists():
+        home_trash.mkdir(mode=0o700)
+    safe_path(home_trash,directory=True)
+    if home_trash.stat().st_dev!=src.lstat().st_dev:
+        raise RuntimeError("Finder could not move this other-volume item to Trash; original retained")
+    target=home_trash/(src.name+".GenDragoon-"+uuid.uuid4().hex)
+    if target.exists() or target.is_symlink():
+        raise RuntimeError("Trash destination already exists; original retained")
+    os.rename(src,target)
+    if src.exists() or src.is_symlink() or not target.exists():
+        raise RuntimeError("Trash move was not verified; inspect the original and Trash")
+
+
 # Python.org macOS builds do not necessarily expose os.listxattr/getxattr.
 # The libc fallback uses Darwin's ABI and never follows a changed symlink.
 XATTR_NOFOLLOW=0x0001
@@ -393,7 +467,9 @@ def macos_xattrs(path):
         raise RuntimeError("Invalid or excessive extended attributes; original retained")
     attributes={};total=0
     for name in sorted(names):
-        if name=="com.apple.provenance":continue
+        # Last-used time is Finder/LaunchServices bookkeeping, not user data.
+        # Keep quarantine, FinderInfo, resource forks and ACLs verified.
+        if name in {"com.apple.provenance", "com.apple.lastuseddate#PS"}:continue
         value=get_api(path,name,follow_symlinks=False)
         total+=len(value)
         if len(value)>MAX_XATTR_VALUE_BYTES or total>MAX_XATTR_TOTAL_BYTES:
@@ -441,7 +517,18 @@ def snapshot(source):
     visit(source,".")
     return {"manifest":sorted(records,key=lambda x:x["path"]),"guard":guards}
 def unchanged(source,baseline):
-    if snapshot(source)!=baseline:raise RuntimeError("Source changed since the verified archive; original retained")
+    """Ignore incidental timestamps, never file content, permissions or identity.
+
+    The strict before/after fstat checks in snapshot still detect concurrent
+    writes. This separately compares signed-restorable metadata, SHA-256 and
+    the device/inode/type of each entry before authorized offload.
+    """
+    observed=snapshot(source)
+    if observed["manifest"]!=baseline["manifest"] or set(observed["guard"])!=set(baseline["guard"]):
+        raise RuntimeError("Source changed: content or important metadata differs from backup; original retained")
+    for path,initial in baseline["guard"].items():
+        if tuple(observed["guard"][path][:3])!=tuple(initial[:3]):
+            raise RuntimeError("Source changed: a source item was replaced since backup; original retained")
 def verify_restored(path,manifest):
     verified=snapshot(path);actual=verified["manifest"]
     # Older library manifests predate xattr recording. Do not fabricate it for
@@ -579,13 +666,13 @@ def validate_archive(path,name):
                     if hops>40:raise ValueError("Archive symlink loop")
                     resolved.pop();pending=links[candidate].split("/")+pending
             if not resolved or resolved[0]!=expected_root:raise ValueError("Archive symlink escapes its bundle")
-def upload(source,remote,folder,offload=False,project=None,bucket=None,parent_key=None):
+def upload(source,remote,folder,offload=False,project=None,bucket=None,parent_key=None,encryption=True):
     original=Path(source).expanduser().absolute()
     resolved=original.resolve(strict=True)
     ensure_not_cloud(resolved)
     key=keyfor(remote,pathpart(folder),resolved.name,project,bucket,parent_key)
-    with upload_lease(key):return _upload(original,remote,folder,offload,project,bucket,parent_key)
-def _upload(source,remote,folder,offload=False,project=None,bucket=None,parent_key=None):
+    with upload_lease(key):return _upload(original,remote,folder,offload,project,bucket,parent_key,encryption)
+def _upload(source,remote,folder,offload=False,project=None,bucket=None,parent_key=None,encryption=True):
     original=Path(source).expanduser().absolute()
     src=original.resolve(strict=True)
     ensure_not_cloud(src)
@@ -595,6 +682,8 @@ def _upload(source,remote,folder,offload=False,project=None,bucket=None,parent_k
     if typ=="app" and not (src/"Contents/Info.plist").is_file():raise ValueError("Not a valid macOS .app bundle")
     if offload and is_running(src):raise ValueError("Quit this application before offloading it")
     folder=pathpart(folder);check_remote(remote)
+    if type(encryption) is not bool or (not encryption and remote!="redxai"):
+        raise ValueError("Unencrypted uploads are available only for Red-XAI MachineNotes")
     context=selected_context(project,bucket,remote,folder)
     redx=redx_config() if remote=="redxai" else None
     if redx and redx["workspaceId"]!=bucket:raise ValueError("Red-XAI workspace changed; refresh the destination")
@@ -634,7 +723,7 @@ def _upload(source,remote,folder,offload=False,project=None,bucket=None,parent_k
             origin=device_origin.current_origin(redx["receiverId"],state_dir=SUPPORT/"DeviceOrigins")
             options={"origin":origin,**({"parent_key":parent_key} if parent_key is not None else {})}
             redx_result=redx_module().upload_archive(redx,archive,key,src.name,typ,
-                "zip-root" if zipped else "flat",original_hash,baseline["manifest"],**options)
+                "zip-root" if zipped else "flat",original_hash,baseline["manifest"],encryption=encryption,**options)
             cloud_item={"key":key,"name":src.name,"kind":typ,"workspace":bucket,
                 "manifestId":redx_result["manifestId"],"archiveBytes":archive.stat().st_size,
                 "archiveSha256":original_hash}
@@ -688,13 +777,31 @@ def _upload(source,remote,folder,offload=False,project=None,bucket=None,parent_k
         try:
             progress.phase("offloading")
             trash(src)
-            prior=json.loads(json.dumps(entry))
-            entry["offloaded"]=True;entry["trashedAt"]=time.time();store_revision(key,entry,prior)
+            mark_offloaded(key,entry)
             reply(message=f"Verified cloud backup of {src.name}; moved original to Trash. Empty Trash to reclaim space.",offloaded=True,**result)
         except Exception as exc:
             reply(message=f"Cloud backup verified. Finder could not confirm moving the original to Trash; inspect it before retrying.",offloaded=False,**result)
     else:
         reply(message=f"Verified cloud copy of {src.name}. Original kept locally.",offloaded=False,**result)
+
+def mark_offloaded(key, verified_entry):
+    """Commit a verified Trash move without overwriting a concurrent metadata refresh.
+
+    A Receiver listing may update the local index after the complete readback.
+    Only the exact immutable archive revision can acquire its offloaded flag;
+    unrelated refreshed fields are preserved.
+    """
+    immutable=("name","kind","remote","folder","file","sha256","project","bucket","redxManifestId")
+    with library_lock():
+        entries=_load();current=entries.get(key)
+        if not current or any(current.get(name)!=verified_entry.get(name) for name in immutable):
+            raise RuntimeError("Cloud archive revision changed after the Trash move; recover the source from Trash and refresh the library")
+        current["offloaded"]=True
+        current["trashedAt"]=time.time()
+        entries[key]=current
+        _save(entries)
+
+
 def check_name(name):
     if not isinstance(name,str) or not name or len(name)>255 or name in (".","..") or "/" in name or "\\" in name or any(ord(c)<32 or ord(c)==127 for c in name):raise ValueError("Invalid item name")
 def item_path(data):
@@ -718,6 +825,58 @@ def cache_record(path,data):
         safe_path(destination);os.replace(temporary,destination)
     finally:
         if os.path.exists(temporary):os.unlink(temporary)
+
+
+def hydrate_launch_manifest(key, data, project, bucket, remote):
+    """Recover authenticated archive sizing when an offloaded app has no cache.
+
+    Receiver library metadata alone has no uncompressed file sizes. Never
+    authorize an unbounded download based only on compressed archiveBytes.
+    The original encryption module is untouched; the adapter verifies root
+    and metadata pages before this manifest is accepted.
+    """
+    if remote!="redxai" or data.get("manifest"):
+        return data
+    config=redx_config()
+    if config["workspaceId"]!=bucket:
+        raise RuntimeError("Red-XAI MachineNote changed before app launch")
+    item=redx_module().find_item(config,key)
+    if (item.get("name")!=data.get("name") or item.get("kind")!="app"
+            or item.get("manifestId")!=data.get("redxManifestId")
+            or item.get("archiveSha256")!=data.get("sha256")):
+        raise RuntimeError("Cloud application revision changed; refresh before launch")
+    inspected=redx_module().read_archive_manifest(config,item)
+    root=inspected["root"];manifest=inspected["manifest"]
+    if (root.get("kind")!="app" or root.get("name")!=data.get("name")
+            or root.get("archiveSha256")!=item["archiveSha256"]
+            or root.get("archiveBytes")!=item["archiveBytes"]):
+        raise RuntimeError("Cloud application source manifest does not match its archive")
+    sizes=0
+    for row in manifest:
+        if not isinstance(row,dict) or row.get("type") not in {"file","directory","symlink"}:
+            raise RuntimeError("Cloud application metadata includes an invalid filesystem entry")
+        if row["type"]=="file":
+            size=row.get("size")
+            if type(size) is not int or size<0 or size>64*1024**3:
+                raise RuntimeError("Cloud application file size exceeds its safe limit")
+            sizes+=size
+            if sizes>64*1024**3:
+                raise RuntimeError("Cloud application exceeds the supported cache budget")
+    if not any(row.get("path")=="." and row.get("type")=="directory" for row in manifest):
+        raise RuntimeError("Cloud application metadata is missing its bundle root")
+    with library_lock():
+        entries=_load();current=entries.get(key)
+        if (not current or current.get("redxManifestId")!=item["manifestId"]
+                or current.get("sha256")!=item["archiveSha256"]):
+            raise RuntimeError("Local application library changed; refresh before launching")
+        if not current.get("manifest"):
+            current["manifest"]=manifest
+            current["sizeBytes"]=sizes
+            entries[key]=current
+            _save(entries)
+        return current
+
+
 def _cache_display_destination(key,data):
     name=data.get("displayName") or data["name"];check_name(name)
     destination=CACHE/key/name
@@ -815,6 +974,8 @@ def stage_item(key,open_after=False,project=None,bucket=None,remote="gendragoon"
     prepare_cache();dest=_cache_display_destination(key,data);safe_path(dest.parent,directory=True)
     if dest.is_symlink():raise ValueError("Unsafe linked local cache")
     if not dest.exists():
+        if kind=="app" and remote=="redxai" and not data.get("manifest"):
+            data=hydrate_launch_manifest(key,data,project,bucket,remote)
         expected=sum(x.get("size",0) for x in data.get("manifest",[]))
         require_space(expected*2+64*1024**2)
         with tempfile.TemporaryDirectory(prefix="gd-restore-",dir=CACHE) as tmp:
@@ -951,6 +1112,7 @@ def main():
     p.add_argument("--project")
     p.add_argument("--bucket")
     p.add_argument("--offload",action="store_true")
+    p.add_argument("--no-encryption",action="store_true")
     p.add_argument("--key",default="")
     p.add_argument("--operation",choices=["create-folder","rename","move","copy","delete"])
     p.add_argument("--keys-json",default="[]")
@@ -968,7 +1130,7 @@ def main():
     if a.action=="list":return listing(a.project,a.bucket,a.remote)
     with maintenance_lock(a.maintenance_fd):
         if a.action=="scan":scan(a.remote,a.root or DEFAULT_ROOT,a.project,a.bucket)
-        elif a.action=="upload":upload(a.source or a.app,a.remote,a.folder or DEFAULT_ROOT+"/"+ARCHIVE_DIR,a.offload,a.project,a.bucket,a.parent_key)
+        elif a.action=="upload":upload(a.source or a.app,a.remote,a.folder or DEFAULT_ROOT+"/"+ARCHIVE_DIR,a.offload,a.project,a.bucket,a.parent_key,encryption=not a.no_encryption)
         elif a.action=="launch":stage_item(a.key,True,a.project,a.bucket,a.remote)
         elif a.action=="restore":stage_item(a.key,False,a.project,a.bucket,a.remote)
         elif a.action=="evict":clear_cache(a.key,a.project,a.bucket,a.remote)
