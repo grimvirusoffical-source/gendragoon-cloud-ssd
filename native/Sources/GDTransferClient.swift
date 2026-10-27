@@ -240,8 +240,8 @@ actor GDTransferClient {
         let limit=try budget.reserve(key:lease,verifiedLimit:workers(c,constrained:constrained),requestedWorkers:maximumWorkers)
         defer{budget.release(key:lease)}
         let state=root.appendingPathComponent("upload-"+key+".json")
-        var id=(try? String(contentsOf:state,encoding:.utf8)) ?? UUID().uuidString.lowercased()
-        if UUID(uuidString:id)==nil{id=UUID().uuidString.lowercased()}
+        let savedID=(try? String(contentsOf:state,encoding:.utf8)) ?? ""
+        let id=UUID(uuidString:savedID)==nil ? UUID().uuidString.lowercased() : savedID
         try persist(Data(id.utf8),to:state)
         var request:[String:Any]=["requestId":id,"name":name,"sizeBytes":size]
         if let metadata {
@@ -335,7 +335,7 @@ actor GDTransferClient {
         #if os(iOS)
         let reserve:Int64=512*1024*1024
         #else
-        let reserve:Int64=10*1024*1024*1024
+        let reserve:Int64=64*1024*1024
         #endif
         guard free>=budget.reservedDownloadBytes-done+reserve else {throw GDTransferError(message:"Not enough local cache space to restore the active files safely.",status:0)}
         let handle=try openDownload(target);defer{try? handle.close()}

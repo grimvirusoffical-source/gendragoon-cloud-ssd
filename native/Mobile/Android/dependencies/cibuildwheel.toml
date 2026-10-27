@@ -1,0 +1,15 @@
+[tool.cibuildwheel]
+build = "cp313-android_*"
+before-build = "python {project}/native/Mobile/Android/dependencies/prepare_linkage.py --output {package}/gendragoon-android-linkage.ini"
+before-test = ""
+# Candidates must subsequently pass GenDragoon's actual APK device fixtures.
+test-command = ""
+build-verbosity = 1
+
+[tool.cibuildwheel.config-settings]
+setup-args = [
+  "--cross-file={project}/native/Mobile/Android/dependencies/android64-cross.ini",
+  "--cross-file={package}/gendragoon-android-linkage.ini",
+  "-Dblas=none", "-Dlapack=none", "-Dallow-noblas=true", "-Duse-ilp64=false",
+]
+compile-args = ["-j2"]

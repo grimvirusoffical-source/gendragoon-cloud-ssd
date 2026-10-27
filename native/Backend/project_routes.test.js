@@ -46,7 +46,7 @@ async function fixture(t){
    subs.set(sub.id,sub);return sub;
  }
  function pay(id=idFor(2),intentId="pi_local1"){
-   const record=db.rows.get(path(id)),session=sessions.get(record.projectCheckoutSessionId);
+   const record=db.rows.get(path(id)),session=sessions.get(record.plansCheckoutSessionId||record.projectCheckoutSessionId);
    session.status="complete";session.payment_status="paid";session.payment_intent=intentId;
    intents.set(intentId,{id:intentId,status:"succeeded",customer:"cus_own",metadata:session.metadata,currency:"usd",amount_received:500,
      latest_charge:{id:"ch_local1",payment_intent:intentId,refunded:false,disputed:false,amount_captured:500,amount_refunded:0}});
@@ -71,11 +71,11 @@ test("new-project API ignores forged owner/amount fields and opens one plans Che
  assert.equal(bare.status,400);assert.equal(bare.body.error,"PLANS_REQUIRED");assert.match(bare.body.message,/storage plan and a performance plan/);
  const onlyStorage=await f.request("/v2/projects",{name:"Second project",intentId:idFor(2),plans:{storageTier:"2TB"}});
  assert.equal(onlyStorage.status,400);assert.equal(onlyStorage.body.error,"PLANS_REQUIRED");
- const second=await f.two();assert.equal(second.status,201);assert.equal(second.body.oneTimeCents,0);assert.equal(second.body.monthlyPriceCents,0);
- assert.equal(second.body.totalCents,7200+900);assert.equal(second.body.project.billingModel,"plans");
+ const second=await f.two();assert.equal(second.status,201);assert.equal(second.body.oneTimeCents,500);assert.equal(second.body.monthlyPriceCents,0);
+ assert.equal(second.body.totalCents,7200+900+500);assert.equal(second.body.project.billingModel,"plans");
  assert.equal(second.body.project.projectStatus,"pending_payment");assert.equal(second.body.policy.usedProjectSlots,2);
- assert.deepEqual(f.calls[0].args.line_items,[{price:"price_2tb",quantity:1},{price:"price_turbo",quantity:1}]);assert.equal(f.calls[0].args.mode,"subscription");
- assert.ok(!f.calls[0].args.line_items.some(x=>x.price==="price_project"));
+ assert.deepEqual(f.calls[0].args.line_items,[{price:"price_2tb",quantity:1},{price:"price_turbo",quantity:1},{price:"price_project",quantity:1}]);assert.equal(f.calls[0].args.mode,"subscription");
+ assert.equal(f.calls[0].args.line_items.filter(x=>x.price==="price_project").length,1);
  assert.equal(f.record(idFor(2)).provisioned,false);assert.equal(f.record(idFor(2)).storageActive,false);
 });
 test("the bundled mobile draft request cannot create projects or collect an activation fee, even when live-shaped pricing is ready",async t=>{
@@ -106,6 +106,8 @@ test("a signed plans subscription activates the workspace with both plans; repla
  assert.equal((await f.webhook("customer.subscription.created",{id:sub.id})).status,200);
  assert.equal(f.record(idFor(2)).projectStatus,"pending_payment");assert.equal(effectiveStorageQuota(f.record(idFor(2))),0);
  sub.status="active";const eventId="evt_plansactive1";
+ const paid=f.pay(idFor(2));paid.subscription=sub.id;
+ assert.equal((await f.webhook("checkout.session.completed",structuredClone(paid),"evt_checkoutpaid1")).status,200);
  assert.equal((await f.webhook("customer.subscription.updated",{id:sub.id},eventId)).status,200);
  assert.equal(f.record(idFor(2)).projectStatus,"active");assert.equal(f.record(idFor(2)).storageTier,"2TB");
  assert.equal(effectiveStorageQuota(f.record(idFor(2))),2e12);assert.equal(effectiveWorkers(f.record(idFor(2))),8);
