@@ -3,7 +3,7 @@
   "requestedAt": "2026-10-26",
   "baseCommit": "98eb1020d0a16340675a38cb99a8b5667b73b4d6",
   "scope": "GenDragoon repository only; pinned vendor and external programs unchanged",
-  "stage": "signed-and-notarized-mac37-awaiting-server-rollout",
+  "stage": "prepublication-blocked-on-Apple-profile-Receiver-rollout-and-CI",
   "work": {
     "reliableTransfers": "native-held credential renewal, bounded resumable retries, durable sanitized errors; receiver_finish",
     "teams": "per-workspace dev peers, unlimited invitation count, required usernames, quick chat and P2P signaling, no shared file rights; billing_finish",
@@ -40,7 +40,7 @@
     "CUA native pipe disconnected during safe UI refresh attempt; one user request for normal refresh/quit is pending.",
     "Opera connector requires reauthentication; no store submission has been attempted."
   ],
-  "storeStatus": "A notarized macOS 0.22.1 (37) package is local-only; GitHub release and store publication remain pending. Receiver fast PNG support is not confirmed active. Do not auto-update customers yet.",
+  "storeStatus": "No public GitHub release/store submission or auto-update feed change. Notarized previous-source archive superseded; latest signed preview lacks Apple notary ticket. Receiver production fast-PNG capability and live payment lifecycle remain unverified.",
   "iosStatus": "No new iOS submission; original plan defers iOS until all other targets verified.",
   "targetVersion": "0.22.1",
   "targetBuild": 37,
@@ -77,7 +77,10 @@
       "zipBytes": 82656339,
       "nodeRuntime": "24.22.1 (2026-10-21 security release)",
       "path": "/Users/grim-virus/GenDragoonRelease-0.22.1-37-checkbox-notary/package/GenDragoon-Cloud-SSD-Mac-v0.22.1.zip",
-      "installationGate": "Installed version 0.22.0 (36) remains untouched; active Receiver must support fast PNG before publishing or installing this release."
+      "installationGate": "Installed version 0.22.0 (36) remains untouched; active Receiver must support fast PNG before publishing or installing this release.",
+      "sourceCommit": "2ed0cfd117a35b43ef2eb5ba9190b3515f2a8b0e",
+      "supersededByNewerSource": true,
+      "eligibleForCurrentPublication": false
     },
     "androidDeviceCandidate": "Reviewed eight-wheel aligned NumPy/Pillow dependency profile passed a573cf6 on both page sizes. Latest da653b9 memory instrumentation run40286028999 passed4KiB but16KiB failed; exact diagnostics under investigation before promotion. Default shipping pins must not ship.",
     "receiverActualRedX": "Isolated actual RedX seven-row CAS/query/revocation/expiry/cleanup probe passed; all seven fixtures removed and account-state fingerprint unchanged. Replacement Set preserves K/Scope/Kind/Position physical indexes.",
@@ -113,7 +116,40 @@
       "notarizeToolSuite": "34 passed",
       "liveFastCarrierActivated": false
     },
-    "livePublicHealth": "2026-10-27: Receiver HTTP 200 productionReady=true; billing control HTTP 200; pricing version4 with 10 storage and six performance tiers, second MachineNote fee 500 cents. No charged payment/activation transaction."
+    "livePublicHealth": "2026-10-27: Receiver HTTP 200 productionReady=true; billing control HTTP 200; pricing version4 with 10 storage and six performance tiers, second MachineNote fee 500 cents. No charged payment/activation transaction.",
+    "macPreviewCandidate37": {
+      "sourceCommit": "7f40a2efc6d37640a7bc6dc731a8c85efcccecf3",
+      "version": "0.22.1 (37)",
+      "signed": true,
+      "notarized": false,
+      "stapled": false,
+      "gatekeeperAccepted": false,
+      "installed": false,
+      "candidate": true,
+      "automaticUpdateEligible": false,
+      "path": "/Users/grim-virus/GenDragoonRelease-0.22.1-37-ci-final-notary/preview-package/GenDragoon-Cloud-SSD-Mac-v0.22.1.zip",
+      "zipSha256": "6d21aa2222c45a310c3e5ec7f2403c642b9372387f4e23e3a7d31f343380e413",
+      "zipIntegrityVerified": true,
+      "blocked": "No GenDragoonNotary Keychain credential profile available at final signing checkpoint; pre-submission failure and no notary receipt.",
+      "vendorNodeVersion": "24.22.1",
+      "cryptoSourceUnchanged": true
+    },
+    "latestGitHubCI": {
+      "head": "7f40a2efc6d37640a7bc6dc731a8c85efcccecf3",
+      "run": "40448721123",
+      "passed": [
+        "backend",
+        "native-helpers",
+        "macos-compile",
+        "desktop-ubuntu"
+      ],
+      "windowsDesktop": "failed transient ERROR_INSUFFICIENT_BUFFER (122) in pywin32 GetFileSecurity during private ACL read",
+      "android": "4KiB emulator acceptance failed, 16KiB still running at last read; local Python 3.13 Android 32/32 passed",
+      "ios": "skipped by explicit platform sequencing"
+    },
+    "androidFixtureRepair": "Android Python 3.13 offline unit suite: 32 passed. Earlier missing gendragoon_storage_mode import fixed.",
+    "signedResourceRepair": "Python 3.13 immutable-resource suite: 6 passed. New adapter/carrier helpers suppress bytecode and implement side-effect-free --help.",
+    "receiverFastPngRepair": "Receiver fast-PNG/Control 25 passed including 1 MiB HTTP carrier SHA verification."
   },
   "limitations": [
     "RottenApple current caller pairs successfully but its storageBind returns unavailable before network; complete file binding requires changes outside this authorized repository.",
@@ -123,7 +159,12 @@
     "10GB is advisory; current installed build35 is unchanged until a new verified installation.",
     "Fast PNG requires a Receiver deployment advertising gendragoon-plaintext-png-v1; app refuses unchecked uploads against an older Receiver rather than silently falling back.",
     "Local billing and entitlement tests do not verify a real Stripe charge, webhook delivery or a real plan activation.",
-    "Mac staging is signed, notarized and package checksum-verified; the installed 0.22.0 (36) app was not replaced."
+    "Mac staging is signed, notarized and package checksum-verified; the installed 0.22.0 (36) app was not replaced.",
+    "Latest branch changes do not match the earlier accepted 0.22.1 ZIP; it is superseded and not publishable.",
+    "Current signed preview ZIP is intentionally not notarized and not eligible for automatic updates.",
+    "GenDragoonNotary stored Keychain profile missing at latest attempt, no new Apple submission was performed.",
+    "Windows CI ACL-buffer race and Android device acceptance remain unresolved; production rollout blocked.",
+    "Authenticated production SSH access did not succeed; Receiver version and full Stripe checkout/webhook/provisioning cannot be asserted."
   ],
   "sourceStatus": {
     "base": "98eb1020d0a16340675a38cb99a8b5667b73b4d6",
@@ -134,7 +175,8 @@
     "androidDependencyRepair": "793603cfb0a2ffb39ed4aa5adf1a43f0ae02cf19",
     "androidDeviceCandidate": "a890d9a",
     "desktopMountCandidate": "57c06ff4f1f5ecce329de4a3ad9e8e547bf5734a",
-    "currentReleaseBranch": "feature/fast-carrier-optional-encryption"
+    "currentReleaseBranch": "feature/fast-carrier-optional-encryption",
+    "currentHead": "7f40a2efc6d37640a7bc6dc731a8c85efcccecf3"
   },
-  "updatedAt": "2026-10-27T04:05:31.642054+00:00"
+  "updatedAt": "2026-10-27T04:24:25.098424+00:00"
 }
