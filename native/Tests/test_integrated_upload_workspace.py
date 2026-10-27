@@ -141,16 +141,37 @@ class UploadWorkspaceTests(unittest.TestCase):
         self.assertEqual(command[command.index("--folder") + 1], "bucket-one/apps/custom")
         self.assertNotIn("gen-dragoon-ssd", command)
 
-    def test_source_change_before_enqueue_is_rejected_without_job(self):
+    def test_source_change_before_enqueue_is_frozen_at_upload_click(self):
         source = self.source()
         state = self.select()
         state = workspace.add_sources([str(source)], state["revision"], self.home)
+        old_identity = state["sources"][0]["identity"]
         source.write_bytes(b"changed after selection")
+        queued, job_id = workspace.enqueue(state["revision"], True, self.home)
+        frozen = queued["jobs"][0]["sources"][0]["identity"]
+        self.assertNotEqual(old_identity, frozen)
+        self.assertEqual(frozen, workspace.fingerprint(source))
+        self.assertEqual(queued["sources"][0]["identity"], frozen)
+        with self.fake_library() as helper:
+            finished, completed = workspace.run_next(self.home)
+        self.assertEqual(completed, job_id)
+        self.assertEqual(finished["jobs"][0]["state"], "succeeded")
+        helper.assert_called_once()
+        # The fixture never trashes a source. Production offload requires a
+        # full verified archive/readback/restore and the final unchanged guard.
+        self.assertEqual(source.read_bytes(), b"changed after selection")
+
+    def test_replaced_root_symlink_before_enqueue_is_refused(self):
+        original = self.source()
+        alternate = self.source("alternate.dmg", b"do not follow")
+        state = self.select()
+        state = workspace.add_sources([str(original)], state["revision"], self.home)
+        original.unlink()
+        original.symlink_to(alternate)
         with self.assertRaises(workspace.WorkspaceError) as failure:
             workspace.enqueue(state["revision"], True, self.home)
-        self.assertEqual(failure.exception.code, "source_changed")
+        self.assertEqual(failure.exception.code, "invalid_source")
         self.assertEqual(workspace.read_state(self.home)["jobs"], [])
-        self.assertTrue(source.exists())
 
     def test_source_change_before_worker_never_calls_library_or_offloads(self):
         source = self.source()
