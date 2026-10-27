@@ -34,7 +34,13 @@ jobs:
         run: python -B -m unittest discover -s native/Desktop/tests -p test_app_controls.py -v
       - name: Real portable process-tree isolation on the target operating system
         run: python -B -m unittest discover -s native/Desktop/tests -p test_app_control_native.py -v
-      - name: Native bridge rejects arbitrary commands, paths and PIDs
-        run: python -B -m unittest native.Tests.test_native_bridge native.Tests.test_extension_packages -v
+      - name: Native bridge rejects arbitrary commands, paths and PIDs on both operating systems
+        run: python -B -m unittest native.Tests.test_native_bridge.NativeBridgeTests.test_app_controls_accept_only_catalog_ids_never_paths_pids_commands_or_force native.Tests.test_extension_packages -v
+      - name: Unix socket, permissions and macOS wrapper regression fixtures
+        if: runner.os == 'Linux'
+        run: python -B -m unittest native.Tests.test_native_bridge -v
+      - name: Actual Windows current-user named-pipe and private ACL checks
+        if: runner.os == 'Windows'
+        run: python -B -m unittest discover -s native/Desktop/tests -p test_companion_server.py -v
       - name: Browser detection and native messaging regressions
         run: node --test native/Extensions/tests/platform.test.cjs

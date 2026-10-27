@@ -78,8 +78,9 @@ app signing policy, or account authorization is bypassed.
 - Legacy backend suite: 483 passed, 5 skips (available local dependencies).
 - Android GitHub lint + unit tests: passed on source snapshot f5fbc1d.
 - Real Linux two-app process isolation test: passed in Platform app controls CI.
-- Real Windows two-app process isolation: see Platform app controls CI; do not
-  infer a Windows pass from the Mac compile or Linux results.
+- Real Windows two-app process isolation: passed in Platform app controls CI on
+  source 4d9304b. Both Windows and Linux stopped the selected managed tree while
+  the second disposable app kept running; cached executable files were retained.
 
 No production deployment, installed-app replacement, user-file offload or force
 quit of a real user's application was performed for these tests.
