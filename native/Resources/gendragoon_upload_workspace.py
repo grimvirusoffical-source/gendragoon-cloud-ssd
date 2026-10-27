@@ -406,13 +406,25 @@ def enqueue(expected_revision, offload, home=None):
             if any(old["name"] == new["name"] and old["path"] != new["path"]
                    for old in existing["sources"] for new in state["sources"]):
                 raise WorkspaceError("name_conflict", "Another queued source already uses this name in the selected cloud folder", state)
+    # Clicking Upload explicitly captures the CURRENT selected files. Ordinary
+    # metadata edits and an app exiting since selection should not force a
+    # tedious remove/reselect cycle. This never reuses an old fingerprint: the
+    # immutable job freezes this fresh scan and the worker verifies it again
+    # before invoking the archive/round-trip/offload helper.
+    fresh_sources = []
     for source in state["sources"]:
-        unchanged(source)
+        path = source_path(source["path"])
+        if str(path) != source["path"] or kindof(path) != source["kind"] or path.name != source["name"]:
+            raise WorkspaceError("source_changed", "A selected source was replaced or renamed; select it again")
+        fresh = copy.deepcopy(source)
+        fresh["identity"] = fingerprint(path)
+        fresh_sources.append(fresh)
     with locked_state(home) as (descriptor, current):
         require_revision(current, expected_revision)
         require_idle(current)
         if len(current["jobs"]) >= MAX_JOBS:
             raise WorkspaceError("workspace_full", "The upload queue/history is full; existing jobs were retained")
+        current["sources"] = fresh_sources
         now = time.time()
         job = {"id": uuid.uuid4().hex, "state": "queued", "destination": copy.deepcopy(current["destination"]),
                "sources": copy.deepcopy(current["sources"]), "offload": offload,
