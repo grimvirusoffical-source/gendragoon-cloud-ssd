@@ -378,6 +378,7 @@ final class UploadWorkspaceModel: ObservableObject {
     @Published private(set) var workerPending = false
     @Published private(set) var isRefreshingChoices = false
     @Published private(set) var pickerPending = false
+    @Published private(set) var preflightingApplications = false
     @Published private(set) var verifiedDestination: UploadDestination?
     @Published var offload = false
     @Published var failure: UploadFailure?
@@ -416,7 +417,7 @@ final class UploadWorkspaceModel: ObservableObject {
         }
     }
     func controlsLocked(externalBusy: Bool) -> Bool {
-        snapshot == nil || externalBusy || !GDUpdateActivity.shared.canStart(excluding: self) || isMutationPending || workerPending || hasRunningJob || pickerPending
+        snapshot == nil || externalBusy || !GDUpdateActivity.shared.canStart(excluding: self) || isMutationPending || workerPending || hasRunningJob || pickerPending || preflightingApplications
     }
     func replaceProjects(_ projects: [UploadCloudProject]) {
         self.projects = projects
@@ -537,8 +538,60 @@ final class UploadWorkspaceModel: ObservableObject {
             failure = UploadFailure("Choose an available authorized project and bucket before uploading.")
             return
         }
-        mutate(["enqueue", "--offload", offload ? "true" : "false"],
-               externalBusy: externalBusy, startAfterSuccess: true)
+        guard !controlsLocked(externalBusy: externalBusy) else { return }
+        // NSRunningApplication identifies the exact selected bundle on this Mac;
+        // an app with the same display name in another location is never touched.
+        let selectedApps = Set((snapshot?.sources ?? []).filter { $0.kind == "app" }
+            .map { URL(fileURLWithPath: $0.path).standardizedFileURL.path })
+        let running = NSWorkspace.shared.runningApplications.filter { candidate in
+            guard let bundle = candidate.bundleURL else { return false }
+            return !candidate.isTerminated && selectedApps.contains(bundle.standardizedFileURL.path)
+        }
+        let arguments = ["enqueue", "--offload", offload ? "true" : "false"]
+        guard !running.isEmpty else {
+            mutate(arguments, externalBusy: externalBusy, startAfterSuccess: true)
+            return
+        }
+        let warning = NSAlert()
+        warning.alertStyle = .warning
+        warning.messageText = "Quit running applications before uploading?"
+        warning.informativeText = "GenDragoon found \(running.count) selected app(s) still running. Save your work first. Quitting keeps the verified cloud backup and offload checks reliable."
+        warning.addButton(withTitle: "Quit and Upload")
+        warning.addButton(withTitle: "Cancel")
+        guard warning.runModal() == .alertFirstButtonReturn else { return }
+        preflightingApplications = true
+        updateBusyGate()
+        Task { [weak self] in
+            guard let self else { return }
+            for app in running { _ = app.terminate() }
+            for _ in 0..<25 {
+                if running.allSatisfy({ $0.isTerminated }) { break }
+                try? await Task.sleep(for: .milliseconds(200))
+            }
+            let stubborn = running.filter { !$0.isTerminated }
+            if !stubborn.isEmpty {
+                let confirmation = NSAlert()
+                confirmation.alertStyle = .critical
+                confirmation.messageText = "Force quit \(stubborn.count) app(s)?"
+                confirmation.informativeText = "The apps did not quit normally. Force quitting may discard unsaved changes. Cancel to keep the originals untouched."
+                confirmation.addButton(withTitle: "Force Quit and Upload")
+                confirmation.addButton(withTitle: "Cancel")
+                if confirmation.runModal() == .alertFirstButtonReturn {
+                    for app in stubborn { _ = app.forceTerminate() }
+                    for _ in 0..<25 {
+                        if running.allSatisfy({ $0.isTerminated }) { break }
+                        try? await Task.sleep(for: .milliseconds(200))
+                    }
+                }
+            }
+            self.preflightingApplications = false
+            self.updateBusyGate()
+            guard running.allSatisfy({ $0.isTerminated }) else {
+                self.failure = UploadFailure("An application is still running. Its files were not uploaded or offloaded. Quit it and try again.")
+                return
+            }
+            self.mutate(arguments, externalBusy: false, startAfterSuccess: true)
+        }
     }
     private func mutate(_ arguments: [String], externalBusy: Bool, startAfterSuccess: Bool = false) {
         guard !controlsLocked(externalBusy: externalBusy), let revision = snapshot?.revision else { return }
@@ -547,14 +600,26 @@ final class UploadWorkspaceModel: ObservableObject {
         Task { [self] in
             var succeeded = false
             do {
-                let response = try await call(arguments + ["--expected-revision", String(revision)])
-                apply(response.state)
-                guard response.ok else {
+                var expectedRevision = revision
+                for attempt in 0..<2 {
+                    let response = try await call(arguments + ["--expected-revision", String(expectedRevision)])
+                    apply(response.state)
+                    if response.ok {
+                        succeeded = true
+                        if arguments.first == "select-destination" { verifiedDestination = response.state?.destination }
+                        await browse(path: tree?.path)
+                        break
+                    }
+                    // A polling/read race must not force the user to repeat a click.
+                    // Retry once against fresh authoritative state; never retry a
+                    // failed upload/offload worker or a conflicting active job.
+                    if attempt == 0, response.error == "revision_conflict",
+                       let fresh = response.state, fresh.activeJobID == nil {
+                        expectedRevision = fresh.revision
+                        continue
+                    }
                     throw UploadFailure(response.message ?? response.error ?? "Upload settings were not changed.")
                 }
-                succeeded = true
-                if arguments.first == "select-destination" { verifiedDestination = response.state?.destination }
-                await browse(path: tree?.path)
             } catch { failure = UploadFailure(error.localizedDescription) }
             isMutationPending = false
             if succeeded && startAfterSuccess { startQueuedUploads(externalBusy: false) }
@@ -597,7 +662,7 @@ final class UploadWorkspaceModel: ObservableObject {
         updateBusyGate()
     }
     private func updateBusyGate() {
-        let busy = isMutationPending || pickerPending || workerPending || hasRunningJob
+        let busy = isMutationPending || pickerPending || workerPending || hasRunningJob || preflightingApplications
         guard busy != reportedBusy else { return }
         reportedBusy = busy
         GDUpdateActivity.shared.set(self, key: "upload", active: busy)
