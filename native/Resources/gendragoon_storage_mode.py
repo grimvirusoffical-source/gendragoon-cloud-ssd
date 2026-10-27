@@ -4,6 +4,11 @@ Legacy encrypted archives always use the original Red-SecretsXAI client. Users
 must explicitly opt out for each queued new upload; restoring an existing
 archive selects its immutable format by checking its authenticated PNG header.
 """
+# Signed app resources must remain immutable, even for a bare helper CLI.
+import os
+import sys
+sys.dont_write_bytecode = True
+os.environ["PYTHONDONTWRITEBYTECODE"] = "1"
 import hashlib
 import json
 import os
@@ -269,3 +274,12 @@ def download_archive(config, item, destination, client_factory=None):
             if partial.exists():
                 partial.unlink()
         return {"root": root, "manifest": manifest, "archive": str(target)}
+
+
+if __name__ == "__main__":
+    # Production clients import this module as a library; expose only help as
+    # a standalone signed helper. No cloud request or file content is touched.
+    import argparse
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.parse_args()
+    parser.print_help()

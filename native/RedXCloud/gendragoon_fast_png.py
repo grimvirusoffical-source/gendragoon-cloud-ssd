@@ -5,6 +5,11 @@ storage. It satisfies the existing PNG-only Receiver API without invoking or
 modifying the pinned Red-SecretsXAI implementation. A complete archive retains
 independent SHA-256 readback and a manifest verification before any offload.
 """
+# Signed app resources must remain immutable, even for a bare helper CLI.
+import os
+import sys
+sys.dont_write_bytecode = True
+os.environ["PYTHONDONTWRITEBYTECODE"] = "1"
 import hashlib
 import struct
 import zlib
@@ -108,3 +113,12 @@ def decode(png, object_id):
     if hashlib.sha256(plain).digest() != raw[len(MAGIC) + 20:header]:
         raise PlainCarrierError("Carrier SHA-256 mismatch")
     return plain
+
+
+if __name__ == "__main__":
+    # Production clients import this module as a library; expose only help as
+    # a standalone signed helper. No cloud request or file content is touched.
+    import argparse
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.parse_args()
+    parser.print_help()

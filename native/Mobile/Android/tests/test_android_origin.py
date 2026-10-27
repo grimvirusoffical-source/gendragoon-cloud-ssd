@@ -114,7 +114,7 @@ class AndroidOriginTests(unittest.TestCase):
 
     def test_upload_adapter_passes_account_origin_and_keeps_verified_source(self):
         with patch.object(sys, "path", [str(RESOURCES), *sys.path]):
-            import gendragoon_redx_storage as storage
+            import gendragoon_storage_mode as storage
         profile = self.profile()
         source = self.root / "selected.txt"
         source.write_bytes(b"explicit selected owner fixture")
