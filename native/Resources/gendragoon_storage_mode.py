@@ -24,7 +24,12 @@ def __getattr__(name):
     return getattr(encrypted, name)
 
 def _expected_plain_manifest(item):
-    return encrypted.object_id(fast.PROFILE + "-root-manifest", item["archiveSha256"], item["key"])
+    # Receiver copy operations create a new library key while retaining the
+    # original immutable archive key; they must not require reuploading bytes.
+    archive_key = item.get("archiveKey") or item.get("key")
+    if not isinstance(archive_key, str) or not encrypted.KEY.fullmatch(archive_key):
+        raise encrypted.RedXStorageError("Unencrypted archive identity is invalid")
+    return encrypted.object_id(fast.PROFILE + "-root-manifest", item["archiveSha256"], archive_key)
 
 def codec_for_item(client, item):
     manifest_id = item.get("manifestId")

@@ -125,6 +125,13 @@ class FastCarrierTests(unittest.TestCase):
                 cfg, source, "a"*18, "content", "file", "flat",
                 hashlib.sha256(data).hexdigest(), [{"path": "content", "size": len(data)}],
                 client_factory=FixtureReceiver, encryption=False)
+            # A server-side copy has a fresh library key but retains the
+            # original archiveKey. This is a legitimate immutable reference.
+            copied = dict(FixtureReceiver.items["a"*18], key="b"*18, archiveKey="a"*18)
+            copied_path = Path(temp) / "copy"
+            mode.download_archive(cfg, copied, copied_path, client_factory=FixtureReceiver)
+            self.assertEqual(copied_path.read_bytes(), data)
+
             changed = dict(FixtureReceiver.items["a"*18], key="b"*18)
             with self.assertRaisesRegex(legacy.RedXStorageError, "immutable object identity"):
                 mode.download_archive(cfg, changed, Path(temp)/"bad", client_factory=FixtureReceiver)
