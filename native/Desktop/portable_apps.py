@@ -3,7 +3,8 @@
 Catalog origin and filename hints never authorize execution. The current
 MachineNotes client supplies a freshly authenticated archive and manifest.
 Every preparation is retained, including failures. There is deliberately no
-cache eviction, original removal, process termination, or companion IPC API.
+cache eviction or original removal. Explicit Stop requests are broker-owned;
+no browser-supplied process IDs or executable paths authorize termination.
 """
 from dataclasses import dataclass
 import base64
@@ -21,6 +22,13 @@ import sys
 import time
 import uuid
 
+# Source-tree broker runs need the reviewed Windows IPC helper just like staged
+# clients. Use only the fixed adjacent Resources directory, never PYTHONPATH
+# inherited from a browser or arbitrary caller. Frozen/staged apps keep their
+# bundled module resolution unchanged.
+_resources = Path(__file__).resolve().parents[1] / "Resources"
+if not getattr(sys, "frozen", False) and (_resources / "gendragoon_platform_ipc.py").is_file():
+    sys.path.insert(0, str(_resources))
 import private_fs as private
 
 SCHEMA="gendragoon.portable-app/v1"

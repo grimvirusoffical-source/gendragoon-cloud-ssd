@@ -16,6 +16,7 @@ class NativeStopTests(unittest.TestCase):
             root=Path(td).resolve();binary=compile_portable_fixture(root)
             manager=apps.PortableApps(root/'sessions')
             first=prepare_native_fixture(manager,binary);second=prepare_native_fixture(manager,binary)
+            primary=None
             try:
                 a=manager.launch(first,binary.name,approved=True)
                 b=manager.launch(second,binary.name,approved=True)
@@ -27,8 +28,17 @@ class NativeStopTests(unittest.TestCase):
                 self.assertNotEqual(before,(second.payload/'child-heartbeat').read_text())
                 self.assertTrue((first.payload/binary.name).exists())
                 self.assertTrue(binary.exists())
+            except Exception as error:
+                primary=error
+                print("Primary fixture failure:",type(error).__name__,getattr(error,"diagnostic",{}),file=sys.stderr)
+                raise
             finally:
-                finish_native_fixture(manager,first)
-                finish_native_fixture(manager,second)
+                cleanup_errors=[]
+                for prepared in (first,second):
+                    try:finish_native_fixture(manager,prepared)
+                    except Exception as error:
+                        cleanup_errors.append(error)
+                        print("Fixture cleanup:",str(error),file=sys.stderr)
+                if cleanup_errors and primary is None:raise cleanup_errors[0]
 
 if __name__=='__main__':unittest.main()
