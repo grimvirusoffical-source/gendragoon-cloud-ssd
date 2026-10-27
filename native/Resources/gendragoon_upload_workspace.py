@@ -433,7 +433,9 @@ def refreshed_source(source):
         if str(path) != source["path"] or kindof(path) != source["kind"]:
             raise WorkspaceError("source_changed", "The selected source moved or changed type; select it again")
         return {**source, "identity": fingerprint(path)}
-    except WorkspaceError:
+    except WorkspaceError as exc:
+        if exc.code == "invalid_source":
+            raise WorkspaceError("source_changed", "The selected root is no longer an ordinary, unlinked source; select it again") from exc
         raise
     except OSError as exc:
         raise WorkspaceError("source_changed", "The selected source is no longer accessible; select it again") from exc

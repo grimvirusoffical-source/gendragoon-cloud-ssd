@@ -525,10 +525,10 @@ def unchanged(source,baseline):
     """
     observed=snapshot(source)
     if observed["manifest"]!=baseline["manifest"] or set(observed["guard"])!=set(baseline["guard"]):
-        raise RuntimeError("Source content or important metadata changed since backup; original retained")
+        raise RuntimeError("Source changed: content or important metadata differs from backup; original retained")
     for path,initial in baseline["guard"].items():
         if tuple(observed["guard"][path][:3])!=tuple(initial[:3]):
-            raise RuntimeError("Source item was replaced since backup; original retained")
+            raise RuntimeError("Source changed: a source item was replaced since backup; original retained")
 def verify_restored(path,manifest):
     verified=snapshot(path);actual=verified["manifest"]
     # Older library manifests predate xattr recording. Do not fabricate it for
