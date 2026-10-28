@@ -102,6 +102,66 @@ def store_revision(key,entry,expected):
         data=_load()
         if data.get(key)!=expected:raise RuntimeError("Library entry changed during upload; original retained")
         data[key]=entry;_save(data)
+def _offload_receipt(path, value):
+    """Durable intent/result, independent of replaceable library-list metadata."""
+    root=SUPPORT/"OffloadReceipts"
+    safe_path(root,directory=True);root.mkdir(mode=0o700,exist_ok=True)
+    if path.parent!=root or not re.fullmatch(r"[a-f0-9]{16}(?:[a-f0-9]{2})?-[a-f0-9]{32}\.json",path.name):
+        raise ValueError("Invalid offload receipt path")
+    safe_path(path)
+    descriptor,name=tempfile.mkstemp(prefix=".offload-",dir=root)
+    try:
+        with os.fdopen(descriptor,"w",encoding="utf8") as output:
+            json.dump(value,output);output.flush();os.fsync(output.fileno())
+        os.replace(name,path)
+    finally:
+        if os.path.exists(name):os.unlink(name)
+
+
+def verified_offload(key,src,entry,baseline):
+    """Move only a verified, unchanged original; never confuse receipt failure with a failed move."""
+    src=Path(src)
+    identity=("source","name","project","bucket","remote","format","file","sha256","redxManifestId")
+    receipt_path=SUPPORT/"OffloadReceipts"/(key+"-"+uuid.uuid4().hex+".json")
+    receipt={"schema":1,"key":key,"source":str(src),"archiveSha256":entry.get("sha256"),
+             "manifestId":entry.get("redxManifestId"),"state":"prepared","createdAt":time.time()}
+    with library_lock():
+        entries=_load();current=entries.get(key)
+        if not current or any(current.get(field)!=entry.get(field) for field in identity):
+            raise RuntimeError("The verified cloud archive changed; no original was moved")
+        unchanged(src,baseline)
+        if is_running(src):raise RuntimeError("Application started during upload; original retained")
+        # Saving the intent must succeed before the reversible OS Trash action.
+        _offload_receipt(receipt_path,receipt)
+        try:
+            trash(src)
+        except Exception:
+            missing=not src.exists() and not src.is_symlink()
+            receipt.update(state="unconfirmed" if missing else "retained",updatedAt=time.time())
+            try:_offload_receipt(receipt_path,receipt)
+            except OSError:pass
+            return {"offloaded":False,"originalMissing":missing,
+                    "message":"Cloud backup verified. OS Trash did not confirm the result; inspect Trash before retrying." if missing else
+                              "Cloud backup verified. The original is still present because OS Trash did not finish."}
+        if src.exists() or src.is_symlink():
+            receipt.update(state="retained",updatedAt=time.time());_offload_receipt(receipt_path,receipt)
+            return {"offloaded":False,"originalMissing":False,
+                    "message":"Cloud backup verified. The original is still present; no successful offload was recorded."}
+        moved_at=time.time();receipt.update(state="trashed",updatedAt=moved_at)
+        recorded=True
+        try:_offload_receipt(receipt_path,receipt)
+        except Exception:recorded=False
+        # Preserve refreshed catalog fields rather than comparing the entire
+        # pre-upload dictionary after Finder has already moved the original.
+        current.update(offloaded=True,trashedAt=moved_at,offloadReceipt=receipt_path.name)
+        entries[key]=current
+        try:_save(entries)
+        except Exception:recorded=False
+        return {"offloaded":True,"offloadRecorded":recorded,
+                "message":"Verified cloud backup; original moved to Trash." if recorded else
+                          "Verified cloud backup; original moved to Trash. Local receipt repair is pending; do not upload it again."}
+
+
 @contextmanager
 def upload_lease(key):
     prepare_cache()
@@ -265,6 +325,9 @@ def sync_redx_library(project,bucket,remote,cloud_snapshot=None):
                   "redxManifestId":item.get("manifestId"),"redxGeneration":item.get("generation",1),"redxTreeRevision":snapshot["revision"],
                   "cacheTreeRevision":existing.get("cacheTreeRevision"),**context}
             if existing.get("cacheName"):base["cacheName"]=existing["cacheName"]
+            if same:
+                for field in ("trashedAt","offloadReceipt"):
+                    if field in existing:base[field]=existing[field]
             if existing!=base:
                 if existing.get("previousVersions"):base["previousVersions"]=existing["previousVersions"]
                 entries[key]=base;changed=True
@@ -689,14 +752,9 @@ def _upload(source,remote,folder,offload=False,project=None,bucket=None,parent_k
         # should remain quiescent during this user-authorized offload.
         unchanged(src,baseline)
         if is_running(src):raise RuntimeError("Application started during upload; original retained")
-        try:
-            progress.phase("offloading")
-            trash(src)
-            prior=json.loads(json.dumps(entry))
-            entry["offloaded"]=True;entry["trashedAt"]=time.time();store_revision(key,entry,prior)
-            reply(message=f"Verified cloud backup of {src.name}; moved original to Trash. Empty Trash to reclaim space.",offloaded=True,**result)
-        except Exception as exc:
-            reply(message=f"Cloud backup verified. Finder could not confirm moving the original to Trash; inspect it before retrying.",offloaded=False,**result)
+        progress.phase("offloading")
+        outcome=verified_offload(key,src,entry,baseline)
+        reply(**outcome,**result)
     else:
         reply(message=f"Verified cloud copy of {src.name}. Original kept locally.",offloaded=False,**result)
 def check_name(name):

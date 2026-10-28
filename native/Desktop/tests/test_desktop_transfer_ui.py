@@ -61,15 +61,19 @@ class FrozenQueueTests(unittest.TestCase):
         app=gui.GenDragoonGUI.__new__(gui.GenDragoonGUI);app.busy=True
         app.note=SimpleNamespace(current=lambda:0);app.selected=lambda:['c'*18]
         app.visible_items={'c'*18:{'key':'c'*18,'virtualFolder':True,'displayName':'Chosen folder'}}
-        calls=[];app.model=SimpleNamespace(session=SimpleNamespace(receiver='a'*64),keys={},vault_exported=True,notes=[{'id':'b'*32,'name':'Visible note','active':True}],selected_note='d'*32,enqueue_selection=lambda *args:calls.append(args) or {'id':'e'*32})
+        app.upload_mode=SimpleNamespace(get=lambda:"Standard encrypted")
+        app.upload_offload=SimpleNamespace(get=lambda:False)
+        calls=[];options=[];app.model=SimpleNamespace(session=SimpleNamespace(receiver='a'*64),keys={},vault_exported=True,notes=[{'id':'b'*32,'name':'Visible note','active':True}],selected_note='d'*32,enqueue_selection=lambda *args,**kwargs:(calls.append(args),options.append(kwargs),{'id':'e'*32})[-1])
         app.status=MagicMock();app.refresh_jobs=lambda:None;app.show_transfers=lambda:None;app.drain_queue=lambda:None
         context=app.upload_context();self.assertEqual(context['workspaceId'],'b'*32);self.assertEqual(context['parentKey'],'c'*18)
         with tempfile.TemporaryDirectory() as td:
             source=Path(td).resolve()/'file';source.write_bytes(b'selected fixture')
-            app.queue_sources(context,[str(source)]);self.assertEqual(calls,[('b'*32,'c'*18,[str(source)])])
+            with patch('verified_offload.running_sources',return_value=[]):app.queue_sources(context,[str(source)])
+            self.assertEqual(calls,[('b'*32,'c'*18,[str(source)])])
             app.model.session.receiver='f'*64
             with self.assertRaisesRegex(ValueError,'account changed'):app.queue_sources(context,[str(source)])
             self.assertEqual(len(calls),1)
+            self.assertEqual(options,[{'encryption_mode':'standard','offload':False}])
     def test_read_only_destination_is_not_mistaken_for_upload_authority(self):
         import gendragoon_gui as gui
         app=gui.GenDragoonGUI.__new__(gui.GenDragoonGUI);app.note=SimpleNamespace(current=lambda:0)

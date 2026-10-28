@@ -723,8 +723,8 @@ def validate_upload_result(result, destination, source, offload):
             or result.get("parentKey") != source.get("parent_key")
             or any(result.get(key) != value for key, value in expected.items())):
         raise WorkspaceError("result_mismatch", "Upload result did not match this job's frozen source and destination")
-    if result["offloaded"] != offload:
-        raise WorkspaceError("offload_incomplete", "The verified upload did not complete the requested local-copy action")
+    if offload is not None and result["offloaded"] != offload:
+        raise WorkspaceError("offload_incomplete", "Cloud backup verified, but OS Trash did not confirm the offload. Check the cloud library and original before retrying.")
 
 
 def job_mutation(identifier, operation, home=None):
@@ -817,6 +817,11 @@ def run_next(home=None):
                     command.extend(["--encryption-mode","fast"])
                 with progress_scope(job, index, home):
                     outcome = child_result(command, maintenance_fd)
+                validate_upload_result(outcome, destination, source, None)
+                def verified(current,state):
+                    current["items"][index].update(key=outcome["key"],offloaded=outcome["offloaded"],
+                                                  message="Cloud backup verified; checking requested offload")
+                job_mutation(job["id"],verified,home)
                 validate_upload_result(outcome, destination, source, job["offload"])
                 def succeeded(current, state):
                     current["items"][index].update(state="succeeded", key=outcome["key"],

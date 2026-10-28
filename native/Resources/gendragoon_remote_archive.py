@@ -5,6 +5,12 @@ flat and zip-root uploads remain readable without re-upload. Payload LRU is 8 Mi
 per reader; oversized metadata/read requests fail closed, never fall back to a
 complete download. Explicit offline downloads still use the separate restore API.
 """
+# Never create bytecode beside signed app resources, even for a bare CLI call.
+import os
+import sys
+sys.dont_write_bytecode=True
+os.environ["PYTHONDONTWRITEBYTECODE"]="1"
+
 from bisect import bisect_right
 from collections import OrderedDict
 from contextlib import contextmanager
@@ -276,3 +282,10 @@ def open_member(client, item, relative, record, *, codec_factory=None):
                 raise RemoteReadError('This legacy archive is not streamable; no local fallback was used')
     finally:
         _READERS.release()
+
+
+if __name__=="__main__":
+    import argparse
+    parser=argparse.ArgumentParser(description=__doc__)
+    parser.parse_args()
+    parser.print_help()

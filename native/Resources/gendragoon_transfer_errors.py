@@ -14,6 +14,7 @@ MESSAGES = {
     "transfer_invalid": "The encrypted transfer could not be verified. Originals were retained.",
     "helper_failed": "The cloud helper did not return a verified result; the selection and job were retained",
     "upload_failed": "Upload could not finish; the selection and job were retained",
+    "offload_incomplete": "Cloud backup verified, but OS Trash did not confirm the offload. Check your cloud library and original before retrying.",
     "source_in_use": "Quit the selected application before moving it to Trash, or turn off Move originals to Trash to upload a backup while keeping it on this Mac.",
     "worker_interrupted": "The upload worker stopped. Its job and original files were retained.",
 }
