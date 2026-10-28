@@ -1,0 +1,17 @@
+{
+  "runtimes": {
+    "linux-x86_64": {
+      "archive": "linux-x86_64.zip",
+      "pinnedLibrary": "9235941b431bc1c23c34286b82052f845121592f",
+      "pythonMajorMinor": "3.13",
+      "sha256": "33ef7d8241e3cbf988bcd7ae98710ec9ab195a239d359baa65941955f8b4ad91"
+    },
+    "windows-x86_64": {
+      "archive": "windows-x86_64.zip",
+      "pinnedLibrary": "9235941b431bc1c23c34286b82052f845121592f",
+      "pythonMajorMinor": "3.13",
+      "sha256": "c830aa3a531f3031d196dfa16f2bda8da83918c3fe494b9c18d779e466b36fff"
+    }
+  },
+  "schema": 1
+}

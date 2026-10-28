@@ -149,6 +149,7 @@ function registerTransferV3({app,db,bucket,firebaseAuth,accountKey,FieldValue,ap
     ...(error.status&&typeof error.code==="string"?{code:error.code}:{})});
   }
  });}
+ const {makeLaunchIntent}=require('./app_launch_intents');
  const stamp=()=>FieldValue.serverTimestamp();
  const jobRef=(c,id)=>{if(!UUID.test(id))throw problem(400,"Invalid upload");return c.ref.collection("uploads").doc(id);};
  const temp=(c,id)=>c.prefix+"/tmp-v3/"+id+"/";
@@ -157,6 +158,22 @@ function registerTransferV3({app,db,bucket,firebaseAuth,accountKey,FieldValue,ap
   receivedRanges:ranges,nextIndex:nextMissing(ranges),
   uploadedBytes:x.uploadedBytes||0};}
  router.use(express.json({limit:"8kb"}));
+ route("post","/app-launch-intents",async(req,res)=>{
+  if(req.authKind==="api_key")throw problem(403,"Account session required for application launch requests");
+  const c=await context(req);if(c.team)throw problem(403,"Use a personal workspace for mobile launchers");
+  if(!UUID.test(req.body?.key||""))throw problem(400,"Invalid application item");
+  const file=c.ref.collection("files").doc(req.body.key),ref=c.ref.collection("appLaunchIntents").doc(req.body.key);
+  let result;const now=Date.now();
+  await db.runTransaction(async tx=>{
+   const snap=await tx.get(file);if(!snap.exists)throw problem(404,"Application not found");
+   const previous=await tx.get(ref);
+   result={...makeLaunchIntent(snap.data(),req.body,now),workspace:c.id};
+   if(previous.exists&&previous.data().id===result.id){result=previous.data();return;}
+   if(previous.exists&&previous.data().createdMs>now-1000)throw problem(429,"Wait before requesting this app again");
+   if(previous.exists)tx.update(ref,result);else tx.create(ref,result);
+  });
+  res.status(202).json(result);
+ });
  route("get","/config",async(req,res)=>{
   const c=await context(req);res.json({workspaceId:c.id,name:c.workspace.name,
    quotaBytes:c.quota,usedBytes:c.workspace.usedBytes||0,reservedBytes:c.workspace.reservedBytes||0,

@@ -1,0 +1,20 @@
+{
+  "schema": 1,
+  "upstream": "github.com/rclone/rclone",
+  "version": "v1.75.2",
+  "sourceCommit": "be8d6044eacb843b74d335db0c5fbe09222031fe",
+  "upstreamGoModURL": "https://raw.githubusercontent.com/rclone/rclone/v1.75.2/go.mod",
+  "upstreamGoModSHA256": "1c9531778eb026c13390af728f882adbeb30581bd6a10905f95190aab0379906",
+  "upstreamGoSumURL": "https://raw.githubusercontent.com/rclone/rclone/v1.75.2/go.sum",
+  "upstreamGoSumSHA256": "7ae53fe95455765a14c3e3b17354dd9ade1d26ba574261fc34f217e79053b89a",
+  "graph": "Exact upstream require blocks, plus the unchanged rclone module itself; no replace or fork.",
+  "selfModuleChecksums": [
+    "github.com/rclone/rclone v1.75.2 h1:0cqa6P3WmhGnu2NeOdZSetJnacpwCRtpsNbHOICqPk8=",
+    "github.com/rclone/rclone v1.75.2/go.mod h1:YmKNkhnFIoIwLsEZl7FSN756Iq5ZXy3LPDuypnuFocA="
+  ],
+  "checksumSource": "https://sum.golang.org/lookup/github.com/rclone/rclone@v1.75.2",
+  "cgofuse": "v1.6.1-0.20260126094232-f2c4fccdb286",
+  "minimumGo": "1.26.0",
+  "privateSourceIncluded": false,
+  "checksumLookupSHA256": "02b38837f1c0911c7e291d7e609bfa04faa0cdfb6f357f6396e10fc53d2d7f2c"
+}

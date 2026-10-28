@@ -35,11 +35,13 @@ const env={STRIPE_CHECKOUT_ENABLED:"false",STRIPE_ENVIRONMENT:"test",PUBLIC_URL:
 const stripe={customers:{create:async()=>({id:"cus_fixture"})},checkout:{sessions:{}},prices:{retrieve:async()=>{throw Error("stripe double");}}};
 const monthlyEnv={...env,STRIPE_CHECKOUT_ENABLED:"true"};
 // Existing Stripe price keys reused by the plans model; no new price is needed.
-const PLAN_PRICES={"storage|standard|100GB|month":"price_fixturestorage100gb","performance|boost|month":"price_fixtureboost","performance|lite|month":"price_fixturelite"};
+const PLAN_PRICES={"storage|standard|100GB|month":"price_fixturestorage100gb","performance|boost|month":"price_fixtureboost","performance|lite|month":"price_fixturelite","one_time|project_creation":"price_fixtureproject"};
 const PLANS={storageTier:"100GB",performanceTier:"boost",interval:"month"};
 function monthlyStripe(){
  return {customers:{create:async()=>({id:"cus_fixture"})},
-  prices:{retrieve:async id=>({id,active:true,type:"recurring",recurring:{interval:"month"},currency:"usd",unit_amount:500,billing_scheme:"per_unit",livemode:false,product:{active:true}})},
+  prices:{retrieve:async id=>id==="price_fixtureproject"
+    ?{id,active:true,type:"one_time",recurring:null,currency:"usd",unit_amount:500,billing_scheme:"per_unit",livemode:false,product:{active:true}}
+    :{id,active:true,type:"recurring",recurring:{interval:"month"},currency:"usd",unit_amount:500,billing_scheme:"per_unit",livemode:false,product:{active:true}}},
   checkout:{sessions:{retrieve:async()=>{throw Error("missing session");},create:async()=>({id:"cs_fixture_plans",url:"https://checkout.stripe.com/c/pay/cs_fixture_plans",status:"open"})}}};
 }
 const byoBody={provider:"s3",endpoint:"https://bucket.s3.us-east-1.amazonaws.com",bucketFingerprint:"ab".repeat(8)};
@@ -235,7 +237,7 @@ async function freeSlotCases(){
   writeCase("workspaces","second-plans-required",bare);
   const second=await capture(hosted.base,"POST","/v2/projects",{body:{name:"Second Workspace",intentId:wid(2),plans:PLANS}});
   assertPrice(second,false,0,"second-plans");
-  if(second.response.body?.totalCents!==1240||second.response.body?.project?.billingModel!=="plans")throw Error("second plans "+JSON.stringify(second.response.body));
+  if(second.response.body?.totalCents!==1740||second.response.body?.oneTimeCents!==500||second.response.body?.project?.billingModel!=="plans")throw Error("second plans "+JSON.stringify(second.response.body));
   writeCase("workspaces","second-plans-checkout",second);
   const refused=await capture(hosted.base,"POST","/v2/workspaces/"+wid(1)+"/byo/register",{body:byoBody});
   if(refused.response.body?.error!=="CUSTOM_STORAGE_NEW_WORKSPACE")throw Error("custom on hosted "+JSON.stringify(refused.response));
@@ -255,7 +257,7 @@ async function freeSlotCases(){
   writeCase("workspaces","custom-performance-required",noPlan);
   const created=await capture(only.base,"POST","/v2/projects",{body:{name:"Own S3",intentId:wid(3),storage:"custom",plans:{performanceTier:"lite",interval:"month"}}});
   assertPrice(created,false,0,"custom-create");
-  if(created.response.body?.totalCents!==300||created.response.body?.project?.customStorage!==true)throw Error("custom create "+JSON.stringify(created.response.body));
+  if(created.response.body?.totalCents!==800||created.response.body?.oneTimeCents!==500||created.response.body?.project?.customStorage!==true)throw Error("custom create "+JSON.stringify(created.response.body));
   writeCase("workspaces","custom-storage-checkout",created);
   const listed=await capture(only.base,"GET","/v2/workspaces");
   const policy=listed.response.body?.policy;

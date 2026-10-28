@@ -473,7 +473,22 @@ struct StoredApp: Decodable, Identifiable {
     let folder: String
     let kind: String?
     let format: String?
+    let displayName: String?
+    let parentKey: String?
+    let virtualFolder: Bool?
+    let archiveKey: String?
+    let bucket: String?
+    let redxManifestId: String?
+    let origin: GDDeviceOrigin?
+    let applicationPlatform: String?
     var id: String { key }
+    var label: String { displayName ?? name }
+    var isFolder: Bool { kind == "folder" }
+    var isVirtualFolder: Bool { virtualFolder == true }
+    var applicationPlatformCode: String? { isVirtualFolder ? nil : GDApplicationPlatform.hint(name: name, kind: kind, declared: applicationPlatform) }
+    var deviceLabel: String { isVirtualFolder ? "Library folder" : origin?.label ?? "Unknown upload device" }
+    var canRestoreOnMac: Bool { GDApplicationPlatform.mayRestoreOnMac(applicationPlatformCode) }
+    var compatibilityMessage: String { "This application or installer backup belongs to " + GDApplicationPlatform.label(applicationPlatformCode ?? "unknown") + ". Restore it using GenDragoon on its original platform. It cannot run as a Mac application." }
 }
 struct GDManagedAppSession: Identifiable {
     let key: String
@@ -483,8 +498,10 @@ struct GDManagedAppSession: Identifiable {
     let cleanupPending: Bool
     let mode: String
     let active: Bool
+    let cachePath: String
     var id: String { key }
     var message: String {
+        if mode == "workspace-stream" { return active ? "Files on Kamatera · on-demand reads · execution on this Mac." : "Cloud app stopped. Workspace and server files retained." }
         if cleanupPending { return mode == "streamed" ? "Streaming from a verified cloud mount · cache cleanup follows exit." : "Running locally · managed cache cleanup follows application exit." }
         switch state {
         case "cleaned", "evicted", "exited-cleaned": return "Local application cache removed. Cloud copy is available."
@@ -499,6 +516,7 @@ struct GDManagedAppSession: Identifiable {
     @Published var folder: String = "" { didSet { if projectID == nil && oldValue != folder { apps = [] } } }
     @Published var remotes: [String] = []
     @Published var apps: [StoredApp] = []
+    @Published private(set) var libraryRevision: Int?
     @Published var message = "Choose a verified cloud destination to load its library."
     @Published var busy = false { didSet { GDUpdateActivity.shared.set(self, key: "library", active: busy) } }
     @Published var offloadOriginal = false
@@ -506,6 +524,7 @@ struct GDManagedAppSession: Identifiable {
         didSet { UserDefaults.standard.set(cleanupAfterExit, forKey: "gd.library.cleanupAfterExit") }
     }
     @Published private(set) var sessions: [GDManagedAppSession] = []
+    @Published private(set) var stoppingKey: String?
     private var projectID: String?
     private var bucket: String?
     private var monitor: Task<Void, Never>?
@@ -516,6 +535,12 @@ struct GDManagedAppSession: Identifiable {
     }
     deinit { monitor?.cancel() }
     var hasDestination: Bool { projectID != nil && bucket != nil && !remote.isEmpty }
+    var destinationIdentity: String { (projectID ?? "") + "/" + (bucket ?? "") + "/" + remote }
+    var canOrganize: Bool {
+        remote == "redxai" && libraryRevision != nil && GDRedXAIAuthSession.shared.uploadProjects.contains { project in
+            project.id == projectID && project.buckets.contains { $0.id == bucket }
+        }
+    }
     private var context: [String] {
         var values = ["--remote", remote]
         if let projectID, let bucket { values += ["--project", projectID, "--bucket", bucket] }
@@ -526,31 +551,54 @@ struct GDManagedAppSession: Identifiable {
         let changed = projectID != destination.project || bucket != destination.bucket || remote != destination.remote
         projectID = destination.project; bucket = destination.bucket; remote = destination.remote
         folder = destination.bucket + (destination.prefix.isEmpty ? "" : "/" + destination.prefix)
-        if changed { apps = [] }
+        if changed { apps = []; libraryRevision = nil }
+    }
+    func clearDestination() {
+        projectID = nil; bucket = nil; remote = ""; folder = ""; apps = []; libraryRevision = nil
+        message = "Choose an available MachineNote to load your encrypted library."
     }
     func session(for key: String) -> GDManagedAppSession? {
         sessions.first { $0.key == key && $0.active } ?? sessions.last { $0.key == key }
     }
-    private func invoke(_ args: [String], helper: String = "gendragoon_library", then: @escaping (Bool, [String: Any]) -> Void = { _, _ in }) {
+    private func invoke(_ args: [String], helper: String = "gendragoon_library", publishMessage: Bool = true, then: @escaping (Bool, [String: Any]) -> Void = { _, _ in }) {
         guard !busy, GDUpdateActivity.shared.canStart(excluding: self) else { return }
         busy = true
         Task {
             do {
-                let usesPerformance = ["upload", "restore", "launch"].contains(args.first ?? "")
-                let input = usesPerformance ? await GDNativePerformance.shared.helperInput() : nil
+                let action = args.first ?? ""
+                let input: Data?
+                if remote == "redxai", ["list", "upload", "restore", "launch", "organize"].contains(action) {
+                    guard let bucket else { throw GDTransferError(message: "Choose a Red-XAI workspace first.", status: 400) }
+                    input = try await GDRedXAIAuthSession.shared.privateWorkerInput(workspaceID: bucket, constrained: false, requireWrite: ["upload", "organize"].contains(action))
+                } else if ["upload", "restore", "launch"].contains(action) {
+                    input = await GDNativePerformance.shared.helperInput()
+                } else {
+                    input = nil
+                }
                 let result = try await GDNativeHelper.invoke(helper,
                     arguments: args + (input == nil ? [] : ["--performance-stdin"]), standardInput: input)
-                if let detail = result["message"] as? String { message = GDNativeMessage.safe(detail) }
+                if !publishMessage { /* Preserve the operation result during a snapshot refresh. */ }
+                else if let detail = result["message"] as? String { message = GDNativeMessage.safe(detail) }
                 else if helper == "gendragoon_app_launch", args.first == "launch" {
                     message = result["mode"] as? String == "streamed" ? "Application launched with optimized cloud preloading." : "Application launched from its verified managed local cache."
                 } else if args.first == "evict" { message = "Managed local cache removed; the cloud copy remains available." }
                 else { message = "Operation completed." }
                 busy = false
                 then(true, result)
-            } catch { busy = false; message = GDNativeMessage.safe(error.localizedDescription); then(false, [:]) }
+            } catch {
+                busy = false
+                let detail = GDNativeMessage.safe(error.localizedDescription)
+                message = publishMessage ? detail : GDNativeMessage.safe(message + " Refresh also needs attention: " + detail)
+                then(false, [:])
+            }
         }
     }
     func refresh() {
+        if remote == "redxai" {
+            remotes = ["redxai"]
+            loadApps()
+            return
+        }
         invoke(["remotes"]) { [weak self] ok, value in
             guard let self, ok else { return }
             self.remotes = value["remotes"] as? [String] ?? []
@@ -558,14 +606,38 @@ struct GDManagedAppSession: Identifiable {
             if !self.remote.isEmpty { self.loadApps() }
         }
     }
-    func loadApps() {
+    func loadApps(preservingMessage: Bool = false) {
         guard !remote.isEmpty else { return }
         let expected = context
-        invoke(["list"] + expected) { [weak self] ok, value in
+        invoke(["list"] + expected, publishMessage: !preservingMessage) { [weak self] ok, value in
             guard let self, ok, self.context == expected, let raw = value["items"],
                   let data = try? JSONSerialization.data(withJSONObject: raw),
                   let items = try? JSONDecoder().decode([StoredApp].self, from: data) else { return }
             self.apps = items
+            self.libraryRevision = (value["revision"] as? NSNumber)?.intValue
+        }
+    }
+    func organize(_ operation: String, keys: [String] = [], parentKey: String? = nil, name: String? = nil,
+                  then: @escaping (Bool) -> Void = { _ in }) {
+        guard canOrganize, let revision = libraryRevision else {
+            message = "Refresh an active MachineNote before changing its library."; then(false); return
+        }
+        guard let encoded = try? JSONSerialization.data(withJSONObject: keys),
+              let keysJSON = String(data: encoded, encoding: .utf8) else { return }
+        var args = ["organize", "--operation", operation, "--keys-json", keysJSON,
+                    "--expected-revision", String(revision)] + context
+        if let parentKey { args += ["--parent-key", parentKey] }
+        if let name { args += ["--name", name] }
+        let expected = context
+        invoke(args) { [weak self] ok, result in
+            guard let self, self.context == expected else { then(false); return }
+            if ok, let raw = result["items"], let data = try? JSONSerialization.data(withJSONObject: raw),
+               let items = try? JSONDecoder().decode([StoredApp].self, from: data) {
+                self.apps = items
+                self.libraryRevision = (result["revision"] as? NSNumber)?.intValue
+            }
+            then(ok)
+            if !ok { self.loadApps(preservingMessage: true) }
         }
     }
     func chooseApp() {
@@ -588,7 +660,13 @@ struct GDManagedAppSession: Identifiable {
                         self.message = "Uploading and verifying \(source.lastPathComponent)…"
                         var args = ["upload", "--source", source.path, "--folder", destination] + context
                         if offload { args.append("--offload") }
-                        let input = await GDNativePerformance.shared.helperInput()
+                        let input: Data?
+                        if self.remote == "redxai" {
+                            guard let bucket = self.bucket else { throw GDTransferError(message: "Choose a Red-XAI workspace first.", status: 400) }
+                            input = try await GDRedXAIAuthSession.shared.privateWorkerInput(workspaceID: bucket, constrained: false, requireWrite: true)
+                        } else {
+                            input = await GDNativePerformance.shared.helperInput()
+                        }
                         let result = try await GDNativeHelper.invoke("gendragoon_library",
                             arguments: args + (input == nil ? [] : ["--performance-stdin"]), standardInput: input)
                         self.message = result["message"] as? String ?? "Cloud copy and restore verified."
@@ -600,10 +678,15 @@ struct GDManagedAppSession: Identifiable {
     }
     func scanCloud() {
         guard !remote.isEmpty, !folder.isEmpty else { return }
+        if remote == "redxai" {
+            loadApps()
+            return
+        }
         let root = bucket ?? folder.components(separatedBy: "/").first ?? ""
         invoke(["scan", "--root", root] + context) { [weak self] ok, _ in if ok { self?.loadApps() } }
     }
     func launch(_ app: StoredApp) {
+        guard app.canRestoreOnMac else { message = app.compatibilityMessage; return }
         if hasDestination && app.kind == "app" { smartLaunch(app); return }
         invoke(["launch", "--key", app.key] + context) { [weak self] ok, result in
             if ok, app.kind == "app", let path = result["localPath"] as? String {
@@ -613,6 +696,7 @@ struct GDManagedAppSession: Identifiable {
         }
     }
     func smartLaunch(_ app: StoredApp) {
+        guard app.kind == "app", app.canRestoreOnMac else { message = app.compatibilityMessage; return }
         guard hasDestination else { launch(app); return }
         var args = ["launch", "--key", app.key] + context
         if !cleanupAfterExit { args.append("--keep-cache") }
@@ -624,8 +708,134 @@ struct GDManagedAppSession: Identifiable {
             Task { @MainActor in await self.refreshSessions() }
         }
     }
+    private func runningManagedApplications(for session: GDManagedAppSession) -> [NSRunningApplication] {
+        // Only control a process whose actual bundle path matches our verified
+        // session cache. Never terminate a same-named local installation.
+        guard session.active, session.cachePath.hasPrefix("/") else { return [] }
+        let path = URL(fileURLWithPath: session.cachePath).standardizedFileURL.path
+        return NSWorkspace.shared.runningApplications.filter { process in
+            guard !process.isTerminated, let bundle = process.bundleURL else { return false }
+            return bundle.standardizedFileURL.path == path
+        }
+    }
+    private func waitUntilExited(_ apps: [NSRunningApplication]) async {
+        for _ in 0..<25 {
+            if apps.allSatisfy({ $0.isTerminated }) { return }
+            try? await Task.sleep(for: .milliseconds(200))
+        }
+    }
+    func stop(_ app: StoredApp) {
+        guard !busy, stoppingKey == nil, let active = session(for: app.key), active.active else { return }
+        let running = runningManagedApplications(for: active)
+        guard !running.isEmpty else {
+            message = "No verified application process is available to stop yet. Refresh the session status; no other apps were touched."
+            startSessionMonitoring()
+            return
+        }
+        stoppingKey = app.key
+        message = "Asking \(app.name) to quit…"
+        Task { [weak self] in
+            guard let self else { return }
+            for process in running { _ = process.terminate() }
+            await self.waitUntilExited(running)
+            let remaining = running.filter { !$0.isTerminated }
+            if !remaining.isEmpty {
+                let confirm = NSAlert()
+                confirm.alertStyle = .critical
+                confirm.messageText = "Force quit \(app.name)?"
+                confirm.informativeText = "The app did not quit normally. Force quitting may discard unsaved work."
+                confirm.addButton(withTitle: "Force Quit")
+                confirm.addButton(withTitle: "Keep Running")
+                if confirm.runModal() == .alertFirstButtonReturn {
+                    for process in remaining { _ = process.forceTerminate() }
+                    await self.waitUntilExited(remaining)
+                }
+            }
+            self.stoppingKey = nil
+            self.startSessionMonitoring()
+            await self.refreshSessions()
+            self.message = running.allSatisfy({ $0.isTerminated })
+                ? "Application stopped. The managed cache will be cleaned after its helpers exit; your cloud copy remains available."
+                : "Application is still running. No cloud files or local originals were removed."
+        }
+    }
+    func play(_ app: StoredApp) {
+        guard !busy, stoppingKey == nil else { return }
+        let others = sessions.filter { $0.active && $0.key != app.key }
+        guard !others.isEmpty else { smartLaunch(app); return }
+        let warning = NSAlert()
+        warning.alertStyle = .warning
+        warning.messageText = "Run multiple cloud applications?"
+        warning.informativeText = "You have \(others.count) other active cloud app session(s). Running more apps at once shares CPU, memory and cloud bandwidth, which may reduce performance."
+        warning.addButton(withTitle: "Continue")
+        warning.addButton(withTitle: "Cancel")
+        guard warning.runModal() == .alertFirstButtonReturn else { return }
+        let question = NSAlert()
+        question.alertStyle = .warning
+        question.messageText = "Close the other running cloud applications?"
+        question.informativeText = "Keep them running, or force quit verified cloud app processes before starting \(app.name). Force quitting can discard unsaved changes."
+        question.addButton(withTitle: "Keep Both Running")
+        question.addButton(withTitle: "Force Quit Other Apps")
+        question.addButton(withTitle: "Cancel")
+        switch question.runModal() {
+        case .alertFirstButtonReturn:
+            smartLaunch(app)
+        case .alertSecondButtonReturn:
+            let processes = others.map { runningManagedApplications(for: $0) }
+            guard processes.allSatisfy({ !$0.isEmpty }) else {
+                message = "Could not verify every other app process. No apps were terminated; choose Keep Both Running to start without closing them."
+                return
+            }
+            let targets = processes.flatMap { $0 }
+            stoppingKey = app.key
+            Task { [weak self] in
+                guard let self else { return }
+                for process in targets { _ = process.forceTerminate() }
+                await self.waitUntilExited(targets)
+                self.stoppingKey = nil
+                guard targets.allSatisfy({ $0.isTerminated }) else {
+                    self.message = "Some cloud applications could not be closed; no new app was started."
+                    return
+                }
+                self.smartLaunch(app)
+            }
+        default: break
+        }
+    }
     func preload(_ app: StoredApp) { smartLaunch(app) }
-    func restore(_ app: StoredApp) { invoke(["restore", "--key", app.key] + context) }
+    func restore(_ app: StoredApp) {
+        guard app.canRestoreOnMac else { message = app.compatibilityMessage; return }
+        invoke(["restore", "--key", app.key] + context)
+    }
+    func performOnItems(_ action: String, items: [StoredApp]) {
+        guard ["restore", "evict"].contains(action), !items.isEmpty,
+              !busy, GDUpdateActivity.shared.canStart(excluding: self) else { return }
+        if action == "restore", let incompatible = items.first(where: { !$0.canRestoreOnMac }) {
+            message = incompatible.compatibilityMessage; return
+        }
+        let expected = context, selectedRemote = remote, selectedBucket = bucket, managed = hasDestination
+        busy = true
+        Task {
+            var completed = 0, failed: [String] = []
+            for item in items {
+                guard context == expected else { break }
+                message = "\(action == "restore" ? "Downloading" : "Clearing local cache for") \(item.label) · \(completed + failed.count + 1) of \(items.count)…"
+                do {
+                    let input: Data?
+                    if action == "restore", selectedRemote == "redxai", let selectedBucket {
+                        input = try await GDRedXAIAuthSession.shared.privateWorkerInput(workspaceID: selectedBucket, constrained: false, requireWrite: false)
+                    } else { input = nil }
+                    guard context == expected else { break }
+                    let helper = action == "evict" && item.kind == "app" && managed ? "gendragoon_app_launch" : "gendragoon_library"
+                    _ = try await GDNativeHelper.invoke(helper, arguments: [action, "--key", item.key] + expected + (input == nil ? [] : ["--performance-stdin"]), standardInput: input)
+                    completed += 1
+                } catch { failed.append(item.label + ": " + GDNativeMessage.safe(error.localizedDescription)) }
+            }
+            busy = false
+            guard context == expected else { return }
+            message = "\(completed) of \(items.count) items completed." + (failed.isEmpty ? "" : " " + failed.prefix(3).joined(separator: " · "))
+        }
+    }
     func evict(_ app: StoredApp) {
         let helper = hasDestination && app.kind == "app" ? "gendragoon_app_launch" : "gendragoon_library"
         invoke(["evict", "--key", app.key] + context, helper: helper)
@@ -656,7 +866,8 @@ struct GDManagedAppSession: Identifiable {
                 guard let key = item["key"] as? String, let state = item["state"] as? String else { return nil }
                 return GDManagedAppSession(key: key, name: item["name"] as? String ?? key, state: state,
                     pid: (item["pid"] as? NSNumber)?.intValue ?? 0, cleanupPending: item["cleanupPending"] as? Bool ?? false,
-                    mode: item["mode"] as? String ?? "managed-local", active: item["active"] as? Bool ?? false)
+                    mode: item["mode"] as? String ?? "managed-local", active: item["active"] as? Bool ?? false,
+                    cachePath: item["cachePath"] as? String ?? "")
             }
             let active = result["active"] as? Bool ?? sessions.contains(where: \.active)
             sessionStatusKnown = true
@@ -723,9 +934,14 @@ struct GDManagedAppSession: Identifiable {
                     }
                     Spacer()
                     if app.kind == "app" {
-                        Button("Preload") { library.preload(app) }.disabled(library.busy || app.format != "raw")
-                        Button("Smart Launch") { library.smartLaunch(app) }.disabled(library.busy || app.format != "raw")
-                        Button("Run Local Copy") { library.launch(app) }.disabled(library.busy)
+                        let active = library.session(for: app.key)?.active == true
+                        Button(active ? "Stop" : "Play", systemImage: active ? "stop.fill" : "play.fill") {
+                            if active { library.stop(app) } else { library.play(app) }
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .disabled(library.busy || library.stoppingKey != nil)
+                        Button("Preload") { library.preload(app) }
+                            .disabled(library.busy || library.stoppingKey != nil || active)
                     } else {
                         Button("Open") { library.launch(app) }.disabled(library.busy)
                     }
@@ -828,7 +1044,7 @@ private struct PlansPanel: View {
             HStack {
                 VStack(alignment: .leading, spacing: 5) {
                     Text("YOUR SPACE. YOUR GAME LIBRARY.").font(.system(size: 19,weight:.heavy,design:.rounded))
-                    Text("Private storage per account · 10 GiB free local cache reserve · restore apps anytime")
+                    Text("Private storage per account · 10 GB free space recommended · restore apps anytime")
                         .font(.system(size: 11)).foregroundStyle(.gray)
                 }
                 Spacer()
@@ -906,12 +1122,18 @@ private struct WelcomePanel: View {
         guard blocked else { return .terminateNow }
         let alert = NSAlert()
         alert.messageText = "Finish cloud activity before quitting"
-        alert.informativeText = "Wait for transfers and cache operations, close managed applications, and unmount the cloud drive. GenDragoon keeps your pending work open."
+        let reasons = GDUpdateActivity.shared.activeOperationReasons(
+            excluding: GDUpdateCoordinator.shared.requestsTermination ? GDUpdateCoordinator.shared : nil,
+            forUpdate: GDUpdateCoordinator.shared.requestsTermination)
+        let detail = reasons.isEmpty ? "The activity state changed; review the app and try Quit again."
+            : "Still active: " + reasons.joined(separator: "; ") + "."
+        alert.informativeText = detail + " Wait for transfers and cache operations, close managed applications, and unmount cloud drives. GenDragoon keeps your pending work open."
         alert.addButton(withTitle: "Keep GenDragoon Open")
         alert.runModal()
         return .terminateCancel
     }
     func applicationWillTerminate(_ notification: Notification) {
+        guard Bundle.main.object(forInfoDictionaryKey: "GDRXPreviewMode") as? Bool != true else { return }
         GDUpdateCoordinator.shared.prepareForTermination()
     }
 }

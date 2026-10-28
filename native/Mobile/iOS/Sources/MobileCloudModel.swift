@@ -150,6 +150,18 @@ struct MobileExport:Identifiable {let id=UUID();let url:URL}
         do {if FileManager.default.fileExists(atPath:cache.path){try FileManager.default.removeItem(at:cache)};try FileManager.default.createDirectory(at:cache,withIntermediateDirectories:true,attributes:[.posixPermissions:0o700]);status="Local settings and transfer cache reset. Cloud and exported files retained.";refresh()}
         catch{status=error.localizedDescription}
     }
+    func requestLaunch(_ target:MobileLaunchTarget){
+        guard !busy,let client,target.owner==GDTransferClient.digest(Data(owner.utf8)) else { status="Sign in to the correct account and finish active transfers first.";return }
+        busy=true;let expected=owner,request=UUID().uuidString.replacingOccurrences(of:"-",with:"").lowercased()
+        task=Task {defer{busy=false};do{
+            let data=try await client.json("v3/cloud/"+target.workspace+"/app-launch-intents",method:"POST",payload:["key":target.key,"platform":"ios","requestId":request])
+            guard owner==expected,let result=try JSONSerialization.jsonObject(with:data) as? [String:Any],result["id"] as? String==request,
+                  result["status"] as? String=="requested",result["executionConfirmed"] as? Bool==false else {
+                throw GDTransferError(message:"The app start was not confirmed. Refresh before retrying.",status:0)
+            }
+            status="Start signal sent. Waiting for a compatible execution service; the app is not yet confirmed running."
+        }catch{report(error)}}
+    }
     func restore(_ file:GDCloudItem, from workspaceID:String?=nil){
         guard CloudSignals.allowsTransfer(method:"GET",locked:lockBlocksSelected) else{return}
         guard !busy,let client else{return};busy=true;transferring=true;fraction=0
