@@ -14,6 +14,10 @@ const libraryTree = require('./library-tree.cjs');
 const libraryOrigin = require('./library-origin.cjs');
 const {createDevTeams} = require('./dev-teams.cjs');
 const deviceRegistry = require('./device-registry.cjs');
+const {GDGAccountState}=require('./gdg-account-state.cjs');
+const {GDGMediaContainer}=require('./gdg-media-container.cjs');
+const {createGDGSettings}=require('./gdg-settings.cjs');
+const {transfer:mediaTransfer}=require('./gdg-media-transfer.cjs');
 const {makeLaunchIntent}=require('../Backend/app_launch_intents.js');
 const {createIntegrations} = require('./integrations.cjs');
 const {createInternalEntitlementClient} = require('./internal-entitlements.cjs');
@@ -50,6 +54,19 @@ async function createCloud(config) {
   await fs.mkdir(lock, {mode: 0o700}); // refuse two writers or an unreconciled crash
   const store = config.store || new RedXState({url: config.redxURL, key: config.redxKey, db: config.redxDB, dev: config.dev, local: config.redxLocal === true});
   const devTeams = createDevTeams({store,...config.teamOptions});
+  const gdgAccounts=config.gdgAccounts||(config.gdgUserKey?new GDGAccountState({url:config.redxURL,key:config.gdgUserKey,db:config.gdgUserDB||'redx_accounts'}):null);
+  const media=config.mediaContainer||(config.gdgMediaKey?new GDGMediaContainer({url:config.redxURL,key:config.gdgMediaKey,db:config.gdgMediaDB||'gendragoon_media'}):null);
+  const gdg=gdgAccounts?createGDGSettings({accounts:gdgAccounts,validateCarrier:config.gdgValidateCarrier|| (async bytes=>{
+    const temp=await fs.mkdtemp(path.join(root,'.gdg-receipt-'));
+    try{const file=path.join(temp,'receipt.png');await fs.writeFile(file,bytes,{mode:0o600});
+      if(await validatePNG(file,crypto.randomBytes(16).toString('hex'))!=='redsecretsxai-png-v1')throw new CloudError('encrypted_receipt_required',422);
+    }finally{await fs.rm(temp,{recursive:true,force:true});}
+  })}):null;
+  async function syncGDG(identity,state){
+    if(!gdg||identity.apiKey)return;
+    const value=await gdg.sync(identity,state);
+    if(media)for(const w of Object.values(value.GDGWS))await media.ensureWorkspace(identity.owner,w.id,w.name);
+  }
   const authorizeWorkspace = config.authorizeWorkspace || createInternalEntitlementClient({
     url:config.internalEntitlementURL || process.env.GENDRAGOON_INTEGRATION_ENTITLEMENTS_URL,
     token:config.internalEntitlementToken || process.env.GENDRAGOON_CONTROL_INTERNAL_TOKEN,issuer,
@@ -82,7 +99,8 @@ async function createCloud(config) {
   const decoderLimit = config.decoderConcurrency ?? 4;
   if (!Number.isInteger(decoderLimit) || decoderLimit < 1 || decoderLimit > 8) throw new Error('Invalid decoder concurrency');
   const workspaceDeleteKey = config.workspaceDeleteKey || config.redxKey || null;
-  const accountDeletion=createReceiverDeletion({store,root,key:workspaceDeleteKey,exclusive:devTeams.exclusive,...config.accountDeletionOptions,isBusy:owner=>
+  const accountDeletion=createReceiverDeletion({store,root,key:workspaceDeleteKey,exclusive:devTeams.exclusive,...config.accountDeletionOptions,
+    purgeExternal:async identity=>{if(media)await media.removeAccount(identity.owner);if(gdgAccounts)await gdgAccounts.remove(identity);},isBusy:owner=>
     [...workspaceOperations.keys(),...deletingWorkspaces].some(key=>key.startsWith(owner+'/'))});
   async function responseJSON(response, max = 65536) {
     const chunks = []; let size = 0;
@@ -143,6 +161,7 @@ async function createCloud(config) {
     return dir;
   }
   async function blobRecord(owner, workspace, id) {
+    if(media){const item=await media.get(owner,workspace,id);if(item)return item;}
     const dir = await blobDirectory(owner, workspace);
     const file = path.join(dir, id + '.png'), meta = path.join(dir, id + '.json');
     let record;
@@ -394,34 +413,64 @@ async function createCloud(config) {
         let state = await store.ensure(owner, quota);
         state = await syncEntitlements(owner, state, entitlement);
         await directory(path.join(root, owner));
+        await syncGDG(identity,state);
         return json(res, 200, publicState(state));
       }
       let state = await store.get(owner);
       if (!state && internalDelete) state = await store.ensure(owner, quota);
       if (!state) throw new CloudError('receiver_not_found', 404);
       state = identity.apiKey ? await syncIntegrationEntitlement(identity,state) : await syncEntitlements(owner,state,entitlement);
-      if (u.pathname === base && req.method === 'GET') return json(res, 200, integrations.filterState(publicState(state),identity));
+      if (u.pathname === base && req.method === 'GET') {
+        await syncGDG(identity,state);return json(res,200,integrations.filterState(publicState(state),identity));
+      }
+      if(u.pathname===base+'/gdg-settings'&&req.method==='GET'){
+        if(identity.apiKey)throw new CloudError('account_session_required',403);
+        if(!gdg)throw new CloudError('gdg_account_store_unavailable',503);
+        await syncGDG(identity,state);const profile=await gdgAccounts.get(identity);
+        return json(res,200,{GDGWS:profile.GDGWS,GDGSigned:Object.values(profile.GDGSigned).map(d=>({id:d.id,workspaceId:d.workspaceId,name:d.name,platform:d.platform,createdMs:d.createdMs,qrFormat:d.qr.format}))});
+      }
       if (u.pathname === base + '/machine-notes' && req.method === 'GET') return json(res, 200, {
         schema:1,scope:'own',ownerAdmin:identity.ownerAdmin,receiverId:owner,storageEngine:'redx',storageFormat:'redsecretsxai-png-v1',machineNotes:machineNotes(state),
       });
-      const deviceRoute = /^\/v1\/receivers\/me\/workspaces\/([a-f0-9]{32})\/devices(?:\/([a-f0-9]{32}))?$/.exec(u.pathname);
-      if (deviceRoute) {
-        if (identity.apiKey) throw new CloudError('account_session_required',403);
-        const [,workspace,deviceId] = deviceRoute;
-        if (!state.workspaces[workspace] || state.workspaceDeletions?.[workspace] || state.deletedWorkspaces?.[workspace])
-          throw new CloudError('not_found',404);
-        if (req.method === 'GET' && !deviceId)
-          return json(res,200,{workspace,devices:deviceRegistry.visible(state,workspace)});
-        if (req.method === 'POST' && !deviceId) {
-          let body;try{body=JSON.parse((await read(req,2048)).toString());}catch{throw new CloudError('bad_json',400);}
-          let result;
-          await store.change(owner,s=>{if(!s.workspaces[workspace])throw new CloudError('not_found',404);
-            result=deviceRegistry.attach(s,workspace,body);});
-          return json(res,201,{workspace,...result});
+      const deviceRoute = /^\/v1\/receivers\/me\/workspaces\/([a-f0-9]{32})\/devices(?:\/([a-f0-9]{32})(\/qr)?)?$/.exec(u.pathname);
+      if(deviceRoute){
+        if(identity.apiKey)throw new CloudError('account_session_required',403);
+        const [,workspace,deviceId,qrRoute]=deviceRoute;
+        if(!state.workspaces[workspace]||state.workspaceDeletions?.[workspace]||state.deletedWorkspaces?.[workspace])throw new CloudError('not_found',404);
+        await syncGDG(identity,state);
+        if(req.method==='GET'&&qrRoute){if(!gdg)throw new CloudError('gdg_account_store_unavailable',503);return json(res,200,await gdg.image(identity,workspace,deviceId));}
+        if(req.method==='GET'&&!deviceId){
+          const saved=gdg?await gdg.listing(identity,workspace):{devices:[]};
+          const live=deviceRegistry.visible(state,workspace),details=new Map(saved.devices.map(d=>[d.id,d]));
+          const rows=live.map(d=>({...d,...details.get(d.id)}));
+          for(const d of saved.devices)if(!live.some(v=>v.id===d.id))rows.push({...d,signed:false,pendingRemoval:true});
+          return json(res,200,{workspace,devices:rows,hardwareSigningAvailable:Boolean(gdg)});
         }
-        if (req.method === 'DELETE' && deviceId) {
-          await store.change(owner,s=>deviceRegistry.detach(s,workspace,deviceId));
-          return json(res,200,{workspace,deviceId,revoked:true});
+        if(req.method==='POST'&&!deviceId){
+          let body;try{body=JSON.parse((await read(req,192*1024)).toString());}catch{throw new CloudError('bad_json',400);}
+          if(!body||Array.isArray(body)||Object.keys(body).some(k=>!['name','platform','deviceFingerprint','qr'].includes(k)))throw new CloudError('device_request_invalid',400);
+          if(!gdg&&(body.deviceFingerprint||body.qr))throw new CloudError('gdg_account_store_unavailable',503);
+          if(gdg&&(!body?.deviceFingerprint||!body?.qr))throw new CloudError('device_identity_and_encrypted_receipt_required',400);
+          const operation='gdg-device:'+owner+':'+workspace;
+          if(busy.has(operation))throw new CloudError('device_operation_busy',409);busy.add(operation);
+          let result;
+          try{
+            await store.change(owner,s=>{if(!s.workspaces[workspace])throw new CloudError('not_found',404);result=deviceRegistry.attach(s,workspace,body);});
+            if(gdg){try{result.device={...result.device,...await gdg.save(identity,workspace,result.device,body)};}
+              catch(error){await store.change(owner,s=>{delete s.deviceAssignments?.[workspace]?.[result.device.id];});throw error;}}
+            return json(res,201,{workspace,...result});
+          }finally{busy.delete(operation);}
+        }
+        if(req.method==='DELETE'&&deviceId&&!qrRoute){
+          const operation='gdg-device:'+owner+':'+workspace;
+          if(busy.has(operation))throw new CloudError('device_operation_busy',409);busy.add(operation);
+          try {
+          // Revoke access first. If receipt removal fails, retry is idempotent
+          // and the credential remains invalid throughout the retry.
+          await store.change(owner,s=>{if(s.deviceAssignments?.[workspace]?.[deviceId])deviceRegistry.detach(s,workspace,deviceId);});
+          if(gdg)await gdg.remove(identity,workspace,deviceId);
+          return json(res,200,{workspace,deviceId,revoked:true,qrDeleted:Boolean(gdg)});
+          } finally { busy.delete(operation); }
         }
         throw new CloudError('method_not_allowed',405);
       }
@@ -490,6 +539,7 @@ async function createCloud(config) {
             Object.assign(ws, {active:false, readOnly:true, quotaBytes:0, workers:0, status:'deleting'});
           });
           const deletion = state.workspaceDeletions[workspace], dir = path.join(root, owner, workspace);
+          if(media)await media.removeWorkspace(owner,workspace);
           const ownerDirectory=path.join(root,owner);
           try{const st=await fs.lstat(ownerDirectory);if(!st.isDirectory()||st.isSymbolicLink()||await fs.realpath(ownerDirectory)!==ownerDirectory)throw new CloudError('stored_object_corrupt',503);}catch(e){if(e.code!=='ENOENT')throw e;}
           try {
@@ -514,6 +564,7 @@ async function createCloud(config) {
             if (s.deviceAssignments) delete s.deviceAssignments[workspace];
             s.deletedWorkspaces ||= {}; s.deletedWorkspaces[workspace] = {deletedMs:Date.now()};
           });
+          await syncGDG(identity,state);
           return json(res, 200, {ok:true, workspace, freedBytes:deletion.bytes, usedBytes:state.used});
         } finally { deletingWorkspaces.delete(key); }
       }
@@ -598,6 +649,16 @@ async function createCloud(config) {
         const operation = await beginWorkspaceOperation(owner, workspace, ['GET','PUT'].includes(req.method),req.headers);
         releaseWorkspace = operation.release;
         const workspaceState = operation.workspace;
+        if(media)return await mediaTransfer({req,res,owner,workspace,id,state,store,media,lookup:blobRecord,busy,read,json,writable:writableWorkspace,
+          validate:async(bytes,objectId)=>{const folder=await fs.mkdtemp(path.join(root,'.gdg-media-'));
+            try{const file=path.join(folder,'carrier.png');await fs.writeFile(file,bytes,{mode:0o600});return await validatePNG(file,objectId);}
+            finally{await fs.rm(folder,{recursive:true,force:true});}},
+          removeLegacy:async(o,w,objectId,expected)=>{
+            const dir=await blobDirectory(o,w),file=path.join(dir,objectId+'.png'),meta=path.join(dir,objectId+'.json');
+            let prior;try{prior=await readJSONFile(meta,4096);}catch(error){if(error.code!=='ENOENT')throw error;}
+            if(prior&&(prior.id!==objectId||prior.workspace!==w||prior.sha256!==expected.sha256||prior.bytes!==expected.bytes))throw new CloudError('stored_object_corrupt',503);
+            if(prior){await fs.unlink(meta).catch(e=>{if(e.code!=='ENOENT')throw e;});await fs.unlink(file).catch(e=>{if(e.code!=='ENOENT')throw e;});await fsyncDirectory(dir);}
+          }});
         if (req.method === 'GET') {
           const found = await blobRecord(owner, workspace, id);
           if (!found) throw new CloudError('not_found', 404);
@@ -830,6 +891,10 @@ if (require.main === module) {
     redxLocal: process.env.REDX_LOCAL_LOOPBACK === '1', entitlementURL: process.env.REDX_ENTITLEMENT_URL || null,
     redxKey: process.env.REDX_RECEIVERS_KEY, redxDB: process.env.REDX_RECEIVERS_DB || 'gendragoon_receivers', root: process.env.REDX_RECEIVERS_ROOT,
     requireDeviceAssignment: process.env.GENDRAGOON_REQUIRE_DEVICE_ASSIGNMENT === '1',
+    gdgUserDB:process.env.GENDRAGOON_USER_DB||'redx_accounts',
+    gdgUserKey:process.env.GENDRAGOON_USER_DB_KEY_FILE?syncFS.readFileSync(process.env.GENDRAGOON_USER_DB_KEY_FILE,'utf8').trim():null,
+    gdgMediaDB:process.env.GENDRAGOON_MEDIA_DB||'gendragoon_media',
+    gdgMediaKey:process.env.GENDRAGOON_MEDIA_KEY_FILE?syncFS.readFileSync(process.env.GENDRAGOON_MEDIA_KEY_FILE,'utf8').trim():null,
     quota: Number(process.env.REDX_RECEIVER_QUOTA_BYTES || 64 * 1024 * 1024), python: process.env.REDX_PYTHON || 'python3', requiredTos: process.env.REDXAI_REQUIRED_TOS}).then(async cloud => {
       console.log('Red-XAI-Reiceivers ' + (productionReady ? 'PRODUCTION' : 'PRIVATE PREVIEW') + ': ' + await cloud.listen(Number(process.env.REDX_CLOUD_PORT || 17779)));
       for (const sig of ['SIGINT','SIGTERM']) process.once(sig, () => cloud.close().then(() => process.exit(0)));

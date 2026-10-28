@@ -56,6 +56,8 @@ def build_account(app):
         ttk.Button(setup,text=title,command=action).pack(anchor="w",pady=4)
     app.account_summary = ttk.Label(app.account, text="Not signed in.", wraplength=900)
     app.account_summary.pack(fill="x", pady=15)
+    from gui_device_signing import build
+    build(app)
 
 
 def choose_note(app):

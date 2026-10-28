@@ -6,7 +6,7 @@ const {PATH,initialJob,verifyInternal,receipt}=require('./account-deletion.cjs')
 const {AccountDeletionRecords}=require('./account-deletion-records.cjs');
 const ID=/^[a-f0-9]{32}$/;
 async function readBody(req){let length=0,parts=[];for await(const part of req){length+=part.length;if(length>4096)throw new CloudError('body_too_large',413);parts.push(part);}try{const value=JSON.parse(Buffer.concat(parts));if(!value||typeof value!=='object'||Array.isArray(value))throw Error();return value;}catch{throw new CloudError('bad_json',400);}}
-function createReceiverDeletion({store,root,key,exclusive,isBusy=()=>false,now=Date.now,purger}){
+function createReceiverDeletion({store,root,key,exclusive,isBusy=()=>false,now=Date.now,purger,purgeExternal=async()=>{}}){
  const deleting=new Set(),active=new Map(),locks=new Map();
  const records=purger||new AccountDeletionRecords(store,{exclusive,now});
  async function serial(owner,fn){const prior=locks.get(owner)||Promise.resolve();let release;const gate=new Promise(r=>release=r),tail=prior.catch(()=>{}).then(()=>gate);locks.set(owner,tail);await prior.catch(()=>{});try{return await fn();}finally{release();if(locks.get(owner)===tail)locks.delete(owner);}}
@@ -58,6 +58,7 @@ function createReceiverDeletion({store,root,key,exclusive,isBusy=()=>false,now=D
     const handle=await fs.open(root,'r');try{await handle.sync();}finally{await handle.close();}
    }catch(error){if(error.code!=='ENOENT')throw error;}
    try{await fs.lstat(directory);throw new CloudError('account_deletion_verification_failed',503);}catch(error){if(error.code!=='ENOENT')throw error;}
+   await purgeExternal(identity);
    const completedAtMs=now();
    const finished=await store.change(owner,s=>{
     const j=s.accountDeletion;

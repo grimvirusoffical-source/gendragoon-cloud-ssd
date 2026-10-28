@@ -11,8 +11,8 @@ import WebKit
             GroupBox("Enable and set up Teams") {
                 VStack(alignment: .leading, spacing: 9) {
                     Text("Teams uses your Red-XAI account, not a separate device enable switch. Choose and mount a MachineNote on Home first, then create a team or accept an invitation below.")
-                    Text("To start a team: create a team, choose its member plan and complete checkout. The server must confirm any required subscription before paid features unlock.")
-                    Text("Team members can collaborate in chat and share selected workspaces. A personal MachineNote does not become shared merely by joining a team. Each shared workspace has its own storage and performance plan.")
+                    Text("Read the community rules below, explicitly accept their current version, and choose a chat username. Then create your workspace team or accept an invitation.")
+                    Text("Teams provides chat, presence and peer connections. Team membership does not grant access to another person’s MachineNote files, encryption keys, API keys, or server folders.")
                 }
                 .font(.caption)
                 .foregroundStyle(.secondary)
@@ -78,8 +78,8 @@ import WebKit
         private var pending = Set<String>()
         func configure() {
             guard let data = try? JSONSerialization.data(withJSONObject: config, options: [.sortedKeys]), let value = String(data: data, encoding: .utf8), configured != value else { return }
-            web?.evaluateJavaScript("window.GenDragoonTeams?.configure(" + value + ")") { [weak self] _, error in
-                if error == nil { self?.configured = value }
+            web?.evaluateJavaScript("(()=>{if(!window.GenDragoonTeams)return false;window.GenDragoonTeams.configure(" + value + ");return true;})()") { [weak self] ready, error in
+                if error == nil, ready as? Bool == true { self?.configured = value }
             }
         }
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) { configured = ""; configure() }
@@ -105,12 +105,13 @@ import WebKit
         func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
             guard message.frameInfo.isMainFrame, let body = message.body as? [String: Any], let id = body["requestId"] as? String,
                   id.range(of: "^[a-f0-9]{32}$", options: .regularExpression) != nil, !pending.contains(id), pending.count < 32,
-                  let path = body["path"] as? String, path.utf8.count <= 4096,
-                  !path.contains(".."), !path.contains("#"), !path.contains("\\"),
-                  !(path.split(separator: "?", maxSplits: 1).first?.contains("%") ?? true),
-                  path.range(of: #"^/v1/receivers/(?:me/dev-(?:profile|teams)(?:\?|$)|me/workspaces/[a-f0-9]{32}/team$|teams(?:/|\?|$))"#, options: .regularExpression) != nil,
-                  let method = body["method"] as? String, ["GET", "POST", "PUT", "DELETE"].contains(method),
+                  let path = body["path"] as? String,
+                  let method = body["method"] as? String,
                   JSONSerialization.isValidJSONObject(body), let encoded = try? JSONSerialization.data(withJSONObject: body), encoded.count <= 128 * 1024 else { return }
+            guard GDTeamsBridgePolicy.permits(path: path, method: method) else {
+                respond(id, error: "This request is not permitted in Teams.")
+                return
+            }
             pending.insert(id)
             let account = GDRedXAIAuthSession.shared.subject
             Task { @MainActor [weak self] in

@@ -376,6 +376,7 @@ private struct GDPrimary: View {
                 }
             }
             if redXSession.linked {
+                GDDeviceAssignmentsPanel()
                 GDRXSubscriptionsPanel(focus:.ads)
             }
             GenDragoonAutomaticUpdateStatus()
