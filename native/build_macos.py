@@ -14,8 +14,8 @@ import shutil
 import subprocess
 import sys
 
-VERSION="0.22.3"
-BUILD="40"
+VERSION="0.22.4"
+BUILD="41"
 ROOT=Path(__file__).resolve().parent
 NAME="GenDragoon Cloud SSD.app"
 IDENTITY="Developer ID Application: Joshua Franklin (NZPU8H843J)"

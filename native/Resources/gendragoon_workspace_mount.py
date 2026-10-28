@@ -30,7 +30,7 @@ from xml.etree import ElementTree as ET
 import zlib
 import gendragoon_library as lib
 import gendragoon_storage_mode as storage
-from gendragoon_remote_archive import open_member
+from gendragoon_remote_archive import open_member, verified_plain, VerifiedBlockCache, RemoteReadBusy
 import gendragoon_auth_broker as broker
 import gendragoon_app_launch as lifecycle
 import gendragoon_performance as performance
@@ -93,7 +93,7 @@ def metadata(client,item):
                 or type(expected) is not int or not 0<expected<=256*1024*1024):raise ValueError("Invalid encrypted directory metadata")
         parts=storage._load_pages(client,codec,meta["partPages"]) if "partPages" in meta else meta.get("parts")
         if not isinstance(parts,list):raise ValueError("Invalid encrypted directory metadata")
-        compressed=b"".join(storage._get_plain(client,codec,part) for part in parts)
+        compressed=b"".join(verified_plain(client,codec,part) for part in parts)
         decoder=zlib.decompressobj();raw=decoder.decompress(compressed,expected+1)
         if (len(raw)!=expected or not decoder.eof or decoder.unused_data or decoder.unconsumed_tail
                 or hashlib.sha256(raw).hexdigest()!=meta.get("jsonSha256")):raise ValueError("Directory metadata failed verification")
@@ -107,7 +107,8 @@ class WorkspaceTree:
         self.config=config;self.client=client or storage.RedXReceiver(config)
         self.authorize=authorize or broker.client_for(config).authorize
         self.reader=reader or open_member;self.manifest_loader=manifest_loader or metadata
-        self.lock=threading.RLock();self.active_reads=0;self.manifests={}
+        self.lock=threading.RLock();self.active_reads=0;self.manifests={};self.manifest_locks={}
+        self.client.mount_block_cache=VerifiedBlockCache()
         self.client.verified_workers()
         snapshot=self.client.library_snapshot();self.revision=snapshot["revision"]
         self.items={item["key"]:item for item in snapshot["items"]}
@@ -123,8 +124,11 @@ class WorkspaceTree:
         value=item.get("displayName") or item["name"];lib.check_name(value);return value
 
     def manifest(self,item):
+        # A cold app archive must not block status/unmount or every other file.
+        key=item["key"]
         with self.lock:
-            key=item["key"]
+            gate=self.manifest_locks.setdefault(key,threading.Lock())
+        with gate:
             if key not in self.manifests:
                 entries={}
                 for entry in self.manifest_loader(self.client,item):
@@ -140,6 +144,10 @@ class WorkspaceTree:
             return self.manifests[key]
 
     def archive_node(self,item,parts):
+        # Library metadata identifies an app/folder root without decrypting all
+        # archives just to answer Finder's top-level directory listing.
+        if not parts and item.get("kind") in ("app","folder"):
+            return dict(type="directory",item=item,relative=".")
         entries=self.manifest(item);parts=list(parts)
         for unused in range(32):
             for index in range(len(parts)+1):
@@ -204,6 +212,14 @@ class DAVServer(ThreadingHTTPServer):
 class DAVHandler(BaseHTTPRequestHandler):
     protocol_version="HTTP/1.1"
     def log_message(self,*args):pass
+    def end_headers(self):
+        super().end_headers();self.response_started=True
+    def failure(self,status,retry=False):
+        # Never append a second HTTP response to a partially delivered file.
+        # Closing a truncated response lets rclone retry the authenticated range.
+        self.close_connection=True
+        if getattr(self,"response_started",False):return
+        self.result(status,headers={"Connection":"close",**({"Retry-After":"1"} if retry else {})})
     def result(self,status,data=b"",kind="text/plain",headers=None):
         self.send_response(status);self.send_header("Content-Type",kind)
         if "Content-Length" not in (headers or {}):self.send_header("Content-Length",str(len(data)))
@@ -220,7 +236,9 @@ class DAVHandler(BaseHTTPRequestHandler):
         for part in parts:lib.check_name(part)
         return parts
     def handle_request(self):
-        if not hmac.compare_digest(self.headers.get("Authorization", ""),"Bearer "+self.server.token):return self.result(401)
+        self.response_started=False
+        self.connection.settimeout(30)
+        if not hmac.compare_digest(self.headers.get("Authorization", ""),"Bearer "+self.server.token):return self.failure(401)
         try:
             self.server.tree.authorize() # Includes cached data and metadata; native EOF/logout fails closed.
             parts=self.path_parts();tree=self.server.tree
@@ -258,18 +276,31 @@ class DAVHandler(BaseHTTPRequestHandler):
                 status=206
             if self.command=="HEAD":return self.result(200,b"",headers={"Content-Length":str(size),"Accept-Ranges":"bytes"})
             with tree.open_file(node) as source:
-                self.send_response(status);self.send_header("Content-Length",str(end-start+1 if size else 0));self.send_header("Accept-Ranges","bytes")
+                remaining=end-start+1 if size else 0
+                source.seek(start)
+                # Fetch/authenticate the first block before committing success.
+                # A temporarily disconnected upstream returns retryable 503.
+                block=source.read(min(256*1024,remaining)) if remaining else b""
+                if remaining and not block:raise OSError("Remote file returned no bytes")
+                self.send_response(status);self.send_header("Content-Length",str(remaining));self.send_header("Accept-Ranges","bytes")
                 self.send_header("Cache-Control","no-store")
                 if status==206:self.send_header("Content-Range",f"bytes {start}-{end}/{size}")
-                self.end_headers();source.seek(start);remaining=end-start+1 if size else 0
+                self.end_headers()
                 while remaining:
-                    block=source.read(min(256*1024,remaining))
-                    if not block:raise OSError("Verified cache changed")
+                    if not block:raise OSError("Remote file was interrupted")
                     self.wfile.write(block);remaining-=len(block)
-        except broker.BrokerError:self.result(403)
-        except FileNotFoundError:self.result(404)
-        except (ValueError,KeyError):self.result(400)
-        except (RuntimeError,OSError):self.result(507)
+                    if remaining:block=source.read(min(256*1024,remaining))
+        except (BrokenPipeError,ConnectionResetError):self.close_connection=True
+        except broker.BrokerError:
+            self.server.tree.client.mount_block_cache.clear()
+            self.failure(403)
+        except FileNotFoundError:self.failure(404)
+        except RemoteReadBusy:self.failure(503,retry=True)
+        except storage.RedXStorageError as error:
+            code=getattr(error,"status",0)
+            self.failure(403 if code in (401,403) else 404 if code==404 else 507 if code==507 else 503,retry=code not in (401,403,404,507))
+        except (ValueError,KeyError):self.failure(400)
+        except (RuntimeError,OSError):self.failure(503,retry=True)
     do_GET=do_HEAD=do_PROPFIND=do_OPTIONS=do_PUT=do_POST=do_DELETE=do_MOVE=do_COPY=do_MKCOL=do_PROPPATCH=do_LOCK=do_UNLOCK=handle_request
 
 
@@ -365,7 +396,7 @@ def serve_ready(config,receiver,workspace,root,mount,record,startup):
             "--read-only","--vfs-cache-mode=off","--cache-dir="+str(cache),"--addr=127.0.0.1:0","--nfs-cache-type=memory",
             "--dir-cache-time=0s","--attr-timeout=0s","--buffer-size=1M","--vfs-read-chunk-size=1M","--vfs-read-chunk-size-limit=4M",
             "--dir-perms=0700","--file-perms=0500"],
-            env=environment,stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,start_new_session=True)
+            env=environment,stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=sys.stderr,start_new_session=True)
         record.update(mountPid=process.pid,mountIdentity=lifecycle.process_identity(process.pid));write_registry(root,record)
         for unused in range(300):
             if os.path.ismount(mount):break
