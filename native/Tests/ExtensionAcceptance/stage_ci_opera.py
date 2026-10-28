@@ -19,10 +19,10 @@ import time
 from urllib.parse import urlsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
-VERSION = "138.0.6044.24"
-PACKAGE_BYTES = 143482144
-PACKAGE_SHA256 = "0ee45e6d17d2153860251e614ba09d6edca2fe2a32f40198a140896aaa3daf60"
-PACKAGE_URL = "https://deb.opera.com/opera-stable/pool/non-free/o/opera-stable/opera-stable_138.0.6044.24_amd64.deb"
+VERSION = "139.0.6053.15"
+PACKAGE_BYTES = 141108256
+PACKAGE_SHA256 = "6f62faf4feb7f28f3673c55ad8bfe6d5f4e1c7a5eb0c772daf188de237537b6b"
+PACKAGE_URL = "https://deb.opera.com/opera-stable/pool/non-free/o/opera-stable/opera-stable_139.0.6053.15_amd64.deb"
 MAX_UNPACKED = 1024 * 1024 * 1024
 MAX_MEMBERS = 20000
 

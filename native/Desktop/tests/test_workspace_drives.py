@@ -72,13 +72,10 @@ def fake_model(root):
     return model
 
 def fake_tree(model,note,cache):
-    payload=("owned note "+note).encode();target=private.private_directory(cache)/"verified-fixture"
-    if target.exists():
-        private.verify(target)
-        if target.read_bytes()!=payload:raise ValueError("The retained fixture cache changed.")
-    else:private.write_private(target,payload)
+    payload=("owned note "+note).encode()
     record=dict(path=".",type="file",size=len(payload),sha256=hashlib.sha256(payload).hexdigest(),executable=0)
-    return REAL_TREE(model,note,cache,manifest_loader=lambda *_:{".":record},restorer=lambda _:target)
+    def reader(*args):return contextlib.closing(io.BytesIO(payload))
+    return REAL_TREE(model,note,cache,manifest_loader=lambda *_:{".":record},reader=reader)
 
 @contextlib.contextmanager
 def serving(tree):
@@ -136,8 +133,11 @@ class DAVTests(unittest.TestCase):
     def test_cached_bytes_fail_closed_on_logout_account_change_delete_or_tamper(self):
         with serving(self.tree) as server:
             self.assertEqual(request(server)[0],200)
-            Path(self.tree.materialized[next(iter(self.tree.materialized))]).write_bytes(b"x"*len(("owned note "+NOTE).encode()))
+            original=self.tree.reader
+            def unavailable(*_):raise ValueError("Remote chunk failed authentication")
+            self.tree.reader=unavailable
             self.assertEqual(request(server)[0],400)
+            self.tree.reader=original
             self.model.session.rows[NOTE]=[]
             self.assertEqual(request(server)[0],404)
             self.model.session.receiver="f"*64
@@ -155,7 +155,7 @@ class DAVTests(unittest.TestCase):
         for updates in ({"name":"Tool.apk","applicationPlatform":"android"},{"name":"Tool.exe","applicationPlatform":"macos"}):
             self.model.session.rows[NOTE]=[row(displayName="renamed-document.txt",**updates)]
             with serving(self.tree) as server:self.assertEqual(request(server,"/renamed-document.txt")[0],400)
-            self.assertEqual(self.tree.materialized,{})
+            self.assertEqual(list(self.tree.cache.iterdir()),[])
     def test_quiescing_and_authenticated_read_activity_protect_unmount(self):
         with self.tree.request():self.assertEqual(self.tree.active,1)
         self.assertEqual(self.tree.active,0)
@@ -310,7 +310,7 @@ class ActualArchiveTests(unittest.TestCase):
         for value in self.patches:value.start();self.addCleanup(value.stop)
         self.source=self.root/"proof-測試.txt";self.payload=os.urandom(4096);self.source.write_bytes(self.payload)
         self.model.upload(self.source)
-    def test_real_codec_metadata_and_archive_restore_are_used_by_authenticated_dav(self):
+    def test_real_codec_remote_reads_do_not_materialize_a_local_archive(self):
         original=self.model.session.rows[NOTE][0]
         self.model.session.rows[NOTE].append(dict(original,key="f"*18,archiveKey=original["key"],displayName="Renamed copy.txt"))
         self.model.session.notes[0].update(active=False,readOnly=True,workers=0)
@@ -320,7 +320,7 @@ class ActualArchiveTests(unittest.TestCase):
             status,payload,_=request(server,"/"+quote(self.source.name))
             self.assertEqual(status,200);self.assertEqual(payload,self.payload)
             self.assertEqual(request(server,"/Renamed%20copy.txt")[1],self.payload)
-            self.assertTrue(tree.materialized);self.assertEqual(self.source.read_bytes(),self.payload)
+            self.assertEqual(list(tree.cache.iterdir()),[]);self.assertEqual(self.source.read_bytes(),self.payload)
             self.model.session.rows[NOTE]=[]
             self.assertEqual(request(server,"/"+quote(self.source.name))[0],404)
 

@@ -1,5 +1,7 @@
 # GenDragoon Red-XAI Receiver and subscriptions
 
+> **0.22.2 storage update:** mounted reads and normal Open/Play no longer restore full archives automatically. See [Kamatera streaming notes](../KAMATERA-STREAMING.md). Older local-cache behavior described below applies only to explicit offline/legacy paths.
+
 The native app and REDXAI Auth-CLI share Red-XAI website approval through
 macOS Keychain. The Receiver stores encrypted PNG objects on the main server,
 with account and MachineNote metadata in a dedicated RedX database. The server

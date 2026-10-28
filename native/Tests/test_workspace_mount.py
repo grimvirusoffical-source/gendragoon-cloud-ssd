@@ -1,5 +1,7 @@
 """Authenticated read-only DAV, isolated note caches and conservative mount status."""
 import copy
+import io
+import contextlib
 import hashlib
 import json
 import os
@@ -43,7 +45,7 @@ class WorkspaceMountTests(unittest.TestCase):
         self.snapshot=lambda:{"revision":7,"items":copy.deepcopy(self.items)}
         self.client=Mock(verified_workers=Mock(return_value=1),library_snapshot=Mock(side_effect=self.snapshot))
         self.authorize=Mock(return_value="opaque-access-never-written")
-        self.stage=Mock(side_effect=lambda key,*args,**kwargs:str(self.local/"report.txt" if key==self.file else self.local/"Backup"))
+        self.stage=Mock(side_effect=lambda *args,**kwargs:contextlib.closing(io.BytesIO(self.payload)))
         self.loader=Mock(side_effect=lambda client,item:copy.deepcopy(self.manifests[item["key"]]))
         self.tree=mounts.WorkspaceTree(self.config,self.client,self.authorize,self.stage,self.loader)
 
@@ -99,8 +101,8 @@ class WorkspaceMountTests(unittest.TestCase):
             with self.tree.open_file(node):pass
         self.stage.assert_not_called()
 
-    def test_low_space_failure_and_traversal_never_return_file_contents(self):
-        url=self.server();self.stage.side_effect=RuntimeError("Not enough local space for this archive restore")
+    def test_remote_failure_and_traversal_never_return_file_contents(self):
+        url=self.server();self.stage.side_effect=RuntimeError("Remote data unavailable; no local fallback")
         status,headers,data=self.request(url+"/Folder/report.txt")
         self.assertEqual(status,507);self.assertNotIn(self.payload,data)
         self.assertEqual(self.request(url+"/%2e%2e/outside")[0],400)

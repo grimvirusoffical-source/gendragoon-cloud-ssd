@@ -179,7 +179,7 @@ class ModelTests(unittest.TestCase):
             called.append((config,selected,client_factory));private.write_private(path,raw)
             return dict(manifest=metadata,root=dict(archiveLayout='flat'))
         with patch.object(self.model,'config',return_value={'_session':self.session}),patch.object(client.storage,'download_archive',side_effect=authenticated_download),patch.object(apps,'host',return_value=('linux','x86_64')):
-            prepared=self.model.prepare_portable_app(KEY)
+            prepared=self.model.prepare_portable_app(KEY,allow_local_copy=True)
         self.assertEqual(prepared.candidates,('.',));self.assertEqual(called[0][2],client.DesktopReceiver)
         self.assertEqual(prepared.payload.read_bytes(),raw);self.assertTrue((prepared.payload.parent/'verified-archive.zip').is_file())
         self.assertEqual(prepared.identity,apps.identity(OWNER,NOTE,self.session.rows[0]))
@@ -320,7 +320,7 @@ class ActualCodecTests(unittest.TestCase):
             before=client.manifest(source);session=MemorySession();model=client.MachineNotesClient(session,root/'state');model.refresh_notes()
             model.import_vault(json.dumps(FIXTURE['envelope']).encode(),FIXTURE['password'])
             with patch.object(client,'DesktopReceiver',MemoryReceiver):
-                uploaded=model.upload(source);prepared=model.prepare_portable_app(uploaded['key'])
+                uploaded=model.upload(source);prepared=model.prepare_portable_app(uploaded['key'],allow_local_copy=True)
                 self.assertEqual(prepared.records,before['manifest']);self.assertEqual(prepared.candidates,(binary.name,))
             try:
                 receipt=launch_native_fixture(lambda:model.launch_portable_app(prepared,binary.name,approved=True))

@@ -23,14 +23,23 @@ struct Note {let id:String;let displayName:String;let remote:String;let prefix:S
 struct Project {let buckets:[Note]}
 @MainActor final class GDRedXAIAuthSession {
  static let shared=GDRedXAIAuthSession(); let linked=false; let receiverID=String(repeating:"a",count:64)
- let uploadProjects:[Project]=[]
+ let uploadProjects:[Project]=[]; let readableProjects:[Project]=[]
  func serviceRequest(path:String,method:String,json:[String:Any]?) async throws->[String:Any] {throw GDNativeFailure(message:"No network calls are permitted in this fixture.")}
 }
 @MainActor final class Upload {
  func enqueueCompanion(_ urls:[URL],destination:UploadDestination) async throws->String {throw GDNativeFailure(message:"No uploads are permitted in this fixture.")}
 }
+struct StubSession { let key:String;let active:Bool;let state:String }
+struct StubApp { let key:String;let kind:String?;let label:String;let canRestoreOnMac:Bool }
+@MainActor final class StubLibrary {
+ let sessions:[StubSession]=[];let apps:[StubApp]=[];let busy=false
+ func startSessionMonitoring(){};func play(_ app:StubApp){};func stop(_ app:StubApp){}
+}
+struct StubMount {let receiverID:String;let workspaceID:String;let state:String}
+@MainActor final class GDWorkspaceMounts {static let shared=GDWorkspaceMounts();let mounts:[StubMount]=[]}
 @MainActor final class GDNativeWorkspace {
- static let shared=GDNativeWorkspace();let upload=Upload()
+ static let shared=GDNativeWorkspace();let upload=Upload();let library=StubLibrary()
+ let selectedDestination:UploadDestination?=nil
  func start() async{};func refreshCloudChoices() async{}
 }
 final class GDUpdateActivity {static let shared=GDUpdateActivity();func canStart()->Bool{true}}

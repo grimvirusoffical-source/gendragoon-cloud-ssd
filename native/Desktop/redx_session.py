@@ -110,7 +110,7 @@ class RedXSession:
             if self._access==failed_token:self._renew_locked()
             return self._access
     def request(self,path,method="GET",value=None):
-        if not path.startswith(("/v1/receivers/","/v1/integrations","/provider/v1/")):
+        if not path.startswith(("/v1/receivers/","/v1/integrations","/provider/v1/","/gendragoon/v2/")):
             raise SessionError("Unsupported account service path.")
         expected=self.receiver;token=self.token()
         try:result=http_json(API,path,method,value,token)

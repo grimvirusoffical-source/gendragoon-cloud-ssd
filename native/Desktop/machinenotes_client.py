@@ -380,9 +380,15 @@ class MachineNotesClient:
         return dict(provider="redxai",cloudApi=API,workspaceId=self.selected_note,receiverId=self.session.receiver,
             storageSecret=self.keys["storageSecret"],keymapPath=str(self.keymap),constrained=False,_session=self.session)
     @transfer_progress
-    def upload(self,source,parent=None):
+    def upload(self,source,parent=None,*,encryption_mode="standard",offload=False,before_offload=None):
+        storage.normalize_mode(encryption_mode=encryption_mode)
         if not self.vault_exported:raise vault.VaultError("Export your new portable vault before uploading. This is the only recovery copy of its storage key.")
+        if type(offload) is not bool:raise ValueError("Choose an explicit offload option.")
         source=Path(source).absolute();safe_path(source.name)
+        if offload:
+            from verified_offload import checked_source,running_sources
+            checked_source(source)
+            if running_sources([source]):raise ValueError("Quit the selected application before upload and offload.")
         if source.name.lower().endswith(".app"):raise ValueError("Use the macOS client to preserve application bundle metadata.")
         baseline=manifest(source);total=sum(r.get("size",0) for r in baseline["manifest"])
         config=self.config();client=DesktopReceiver(config);client.verified_workers(write=True)
@@ -397,7 +403,8 @@ class MachineNotesClient:
             digest=storage.sha256_file(archive)
             result=storage.upload_archive(config,archive,key,source.name,"folder" if source.is_dir() else "file","zip-root",digest,
                 baseline["manifest"],parent_key=parent,client_factory=DesktopReceiver,
-                origin=current_origin(self.session.receiver,state_dir=self.root/"DeviceOrigins"))
+                origin=current_origin(self.session.receiver,state_dir=self.root/"DeviceOrigins"),
+                **({"encryption_mode":encryption_mode} if encryption_mode!="standard" else {}))
             item=dict(key=key,name=source.name,kind="folder" if source.is_dir() else "file",workspace=self.selected_note,
                 manifestId=result["manifestId"],archiveBytes=result["archiveBytes"],archiveSha256=digest)
             readback=directory/"readback.zip";verified=storage.download_archive(config,item,readback,client_factory=DesktopReceiver)
@@ -405,8 +412,19 @@ class MachineNotesClient:
             restored=private.private_directory(directory/"restore")
             self.progress.phase("verifying",total_bytes=total);extract_checked(readback,restored,verified["manifest"],source.name,"zip-root");self.progress.advance(total)
             if manifest(source)!=baseline:raise ValueError("The source changed during transfer. Original retained.")
-        self.refresh_tree();return dict(verified=True,originalRetained=True,key=key,parentKey=parent,
-            manifestId=result["manifestId"],archiveSha256=digest)
+        self.refresh_tree()
+        receipt=dict(verified=True,originalRetained=True,key=key,parentKey=parent,
+            manifestId=result["manifestId"],archiveSha256=digest,offloaded=False)
+        if offload:
+            # Persist the verified cloud receipt BEFORE moving any original.
+            # A crash/retry can never re-upload a missing, already-offloaded source.
+            if before_offload is not None:before_offload(dict(receipt,offloadPending=True))
+            from verified_offload import trash_verified,OffloadError
+            try:receipt.update(trash_verified(source,baseline,manifest,approved=True))
+            except OffloadError as error:
+                receipt.update(offloadError=str(error),originalRetained=source.exists())
+            receipt["offloadPending"]=False
+        return receipt
     def check_restore_compatible(self,keys,*,items=None):
         values=list(self.items if items is None else items);lookup={item['key']:item for item in values};children={}
         for item in values:children.setdefault(item.get('parentKey'),[]).append(item['key'])
@@ -419,11 +437,27 @@ class MachineNotesClient:
             ensure_restore_compatible(item)
             if item.get('virtualFolder'):pending.extend(children.get(key,()))
     @transfer_progress
-    def prepare_portable_app(self,key):
+    def prepare_portable_app(self,key,*,mount_record=None,allow_local_copy=False):
         config=self.config();tree=self.refresh_tree();item=next((row for row in tree["items"] if row["key"]==key),None)
         if item is None or item.get("virtualFolder") or item.get("kind")=="app":
             raise PortableAppError("Select one portable Windows or Linux application archive.")
         binding=app_identity(self.session.receiver,self.selected_note,item)
+        if mount_record is not None:
+            from workspace_mount import metadata
+            records=metadata(DesktopReceiver(config),item)
+            parts=[];current=item;lookup={row["key"]:row for row in tree["items"]};seen=set()
+            while current:
+                if current["key"] in seen or len(parts)>=128:raise PortableAppError("Invalid cloud app folder hierarchy.")
+                seen.add(current["key"]);name=current.get("displayName") or current["name"];safe_path(name)
+                if "/" in name:raise PortableAppError("Invalid mounted app name.")
+                parts.append(name);parent=current.get("parentKey")
+                if not parent:break
+                current=lookup.get(parent)
+                if not current or not current.get("virtualFolder"):raise PortableAppError("Invalid mounted app parent.")
+            payload=Path(mount_record["mountPath"]).joinpath(*reversed(parts))
+            return self.portable_apps.prepare_mounted(binding,payload,list(records.values()),mount_record)
+        if allow_local_copy is not True:
+            raise PortableAppError("Mount this workspace to play its remote app. No full local download was performed.")
         def restore(directory):
             require_space(directory,item.get("archiveBytes",0)*2)
             archive=directory/"verified-archive.zip"
@@ -495,14 +529,16 @@ class MachineNotesClient:
             raise ValueError("Unsupported Teams request.")
         return self.session.request(path,method,value)
 
-    def enqueue_selection(self,note,parent,paths):
+    def enqueue_selection(self,note,parent,paths,*,encryption_mode="standard",offload=False):
+        if type(offload) is not bool:raise ValueError("Offload must be explicitly selected.")
+        storage.normalize_mode(encryption_mode=encryption_mode)
         if note not in {n["id"] for n in self.notes} or not self.session.receiver:
             raise SessionError("Choose a MachineNote owned by this session.")
         if parent is not None and not storage.KEY.fullmatch(parent):raise ValueError("Invalid destination folder.")
         if not isinstance(paths,list) or not 1<=len(paths)<=100 or any(not isinstance(p,str) or not Path(p).is_absolute() for p in paths):
             raise ValueError("Select at most 100 actual local paths.")
         job={"schema":1,"id":uuid.uuid4().hex,"receiverId":self.session.receiver,"workspaceId":note,"parentKey":parent,
-            "sources":list(dict.fromkeys(paths)),"state":"queued","createdAt":int(time.time()),"attempts":0}
+            "sources":list(dict.fromkeys(paths)),"state":"queued","createdAt":int(time.time()),"attempts":0,"encryptionMode":encryption_mode,"offload":offload}
         directory=private.private_directory(self.root/"jobs"/self.session.receiver)
         if directory.resolve()!=directory or directory.is_symlink():raise ValueError("The private upload queue is linked.")
         path=directory/(job["id"]+".json")
@@ -531,6 +567,8 @@ class MachineNotesClient:
             if (not isinstance(job,dict) or job.get("schema")!=1 or job.get("receiverId")!=self.session.receiver
                     or not storage.ID.fullmatch(job.get("id", "")) or path.stem!=job["id"]
                     or not storage.ID.fullmatch(job.get("workspaceId", "")) or job.get("state") not in ("queued","running","failed","completed")
+                    or job.get("encryptionMode","standard") not in ("standard","fast","off")
+                    or type(job.get("offload",False)) is not bool
                     or not isinstance(job.get("sources"),list) or not 1<=len(job["sources"])<=100
                     or any(not isinstance(p,str) or not Path(p).is_absolute() for p in job["sources"])
                     or job.get("parentKey") is not None and not storage.KEY.fullmatch(str(job["parentKey"]))):
@@ -566,7 +604,14 @@ class MachineNotesClient:
                     if item is None or item.get("manifestId")!=recorded.get("manifestId") or item.get("archiveSha256")!=recorded.get("archiveSha256"):
                         raise ValueError("A previously completed queued item changed. Its newer library version was preserved.")
                     continue
-                results.append(self.upload(Path(path),queued["parentKey"]));completed.append(index);self._save_job(queued)
+                options={"encryption_mode":queued["encryptionMode"]} if queued.get("encryptionMode","standard")!="standard" else {}
+                if queued.get("offload",False):
+                    def checkpoint(receipt):
+                        results.append(receipt);completed.append(index);self._save_job(queued)
+                    receipt=self.upload(Path(path),queued["parentKey"],offload=True,before_offload=checkpoint,**options)
+                    results[completed.index(index)]=receipt;self._save_job(queued)
+                else:
+                    results.append(self.upload(Path(path),queued["parentKey"],**options));completed.append(index);self._save_job(queued)
             queued["state"]="completed";queued["completedAt"]=int(time.time());self._save_job(queued)
             return queued
         except Exception:

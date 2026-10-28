@@ -501,6 +501,7 @@ struct GDManagedAppSession: Identifiable {
     let cachePath: String
     var id: String { key }
     var message: String {
+        if mode == "workspace-stream" { return active ? "Files on Kamatera · on-demand reads · execution on this Mac." : "Cloud app stopped. Workspace and server files retained." }
         if cleanupPending { return mode == "streamed" ? "Streaming from a verified cloud mount · cache cleanup follows exit." : "Running locally · managed cache cleanup follows application exit." }
         switch state {
         case "cleaned", "evicted", "exited-cleaned": return "Local application cache removed. Cloud copy is available."

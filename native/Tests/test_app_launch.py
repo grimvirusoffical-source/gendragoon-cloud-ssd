@@ -392,7 +392,7 @@ class AppLaunchTests(unittest.TestCase):
         with patch.object(launch.sys, "platform", "darwin"), \
                 patch.object(launch, "prepare_stream", return_value=None), \
                 patch.object(launch, "stop_mount") as stop:
-            result = launch.launch(record["key"], record["project"], record["bucket"], record["remote"])
+            result = launch.launch(record["key"], record["project"], record["bucket"], record["remote"], allow_local_copy=True)
         self.assertEqual(result["state"], "launching")
         self.assertIn("still opening", result["message"])
         receipt = next(launch.ROOT.glob("*.json"))
@@ -432,7 +432,7 @@ class AppLaunchTests(unittest.TestCase):
                 with patch.object(launch.sys, "platform", "darwin"), \
                         patch.object(launch, "prepare_stream", return_value=None), \
                         patch.object(launch, "compatible", wraps=launch.compatible) as compatible:
-                    result = launch.launch(key, record["project"], record["bucket"], record["remote"])
+                    result = launch.launch(key, record["project"], record["bucket"], record["remote"], allow_local_copy=True)
                 compatible.assert_called_once_with(expected)
                 self.assertEqual(result["cachePath"], str(expected))
                 self.assertEqual(result["name"], display_name)
@@ -518,16 +518,17 @@ class AppLaunchTests(unittest.TestCase):
         library.clear_cache(key, "project-one", "bucket-one", "gendragoon")
         self.assertFalse(folder.exists())
 
-    def test_a_different_running_app_blocks_before_any_download(self):
+    def test_another_app_does_not_authorize_local_download_fallback(self):
+        launch.process_identity.side_effect = lambda pid: self.identity(pid)
         first, first_app = self.fixture(state="running")
         second, second_app = self.fixture(key="2" * 18, cache=False)
         self.processes.return_value = {811: str(first_app / "Contents/MacOS/Fixture")}
         with patch.object(launch.sys, "platform", "darwin"), \
-                patch.object(launch, "prepare_stream") as stream, \
+                patch.object(launch, "prepare_stream", return_value=None) as stream, \
                 patch.object(library, "stage_item") as stage:
-            with self.assertRaisesRegex(RuntimeError, "Another cloud application"):
+            with self.assertRaisesRegex(RuntimeError, "No full app download"):
                 launch.launch(second["key"], second["project"], second["bucket"], second["remote"])
-        stream.assert_not_called()
+        stream.assert_called_once()
         stage.assert_not_called()
         self.spawn.assert_not_called()
         self.signals.assert_not_called()
@@ -535,7 +536,8 @@ class AppLaunchTests(unittest.TestCase):
         self.assertFalse(second_app.exists())
         self.assert_original_intact()
 
-    def test_different_workspace_cannot_bypass_single_app_slot(self):
+    def test_other_workspace_cannot_enable_a_silent_local_copy(self):
+        launch.process_identity.side_effect = lambda pid: self.identity(pid)
         first, first_app = self.fixture(state="running")
         second, _ = self.fixture(key="2" * 18, cache=False)
         entry = library.load()[second["key"]]
@@ -546,7 +548,7 @@ class AppLaunchTests(unittest.TestCase):
         self.processes.return_value = {811: str(first_app / "Contents/MacOS/Fixture")}
         with patch.object(launch.sys, "platform", "darwin"), \
                 patch.object(library, "stage_item") as stage:
-            with self.assertRaisesRegex(RuntimeError, "Another cloud application"):
+            with self.assertRaisesRegex(RuntimeError, "No full app download"):
                 launch.launch(second["key"], "project-two", "bucket-two", "gendragoon")
         stage.assert_not_called()
         self.assert_original_intact()

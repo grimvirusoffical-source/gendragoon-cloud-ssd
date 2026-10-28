@@ -88,7 +88,7 @@ def read(identifier):
         os.close(fd)
     if not isinstance(data, dict) or data.get("id") != identifier:
         raise ValueError("Mismatched launch receipt")
-    if data.get("mode") not in {"managed-local", "streamed"} or data.get("state") not in LIVE | TERMINAL:
+    if data.get("mode") not in {"managed-local", "streamed", "workspace-stream"} or data.get("state") not in LIVE | TERMINAL:
         raise ValueError("Invalid launch state")
     if type(data.get("keepCache")) is not bool:
         raise ValueError("Invalid cache retention option")
@@ -108,7 +108,8 @@ def read(identifier):
     lib.check_name(cache_name)
     if not cache_name.lower().endswith(".app"):
         raise ValueError("Invalid application cache name")
-    expected = (lib.CACHE / data["key"] / cache_name if data["mode"] == "managed-local"
+    expected = (workspace_path(data, require_live=False) if data["mode"] == "workspace-stream"
+                else lib.CACHE / data["key"] / cache_name if data["mode"] == "managed-local"
                 else session_root / "mount" / data["name"])
     if data.get("cachePath") != str(expected):
         raise ValueError("Unsafe launch cache path")
@@ -258,6 +259,58 @@ def sessions(project=None, bucket=None, remote="gendragoon"):
             "busy": any(x["active"] for x in values)}
 
 
+def workspace_path(record, require_live=True):
+    """Derive an owned mount path; receipt-provided arbitrary paths are forbidden."""
+    import gendragoon_workspace_mount as mounts
+    receiver=record.get("workspaceReceiver")
+    if not isinstance(receiver,str) or not mounts.HEX64.fullmatch(receiver):raise ValueError("Invalid workspace owner")
+    bucket=record.get("bucket")
+    if not isinstance(bucket,str) or not mounts.HEX32.fullmatch(bucket):raise ValueError("Invalid workspace")
+    parts=record.get("workspacePathParts")
+    if not isinstance(parts,list) or not 1<=len(parts)<=128:raise ValueError("Invalid mounted app path")
+    for part in parts:lib.check_name(part)
+    if parts[-1]!=record.get("cacheName",record["name"]):raise ValueError("Mounted app name changed")
+    root=mounts.ROOT/receiver/bucket;point=root/"mount"
+    if require_live:
+        saved=mounts.read_registry(root)
+        if (saved.get("payloadMode")!="remote-memory-v1" or not os.path.ismount(point)
+                or not mounts.owned_daemon(saved)):
+            raise RuntimeError("Mount this MachineNote using the updated Kamatera client first. No local app copy was downloaded.")
+    return point.joinpath(*parts)
+
+
+def prepare_workspace_app(data,record):
+    import gendragoon_workspace_mount as mounts
+    config=lib.redx_config()
+    if config["workspaceId"]!=record["bucket"]:raise ValueError("Selected workspace changed")
+    client=lib.redx_module().RedXReceiver(config);client.verified_workers()
+    items={item["key"]:item for item in client.library_snapshot()["items"]}
+    item=items.get(record["key"])
+    if (not item or item.get("workspace")!=record["bucket"] or item.get("kind")!="app"
+            or item.get("manifestId")!=data.get("redxManifestId")):
+        raise ValueError("The cloud app generation changed. Refresh its library.")
+    parts=[];current=item;seen=set()
+    while current:
+        if current["key"] in seen or len(parts)>=128:raise ValueError("Invalid app folder tree")
+        seen.add(current["key"]);part=current.get("displayName") or current["name"];lib.check_name(part);parts.append(part)
+        parent=current.get("parentKey")
+        if not parent:break
+        current=items.get(parent)
+        if not current or current.get("virtualFolder") is not True:raise ValueError("Invalid cloud parent folder")
+    record.update(mode="workspace-stream",workspaceReceiver=config["receiverId"],workspacePathParts=list(reversed(parts)))
+    path=workspace_path(record,require_live=False)
+    record["cachePath"]=str(path)
+    workspace_path(record)
+    manifest=mounts.metadata(client,item)
+    reason=lib.stream_metadata_reason(manifest)
+    if reason:
+        raise RuntimeError("This app requires macOS metadata the read-only mount cannot preserve. Cloud data was kept; no automatic local copy was created. Use explicit Download only when you choose an offline copy.")
+    compatible(path)
+    lib.run(["/usr/bin/codesign","--verify","--deep","--strict",path],timeout=180)
+    record.update(cachePath=str(path),payloadStorage="kamatera",localPayloadCache=False)
+    return path
+
+
 def compatible(path):
     if path.suffix.lower() != ".app" or path.is_symlink():
         raise ValueError("Choose an actual macOS application bundle")
@@ -301,6 +354,8 @@ def cleanup(record):
     path = Path(record["cachePath"])
     if cache_users(path) or same_process(record, "open"):
         raise RuntimeError("Application or helper is still running; cache retained")
+    if record["mode"] == "workspace-stream":
+        return  # The workspace is shared; stopping an app never unmounts it.
     if record["mode"] == "streamed":
         stop_mount(record)
         if not record["keepCache"]:
@@ -336,7 +391,7 @@ def prepare_stream(data, record):
     mount.mkdir(mode=0o700)
     target = lib.cloud(record["remote"], str(Path(raw).parent))
     process = subprocess.Popen([str(lib.RCLONE), "--config", str(lib.CONFIG), "nfsmount", target, str(mount),
-        "--read-only", "--vfs-cache-mode=full", "--cache-dir=" + str(root / "vfs"),
+        "--read-only", "--vfs-cache-mode=off", "--cache-dir=" + str(root / "vfs"),
         *lib.performance.stream_arguments(), "--vfs-links",
         "--file-perms=0755", "--dir-perms=0755"], stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
@@ -402,7 +457,7 @@ def local_cache_preflight(data, destination):
     return {"cacheLimitBytes": limit, "existingCacheBytes": used, "additionalBytes": extra}
 
 
-def launch(key, project, bucket, remote, keep_cache=False):
+def launch(key, project, bucket, remote, keep_cache=False, *, allow_local_copy=False):
     if sys.platform != "darwin":
         raise RuntimeError("macOS application launching requires macOS")
     if not project or not bucket:
@@ -412,16 +467,10 @@ def launch(key, project, bucket, remote, keep_cache=False):
     lib.assert_restore_compatible(key,data,project,bucket,remote)
     if data.get("kind", "app") != "app":
         raise ValueError("Use Restore for files and folders")
-    # The cloud SSD has one active application slot across ALL workspaces.
-    # The caller holds the shared maintenance lock while inspecting sessions
-    # and writing the preparing receipt, so two launchers cannot both pass.
     active = [item for item in sessions()["sessions"] if item["active"]]
-    if active:
-        if any(item["key"] == key for item in active):
-            raise RuntimeError("This application already has an active managed session")
-        raise RuntimeError("Another cloud application is still running or cleaning up. "
-                           "Quit it and wait for its helpers before launching the next app. "
-                           "No application was stopped and no cache was deleted.")
+    if any(item["key"] == key for item in active):
+        raise RuntimeError("This application already has an active managed session")
+    if len(active)>=32:raise RuntimeError("Close a managed application before starting more than 32 sessions")
     cache_name = data.get("displayName") or data.get("cacheName") or data["name"]
     lib.check_name(cache_name)
     if not cache_name.lower().endswith(".app"):
@@ -437,7 +486,9 @@ def launch(key, project, bucket, remote, keep_cache=False):
     save(record)
     handed_off = False
     try:
-        path = prepare_stream(data, record)
+        path = prepare_workspace_app(data,record) if remote=="redxai" and not allow_local_copy else prepare_stream(data, record)
+        if path is None and not allow_local_copy:
+            raise RuntimeError("This app has no supported remote mount. No full app download was performed. Choose explicit Download for an offline copy.")
         if path is None:
             preflight_path = Path(record["cachePath"])
             previous_name = data.get("cacheName") or data["name"]
@@ -460,6 +511,7 @@ def launch(key, project, bucket, remote, keep_cache=False):
             save(record)
             compatible(path)
         try:
+            if record["mode"]=="workspace-stream":raise RuntimeError("Cloud app demand paging uses no bulk local preload")
             # Use the already verified manifest size, rather than traversing a
             # potentially remote bundle merely to decide how much to preload.
             app_bytes = data.get("rawBytes") or data.get("sizeBytes") or data.get("archiveBytes")
@@ -493,7 +545,7 @@ def launch(key, project, bucket, remote, keep_cache=False):
                 "state": current["state"],
                 "message": ("Launch requested. macOS is still opening the application; inspect its session status."
                             if pending else "Application opened with a managed " +
-                            ("cloud cache" if current["mode"] == "streamed" else "local copy") + ".")}
+                            ("Kamatera-backed mount (no local app copy)" if current["mode"] == "workspace-stream" else "cloud mount" if current["mode"] == "streamed" else "explicit local copy") + ".")}
     except Exception as error:
         if not handed_off:
             if record["mode"] == "streamed":
@@ -537,6 +589,8 @@ def watch(identifier):
         save(record)
         try:
             path = Path(record["cachePath"])
+            if record["mode"]=="workspace-stream" and workspace_path(record)!=path:
+                raise RuntimeError("The verified workspace mount changed")
             process = subprocess.Popen(["/usr/bin/open", "-n", "-W", str(path)], stdin=subprocess.DEVNULL,
                                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             record.update(openPid=process.pid, openIdentity=process_identity(process.pid))
@@ -610,6 +664,7 @@ def main():
     parser.add_argument("--prefix")
     parser.add_argument("--session")
     parser.add_argument("--keep-cache", action="store_true")
+    parser.add_argument("--allow-local-copy", action="store_true", help="Explicit offline execution only; permits a full local download")
     parser.add_argument("--performance-stdin", action="store_true")
     args = parser.parse_args()
     if args.performance_stdin:
@@ -619,7 +674,7 @@ def main():
     if args.action == "status":
         return lib.reply(**sessions(args.project, args.bucket, args.remote))
     with lib.maintenance_lock():
-        value = (launch(args.key, args.project, args.bucket, args.remote, args.keep_cache)
+        value = (launch(args.key, args.project, args.bucket, args.remote, args.keep_cache, allow_local_copy=args.allow_local_copy)
                  if args.action == "launch" else evict(args.key, args.project, args.bucket, args.remote))
     lib.reply(**value)
 

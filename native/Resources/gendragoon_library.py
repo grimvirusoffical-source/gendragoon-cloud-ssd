@@ -579,13 +579,13 @@ def validate_archive(path,name):
                     if hops>40:raise ValueError("Archive symlink loop")
                     resolved.pop();pending=links[candidate].split("/")+pending
             if not resolved or resolved[0]!=expected_root:raise ValueError("Archive symlink escapes its bundle")
-def upload(source,remote,folder,offload=False,project=None,bucket=None,parent_key=None,encryption=True):
+def upload(source,remote,folder,offload=False,project=None,bucket=None,parent_key=None,encryption=True,encryption_mode=None):
     original=Path(source).expanduser().absolute()
     resolved=original.resolve(strict=True)
     ensure_not_cloud(resolved)
     key=keyfor(remote,pathpart(folder),resolved.name,project,bucket,parent_key)
-    with upload_lease(key):return _upload(original,remote,folder,offload,project,bucket,parent_key,encryption)
-def _upload(source,remote,folder,offload=False,project=None,bucket=None,parent_key=None,encryption=True):
+    with upload_lease(key):return _upload(original,remote,folder,offload,project,bucket,parent_key,encryption,encryption_mode)
+def _upload(source,remote,folder,offload=False,project=None,bucket=None,parent_key=None,encryption=True,encryption_mode=None):
     original=Path(source).expanduser().absolute()
     src=original.resolve(strict=True)
     ensure_not_cloud(src)
@@ -597,6 +597,8 @@ def _upload(source,remote,folder,offload=False,project=None,bucket=None,parent_k
     folder=pathpart(folder);check_remote(remote)
     if type(encryption) is not bool or (not encryption and remote!="redxai"):
         raise ValueError("Unencrypted uploads are available only for Red-XAI MachineNotes")
+    if encryption_mode not in (None,"standard","fast","off") or (encryption_mode in ("fast","off") and remote!="redxai"):
+        raise ValueError("Choose a supported encryption mode for this MachineNote")
     context=selected_context(project,bucket,remote,folder)
     redx=redx_config() if remote=="redxai" else None
     if redx and redx["workspaceId"]!=bucket:raise ValueError("Red-XAI workspace changed; refresh the destination")
@@ -636,7 +638,7 @@ def _upload(source,remote,folder,offload=False,project=None,bucket=None,parent_k
             origin=device_origin.current_origin(redx["receiverId"],state_dir=SUPPORT/"DeviceOrigins")
             options={"origin":origin,**({"parent_key":parent_key} if parent_key is not None else {})}
             redx_result=redx_module().upload_archive(redx,archive,key,src.name,typ,
-                "zip-root" if zipped else "flat",original_hash,baseline["manifest"],encryption=encryption,**options)
+                "zip-root" if zipped else "flat",original_hash,baseline["manifest"],encryption=encryption,**({"encryption_mode":encryption_mode} if encryption_mode is not None else {}),**options)
             cloud_item={"key":key,"name":src.name,"kind":typ,"workspace":bucket,
                 "manifestId":redx_result["manifestId"],"archiveBytes":archive.stat().st_size,
                 "archiveSha256":original_hash}
@@ -942,6 +944,35 @@ def clear_cache(key,project=None,bucket=None,remote="gendragoon"):
         if error.errno!=errno.ENOTEMPTY:raise
         raise RuntimeError("Application cache removed; unexpected files were retained for review") from None
     reply(message=f"Deleted local cached copy of {data['name']}; cloud copy remains.")
+def open_cloud_item(key,project,bucket,remote):
+    """Open the owned mounted file; only explicit Restore creates an offline copy."""
+    if remote!="redxai":raise RuntimeError("Choose a Kamatera MachineNote. Legacy destinations require an explicit offline download.")
+    context=selected_context(project,bucket,remote)
+    if context is None:raise ValueError("Choose a verified MachineNote")
+    config=redx_config()
+    if config["workspaceId"]!=bucket:raise ValueError("Workspace changed")
+    client=redx_module().RedXReceiver(config);client.verified_workers()
+    items={item["key"]:item for item in client.library_snapshot()["items"]}
+    item=items.get(key)
+    if not item or item.get("workspace")!=bucket:raise ValueError("The cloud item is no longer available")
+    if item.get("kind")=="app":raise ValueError("Use Play for applications")
+    import gendragoon_workspace_mount as mounts
+    root=mounts.ROOT/config["receiverId"]/bucket;registry=mounts.read_registry(root)
+    if registry.get("payloadMode")!="remote-memory-v1" or not os.path.ismount(root/"mount") or not mounts.owned_daemon(registry):
+        raise RuntimeError("Mount this MachineNote with the updated client first. No full local copy was downloaded.")
+    parts=[];seen=set();current=item
+    while current:
+        if current["key"] in seen or len(parts)>=128:raise ValueError("Invalid cloud folder hierarchy")
+        seen.add(current["key"]);name=current.get("displayName") or current["name"];check_name(name);parts.append(name)
+        parent=current.get("parentKey")
+        if not parent:break
+        current=items.get(parent)
+        if not current or not current.get("virtualFolder"):raise ValueError("Invalid cloud folder parent")
+    path=(root/"mount").joinpath(*reversed(parts))
+    run(["/usr/bin/open",path],timeout=30)
+    return reply(mountPath=str(path),payloadStorage="kamatera",localPayloadCache=False,
+                 message="Opened from the Kamatera-backed workspace without creating an offline copy.")
+
 def main():
     p=argparse.ArgumentParser()
     p.add_argument("action",choices=["remotes","list","scan","upload","launch","restore","evict","organize"])
@@ -954,6 +985,7 @@ def main():
     p.add_argument("--bucket")
     p.add_argument("--offload",action="store_true")
     p.add_argument("--no-encryption",action="store_true")
+    p.add_argument("--encryption-mode",choices=("standard","fast","off"))
     p.add_argument("--key",default="")
     p.add_argument("--operation",choices=["create-folder","rename","move","copy","delete"])
     p.add_argument("--keys-json",default="[]")
@@ -971,8 +1003,8 @@ def main():
     if a.action=="list":return listing(a.project,a.bucket,a.remote)
     with maintenance_lock(a.maintenance_fd):
         if a.action=="scan":scan(a.remote,a.root or DEFAULT_ROOT,a.project,a.bucket)
-        elif a.action=="upload":upload(a.source or a.app,a.remote,a.folder or DEFAULT_ROOT+"/"+ARCHIVE_DIR,a.offload,a.project,a.bucket,a.parent_key,encryption=not a.no_encryption)
-        elif a.action=="launch":stage_item(a.key,True,a.project,a.bucket,a.remote)
+        elif a.action=="upload":upload(a.source or a.app,a.remote,a.folder or DEFAULT_ROOT+"/"+ARCHIVE_DIR,a.offload,a.project,a.bucket,a.parent_key,encryption=not a.no_encryption,encryption_mode=a.encryption_mode)
+        elif a.action=="launch":open_cloud_item(a.key,a.project,a.bucket,a.remote)
         elif a.action=="restore":stage_item(a.key,False,a.project,a.bucket,a.remote)
         elif a.action=="evict":clear_cache(a.key,a.project,a.bucket,a.remote)
         elif a.action=="organize":organize(a.operation,json.loads(a.keys_json),a.name,a.parent_key,a.expected_revision,a.project,a.bucket,a.remote)

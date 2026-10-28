@@ -18,8 +18,8 @@ ROOT=Path(__file__).resolve().parent
 NATIVE=ROOT.parent
 PIN="9235941b431bc1c23c34286b82052f845121592f"
 MODULES=("storage_image","_image","rs","decode_math","chaff","look","stencil_decode","glyphs","pyramid","chromatic","operators","ct_sample","confidence_map","capacity","damage_recover","geom_sync")
-HELPERS=("gendragoon_redx_storage.py", "gendragoon_fast_png.py", "gendragoon_storage_mode.py","gendragoon_auth_broker.py","gendragoon_transfer_errors.py","gendragoon_progress.py","gendragoon_performance.py","gendragoon_native_bridge.py","gendragoon_platform_ipc.py","gendragoon_device_origin.py")
-CLIENTS=("gendragoon_gui.py","desktop_transfer_ui.py","desktop_drop.py","tkdnd-runtime.json","tkinterdnd2-LICENSE.txt","tkdnd-LICENSE.txt","gendragoon_desktop.py","machinenotes_client.py","portable_apps.py","portable_control.py","app_platform.py","gui_access.py","gui_onboarding.py","portable_vault.py","redx_session.py","requirements.txt","companion_server.py","private_fs.py","codec_loader.py","windows_utf8.py","windows-utf8.manifest","workspace_mount.py","mount_platform.py")
+HELPERS=("gendragoon_redx_storage.py", "gendragoon_fast_png.py", "gendragoon_storage_mode.py","gendragoon_remote_archive.py","gendragoon_auth_broker.py","gendragoon_transfer_errors.py","gendragoon_progress.py","gendragoon_performance.py","gendragoon_native_bridge.py","gendragoon_platform_ipc.py","gendragoon_device_origin.py")
+CLIENTS=("gendragoon_gui.py","desktop_transfer_ui.py","desktop_drop.py","tkdnd-runtime.json","tkinterdnd2-LICENSE.txt","tkdnd-LICENSE.txt","gendragoon_desktop.py","machinenotes_client.py","portable_apps.py","portable_control.py","verified_offload.py","app_platform.py","gui_access.py","gui_onboarding.py","portable_vault.py","redx_session.py","requirements.txt","companion_server.py","private_fs.py","codec_loader.py","windows_utf8.py","windows-utf8.manifest","workspace_mount.py","mount_platform.py")
 
 def run(arguments,timeout=600):
     result=subprocess.run([str(a) for a in arguments],capture_output=True,text=True,timeout=timeout)

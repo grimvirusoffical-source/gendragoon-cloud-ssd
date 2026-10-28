@@ -16,6 +16,7 @@ const PERFORMANCE=Object.freeze({free:{cents:0,workers:1},...PAID_PERFORMANCE});
 
 const OWNER_EMAIL='support@infected-nation.com';
 const WORKSPACE_MONTHLY_CENTS=500;
+const FREE_STORAGE_BYTES=2_000_000_000;
 const REMOVE_ADS_CENTS=499;
 const ID=/^[a-f0-9]{32}$/;
 const RX=/^Bearer (rxca_[A-Za-z0-9_-]{43})$/;
@@ -59,14 +60,14 @@ function recurringPriceIds(p){
  if(p.performanceTier!=='free')ids.push(price('performance|'+p.performanceTier+'|'+p.interval));
  return ids;
 }
-function recurringCents(p){const factor=p.interval==='year'?10:1;return STORAGE[p.storageTier].standard*factor+PERFORMANCE[p.performanceTier].cents*factor;}
+function recurringCents(p){if(p.freeTier===true)return 0;const factor=p.interval==='year'?10:1;return STORAGE[p.storageTier].standard*factor+PERFORMANCE[p.performanceTier].cents*factor;}
 function feeRequired(p){return !p.owner&&!p.feeWaived;}
 function publicProject(p){return {id:p.id,name:p.name,status:p.status,active:p.active===true,readOnly:p.readOnly===true,
  feeWaived:p.feeWaived===true,workspaceMonthlyCents:p.feeWaived?0:WORKSPACE_MONTHLY_CENTS,owner:p.owner===true,
  storageTier:p.storageTier||null,performanceTier:p.performanceTier||null,interval:p.interval||null,
  quotaBytes:p.quotaBytes||0,workers:p.workers||0,subscriptionStatus:p.subscriptionStatus||null,
- checkoutPending:!p.owner&&Boolean(p.storageTier&&p.performanceTier)&&(!p.subscriptionId||['canceled','incomplete_expired'].includes(p.subscriptionStatus)||feeRequired(p)&&!p.workspaceFeePriceId&&(!p.workspaceSubscriptionId||['canceled','incomplete_expired'].includes(p.workspaceSubscriptionStatus))),
- checkoutStage:!p.subscriptionId||['canceled','incomplete_expired'].includes(p.subscriptionStatus)?'plans':feeRequired(p)&&!p.workspaceFeePriceId&&(!p.workspaceSubscriptionId||['canceled','incomplete_expired'].includes(p.workspaceSubscriptionStatus))?'workspace_fee':null,createdMs:p.createdMs||null};}
+ checkoutPending:!p.owner&&p.freeTier!==true&&Boolean(p.storageTier&&p.performanceTier)&&(!p.subscriptionId||['canceled','incomplete_expired'].includes(p.subscriptionStatus)||feeRequired(p)&&!p.workspaceFeePriceId&&(!p.workspaceSubscriptionId||['canceled','incomplete_expired'].includes(p.workspaceSubscriptionStatus))),
+ freeTier:p.freeTier===true,checkoutStage:p.freeTier===true?null:!p.subscriptionId||['canceled','incomplete_expired'].includes(p.subscriptionStatus)?'plans':feeRequired(p)&&!p.workspaceFeePriceId&&(!p.workspaceSubscriptionId||['canceled','incomplete_expired'].includes(p.workspaceSubscriptionStatus))?'workspace_fee':null,createdMs:p.createdMs||null};}
 
 async function createControl(config){
  const issuer=origin(config.issuer||'https://red-xai.com',false);
@@ -155,6 +156,7 @@ async function createControl(config){
  function validFee(row){return row?.quantity===1&&row.price?.currency==='usd'&&row.price?.unit_amount===WORKSPACE_MONTHLY_CENTS&&row.price?.recurring?.interval==='month'&&(row.price.recurring.interval_count||1)===1;}
  async function openProjectCheckout(identity,p,s){
    if(p.owner)return {complimentary:true,message:'Owner lifetime access is active.',project:publicProject(p)};
+   if(p.freeTier===true&&s.freeWorkspaceId===p.id)return {complimentary:true,message:'Free 2 GB workspace is active.',project:publicProject(p)};
    if(!billingReady)throw new CloudError('billing_unavailable',503);
    if(!p.storageTier||!p.performanceTier||!p.interval)throw new CloudError('plans_required',409);
    if(p.subscriptionId&&['canceled','incomplete_expired'].includes(p.subscriptionStatus)){
@@ -185,6 +187,15 @@ async function createControl(config){
  }
  async function reconcileProject(identity,p,s){
    if(p.owner)return;
+   if(p.freeTier===true){
+     if(s.freeWorkspaceId!==p.id||p.subscriptionId||p.workspaceSubscriptionId)
+       throw new CloudError('free_workspace_review_required',409);
+     if(p.status==='deleting')return;
+     await store.change(identity.owner,x=>Object.assign(x.projects[p.id],{
+       feeWaived:true,storageTier:'free2GB',performanceTier:'free',interval:null,
+       quotaBytes:FREE_STORAGE_BYTES,workers:1,active:true,readOnly:false,status:'active',subscriptionStatus:'free'}));
+     return;
+   }
    // Without a configured billing provider, existing paid entitlements fail
    // closed rather than retaining a stale paid worker/quota grant.
    if(!stripe){await store.change(identity.owner,x=>Object.assign(x.projects[p.id],{active:false,readOnly:true,quotaBytes:0,workers:0,status:'billing_unavailable'}));return;}
@@ -238,8 +249,29 @@ async function createControl(config){
    }
    return store.get(identity.owner);
  }
+ async function createFreeProject(identity,s,body){
+   const name=cleanName(body.name||'My Free Cloud');
+   const existing=Object.values(s.projects||{});
+   const free=existing.find(p=>p.freeTier===true);
+   if(free)return {state:s,project:free,checkout:null};
+   if(existing.length)throw new CloudError('free_workspace_already_claimed',409);
+   // Optional deployment eligibility gate may require attested signup signals;
+   // a client-provided device ID alone is never treated as identity proof.
+   if(config.freeEligibility && await config.freeEligibility(identity)!==true)
+     throw new CloudError('free_workspace_eligibility_required',403);
+   const id=crypto.randomBytes(16).toString('hex');
+   s=await store.change(identity.owner,x=>{
+     if(Object.keys(x.projects||{}).length)throw new CloudError('free_workspace_already_claimed',409);
+     x.freeWorkspaceId=id;
+     x.projects[id]={id,name,createdMs:Date.now(),feeWaived:true,owner:false,freeTier:true,
+       storageTier:'free2GB',performanceTier:'free',interval:null,quotaBytes:FREE_STORAGE_BYTES,
+       workers:1,active:true,readOnly:false,status:'active',subscriptionStatus:'free'};
+   });
+   return {state:s,project:s.projects[id],checkout:null};
+ }
  async function createProject(identity,s,body){
    const name=cleanName(body.name),owner=s.ownerBenefits===true;
+   if(!owner&&body.storageTier==='free2GB')return createFreeProject(identity,s,body);
    if(!owner&&!billingReady)throw new CloudError('billing_unavailable',503);
    const tier=owner?'6TB':storageTier(body.storageTier),perf=owner?'max':performanceTier(body.performanceTier||'free'),iv=owner?'year':interval(body.interval||'month');
    // A failed Checkout creation leaves a recoverable pending workspace. A retry
@@ -256,11 +288,15 @@ async function createControl(config){
  }
  async function changePlan(identity,s,id,body){
    const p=s.projects[id];if(!p)throw new CloudError('project_not_found',404);
+   if(body.storageTier==='free2GB'){
+     if(s.freeWorkspaceId!==id||p.subscriptionId||p.workspaceSubscriptionId)throw new CloudError('cancel_subscription_before_free_plan',409);
+     await store.change(identity.owner,x=>{x.projects[id].freeTier=true;});return;
+   }
    const st=storageTier(body.storageTier),pt=performanceTier(body.performanceTier||'free'),iv=interval(body.interval||p.interval||'month');
    if(s.ownerBenefits){await store.change(identity.owner,x=>Object.assign(x.projects[id],{storageTier:st,performanceTier:pt,interval:iv,quotaBytes:STORAGE[st].gb*1e9,workers:workersFor(pt),active:true,readOnly:false,status:'active',owner:true,subscriptionStatus:'owner'}));return;}
    if(!p.subscriptionId||['canceled','incomplete_expired'].includes(p.subscriptionStatus)){
      if(!p.subscriptionId&&p.checkoutSessionId){const prior=await stripe.checkout.sessions.retrieve(p.checkoutSessionId);if(prior.status==='complete')throw new CloudError('checkout_processing',409);if(prior.status==='open')await stripe.checkout.sessions.expire(prior.id);}
-     await store.change(identity.owner,x=>Object.assign(x.projects[id],{storageTier:st,performanceTier:pt,interval:iv,subscriptionId:null,workspaceFeePriceId:null,checkoutSessionId:null,checkoutGeneration:(p.checkoutGeneration||0)+1,status:'pending_payment'}));return;
+     await store.change(identity.owner,x=>Object.assign(x.projects[id],{freeTier:false,storageTier:st,performanceTier:pt,interval:iv,subscriptionId:null,workspaceFeePriceId:null,checkoutSessionId:null,checkoutGeneration:(p.checkoutGeneration||0)+1,status:'pending_payment'}));return;
    }
    if(!billingReady)throw new CloudError('billing_unavailable',503);
    const sub=await stripe.subscriptions.retrieve(p.subscriptionId),items=sub.items?.data||[];
@@ -318,9 +354,9 @@ async function createControl(config){
    return {url:session.url,oneTimeCents:REMOVE_ADS_CENTS};
  }
  async function portal(identity,s){if(!billingReady||!s.stripeCustomerId)throw new CloudError('billing_account_not_found',404);return stripe.billingPortal.sessions.create({customer:s.stripeCustomerId,return_url:publicBase+'/billing/return'});}
- const pricing={currency:'usd',catalogVersion:4,free:{workspaceMonthlyCents:0,performanceTier:'free',performanceMonthlyCents:0,workers:1},
+ const pricing={currency:'usd',catalogVersion:4,free:{workspaceMonthlyCents:0,storageTier:'free2GB',quotaBytes:FREE_STORAGE_BYTES,performanceTier:'free',performanceMonthlyCents:0,workers:1},
    projects:{firstWorkspaceFeeWaived:true,additionalWorkspaceMonthlyCents:WORKSPACE_MONTHLY_CENTS,firstMachineNoteFeeWaived:true,additionalMachineNoteMonthlyCents:WORKSPACE_MONTHLY_CENTS,defaultLimit:10,qualifiedLimit:20,qualificationLabel:'2 TB storage and Turbo (8 workers) or higher on the same active MachineNote'},
-   storage:Object.fromEntries(Object.entries(STORAGE).map(([k,v])=>[k,{gb:v.gb,monthlyCents:v.standard,yearlyCents:v.standard*10}])),
+   storage:{free2GB:{gb:2,monthlyCents:0,yearlyCents:0},...Object.fromEntries(Object.entries(STORAGE).map(([k,v])=>[k,{gb:v.gb,monthlyCents:v.standard,yearlyCents:v.standard*10}]))},
    performance:Object.fromEntries(Object.entries(PERFORMANCE).map(([k,v])=>[k,{workers:v.workers,monthlyCents:v.cents,yearlyCents:v.cents*10}])),
    removeAds:{oneTimeCents:REMOVE_ADS_CENTS},owner:{email:OWNER_EMAIL,allPlansIncluded:true,lifetime:true}};
  const accountLocks=new Map();

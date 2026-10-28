@@ -197,11 +197,19 @@ class RedXPerformanceTests(unittest.TestCase):
                 active += 1
                 maximum = max(maximum, active)
             time.sleep(.001)
-            Path(out_path).write_bytes(Path(source).read_bytes())
+            data=Path(source).read_bytes()
+            Path(out_path).write_bytes(struct.pack(">H",5)+b"plain"+struct.pack(">Q",len(data))+data)
             with lock:
                 active -= 1
         runtime.encrypt_file.side_effect = native_copy
-        runtime.decrypt_file.side_effect = native_copy
+        def native_open(session, blob, aad):
+            nonlocal active, maximum
+            with lock:
+                active += 1; maximum=max(maximum,active)
+            time.sleep(.001)
+            with lock: active -= 1
+            return blob
+        runtime.open_.side_effect = native_open
         client = storage.RedXReceiver(self.config)
         def roundtrip(codec, index):
             oid = storage.object_id("lock-fixture", index)

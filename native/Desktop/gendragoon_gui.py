@@ -203,6 +203,14 @@ class GenDragoonGUI:
         toolbar=ttk.Frame(self.files);toolbar.pack(fill="x",pady=8)
         for title,command in (("New folder",self.new_folder),("Upload selected…",self.upload),("Transfers…",self.show_transfers),("Download…",self.download),("Play / Stop app",self.toggle_app),("Rename",self.rename),("Delete",self.delete)):
             ttk.Button(toolbar,text=title,command=command).pack(side="left",padx=2)
+        protection=ttk.Frame(self.files);protection.pack(fill="x",pady=6)
+        ttk.Label(protection,text="Upload protection").pack(side="left")
+        self.upload_mode=self.tk.StringVar(value="Standard encrypted")
+        ttk.Combobox(protection,textvariable=self.upload_mode,state="readonly",width=27,
+                     values=("Standard encrypted","Fast encrypted","Off — not encrypted")).pack(side="left",padx=8)
+        ttk.Label(protection,text="Fast retains encryption; Off exposes stored contents.").pack(side="left")
+        self.upload_offload=self.tk.BooleanVar(value=False)
+        ttk.Checkbutton(self.files,text="Move selected originals to OS Trash only after full cloud readback and restore verification",variable=self.upload_offload).pack(anchor="w",pady=5)
         self.tree=ttk.Treeview(self.files,columns=("kind","source","bytes","action"),selectmode="extended")
         self.tree.heading("#0",text="Name");self.tree.heading("kind",text="Type / artifact OS hint");self.tree.heading("source",text="Uploaded from (client reported)");self.tree.heading("bytes",text="Archive bytes")
         self.tree.column("#0",width=330);self.tree.column("kind",width=230);self.tree.column("source",width=270);self.tree.column("bytes",width=120,anchor="e")
@@ -394,6 +402,17 @@ class GenDragoonGUI:
             self.model.selected_note=self.model.notes[index]["id"];self.visible_note=self.model.selected_note;self.visible_items={};self.tree.delete(*self.tree.get_children());self.model.selected_parent=None;self.refresh_tree()
     def refresh(self):
         self.run("Refreshing owned MachineNotes…",self.model.refresh_notes,lambda _:(self.display_notes(),self.refresh_tree() if self.model.selected_note else None))
+    def create_free_workspace(self):
+        from tkinter import simpledialog
+        if self.busy or not self.model.session.receiver or self.model.session.integration_mode:
+            self.status.set("Connect your account before creating a workspace.");return
+        name=simpledialog.askstring("Create free workspace","Name your first 2 GB workspace (3–80 characters):",parent=self.root,initialvalue="My Free Cloud")
+        if name is None:return
+        name=name.strip()
+        if not 3<=len(name)<=80:self.status.set("Choose a name with 3–80 characters.");return
+        self.run("Creating your free 2 GB workspace…",lambda:self.model.session.request(
+            "/gendragoon/v2/machinenotes","POST",{"name":name,"storageTier":"free2GB","performanceTier":"free"}),
+            lambda _:self.refresh())
     def refresh_tree(self):self.run("Loading the current library…",self.model.refresh_tree,lambda _:self.display_tree())
     def display_tree(self,*,refresh_snapshot=True):
         if refresh_snapshot:
@@ -517,8 +536,24 @@ class GenDragoonGUI:
     def queue_sources(self,context,paths):
         if context['receiverId']!=self.model.session.receiver:raise ValueError("The account changed. Select the destination again.")
         paths=validate_sources(paths)
-        job=self.model.enqueue_selection(context['workspaceId'],context['parentKey'],paths)
-        self.status.set(str(len(paths))+" source(s) queued. Originals are retained.");self.refresh_jobs();self.show_transfers();self.drain_queue()
+        from tkinter import messagebox
+        from verified_offload import running_sources,request_close
+        running=running_sources(paths)
+        if running:
+            if not messagebox.askyesno("Close selected running apps?","Save your work first. GenDragoon must close the selected running apps before uploading them.",parent=self.root):return None
+            remaining=request_close(running,approved=True)
+            if remaining:
+                if not messagebox.askyesno("Force quit selected apps?","Some selected apps did not close. Force quit can discard unsaved changes. Force quit and continue?",parent=self.root):return None
+                if request_close(remaining,force=True,approved=True):raise ValueError("A selected app is still running; no upload was queued.")
+        offload=self.upload_offload.get()
+        if offload and not messagebox.askyesno("Verified offload to Trash?","After full cloud upload and restore verification, move only these selected originals to OS Trash? Other files and cloud backups are unchanged.",parent=self.root):return None
+        mode={"Standard encrypted":"standard","Fast encrypted":"fast","Off — not encrypted":"off"}[self.upload_mode.get()]
+        if mode=="off":
+            from tkinter import messagebox
+            if not messagebox.askyesno("Upload without encryption?","Server storage access can reveal these files. Continue without encryption?",parent=self.root):
+                return None
+        job=self.model.enqueue_selection(context['workspaceId'],context['parentKey'],paths,encryption_mode=mode,offload=offload)
+        self.status.set(str(len(paths))+(" source(s) queued for verified offload to Trash." if offload else " source(s) queued. Originals are retained."));self.refresh_jobs();self.show_transfers();self.drain_queue()
         if self.model.keys is None or not self.model.vault_exported:self.status.set("Sources queued. Import or export this account’s portable vault in Storage keys before transfers can start.")
         return job
     def review_dropped_sources(self,paths):
@@ -598,7 +633,11 @@ class GenDragoonGUI:
         item=self.visible_items.get(selected[0],{})
         if not playable(item):self.status.set("That app does not match this OS or is an installer, not a portable app.");return
         if self.owned_app_sessions(selected[0]):self.status.set("This app already has a managed session. Use Stop first.");return
-        self.run("Restoring and verifying a retained portable app cache…",lambda:self.model.prepare_portable_app(selected[0]),self.review_portable)
+        owner=self.model.session.receiver;note=self.model.selected_note
+        record=next((r for r in self.mounts.refresh() if r.get("receiverId")==owner and r.get("workspaceId")==note and r.get("state")=="mounted"),None)
+        if not record:
+            self.status.set("Mount the selected workspace on Home first. No local app copy was downloaded.");return
+        self.run("Verifying the application on its Kamatera-backed drive…",lambda:self.model.prepare_portable_app(selected[0],mount_record=record),self.review_portable)
     def review_portable(self,prepared):
         from tkinter import messagebox
         window=self.tk.Toplevel(self.root);window.title("Choose a verified portable executable");window.geometry("720x430");window.transient(self.root)
@@ -607,13 +646,13 @@ class GenDragoonGUI:
         for relative in prepared.candidates:choices.insert("end",prepared.payload.name if relative=="." else relative)
         choices.pack(fill="both",expand=True,padx=12);approved=self.tk.BooleanVar(value=False)
         self.ttk.Checkbutton(window,text="I recognize this app and confirm it is portable, with no installation required.",variable=approved).pack(anchor="w",padx=12,pady=8)
-        self.ttk.Label(window,text="Apps run with your local user permissions. Originals and cached copies stay on disk. Apps and children keep running if GenDragoon closes.",wraplength=670,padding=12).pack(fill="x")
+        self.ttk.Label(window,text="App files are read from the Kamatera-backed mount without a full local copy. Execution uses this computer. Apps and children keep running until stopped.",wraplength=670,padding=12).pack(fill="x")
         def launch():
             selection=choices.curselection()
             if not selection or not approved.get():
                 messagebox.showinfo("Choose and approve an app","Select one executable and confirm that you recognize it as a portable app.",parent=window);return
             relative=prepared.candidates[selection[0]]
-            if not messagebox.askyesno("Launch selected portable app?","Launch "+(prepared.payload.name if relative=="." else relative)+" with your local permissions? Its verified cache will be retained, including after the app exits.",parent=window):return
+            if not messagebox.askyesno("Launch selected portable app?","Launch "+(prepared.payload.name if relative=="." else relative)+" with your local permissions? Its files stay on Kamatera and are read through the mounted drive; CPU and memory execution is on this device.",parent=window):return
             others=self.owned_app_sessions()
             stopping=[]
             if others:
@@ -890,7 +929,9 @@ def check_gui():
             root=create_root();root.withdraw()
             app=GenDragoonGUI(root,companion_directory=directory/"ipc")
             root.update_idletasks();root.update()
-            if ([app.tabs.tab(tab,"text") for tab in app.tabs.tabs()]!=["Files","Teams","Storage keys"]
+            if ([app.tabs.tab(tab,"text") for tab in app.tabs.tabs()]!=["Home","Files","Teams","Storage keys","Account"]
+                    or app.tabs.select()!=str(app.home)
+                    or any(app.tabs.tab(p,"state")!="disabled" for p in (app.files,app.teams,app.settings))
                     or app.companion is None or app.model.session.receiver is not None
                     or app.model.keys is not None or app.tree.get_children()):
                 raise RuntimeError("The packaged desktop window or private companion could not start.")

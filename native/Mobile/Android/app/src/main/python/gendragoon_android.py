@@ -393,7 +393,8 @@ def _upload(config_json, source, cache, callback, receiver):
         archive_sha = digest(archive)
         key = hashlib.sha256((config["receiverId"] + "|" + config["workspaceId"] + "|android|" + source.name).encode()).hexdigest()[:18]
         result = storage.upload_archive(config, archive, key, source.name, kind, layout, archive_sha, manifest,
-                                        client_factory=receiver, origin=android_origin(config))
+                                        client_factory=receiver, origin=android_origin(config),
+                                        **({"encryption_mode": config["encryptionMode"]} if config.get("encryptionMode","standard") != "standard" else {}))
         item = receiver(config).json("/v1/receivers/me/library")
         matches = [row for row in item.get("items", []) if row.get("key") == key and row.get("workspace") == config["workspaceId"]]
         if len(matches) != 1:

@@ -14,7 +14,7 @@ def capabilities():
     system = host_platform()
     arch = {'amd64': 'x86_64', 'aarch64': 'arm64'}.get(platform.machine().lower(), platform.machine().lower())
     return {'platform': system, 'architecture': arch, 'deviceType': 'desktop',
-            'nativeAppControl': system in ('windows', 'linux'), 'launchMode': 'verified-local-cache'}
+            'nativeAppControl': system in ('windows', 'linux'), 'launchMode': 'kamatera-mounted'}
 
 
 def playable(item, system=None):

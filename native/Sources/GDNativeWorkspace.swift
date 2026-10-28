@@ -263,7 +263,7 @@ enum GDNativeHelper {
                 Button { showCleanup.toggle() } label: { Label("Cleanup Drive", systemImage: "folder.badge.gearshape") }
                     .disabled(native.maintenanceBusy)
             }
-            Text("Your MachineNotes live on the Red-XAI server. Files are encrypted on this Mac and encoded into red-X barcode PNGs before upload. Only your account can access its notes; the verified owner can view account and library metadata across the service.")
+            Text("Your MachineNotes live on the Red-XAI server. Choose standard encryption, fast encryption or explicitly unencrypted storage for each upload. Only your account can access its notes; the verified owner can view account and library metadata across the service.")
                 .font(.system(size: 11)).foregroundStyle(.secondary)
             DisclosureGroup("MachineNotes connection", isExpanded: $showConnection) {
                 HStack {
@@ -287,10 +287,10 @@ enum GDNativeHelper {
                     } else { Text("Run the GenDragoon installer to configure the Python runtime.") }
                 }
             }
-            DisclosureGroup("Managed local cache") {
+            DisclosureGroup("Optional offline copies") {
                 VStack(alignment: .leading, spacing: 12) {
                     Label("Encrypted MachineNotes on your Red-XAI server", systemImage: "lock.shield.fill")
-                    Text("Files and applications are decrypted into a verified local cache when you download or launch them. Keeping 10 GB free is recommended; GenDragoon checks the actual space needed and retains caches that changed or are still in use.")
+                    Text("Mounted files and compatible apps read authenticated chunks from Kamatera into bounded memory. A full local copy is created only through an explicit Download/offline action. Existing older caches are retained until you choose to remove them.")
                         .font(.caption).foregroundStyle(.secondary)
                     if cloud.mounted {
                         HStack {

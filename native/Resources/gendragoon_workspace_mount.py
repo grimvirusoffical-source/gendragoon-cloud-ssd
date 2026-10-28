@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Owned read-only Finder drives: authenticated loopback DAV -> bundled NFS.
 
-Directory metadata is verified lazily. Opening a backup restores and verifies
-its complete archive in this mount's private cache. No account token is stored
+Directory metadata is verified lazily. File reads fetch authenticated ranges from
+Kamatera into bounded RAM, without restoring archives to disk. No account token is stored
 in a registry, rclone argument, environment variable or file.
 """
 import os,sys
@@ -29,7 +29,8 @@ from urllib.parse import quote,unquote,urlsplit
 from xml.etree import ElementTree as ET
 import zlib
 import gendragoon_library as lib
-import gendragoon_redx_storage as storage
+import gendragoon_storage_mode as storage
+from gendragoon_remote_archive import open_member
 import gendragoon_auth_broker as broker
 import gendragoon_app_launch as lifecycle
 import gendragoon_performance as performance
@@ -85,7 +86,7 @@ def read_registry(root):
 
 
 def metadata(client,item):
-    with storage.Codec(client) as codec:
+    with storage.codec_for_item(client,item) as codec:
         root,_=storage._root_for_item(client,codec,item)
         meta=root["metadata"];expected=meta.get("jsonBytes")
         if (meta.get("schema")!=storage.METADATA_SCHEMA or meta.get("encoding")!="zlib-json"
@@ -102,10 +103,10 @@ def metadata(client,item):
 
 
 class WorkspaceTree:
-    def __init__(self,config,client=None,authorize=None,stage=None,manifest_loader=None):
+    def __init__(self,config,client=None,authorize=None,reader=None,manifest_loader=None):
         self.config=config;self.client=client or storage.RedXReceiver(config)
         self.authorize=authorize or broker.client_for(config).authorize
-        self.stage=stage or lib.stage_item;self.manifest_loader=manifest_loader or metadata
+        self.reader=reader or open_member;self.manifest_loader=manifest_loader or metadata
         self.lock=threading.RLock();self.active_reads=0;self.manifests={}
         self.client.verified_workers()
         snapshot=self.client.library_snapshot();self.revision=snapshot["revision"]
@@ -116,7 +117,6 @@ class WorkspaceTree:
             while parent:
                 if parent in seen or parent not in self.items or self.items[parent].get("virtualFolder") is not True:raise ValueError("Invalid MachineNote folder tree")
                 seen.add(parent);parent=self.items[parent].get("parentKey")
-        if stage is None:lib.sync_redx_library("redxai",config["workspaceId"],"redxai",cloud_snapshot=snapshot)
 
     @staticmethod
     def label(item):
@@ -186,16 +186,10 @@ class WorkspaceTree:
             item=node["item"]
             current=next((i for i in self.client.library_snapshot()["items"] if i["key"]==item["key"]),None)
             if not current or any(current.get(k)!=item.get(k) for k in ("manifestId","archiveBytes","archiveSha256")):raise FileNotFoundError()
-            with self.lock:
-                entries=lib.load();saved=entries.get(item["key"])
-                if saved is not None:
-                    saved["manifest"]=list(self.manifest(item).values());lib.store(item["key"],saved)
-                with contextlib.redirect_stdout(io.StringIO()):
-                    restored=Path(self.stage(item["key"],False,"redxai",self.config["workspaceId"],"redxai",emit=False))
-                target=restored if node["relative"]=="." else restored/node["relative"]
-                if not target.resolve().is_relative_to(restored.resolve() if restored.is_dir() else restored.parent.resolve()):raise ValueError("Unsafe restored backup path")
-                fd=os.open(target,os.O_RDONLY|os.O_NOFOLLOW)
-            with os.fdopen(fd,"rb") as source:yield source
+            # Each object and data range is authenticated by the Receiver codec.
+            # No stage_item/full extraction or persistent payload cache is used.
+            with self.reader(self.client,item,node["relative"],node) as source:
+                yield source
         finally:
             with self.lock:self.active_reads-=1
 
@@ -339,7 +333,7 @@ def serve(receiver,workspace,name):
     try:fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
     except BlockingIOError:os.close(lock);raise RuntimeError("This MachineNote is already preparing a drive") from None
     record={"schema":1,"receiverId":receiver,"workspaceId":workspace,"name":name,"mountPath":str(mount),"revision":0,
-            "daemonPid":os.getpid(),"daemonIdentity":lifecycle.process_identity(os.getpid()),"nativePid":os.getppid(),
+            "payloadMode":"remote-memory-v1","daemonPid":os.getpid(),"daemonIdentity":lifecycle.process_identity(os.getpid()),"nativePid":os.getppid(),
             "nativeIdentity":lifecycle.process_identity(os.getppid()),"createdAt":int(time.time())}
     if not record["daemonIdentity"]:raise RuntimeError("Mount process identity is unavailable")
     write_registry(root,record)
@@ -351,7 +345,6 @@ def serve(receiver,workspace,name):
 
 
 def serve_ready(config,receiver,workspace,root,mount,record,startup):
-    lib.CACHE=private_directory(root/"items");lib.INDEX=root/"library.json"
     tree=WorkspaceTree(config)
     token=secrets.token_urlsafe(32);http=DAVServer(tree,token)
     thread=threading.Thread(target=http.serve_forever,daemon=True);thread.start()
@@ -370,7 +363,8 @@ def serve_ready(config,receiver,workspace,root,mount,record,startup):
     try:
         process=subprocess.Popen([str(lib.RCLONE),"--config","/dev/null","nfsmount",":webdav:",str(mount),
             "--read-only","--vfs-cache-mode=off","--cache-dir="+str(cache),"--addr=127.0.0.1:0","--nfs-cache-type=memory",
-            "--dir-cache-time=0s","--attr-timeout=0s","--dir-perms=0700","--file-perms=0400"],
+            "--dir-cache-time=0s","--attr-timeout=0s","--buffer-size=1M","--vfs-read-chunk-size=1M","--vfs-read-chunk-size-limit=4M",
+            "--dir-perms=0700","--file-perms=0500"],
             env=environment,stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,start_new_session=True)
         record.update(mountPid=process.pid,mountIdentity=lifecycle.process_identity(process.pid));write_registry(root,record)
         for unused in range(300):

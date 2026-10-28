@@ -319,7 +319,7 @@ struct GDRXSubscriptionsPanel: View {
     @StateObject private var model = GDRXSubscriptionModel()
     let focus: GDRXSubscriptionFocus
     @State private var projectName = "My MachineNote"
-    @State private var storageTier = "100GB"
+    @State private var storageTier = "free2GB"
     @State private var performanceTier = "free"
     @State private var yearly = false
     @State private var selectedProjectID = ""
@@ -366,15 +366,15 @@ struct GDRXSubscriptionsPanel: View {
                 Text(model.ownerBenefits
                      ? "Owner account: every MachineNote, storage tier, performance tier, and ad-free entitlement is included for life."
                      : model.projects.isEmpty
-                       ? "Your first MachineNote has no MachineNote fee forever. Storage is still subscribed; performance may be Free (1 worker) or a faster paid tier."
+                       ? "Your first MachineNote can start with 2 GB free storage and the slowest Free performance plan. Paid storage and faster performance remain optional."
                        : "Additional MachineNote: \(money(pricing.projects.additionalWorkspaceMonthlyCents))/month + selected storage + selected performance. Free performance is allowed.")
                     .font(.caption).foregroundStyle(.secondary)
                 if !model.ownerBenefits && !model.projects.isEmpty {
                     Text("Storage and performance share your selected billing interval. The MachineNote fee is billed monthly through a second checkout. Complete both checkouts to activate the MachineNote.")
                         .font(.caption).foregroundStyle(.secondary)
                 }
-                Button(model.ownerBenefits ? "Create MachineNote · Included" : "Create MachineNote & Open Checkout") {
-                    model.createProject(redX, name: projectName, storageTier: storageTier, performanceTier: performanceTier, yearly: yearly)
+                Button(model.ownerBenefits ? "Create MachineNote · Included" : storageTier == "free2GB" ? "Create free 2 GB MachineNote" : "Create MachineNote & Open Checkout") {
+                    model.createProject(redX, name: projectName, storageTier: storageTier, performanceTier: storageTier == "free2GB" ? "free" : performanceTier, yearly: yearly)
                 }.buttonStyle(.borderedProminent).tint(gdPurple)
                     .disabled(model.busy || model.usedProjectSlots >= model.projectLimit)
             }

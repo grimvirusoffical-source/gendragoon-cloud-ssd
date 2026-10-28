@@ -442,15 +442,31 @@ class Codec:
                     blob = decode_image(png)
             except ValueError as exc:
                 raise RedXStorageError("Encrypted visual barcode is invalid") from exc
-        factory = getattr(self.client, "temporary_directory", tempfile.TemporaryDirectory)
-        with factory(prefix="gd-rsx-open-") as td:
-            sealed = Path(td) / "sealed"
-            output = Path(td) / "plain"
-            sealed.write_bytes(blob)
-            with self._operation_lock:
-                rsx.decrypt_file(self._session, str(sealed), out_path=str(output),
-                                 aad=aad(self.client.receiver, self.client.workspace, object_id_value))
-            return output.read_bytes()
+        if not isinstance(blob, bytes) or len(blob) > MAX_PNG:
+            raise RedXStorageError("Encrypted payload exceeds the transport limit")
+        # The pinned file wrapper aborts an already-freed stream when final
+        # authentication fails. Use its supported in-memory API instead; this
+        # verifies the identical RSX3 ciphertext/AAD without altering the core.
+        # No plaintext is published until authentication and framing both pass.
+        with self._operation_lock:
+            payload = rsx.open_(self._session, blob,
+                                aad=aad(self.client.receiver, self.client.workspace, object_id_value))
+        if not isinstance(payload, bytes) or len(payload) < 10 or len(payload) > MAX_PNG:
+            raise RedXStorageError("Authenticated file payload has invalid length")
+        name_size = struct.unpack_from(">H", payload)[0]
+        if not 1 <= name_size <= 255 or len(payload) < 10 + name_size:
+            raise RedXStorageError("Authenticated file payload has invalid framing")
+        try:
+            name = payload[2:2 + name_size].decode("utf-8")
+        except UnicodeError as error:
+            raise RedXStorageError("Authenticated file payload has invalid name") from error
+        if not name or "\0" in name:
+            raise RedXStorageError("Authenticated file payload has invalid name")
+        size = struct.unpack_from(">Q", payload, 2 + name_size)[0]
+        plain = payload[10 + name_size:]
+        if len(plain) != size:
+            raise RedXStorageError("Authenticated file payload size mismatch")
+        return plain
 
 
 def _put_plain(client, codec, object_id_value, plain, on_encoded=None):

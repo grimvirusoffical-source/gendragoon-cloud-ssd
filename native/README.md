@@ -1,5 +1,7 @@
 # GenDragoon native applications
 
+> **0.22.2 storage update:** mounted reads and normal Open/Play no longer restore full archives automatically. See [Kamatera streaming notes](KAMATERA-STREAMING.md). Older local-cache behavior described below applies only to explicit offline/legacy paths.
+
 This tree contains the macOS app, the iOS and Android clients, the cloud backend and the upload, cleanup, reset and update features.
 The previous `GenDragoonFreeCloud.swift` is kept under `Legacy`; the current app uses `GenDragoonCustomerCloud.swift` and the v3 transfer client.
 

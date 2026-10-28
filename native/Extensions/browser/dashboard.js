@@ -42,7 +42,7 @@
   const current=++epoch,note=selected();items=[];sessions=[];draw();
   const active=note?.active===true&&note.readOnly!==true;
   el('upload-file').disabled=!active;el('upload-folder').disabled=!active;el('teams').disabled=!note;
-  el('note-detail').textContent=note?(active?'Ready. For app controls, select and mount this same workspace in GenDragoon.':'Read only or awaiting subscription. Open GenDragoon to manage this workspace.'):'Choose a MachineNote.';
+  el('note-detail').textContent=note?(active?'Ready for uploads. For app controls, select and mount this same workspace in GenDragoon.':'Read only or awaiting subscription. Open GenDragoon to manage this workspace.'):'Choose a MachineNote.';
   if(!note)return;
   const response=await api('/v1/receivers/me/workspaces/'+note.id+'/library');if(current!==epoch)return;
   items=Array.isArray(response.items)?response.items:[];draw();await pollSessions();

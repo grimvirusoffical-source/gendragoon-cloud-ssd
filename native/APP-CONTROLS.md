@@ -1,5 +1,7 @@
 # Platform app controls and mobile launchers
 
+> **0.22.2 storage update:** mounted reads and normal Open/Play no longer restore full archives automatically. See [Kamatera streaming notes](KAMATERA-STREAMING.md). Older local-cache behavior described below applies only to explicit offline/legacy paths.
+
 Development candidate: `codex/platform-app-controls-20261027` (PR #26).
 
 ## Desktop execution

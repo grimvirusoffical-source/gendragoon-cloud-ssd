@@ -252,3 +252,31 @@ test('owner MachineNote alias checkout stays complimentary and returns both obje
  const f=await fixture({owner:true,stripeOverride:null});t.after(()=>f.c.close());const r=await f.call('/v2/machinenotes',{method:'POST',body:{name:'Owner MachineNote'}});assert.equal(r.status,201);assert.deepEqual(r.body.machineNote,r.body.project);
  const checkout=await f.call('/v2/machinenotes/'+r.body.machineNote.id+'/checkout',{method:'POST',body:{}});assert.equal(checkout.status,200);assert.equal(checkout.body.complimentary,true);assert.deepEqual(checkout.body.machineNote,checkout.body.project);
 });
+
+test('first 2 GB free workspace works with no Stripe and remains active without checkout',async t=>{
+ const f=await fixture({stripeOverride:null});t.after(()=>f.c.close());
+ const r=await f.call('/v2/machinenotes',{method:'POST',body:{name:'Free Home',storageTier:'free2GB',performanceTier:'free'}});
+ assert.equal(r.status,201);const p=r.body.project;
+ assert.equal(p.active,true);assert.equal(p.quotaBytes,2_000_000_000);assert.equal(p.workers,1);
+ assert.equal(p.checkoutPending,false);assert.equal(p.freeTier,true);assert.equal(r.body.url,undefined);
+ let list=await f.call('/v2/receiver-entitlements');assert.equal(list.status,200);assert.equal(list.body.workspaces[0].quotaBytes,2_000_000_000);
+ const checkout=await f.call('/v2/projects/'+p.id+'/checkout',{method:'POST',body:{}});
+ assert.equal(checkout.status,200);assert.equal(checkout.body.complimentary,true);
+ list=await f.call('/v2/projects');assert.equal(list.body.projects[0].active,true);
+});
+test('concurrent free-workspace requests cannot allocate multiple free quotas',async t=>{
+ const f=await fixture({stripeOverride:null});t.after(()=>f.c.close());
+ const replies=await Promise.all(Array.from({length:12},(_,n)=>f.call('/v2/projects',{method:'POST',body:{name:'Free '+n,storageTier:'free2GB'}})));
+ assert.ok(replies.every(r=>r.status===201));assert.equal(new Set(replies.map(r=>r.body.project.id)).size,1);
+ const state=await getState(f);assert.equal(Object.keys(state.projects).length,1);
+ assert.equal(Object.values(state.projects).reduce((n,p)=>n+p.quotaBytes,0),2_000_000_000);
+});
+test('additional paid workspace after free storage still requires the monthly workspace fee',async t=>{
+ const f=await fixture();t.after(()=>f.c.close());
+ const free=await f.call('/v2/projects',{method:'POST',body:{name:'Starter free',storageTier:'free2GB'}});assert.equal(free.status,201);
+ const second=await f.call('/v2/projects',{method:'POST',body:{name:'Additional paid',storageTier:'100GB',performanceTier:'free',interval:'month'}});
+ assert.equal(second.status,201);assert.equal(second.body.project.feeWaived,false);assert.equal(second.body.project.workspaceMonthlyCents,500);
+ assert.equal(second.body.project.active,false);assert.equal(f.stripe._sessions.size,1);
+ const repeated=await f.call('/v2/projects',{method:'POST',body:{name:'Another alleged free',storageTier:'free2GB'}});
+ assert.equal(repeated.body.project.id,free.body.project.id);assert.equal(Object.keys((await getState(f)).projects).length,2);
+});

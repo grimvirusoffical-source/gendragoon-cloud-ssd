@@ -73,12 +73,61 @@ class PlainCodec:
         except fast.PlainCarrierError as error:
             raise encrypted.RedXStorageError(str(error)) from error
 
-def upload_archive(config, archive, key, name, kind, archive_layout, archive_sha,
-                   source_manifest, parent_key=None, client_factory=None, origin=None,
-                   *, encryption=True):
+COMPACT_PROFILE = "redsecretsxai-compact-v1"
+MODES = frozenset(("standard", "fast", "off"))
+
+def normalize_mode(encryption=True, encryption_mode=None):
     if type(encryption) is not bool:
         raise encrypted.RedXStorageError("Select an explicit encryption option")
-    if encryption:
+    mode = ("standard" if encryption else "off") if encryption_mode is None else encryption_mode
+    if not isinstance(mode, str) or mode not in MODES or (encryption is False and mode != "off"):
+        raise encrypted.RedXStorageError("Choose standard, fast, or off encryption mode")
+    return mode
+
+class CompactCodec(encrypted.Codec):
+    """Same pinned C++ AEAD, session, secret, keymap and AAD; compact PNG carrier.
+
+    This optimizes only carrier creation. It never weakens the cipher or KDF,
+    never stores cleartext in the PNG, and never modifies Red-SecretsXAI.
+    The existing encrypted decoder already understands compact PNG payloads.
+    """
+    def worker(self, client):
+        if self._session is None:
+            raise encrypted.RedXStorageError("Encrypted transfer session is not initialized")
+        worker = CompactCodec(client)
+        worker._session = self._session
+        worker._operation_lock = self._operation_lock
+        return worker
+
+    def seal(self, plain, oid):
+        import tempfile
+        from redsecretsxai import encode_storage_image
+        plain = bytes(plain)
+        if not plain or len(plain) > fast.MAX_PAYLOAD:
+            raise encrypted.RedXStorageError("Fast encrypted chunk exceeds its memory limit")
+        progress.activity("encoding", during=("encoding", "uploading"))
+        factory = getattr(self.client, "temporary_directory", tempfile.TemporaryDirectory)
+        with factory(prefix="gd-rsx-compact-") as td:
+            source, sealed = Path(td) / "plain", Path(td) / "sealed"
+            source.write_bytes(plain)
+            source.chmod(0o600)
+            with self._operation_lock:
+                encrypted.rsx.encrypt_file(self._session, str(source), out_path=str(sealed),
+                    aad=encrypted.aad(self.client.receiver, self.client.workspace, oid))
+            blob = sealed.read_bytes()
+        png = encode_storage_image(blob)
+        if not isinstance(png, bytes) or len(png) > encrypted.MAX_PNG:
+            raise encrypted.RedXStorageError("Compact encrypted PNG exceeds the transport limit")
+        # This checks the container only. AEAD remains the authority on restore.
+        if encrypted.decode_storage_image(png) != blob:
+            raise encrypted.RedXStorageError("Compact encrypted PNG verification failed")
+        return png
+
+def upload_archive(config, archive, key, name, kind, archive_layout, archive_sha,
+                   source_manifest, parent_key=None, client_factory=None, origin=None,
+                   *, encryption=True, encryption_mode=None):
+    mode = normalize_mode(encryption, encryption_mode)
+    if mode == "standard":
         return encrypted.upload_archive(
             config, archive, key, name, kind, archive_layout, archive_sha,
             source_manifest, parent_key, client_factory, origin)
@@ -86,9 +135,11 @@ def upload_archive(config, archive, key, name, kind, archive_layout, archive_sha
     platform = application_platform(name, kind)
     client = (client_factory or encrypted.RedXReceiver)(config)
     workers = client.verified_workers(write=True)
+    # Prevent unencrypted uploads to older Receivers; encrypted compact PNGs
+    # use the original supported Red-SecretsXAI decoder.
     # Prevent attempts against an older live Receiver that only accepts
     # Red-SecretsXAI carriers. A preflight failure cannot write cloud objects.
-    if callable(getattr(client, "json", None)):
+    if mode == "off" and callable(getattr(client, "json", None)):
         capabilities = client.json("/v1/receivers/me")
         if (capabilities.get("id") != client.receiver
                 or fast.PROFILE not in capabilities.get("supportedStorageFormats", [])):
@@ -103,11 +154,12 @@ def upload_archive(config, archive, key, name, kind, archive_layout, archive_sha
         raise encrypted.RedXStorageError("Prepared archive changed before upload")
     # The fast format has its own object-id namespace; encrypted objects cannot
     # collide with cleartext objects even if an archive has the same SHA-256.
-    profile = fast.PROFILE
+    profile = fast.PROFILE if mode == "off" else COMPACT_PROFILE
     progress.phase("uploading", total_bytes=archive_bytes * 2, workers=workers,
                    objects_done=0, objects_total=(archive_bytes + fast.MAX_PAYLOAD - 1) // fast.MAX_PAYLOAD)
     chunks = []
-    with PlainCodec(client) as codec, archive.open("rb") as stream:
+    codec_class = PlainCodec if mode == "off" else CompactCodec
+    with codec_class(client) as codec, archive.open("rb") as stream:
         def parts():
             for index, plain in enumerate(iter(lambda: stream.read(fast.MAX_PAYLOAD), b"")):
                 yield index, plain
@@ -141,7 +193,7 @@ def upload_archive(config, archive, key, name, kind, archive_layout, archive_sha
             metadata_parts.append(encrypted._put_plain(client, codec, oid, part))
         metadata_pages = encrypted._json_pages(client, codec, profile + "-metadata-page", archive_sha, metadata_parts)
         root = {
-            "schema": encrypted.ROOT_SCHEMA, "storageProfile": profile, "encryptionMode": "off",
+            "schema": encrypted.ROOT_SCHEMA, "storageProfile": profile, "encryptionMode": mode,
             "chunkBytes": fast.MAX_PAYLOAD,
             "key": key, "name": name, "kind": kind, "archiveLayout": archive_layout,
             "archiveBytes": archive_bytes, "archiveSha256": archive_sha,
@@ -171,7 +223,7 @@ def upload_archive(config, archive, key, name, kind, archive_layout, archive_sha
         actual_origin = validate_origin(registered.get("origin"))
         actual_platform = validate_application_platform(registered.get("applicationPlatform"))
         return {"manifestId": manifest_id, "rootRecord": root_record, "chunks": len(chunks),
-                "encrypted": False, "origin": actual_origin,
+                "encrypted": mode != "off", "encryptionMode": mode, "origin": actual_origin,
                 "applicationPlatform": actual_platform,
                 "archiveBytes": archive_bytes, "archiveSha256": archive_sha}
 

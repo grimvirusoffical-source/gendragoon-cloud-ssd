@@ -1,4 +1,4 @@
-"""Real read-only MachineNote drives: verified archives -> private DAV -> rclone.
+"""Read-only Kamatera drives: authenticated remote ranges -> private DAV -> rclone.
 
 Account credentials and keys stay in this process. The rclone child receives only
 an ephemeral loopback DAV credential. A folder is never reported as a drive until
@@ -30,6 +30,7 @@ from machinenotes_client import MachineNotesClient,DesktopReceiver,storage,safe_
 from redx_session import SessionError
 import mount_platform as platform_api
 import gendragoon_device_origin as device_origin
+from gendragoon_remote_archive import open_member
 
 class MountError(RuntimeError):pass
 
@@ -74,7 +75,7 @@ def metadata(client,item):
     return entries
 
 class WorkspaceTree:
-    def __init__(self,model,note,cache,*,manifest_loader=None,restorer=None):
+    def __init__(self,model,note,cache,*,manifest_loader=None,reader=None):
         owner=model.session.receiver
         if not storage.RECEIVER.fullmatch(owner or "") or not storage.ID.fullmatch(note or ""):
             raise MountError("Connect an account and choose its MachineNote.")
@@ -85,8 +86,8 @@ class WorkspaceTree:
         self.model.keys=dict(model.keys);self.model.keymap=model.keymap;self.model.vault_exported=model.vault_exported
         self.model.selected_note=note;self.model.notes=list(model.notes)
         self.cache=private.private_directory(cache);self.lock=threading.RLock()
-        self.active=0;self.closing=False;self.items={};self.manifests={};self.materialized={};self.verified_files={}
-        self.loader=manifest_loader or metadata;self.restorer=restorer or self._restore
+        self.active=0;self.closing=False;self.items={};self.manifests={};self.generations={}
+        self.loader=manifest_loader or metadata;self.reader=reader or open_member
         self.authorize()
 
     def authorize(self):
@@ -118,6 +119,8 @@ class WorkspaceTree:
         device_origin.ensure_restore_compatible(item)
         key=identity(item)
         with self.lock:
+            previous=self.generations.setdefault(item["key"],key)
+            if previous!=key:raise MountError("The remote archive changed. Remount this workspace to use the new generation.")
             if key not in self.manifests:
                 self.manifests[key]=self.loader(DesktopReceiver(self.model.config()),item)
             return self.manifests[key]
@@ -152,60 +155,16 @@ class WorkspaceTree:
             names=[p[len(prefix):] for p in self.manifest(node["item"]) if p!="." and p.startswith(prefix) and "/" not in p[len(prefix):]]
         return [(name,self.resolve((*parts,name))) for name in sorted(names)]
 
-    def _restore(self,item):
-        device_origin.ensure_restore_compatible(item)
-        if item["kind"]=="app":raise PermissionError("Restore macOS applications on their original platform.")
-        records=self.manifest(item);checked_manifest(list(records.values()))
-        generation=hashlib.sha256(json.dumps(identity(item),separators=(",",":")).encode()).hexdigest()
-        directory=private.private_directory(self.cache/item["key"]/generation);target=directory/"payload"
-        if target.exists() or target.is_symlink():
-            self._verify_cached(target,records);return target
-        require_space(directory,sum(r.get("size",0) for r in records.values())+item["archiveBytes"]*2)
-        with model_api.TRANSFER_LOCK,private.temporary_directory(directory,prefix="restore-") as temporary:
-            scratch=Path(temporary);archive=scratch/"archive.zip"
-            result=storage.download_archive(self.model.config(),item,archive,client_factory=DesktopReceiver)
-            if result["manifest"]!=list(records.values()):raise ValueError("The encrypted drive manifest changed during restoration.")
-            output=private.private_directory(scratch/"output")
-            restored=extract_checked(archive,output,result["manifest"],item["name"],result["root"]["archiveLayout"])
-            private.protect_generated_tree(output);publish_exclusive(restored,target)
-        return target
-
-    @staticmethod
-    def _verify_cached(target,records):
-        for relative,record in records.items():
-            path=target if relative=="." else target/relative
-            private.verify(path)
-            if record["type"]=="directory":
-                if not path.is_dir():raise ValueError("The private drive cache changed.")
-            elif not path.is_file() or path.stat().st_size!=record["size"] or storage.sha256_file(path)!=record["sha256"]:
-                raise ValueError("The private drive cache failed integrity verification.")
-
     @contextlib.contextmanager
     def open_file(self,node):
         if node["type"]!="file":raise IsADirectoryError()
         with self.lock:
             item=node["item"]
             if identity(self.items.get(item["key"],{}))!=identity(item):raise FileNotFoundError()
-            key=identity(item)
-            if key not in self.materialized:self.materialized[key]=self.restorer(item)
-            root=Path(self.materialized[key]);path=root if node["relative"]=="." else root/node["relative"]
-            private.verify(path)
-            fd=os.open(path,os.O_RDONLY|getattr(os,"O_NOFOLLOW",0))
-            before=os.fstat(fd)
-            if not stat.S_ISREG(before.st_mode) or before.st_size!=node["size"]:
-                os.close(fd);raise ValueError("The verified drive cache changed.")
-            source=os.fdopen(fd,"rb")
-            fingerprint=lambda value:(value.st_dev,value.st_ino,value.st_size,value.st_mtime_ns,value.st_ctime_ns,value.st_mode)
-            verification=(key,node["relative"])
-            if self.verified_files.get(verification)!=fingerprint(before):
-                digest=hashlib.sha256()
-                while part:=source.read(1024*1024):digest.update(part)
-                if digest.hexdigest()!=node["sha256"] or fingerprint(os.fstat(fd))!=fingerprint(before):
-                    source.close();raise ValueError("The verified drive cache changed.")
-                self.verified_files[verification]=fingerprint(before)
-            source.seek(0)
-        try:yield source
-        finally:source.close()
+            client=DesktopReceiver(self.model.config())
+        # No download_archive, payload directory or extracted local file.
+        with self.reader(client,item,node["relative"],node) as source:
+            yield source
 
 class DAVServer(ThreadingHTTPServer):
     daemon_threads=True
@@ -352,7 +311,7 @@ class WorkspaceMountManager:
             if len(self.records)>=20:raise MountError("Unmount a drive before mounting more than twenty MachineNotes.")
             tools=platform_api.prerequisites(rclone)
             mount_path=platform_api.choose_mount_path(root)
-            record={"schema":1,"id":key,"receiverId":owner,"workspaceId":note,"mountPath":str(mount_path),"readOnly":True,
+            record={"schema":1,"id":key,"receiverId":owner,"workspaceId":note,"mountPath":str(mount_path),"readOnly":True,"payloadMode":"remote-memory-v1",
                 "label":platform_api.volume_label(owner,note),"state":"preparing","process":None,"tools":tools,
                 "name":next((str(n.get("name") or "MachineNote")[:128] for n in model.notes if n["id"]==note),"MachineNote")}
             tree=WorkspaceTree(model,note,private.private_directory(root/"cache"));server=DAVServer(tree)

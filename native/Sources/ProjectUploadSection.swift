@@ -221,11 +221,17 @@ struct ProjectUploadSection: View {
                         }
                     }.frame(maxHeight: 180)
                 }
-                Toggle("Use Red-SecretsXAI encryption", isOn: $workspace.encryptionEnabled)
-                    .toggleStyle(.checkbox)
-                    .disabled(workspace.controlsLocked(externalBusy: externalBusy))
-                Text(workspace.encryptionEnabled ? "Red-SecretsXAI encryption and red-X barcode protection are enabled. This option stays intact." : "Fast unencrypted upload: files, folder archives and apps can be read by anyone with server storage access. Never use this mode for sensitive data. Existing encrypted backups are unchanged.")
-                    .font(.caption).foregroundStyle(workspace.encryptionEnabled ? Color.secondary : Color.orange)
+                Picker("Upload protection", selection: $workspace.encryptionMode) {
+                    Text("Standard encrypted · visual barcode").tag("standard")
+                    Text("Fast encrypted · compact carrier").tag("fast")
+                    Text("Off · no encryption").tag("off")
+                }.disabled(workspace.controlsLocked(externalBusy: externalBusy))
+                Text(workspace.encryptionMode == "off"
+                     ? "Unencrypted uploads can be read by anyone with server storage access. Existing encrypted backups are unchanged."
+                     : workspace.encryptionMode == "fast"
+                       ? "Same Red-SecretsXAI encryption and key protection, with less PNG carrier processing. No encryption strength is reduced."
+                       : "Original Red-SecretsXAI encrypted visual red-X barcode format.")
+                    .font(.caption).foregroundStyle(workspace.encryptionMode == "off" ? Color.orange : Color.secondary)
                 Toggle("Move originals to Trash after a verified cloud backup and restore check", isOn: $workspace.offload)
                     .disabled(workspace.controlsLocked(externalBusy: externalBusy))
                 Text("Leave unchecked to keep originals on this computer. Verification failures keep originals in place.")
@@ -516,6 +522,9 @@ final class UploadWorkspaceModel: ObservableObject {
     @Published private(set) var preflightingApplications = false
     @Published private(set) var verifiedDestination: UploadDestination?
     @Published var offload = false
+    @Published var encryptionMode: String = "standard" {
+        didSet { UserDefaults.standard.set(encryptionMode, forKey: "gd.upload.encryptionMode") }
+    }
     @Published var encryptionEnabled: Bool {
         didSet { UserDefaults.standard.set(encryptionEnabled, forKey: "gd.upload.encryptionEnabled") }
     }
@@ -534,7 +543,11 @@ final class UploadWorkspaceModel: ObservableObject {
     init(projects: [UploadCloudProject], requiresSecurityScopedAccess: Bool,
          onBusyStateChange: @escaping @MainActor (Bool) -> Void) {
         self.projects = projects
-        encryptionEnabled = UserDefaults.standard.object(forKey: "gd.upload.encryptionEnabled") as? Bool ?? true
+        let legacyEncryption = UserDefaults.standard.object(forKey: "gd.upload.encryptionEnabled") as? Bool ?? true
+        encryptionEnabled = legacyEncryption
+        let savedMode = UserDefaults.standard.string(forKey: "gd.upload.encryptionMode")
+        encryptionMode = savedMode.flatMap { ["standard","fast","off"].contains($0) ? $0 : nil }
+            ?? (legacyEncryption ? "standard" : "off")
         self.onBusyStateChange = onBusyStateChange
         sourceAccess = UploadSourceAccess(required: requiresSecurityScopedAccess)
     }
@@ -741,7 +754,7 @@ final class UploadWorkspaceModel: ObservableObject {
             guard let bundle = candidate.bundleURL else { return false }
             return !candidate.isTerminated && selectedApps.contains(bundle.standardizedFileURL.path)
         }
-        let arguments = ["enqueue", "--offload", offload ? "true" : "false", "--encryption", encryptionEnabled ? "true" : "false"]
+        let arguments = ["enqueue", "--offload", offload ? "true" : "false", "--encryption", encryptionMode == "off" ? "false" : "true", "--encryption-mode", encryptionMode]
         guard !running.isEmpty else {
             mutate(arguments, externalBusy: externalBusy, startAfterSuccess: true)
             return

@@ -1,5 +1,7 @@
 # GenDragoon Cloud SSD
 
+> **0.22.2 storage update:** mounted reads and normal Open/Play no longer restore full archives automatically. See [Kamatera streaming notes](native/KAMATERA-STREAMING.md). Older local-cache behavior described below applies only to explicit offline/legacy paths.
+
 GenDragoon Cloud SSD stores encrypted files, folders and applications in **MachineNotes** on your Red-XAI server. The macOS app uses your Red-XAI account and the pinned Red-SecretsXAI library to encrypt archives locally and encode them as red-X barcode PNGs before upload. This repository holds the clients, backend services, release tooling and storage SDKs.
 
 ## Features

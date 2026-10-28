@@ -259,7 +259,7 @@ def start(tools,record,url,token,cache):
     # Windows paths. Python's lowercase "nul" is rejected; Go expects "NUL".
     null_config="NUL" if sys.platform=="win32" else os.devnull
     args=[tools["rclone"],"--config",null_config,"mount",":webdav:",record["mountPath"],"--read-only","--vfs-cache-mode=off",
-        "--cache-dir",str(cache),"--dir-cache-time=0s","--attr-timeout=0s","--dir-perms=0500","--file-perms=0400",
+        "--cache-dir",str(cache),"--dir-cache-time=0s","--attr-timeout=0s","--dir-perms=0500","--file-perms=0500","--buffer-size=1M","--vfs-read-chunk-size=1M","--vfs-read-chunk-size-limit=4M",
         "--volname",record["label"],"--timeout=0","--rc","--rc-addr=127.0.0.1:0","--log-level=NOTICE","--log-format="]
     if sys.platform=="win32":
         if tools.get("backend")!="owned-host":raise PlatformMountError("The Windows rclone command-line mount path is disabled until a busy-safe host is verified.")

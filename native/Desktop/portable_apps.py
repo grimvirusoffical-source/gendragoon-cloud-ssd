@@ -303,6 +303,38 @@ def verify_payload(payload,records):
             raise PortableAppError("The restored app bytes changed. Its cache was retained for review.")
     return expected
 
+def verify_mounted(payload,records,mount,binding,selected=None):
+    """Authenticate the mounted source and selected executable, never clone it."""
+    import mount_platform
+    if (not isinstance(mount,dict) or mount.get("readOnly") is not True
+            or mount.get("payloadMode")!="remote-memory-v1"
+            or mount.get("receiverId")!=binding.get("receiverId")
+            or mount.get("workspaceId")!=binding.get("workspaceId")
+            or mount_platform.mounted(mount) is not True
+            or mount_platform.process_matches(mount.get("process")) is not True):
+        raise PortableAppError("Mount this workspace with the updated Kamatera client first. No local copy was downloaded.")
+    root=Path(mount["mountPath"]);payload=Path(payload)
+    if not root.is_absolute() or not payload.is_relative_to(root) or payload==root:
+        raise PortableAppError("App path escaped its mounted workspace.")
+    _real(payload)
+    expected={};folded=set()
+    if not isinstance(records,list) or not 1<=len(records)<=100000:raise PortableAppError("Invalid mounted application manifest.")
+    for row in records:
+        relative=row.get("path") if isinstance(row,dict) else None
+        if (not isinstance(relative,str) or relative!="." and (not relative or relative.startswith("/") or "\\" in relative or any(p in (".","..","") for p in relative.split("/")))
+                or relative in expected or relative.casefold() in folded or row.get("type") not in ("file","directory")):
+            raise PortableAppError("Unsafe mounted application manifest.")
+        expected[relative]=row;folded.add(relative.casefold())
+    if "." not in expected:raise PortableAppError("Missing mounted application root.")
+    if selected is not None:
+        row=expected.get(selected)
+        if not row or row["type"]!="file":raise PortableAppError("Select an authenticated executable.")
+        path=payload if selected=="." else payload/selected
+        info=_real(path)
+        if not stat.S_ISREG(info.st_mode) or info.st_size!=row.get("size") or _digest(path)!=row.get("sha256"):
+            raise PortableAppError("Mounted executable failed verification. Nothing was launched.")
+    return expected
+
 @dataclass(frozen=True)
 class PreparedApp:
     directory: Path
@@ -310,6 +342,7 @@ class PreparedApp:
     identity: dict
     records: list
     candidates: tuple
+    mounted: dict | None = None
 
 def process_identity(pid,*,required=False):
     """PID reuse cannot make an orphaned lease look healthy."""
@@ -366,6 +399,29 @@ class PortableApps:
             if binary_kind(path)==host():candidates.append(row["path"])
         if not candidates:raise PortableAppError("This archive has no verified native executable matching this computer. Choose a recognized portable native app; scripts and installation packages are unsupported.")
         return PreparedApp(directory,payload,dict(binding),records,tuple(sorted(candidates)))
+    def prepare_mounted(self,binding,payload,records,mount):
+        binding=identity(binding.get("receiverId"),binding.get("workspaceId"),binding)
+        host();self.assert_safe("prepare another app",uncertain_only=True)
+        expected=verify_mounted(payload,records,mount,binding)
+        candidates=[]
+        for relative,row in expected.items():
+            if row["type"]!="file":continue
+            path=Path(payload) if relative=="." else Path(payload)/relative
+            if sys.platform!="win32" and not row.get("executable",0):continue
+            if sys.platform=="win32" and path.suffix.lower()!=".exe":continue
+            if binary_kind(path)==host():candidates.append(relative)
+            if len(candidates)>=256:break
+        if not candidates:raise PortableAppError("No matching portable executable was found on the mounted workspace.")
+        _safe_ancestors(self.root);parent=self._parent(binding)
+        if sys.platform=="win32":
+            if not parent.exists():
+                private.private_directory(parent)
+                private.write_private(parent/"binding.json",json.dumps(dict(schema=SCHEMA,layout=WINDOWS_LAYOUT,identity=binding),sort_keys=True,separators=(",",":")).encode("ascii"))
+            _binding(parent,binding)
+        else:private.private_directory(parent)
+        directory=_new_attempt(parent)
+        private.private_directory(directory/"content");private.private_directory(directory/"control")
+        return PreparedApp(directory,Path(payload),binding,records,tuple(sorted(candidates)),dict(mount))
     def leases(self):
         try:self.root.lstat()
         except FileNotFoundError:return []
@@ -490,15 +546,16 @@ class PortableApps:
         expected_parent=self._parent(prepared.identity)
         if prepared.directory.parent!=expected_parent:raise PortableAppError("The launch belongs to a different account or archive generation.")
         if sys.platform=="win32":_binding(expected_parent,prepared.identity)
-        verify_payload(prepared.payload,prepared.records)
+        if prepared.mounted:verify_mounted(prepared.payload,prepared.records,prepared.mounted,prepared.identity,selected)
+        else:verify_payload(prepared.payload,prepared.records)
         executable=prepared.payload if selected=="." else prepared.payload/selected
         if binary_kind(executable)!=host():raise PortableAppError("The selected bytes are not a matching native executable.")
         _check_working_directory(executable)
         control=prepared.directory/"control";_real(control);private.verify(control)
         launch_id=uuid.uuid4().hex;lease=control/("lease-"+launch_id+".json");spec=control/("launch-"+launch_id+".json")
-        record=dict(schema=SCHEMA,id=launch_id,state="pending",identity=prepared.identity,createdAt=time.time(),cacheRetained=True)
+        record=dict(schema=SCHEMA,id=launch_id,state="pending",identity=prepared.identity,createdAt=time.time(),cacheRetained=not bool(prepared.mounted),payloadStorage="kamatera" if prepared.mounted else "explicit-local")
         _write(lease,record)
-        _write(spec,dict(schema=SCHEMA,lease=str(lease),payload=str(prepared.payload),records=prepared.records,selected=selected,identity=prepared.identity))
+        _write(spec,dict(schema=SCHEMA,lease=str(lease),payload=str(prepared.payload),records=prepared.records,selected=selected,identity=prepared.identity,mounted=prepared.mounted))
         command=_broker_command(spec)
         options=dict(stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,close_fds=True,env=_environment())
         if sys.platform=="win32":options["creationflags"]=subprocess.DETACHED_PROCESS|subprocess.CREATE_NEW_PROCESS_GROUP
@@ -560,10 +617,13 @@ def broker(spec_path):
         mark("read-lease");record=_read(lease);mark("validate-spec")
         if spec.get("schema")!=SCHEMA or record.get("schema")!=SCHEMA or record.get("state")!="pending":raise PortableAppError("Invalid launch specification.")
         payload=Path(spec["payload"])
-        if spec_path.parent.name!="control" or payload.parent!=spec_path.parent.parent/"content" or spec["identity"]!=record["identity"]:raise PortableAppError("Launch cache identity changed.")
+        if spec_path.parent.name!="control" or spec["identity"]!=record["identity"]:raise PortableAppError("Launch identity changed.")
+        mounted=spec.get("mounted")
+        if not mounted and payload.parent!=spec_path.parent.parent/"content":raise PortableAppError("Launch cache identity changed.")
         parent=spec_path.parent.parent.parent
         if parent.parent.name in WINDOWS_LAYOUTS:_binding(parent,spec["identity"])
-        mark("verify-payload");expected=verify_payload(payload,spec["records"]);selected=spec["selected"]
+        mark("verify-payload");selected=spec["selected"]
+        expected=verify_mounted(payload,spec["records"],mounted,spec["identity"],selected) if mounted else verify_payload(payload,spec["records"])
         if selected not in expected or expected[selected]["type"]!="file":raise PortableAppError("Select a verified executable.")
         executable=payload if selected=="." else payload/selected
         mark("binary-header")
@@ -584,7 +644,7 @@ def broker(spec_path):
             record.update(mainExitCode=code,mainExitedAt=time.time());mark("receipt-main-exit");_write(lease,record)
         from portable_control import StopControl
         control=StopControl(lease,record,_read,process_identity)
-        if sys.platform.startswith("linux"):_linux_tree(executable,running,possible_start,exited,mark,control)
+        if sys.platform.startswith("linux"):_linux_tree(executable,running,possible_start,exited,mark,control,mounted=bool(mounted))
         elif sys.platform=="win32":_windows_tree(executable,running,possible_start,exited,mark,control)
         else:raise PortableAppError("Unsupported portable app platform.")
         record.update(state="complete",completedAt=time.time());mark("receipt-complete");_write(lease,record)
@@ -603,13 +663,14 @@ def broker(spec_path):
             except Exception:pass
         return 1
 
-def _linux_tree(executable,running,possible_start,exited,mark,control=None):
+def _linux_tree(executable,running,possible_start,exited,mark,control=None,*,mounted=False):
     import signal
     mark("linux-subreaper");libc=ctypes.CDLL(None,use_errno=True)
     if libc.prctl(36,1,0,0,0)!=0:raise PortableAppError("Linux process-tree tracking is unavailable.")
     # Parent/GUI terminal closure must not propagate a hangup to this broker.
     signal.signal(signal.SIGHUP,signal.SIG_IGN)
-    executable.chmod(0o700)
+    if not mounted:executable.chmod(0o700)
+    elif not os.access(executable,os.X_OK):raise PortableAppError("Mounted executable permission is unavailable. No local copy was created.")
     possible_start()
     mark("linux-process-create");process=subprocess.Popen([str(executable)],cwd=str(executable.parent),env=_environment(),stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,close_fds=True,start_new_session=True)
     # Mark the tree possibly started before any receipt write can fail.
