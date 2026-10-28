@@ -104,7 +104,7 @@ class WorkspaceMountTests(unittest.TestCase):
     def test_remote_failure_and_traversal_never_return_file_contents(self):
         url=self.server();self.stage.side_effect=RuntimeError("Remote data unavailable; no local fallback")
         status,headers,data=self.request(url+"/Folder/report.txt")
-        self.assertEqual(status,507);self.assertNotIn(self.payload,data)
+        self.assertEqual(status,503);self.assertEqual(headers.get("Retry-After"),"1");self.assertNotIn(self.payload,data)
         self.assertEqual(self.request(url+"/%2e%2e/outside")[0],400)
 
     def record(self,receiver=None,workspace=None):

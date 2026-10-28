@@ -88,3 +88,28 @@ and first-workspace free-tier work. Features requiring new Receiver/control
 capabilities remain subject to server deployment; this document does not claim a
 production service deployment. The existing Kamatera read API is sufficient for
 the on-demand mounted-read correction.
+
+
+## 0.22.4 mount recovery correction
+
+The read-only macOS mount now distinguishes transient transport/capacity errors
+from quota/authentication failures. Temporary read failures return retryable HTTP
+503 before streaming begins. A failure after headers closes that response; it
+never appends a second HTTP error message into the requested file's bytes.
+
+The first data block is verified before success is announced. Top-level app
+folder listing no longer decrypts every backup just to show its name. Archive
+metadata loading has per-item locks so one slow backup does not monopolize the
+mount status lock. A per-mount LRU shares at most 32 MiB of verified blocks for up
+to 60 seconds in RAM; separate per-reader and metadata safety bounds remain.
+Normal requests still require native authorization and live catalog identity
+checks. Logout clears shared blocks. No disk payload cache or full local restore
+was introduced. The original encryption implementation is unchanged.
+
+Validation on an Apple Silicon Mac: the focused combined regression command ran
+160 tests (159 passed, one platform opt-in skip). A separately enabled, real NFS
+fixture generated a first-read outage and a midstream disconnect and read the
+correct complete fixture without recreating the mount. Local data was generated
+only for that disposable test. Network outages can still interrupt a cloud-only
+drive; this correction does not promise offline access or bypass failed trust,
+expired sessions, or changed cloud objects.

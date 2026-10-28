@@ -19,6 +19,7 @@ import io
 import json
 import stat
 import threading
+import time
 import zipfile
 
 import gendragoon_storage_mode as storage
@@ -34,6 +35,73 @@ _READERS = threading.BoundedSemaphore(MAX_CONCURRENT_READS)
 
 class RemoteReadError(ValueError):
     pass
+
+
+class RemoteReadBusy(RemoteReadError):
+    """Capacity exhaustion is retryable, not an invalid cloud file."""
+
+
+class VerifiedBlockCache:
+    """Per-mount bounded RAM only; shared immutable verified blocks, never files.
+
+    Authorization still precedes every DAV request. Each file open revalidates
+    its current catalog identity. Failed/tampered results are never cached.
+    Keys bind object identity and BOTH expected digests, not only its filename.
+    """
+    def __init__(self, limit=32*1024*1024, max_entries=512, ttl=60):
+        if type(limit) is not int or not 0 <= limit <= 32*1024*1024:
+            raise ValueError('Invalid mount memory bound')
+        self.limit, self.max_entries, self.ttl = limit, max_entries, ttl
+        self.lock = threading.RLock()
+        self.entries = OrderedDict()
+        self.bytes = 0
+        self.inflight = {}
+        self.generation = 0
+
+    def clear(self):
+        with self.lock:
+            self.entries.clear(); self.bytes=0; self.generation+=1
+
+    def get(self, record, loader):
+        _record(record)
+        key=tuple(record[k] for k in ('id','plainBytes','plainSha256','carrierBytes','carrierSha256'))
+        while True:
+            with self.lock:
+                cached=self.entries.pop(key,None)
+                if cached is not None:
+                    when,value=cached
+                    if time.monotonic()-when < self.ttl:
+                        self.entries[key]=cached
+                        return value
+                    self.bytes-=len(value)
+                ready=self.inflight.get(key)
+                if ready is None:
+                    ready=threading.Event();self.inflight[key]=ready
+                    generation=self.generation
+                    break
+            if not ready.wait(20):
+                raise RemoteReadBusy('The authenticated remote block is still loading; retry safely')
+        try:
+            value=loader()
+            if (not isinstance(value,bytes) or len(value)!=record['plainBytes']
+                    or hashlib.sha256(value).hexdigest()!=record['plainSha256']):
+                raise RemoteReadError('Remote block failed verification')
+            with self.lock:
+                if generation==self.generation and len(value)<=self.limit:
+                    while self.entries and (self.bytes+len(value)>self.limit or len(self.entries)>=self.max_entries):
+                        self.bytes-=len(self.entries.popitem(last=False)[1][1])
+                    self.entries[key]=(time.monotonic(),value);self.bytes+=len(value)
+            return value
+        finally:
+            with self.lock:
+                self.inflight.pop(key,None);ready.set()
+
+
+def verified_plain(client,codec,record):
+    cache=getattr(client,'mount_block_cache',None)
+    if isinstance(cache,VerifiedBlockCache):
+        return cache.get(record,lambda:storage._get_plain(client,codec,record))
+    return storage._get_plain(client,codec,record)
 
 
 def _integer(value, minimum, maximum, what):
@@ -107,7 +175,7 @@ class RemoteArchive(io.RawIOBase):
 
     def _page(self, descriptor):
         _record(descriptor)
-        return json.loads(storage._get_plain(self.client, self.codec, descriptor))
+        return json.loads(verified_plain(self.client, self.codec, descriptor))
 
     def _index(self):
         seen = set()
@@ -171,7 +239,7 @@ class RemoteArchive(io.RawIOBase):
             value = self.cache.pop(index)
             self.cache[index] = value
             return value
-        value = storage._get_plain(self.client, self.codec, self._chunk_record(index))
+        value = verified_plain(self.client, self.codec, self._chunk_record(index))
         if len(value) <= self.limit:
             while self.cache and self.cache_bytes + len(value) > self.limit:
                 self.cache_bytes -= len(self.cache.popitem(last=False)[1])
@@ -250,7 +318,7 @@ def open_member(client, item, relative, record, *, codec_factory=None):
             or record.get('type') != 'file' or not storage.SHA.fullmatch(str(record.get('sha256', '')))):
         raise RemoteReadError('Invalid remote file selection')
     _integer(record.get('size'), 0, 64 * 1024**4, 'file length')
-    if not _READERS.acquire(timeout=3): raise RemoteReadError('Remote read slots are busy; retry safely')
+    if not _READERS.acquire(timeout=3): raise RemoteReadBusy('Remote read slots are busy; retry safely')
     try:
         with RemoteArchive(client, item, codec_factory=codec_factory) as source:
             layout = source.root.get('archiveLayout')

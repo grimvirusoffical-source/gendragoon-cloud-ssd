@@ -137,7 +137,7 @@ struct GDWorkspaceMountRecord: Identifiable {
         do {
             _ = try await GDNativeHelper.invoke("gendragoon_workspace_mount", arguments: ["unmount", "--receiver", record.receiverID,
                                                                                        "--workspace", record.workspaceID], timeout: 45)
-            message = "Workspace drive unmounted. Its verified local cache was retained."
+            message = "Workspace drive unmounted. Your Kamatera files are unchanged."
         } catch { message = GDNativeMessage.safe(error.localizedDescription) }
         await refresh()
     }
@@ -153,7 +153,7 @@ struct GDWorkspaceMountsPanel: View {
     var body: some View {
         GroupBox("Finder drives") {
             VStack(alignment: .leading, spacing: 10) {
-                Text("Mount several MachineNotes as separate read-only Finder drives. Changes stay in GenDragoon. Opening a file can restore its complete backup archive. Keeping 10 GiB free is recommended.")
+                Text("Mount several MachineNotes as separate read-only Finder drives. Changes stay in GenDragoon. File reads stream authenticated chunks from Kamatera into bounded memory; they do not restore complete archives onto this Mac.")
                     .font(.caption).foregroundStyle(.secondary)
                 ForEach(auth.readableProjects.flatMap({ $0.buckets }), id: \.id) { note in
                     HStack {
@@ -179,7 +179,7 @@ struct GDWorkspaceMountsPanel: View {
                     if model.unknownMounts { Text("Mount status needs review; account switching is blocked.").font(.caption).foregroundStyle(.orange) }
                 }
                 if !model.message.isEmpty { Text(model.message).font(.caption).textSelection(.enabled) }
-                Text("These drives use local read-only NFS. Unmount all drives before disconnecting or changing accounts because macOS may retain filesystem data in its kernel cache. Restore app backups in GenDragoon before launching them.")
+                Text("These drives use local read-only NFS. Unmount all drives before disconnecting or changing accounts because macOS may retain filesystem data in its kernel cache. Use Play in GenDragoon for compatible applications.")
                     .font(.caption2).foregroundStyle(.secondary)
             }.frame(maxWidth: .infinity, alignment: .leading)
         }.task { await model.refresh() }

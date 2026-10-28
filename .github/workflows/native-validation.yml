@@ -39,6 +39,8 @@ jobs:
         run: python -B -m unittest native.Tests.test_verified_mac_offload -v
       - name: Verify Kamatera-only payload reads and bounded RAM range access
         run: python -B -m unittest native.Tests.test_remote_archive -v
+      - name: Verify mount interruption recovery and bounded shared memory
+        run: python -B -m unittest native.Tests.test_mount_resilience.MountResilienceTests -v
       - run: python -m unittest discover -s native/Tests -p test_app_launch.py
       - run: python -m unittest discover -s native/Tests -p test_preload.py
       - name: Verify authenticated performance profiles and bounded tuning
