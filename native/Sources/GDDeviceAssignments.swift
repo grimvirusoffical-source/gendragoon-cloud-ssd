@@ -163,6 +163,10 @@ private enum GDDeviceKeychain {
             devices[id] = []
             busy.remove(id)
             await refresh(id)
+            guard owner == GDRedXAIAuthSession.shared.receiverID, local(id) == deviceID else {
+                if owner == GDRedXAIAuthSession.shared.receiverID { message = "The registration response was received, but the server could not confirm signing. Refresh before retrying." }
+                return
+            }
             message = "This Mac is signed. Its encrypted Red-X receipt is available in Settings."
         } catch {
             message = errorMessage(error)

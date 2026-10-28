@@ -8,14 +8,14 @@ class Element{
  get firstChild(){return this.children[0]}
  remove(){if(this.parent)this.parent.children=this.parent.children.filter(c=>c!==this)}
 }
-function fixture({accepted=true,serviceOwner=false}={}){
+function fixture({accepted=true,serviceOwner=false,communityFailure=false}={}){
  const elements=new Map(),calls=[],peers=[],blocked=new Set(),tid='a'.repeat(32),self={peerId:'owner',username:'Owner',role:'owner'};let rulesAccepted=accepted;
  const names=['Alice','Bob','Charlie'],members=Array.from({length:125},(_,i)=>({peerId:'p'+i,username:names[i%3]+i,role:'peer'}));
  const team={id:tid,name:'Development',role:'owner',me:self};let removed=false;
  const api=async(route,method='GET',body)=>{
   calls.push({route,method,body});const u=new URL(route,'https://fixture.invalid'),cursor=u.searchParams.get('cursor'),start=Number(cursor||0);
   const paged=(key,rows)=>({[key]:rows.slice(start,start+50),cursor:String(start+Math.min(50,rows.length-start)),nextCursor:start+50<rows.length?String(start+50):null});
-  if(u.pathname==='/v1/receivers/me/dev-community'){if(method==='PUT')rulesAccepted=body.version==='fixture-v1'&&body.accepted===true;return{policy:{version:'fixture-v1',rules:['Fixture community rule'],notice:'Fixture reporting notice'},accepted:rulesAccepted,serviceOwner};}
+  if(u.pathname==='/v1/receivers/me/dev-community'){if(communityFailure)throw new Error('Fixture server unavailable');if(method==='PUT')rulesAccepted=body.version==='fixture-v1'&&body.accepted===true;return{policy:{version:'fixture-v1',rules:['Fixture community rule'],notice:'Fixture reporting notice'},accepted:rulesAccepted,serviceOwner};}
   if(u.pathname==='/v1/receivers/me/dev-profile')return{profile:{username:'Owner'}};
   if(u.pathname==='/v1/receivers/me/dev-teams')return paged('teams',Array.from({length:121},(_,i)=>({...team,id:i===0?tid:i.toString(16).padStart(32,'0'),name:'Team '+i})));
   if(u.pathname.endsWith('/members')&&method==='GET')return paged('members',members.filter(m=>!removed||m.peerId!=='p0').map(m=>({...m,blockedByYou:blocked.has(m.peerId),directAvailable:!blocked.has(m.peerId)})));
@@ -38,7 +38,7 @@ function fixture({accepted=true,serviceOwner=false}={}){
  const window={gdNative:{request:api},confirm:()=>true,dispatchEvent(){},addEventListener(){}};
  const context={window,document:{getElementById:el,createElement:t=>new Element(t)},crypto:globalThis.crypto,Option:function(text,value){return{textContent:text,value}},GDDevPeer:{Session:Peer},setInterval(){},Event:class{},URL,Date,console};
  vm.runInNewContext(fs.readFileSync(path.join(__dirname,'../teams-ui.js'),'utf8'),context);
- return{el,calls,window,peers,configure:()=>window.GenDragoonTeams.configure({workspaceId:'f'.repeat(32),workspaceName:'Fixture'}),open:async()=>el('teams').children[0].children[1].onclick()};
+ return{el,calls,window,peers,setCommunityFailure:value=>{communityFailure=value},configure:()=>window.GenDragoonTeams.configure({workspaceId:'f'.repeat(32),workspaceName:'Fixture'}),open:async()=>el('teams').children[0].children[1].onclick()};
 }
 test('team and member lists can page past50 without an artificial total cap',async()=>{
  const f=fixture();await f.configure();assert.equal(f.el('teams').children.length,50);assert.equal(f.el('more-teams').hidden,false);
@@ -59,7 +59,7 @@ test('peer-supplied chat and username render as literal text',async()=>{
 });
 const flush=()=>new Promise(setImmediate),submit=element=>element.onsubmit({preventDefault(){}});
 test('rules display the server version and participation stays disabled until explicit acceptance',async()=>{
- const f=fixture({accepted:false});await f.configure();assert.equal(f.el('community-version').textContent,'Version fixture-v1');assert.equal(f.el('community-rules').children[0].textContent,'Fixture community rule');
+ const f=fixture({accepted:false});await f.configure();assert.equal(f.el('community-version').textContent,'Current rules · fixture-v1');assert.equal(f.el('community-rules').children[0].textContent,'Fixture community rule');
  for(const name of ['save-username','join-team','send-message','create-team'])assert.equal(f.el(name).disabled,true);
  submit(f.el('community-form'));await flush();assert.equal(f.calls.filter(c=>c.method==='PUT').length,0);
  f.el('community-accept').checked=true;submit(f.el('community-form'));await flush();assert(f.calls.some(c=>c.route.endsWith('/dev-community')&&c.body?.accepted===true&&c.body.version==='fixture-v1'));
@@ -83,4 +83,20 @@ test('owner review exposes literal evidence and appends a distinct decision; ser
  const f=fixture({serviceOwner:true});await f.configure();await f.open();assert.equal(f.el('service-moderation').hidden,false);await f.el('refresh-service-reports').onclick();await f.el('service-reports').children[0].children[1].onclick();assert.match(f.el('review-evidence').textContent,/UNVERIFIED REPORTER-PROVIDED DIRECT TEXT/);assert.match(f.el('review-evidence').textContent,/<script>evidence<\/script>/);assert.equal(f.el('review-evidence').children.length,0);
  f.el('review-status').value='reviewed';f.el('review-action').value='none';submit(f.el('review-form'));await flush();assert(f.calls.some(c=>c.method==='PATCH'&&c.route.includes('/me/dev-reports/')&&c.body.reviewId));
  const peer=fixture();await peer.configure();assert.equal(peer.el('service-moderation').hidden,true);
+});
+
+test('unavailable rules leave readable explanation and prevent implicit acceptance',async()=>{
+ const f=fixture({accepted:false,communityFailure:true});await f.configure();
+ assert.match(f.el('community-version').textContent,/could not be verified/);
+ for(const name of ['community-accept','accept-community','save-username','join-team','send-message','create-team'])assert.equal(f.el(name).disabled,true);
+ assert.equal(f.calls.filter(c=>c.method==='PUT').length,0);
+ f.setCommunityFailure(false);await f.el('reload-community').onclick();
+ assert.equal(f.el('community-version').textContent,'Current rules · fixture-v1');
+ assert.equal(f.el('community-accept').disabled,false);assert.equal(f.el('community-accept').checked,false);
+ assert.equal(f.el('accept-community').disabled,true);assert.equal(f.el('create-team').disabled,true);
+});
+test('shutdown clears acceptance and blocks participation without a verified current policy',async()=>{
+ const f=fixture({accepted:true});await f.configure();assert.equal(f.el('create-team').disabled,false);
+ f.window.GenDragoonTeams.shutdown();
+ for(const name of ['community-accept','accept-community','save-username','join-team','send-message','create-team'])assert.equal(f.el(name).disabled,true);
 });

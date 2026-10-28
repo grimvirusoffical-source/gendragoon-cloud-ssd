@@ -23,7 +23,7 @@ REQUIRED_RESOURCES=("gendragoon_update_restart.py", "gendragoon_auto_update.py",
     "gendragoon_upload_workspace.py", "gendragoon_performance.py", "gendragoon_redx_storage.py", "gendragoon_fast_png.py", "gendragoon_storage_mode.py", "gendragoon_progress.py",
     "gendragoon_auth_broker.py", "gendragoon_transfer_errors.py",
     "gendragoon_workspace_mount.py", "gendragoon_redx_pack.py", "gendragoon_native_bridge.py",
-    "gendragoon_vault.py", "gendragoon_byo_vault.py", "gendragoon_device_origin.py",
+    "gendragoon_vault.py", "gendragoon_byo_vault.py", "gendragoon_device_origin.py", "gendragoon_signed_device.py",
     "gendragoon_platform_ipc.py",
     "gendragoon_performance_profiles.json", "gendragoon_project_files.py",
     "GenDragoonTeams/index.html", "GenDragoonTeams/teams.css", "GenDragoonTeams/teams-ui.js", "GenDragoonTeams/dev-peer.js")
