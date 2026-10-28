@@ -73,13 +73,25 @@ private struct GDPrimary: View {
     @EnvironmentObject private var redXSession: GDRedXAIAuthSession
     @StateObject private var ads = GenDragoonAdsModel()
     @StateObject private var native = GDNativeWorkspace.shared
+    @ObservedObject private var setupUpload = GDNativeWorkspace.shared.upload
     @StateObject private var subscriptions = GDRXSubscriptionModel()
     @ObservedObject private var workspaceMounts = GDWorkspaceMounts.shared
-    private var mountedForThisAccount: Bool {
-        redXSession.linked && workspaceMounts.mounts.contains {
-            $0.receiverID == redXSession.receiverID && $0.state == "mounted"
-        }
+    @ObservedObject private var deviceAssignments = GDDeviceAssignments.shared
+    private var ownedWorkspaceIDs: Set<String> { Set(redXSession.readableProjects.flatMap({ $0.buckets }).map(\.id)) }
+    private var mountedWorkspaceIDs: Set<String> {
+        Set(ownedWorkspaceIDs.filter { workspaceMounts.confirmed(receiver: redXSession.receiverID, workspace: $0) })
     }
+    private var setupWorkspaceID: String? {
+        if let selected = setupUpload.snapshot?.destination?.bucket, ownedWorkspaceIDs.contains(selected) { return selected }
+        return mountedWorkspaceIDs.sorted().first ?? ownedWorkspaceIDs.sorted().first
+    }
+    private var setupStage: GDWorkspaceSetupPolicy.Stage {
+        GDWorkspaceSetupPolicy.stage(linked: redXSession.linked, receiver: redXSession.receiverID,
+            workspace: setupWorkspaceID, owned: ownedWorkspaceIDs, mounted: mountedWorkspaceIDs,
+            signed: Set(ownedWorkspaceIDs.filter { deviceAssignments.isConfirmed($0) }))
+    }
+    private var workspaceReady: Bool { setupStage == .ready }
+    private var setupKey: String { redXSession.receiverID + ":" + (setupWorkspaceID ?? "") + ":" + mountedWorkspaceIDs.sorted().joined(separator: ",") }
     @ObservedObject private var activity = GDUpdateActivity.shared
     @State private var page:GDPage = .home
 
@@ -94,7 +106,7 @@ private struct GDPrimary: View {
                     if subscriptions.accountVerified && !subscriptions.adFree,let top=ads.top {
                         GenDragoonAdView(item:top)
                     }
-                    if !mountedForThisAccount && page != .home && page != .account {
+                    if !GDWorkspaceSetupPolicy.mayOpen(page: page.rawValue, stage: setupStage) {
                         mountRequiredPage
                     } else {
                     switch page {
@@ -127,10 +139,18 @@ private struct GDPrimary: View {
         .onChange(of:page) { _,_ in
             if redXSession.linked { subscriptions.refresh(redXSession) }
         }
-        .onChange(of:mountedForThisAccount) { _, ready in
+        .onChange(of:workspaceReady) { _, ready in
             if !ready && page != .account { page = .home }
         }
-        .onReceive(NotificationCenter.default.publisher(for: .init("GDIntegrationURLReceived"))) { _ in page = .integrations }
+        .onChange(of:redXSession.subject) { _, _ in deviceAssignments.resetForAccountChange(); page = .home }
+        .task(id: setupKey) {
+            deviceAssignments.invalidateUnmounted()
+            while !Task.isCancelled {
+                for workspace in mountedWorkspaceIDs.sorted() { await deviceAssignments.refresh(workspace) }
+                do { try await Task.sleep(nanoseconds: 30_000_000_000) } catch { return }
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .init("GDIntegrationURLReceived"))) { _ in page = workspaceReady ? .integrations : .home }
         .onChange(of:subscriptions.adFree) { _,adFree in
             ads.refresh(isAdFree:adFree,allowFetch:subscriptions.accountVerified)
         }
@@ -176,10 +196,10 @@ private struct GDPrimary: View {
                     .background(page == dest ? gdPurple.opacity(0.21) : .clear,in:RoundedRectangle(cornerRadius:11))
                     .overlay(RoundedRectangle(cornerRadius:11).stroke(page == dest ? gdPurple.opacity(0.55) : .clear))
                 }.buttonStyle(.plain)
-                 .disabled(!mountedForThisAccount && dest != .home && dest != .account)
+                 .disabled(!GDWorkspaceSetupPolicy.mayOpen(page: dest.rawValue, stage: setupStage))
             }
-            if !mountedForThisAccount {
-                Label("Choose and mount a MachineNote on Home to unlock Files, Apps, Teams and settings.", systemImage: "lock.fill")
+            if !workspaceReady {
+                Label(setupStage.explanation, systemImage: "lock.fill")
                     .font(.system(size:11)).foregroundStyle(.orange)
                     .fixedSize(horizontal:false, vertical:true).padding(.horizontal,10)
             }
@@ -196,9 +216,9 @@ private struct GDPrimary: View {
     }
     private var mountRequiredPage: some View {
         GDPanel {
-            Label("Mount a MachineNote first", systemImage: "externaldrive.badge.plus")
+            Label(setupStage.title, systemImage: setupStage == .sign ? "signature" : "externaldrive.badge.plus")
                 .font(.title2.bold())
-            Text("Home and Account remain available. On Home, create or select a MachineNote and mount a real read-only Finder drive. Files, Applications, Teams, Integrations, Storage and Performance unlock when this account has a confirmed mount.")
+            Text(setupStage.explanation)
                 .font(.caption).foregroundStyle(gdSecondary)
             GDPrimary(title:"Open workspace setup",icon:"house.fill") { page = .home }
         }
@@ -220,30 +240,49 @@ private struct GDPrimary: View {
             }
             .padding(28).frame(maxWidth:.infinity,alignment:.leading)
             .background(LinearGradient(colors:[Color(red:0.34,green:0.20,blue:0.68),Color(red:0.13,green:0.10,blue:0.27)],startPoint:.topLeading,endPoint:.bottomTrailing),in:RoundedRectangle(cornerRadius:21))
-            GDHeading(kicker:"GET STARTED",title:"Choose your MachineNote and mount it",subtitle:"Create your first free-fee MachineNote or select one or several existing MachineNotes below. Only Account and Home are available until a Finder drive is confirmed mounted.")
+            GDHeading(kicker:"SETUP IN ORDER",title:"Mount your SSD, then sign this Mac",subtitle:"Home and Account remain available. The other pages unlock only after the selected workspace is mounted and this Mac's signing is confirmed by the server.")
             if redXSession.linked {
                 GDPanel {
-                    Label(mountedForThisAccount ? "Drive mounted — workspace unlocked" : "Mount a MachineNote to continue",
-                          systemImage: mountedForThisAccount ? "checkmark.circle.fill" : "externaldrive.badge.plus")
-                        .foregroundStyle(mountedForThisAccount ? .green : .orange)
+                    Label(setupStage.title, systemImage: workspaceReady ? "checkmark.circle.fill" : "lock.fill")
+                        .foregroundStyle(workspaceReady ? .green : .orange)
+                    Text(setupStage.explanation).font(.callout).foregroundStyle(gdSecondary)
                     Text("The first MachineNote has no additional workspace fee and can use the smallest free performance plan. Storage, performance and further MachineNotes are governed by your authenticated server plans.")
                         .font(.caption).foregroundStyle(gdSecondary)
                     Button("Refresh MachineNotes") {
                         Task { await redXSession.refreshWorkspaces(); await workspaceMounts.refresh() }
                     }.buttonStyle(.bordered)
                 }
-                GDDeviceAssignmentsPanel()
+                if !ownedWorkspaceIDs.isEmpty {
+                    GDPanel {
+                        Picker("Active workspace", selection: Binding(
+                            get: { setupUpload.snapshot?.destination },
+                            set: { destination in
+                                if let destination { setupUpload.select(destination, externalBusy: native.externalUploadBusy) }
+                            }
+                        )) {
+                            Text("Choose a workspace").tag(Optional<UploadDestination>.none)
+                            ForEach(redXSession.readableProjects) { project in
+                                ForEach(project.buckets) { bucket in
+                                    Text(bucket.displayName).tag(Optional(UploadDestination(project: project.id, bucket: bucket.id, remote: bucket.remote, prefix: bucket.prefix)))
+                                }
+                            }
+                        }.disabled(setupUpload.controlsLocked(externalBusy: native.externalUploadBusy))
+                        Text("The selected workspace needs its own confirmed mount and device signature. Another workspace's signature does not unlock it.")
+                            .font(.caption).foregroundStyle(gdSecondary)
+                    }
+                }
                 GDWorkspaceMountsPanel()
+                GDDeviceAssignmentsPanel()
                 GDRXSubscriptionsPanel(focus:.plans)
                 GDPanel { GDMachineNotesInventoryPanel() }
             }
-            GDHeading(kicker:"NEXT STEPS",title:"Your setup, in three simple steps",subtitle:"Choose a plan, mount an actual Finder drive, then access your library.")
+            GDHeading(kicker:"NEXT STEPS",title:"Mount → Sign → Use",subtitle:"A saved credential or an attempted signing is not enough. GenDragoon verifies the server response before unlocking the workspace.")
             GDPanel {
-                onboardingStep(1,"Your private MachineNotes","Create a free-fee MachineNote or choose an existing one in the setup panel above.","Home","cloud.fill") { page = .home }
+                onboardingStep(1,"Mount your SSD","Choose an owned workspace and confirm its live mount above.","Home","externaldrive.fill") { page = .home }
                 Divider()
-                onboardingStep(2,"Storage and performance","Select the storage and transfer plan in Home, then mount your MachineNote.","Home","slider.horizontal.3") { page = .home }
+                onboardingStep(2,"Sign this Mac","After mounting, register this Mac and verify its encrypted device receipt with the server.","Home","signature") { page = .home }
                 Divider()
-                onboardingStep(3,"Mac app library","Once mounted, compatible Mac bundles can launch through a verified cache.","Applications","bolt.fill") {if mountedForThisAccount { page = .applications }}
+                onboardingStep(3,"Use your workspace","Files, Apps and Teams unlock after both steps are confirmed for this workspace.","Applications","bolt.fill") {if workspaceReady { page = .applications }}
             }
             HStack(spacing:12) {
                 GDPanel {
@@ -260,7 +299,7 @@ private struct GDPrimary: View {
                     Text("10 GB free space recommended").font(.system(size:17,weight:.bold))
                     Text("Compatible app bundles can stream from the mount; other apps need a local copy.")
                         .font(.system(size:11)).foregroundStyle(gdSecondary)
-                    GDPrimary(title:"Go to My Cloud",icon:"externaldrive") {page = mountedForThisAccount ? .cloud : .home}
+                    GDPrimary(title:"Go to My Cloud",icon:"externaldrive") {page = workspaceReady ? .cloud : .home}
                 }
             }
         }
@@ -377,10 +416,10 @@ private struct GDPrimary: View {
             }
             if redXSession.linked {
                 GDDeviceAssignmentsPanel()
-                GDRXSubscriptionsPanel(focus:.ads)
+                if workspaceReady { GDRXSubscriptionsPanel(focus:.ads) }
             }
             GenDragoonAutomaticUpdateStatus()
-            GDCompanionPanel()
+            if workspaceReady { GDCompanionPanel() }
             GDPortableVaultPanel()
             GDAccountDeletionSection()
             GDPanel {

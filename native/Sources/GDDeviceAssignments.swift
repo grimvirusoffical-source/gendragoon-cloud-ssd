@@ -3,7 +3,7 @@ import Foundation
 import Security
 import SwiftUI
 
-private struct GDRegisteredDevice: Identifiable {
+struct GDRegisteredDevice: Identifiable {
     let id: String
     let name: String
     let platform: String
@@ -55,7 +55,7 @@ private enum GDDeviceKeychain {
         SecItemDelete(query(receiver,workspace) as CFDictionary)
     }
 }
-@MainActor private final class GDDeviceAssignments: ObservableObject {
+@MainActor final class GDDeviceAssignments: ObservableObject {
     static let shared = GDDeviceAssignments()
     @Published var devices: [String: [GDRegisteredDevice]] = [:]
     @Published var busy: Set<String> = []
@@ -64,6 +64,23 @@ private enum GDDeviceKeychain {
     @Published var receiptTitle = ""
     @Published var showingReceipt = false
     private var receiver = ""
+    @Published private(set) var verifiedAt: [String: Date] = [:]
+    @Published private(set) var signingAvailable: [String: Bool] = [:]
+    func resetForAccountChange() {
+        devices = [:]; verifiedAt = [:]; signingAvailable = [:]
+        receiptImage = nil; showingReceipt = false; receiver = ""; message = ""
+    }
+    func mountConfirmed(_ workspace: String) -> Bool {
+        let auth = GDRedXAIAuthSession.shared
+        return auth.linked && auth.readableProjects.flatMap({ $0.buckets }).contains(where: { $0.id == workspace })
+            && GDWorkspaceMounts.shared.confirmed(receiver: auth.receiverID, workspace: workspace)
+    }
+    func invalidateUnmounted() {
+        for id in Array(verifiedAt.keys) where !mountConfirmed(id) { verifiedAt.removeValue(forKey: id) }
+        if !GDRedXAIAuthSession.shared.linked { resetForAccountChange() }
+    }
+    func isConfirmed(_ workspace: String) -> Bool { local(workspace) != nil }
+
 
     private func path(_ id: String) -> String {
         "/v1/receivers/me/workspaces/" + id + "/devices"
@@ -71,20 +88,22 @@ private enum GDDeviceKeychain {
     private func ensureCurrent() -> Bool {
         let current = GDRedXAIAuthSession.shared.receiverID
         guard GDRedXAIAuthSession.shared.linked, current.range(of: "^[a-f0-9]{64}$", options: .regularExpression) != nil else {
-            devices = [:]
-            receiver = ""
+            devices = [:]; verifiedAt = [:]; signingAvailable = [:]
+            receiptImage = nil; showingReceipt = false; receiver = ""
             message = "Sign in before registering devices."
             return false
         }
         if receiver != current {
-            devices = [:]
-            receiver = current
+            devices = [:]; verifiedAt = [:]; signingAvailable = [:]
+            receiptImage = nil; showingReceipt = false; receiver = current
         }
         return true
     }
     func local(_ workspace: String) -> String? {
         let current = GDRedXAIAuthSession.shared.receiverID
-        guard GDRedXAIAuthSession.shared.linked, current == receiver,
+        guard GDRedXAIAuthSession.shared.linked, current == receiver, mountConfirmed(workspace),
+              signingAvailable[workspace] == true, let checked = verifiedAt[workspace],
+              Date().timeIntervalSince(checked) >= 0, Date().timeIntervalSince(checked) < 120,
               let id = GDDeviceKeychain.stored(current, workspace),
               devices[workspace]?.contains(where: { $0.id == id && $0.signed }) == true else { return nil }
         return id
@@ -93,10 +112,18 @@ private enum GDDeviceKeychain {
         if let failure = error as? GDTransferError, failure.status == 404 {
             return "The server does not have the device-signing service yet. No signing was completed."
         }
+        if let failure = error as? GDTransferError, failure.status == 503 {
+            return "The signing endpoint cannot reach its account database. Nothing was signed. Contact the server administrator; reinstalling the app will not repair this server configuration."
+        }
         return GDNativeMessage.safe(error.localizedDescription)
     }
-    func refresh(_ id: String) async {
-        guard ensureCurrent(), !busy.contains(id) else { return }
+    @discardableResult func refresh(_ id: String) async -> Bool {
+        guard ensureCurrent(), !busy.contains(id) else { return false }
+        guard mountConfirmed(id) else {
+            verifiedAt.removeValue(forKey: id)
+            message = "Step 1: mount this workspace SSD before checking or signing this Mac."
+            return false
+        }
         let owner = receiver
         busy.insert(id)
         defer { busy.remove(id) }
@@ -105,6 +132,12 @@ private enum GDDeviceKeychain {
             guard receiver == owner, owner == GDRedXAIAuthSession.shared.receiverID, payload["workspace"] as? String == id,
                   let entries = payload["devices"] as? [[String: Any]],
                   entries.count <= 20 else { throw GDTransferError(message: "Invalid device list. No registrations were changed.", status: 0) }
+            guard mountConfirmed(id) else {
+                verifiedAt.removeValue(forKey: id)
+                message = "The SSD was unmounted. Mount it again before signing."
+                return false
+            }
+            signingAvailable[id] = payload["hardwareSigningAvailable"] as? Bool == true
             devices[id] = try entries.map { item in
                 guard let identifier = item["id"] as? String,
                       identifier.range(of: "^[a-f0-9]{32}$", options: .regularExpression) != nil,
@@ -114,18 +147,29 @@ private enum GDDeviceKeychain {
                 }
                 return GDRegisteredDevice(id: identifier, name: name, platform: platform, signed: item["signed"] as? Bool == true)
             }
-            if let saved = GDDeviceKeychain.stored(owner,id), devices[id]?.contains(where: { $0.id == saved }) != true {
+            if signingAvailable[id] == true, let saved = GDDeviceKeychain.stored(owner,id), devices[id]?.contains(where: { $0.id == saved }) != true {
                 GDDeviceKeychain.clear(owner,id)
             }
-            message = "Device assignments verified with the server."
+            if signingAvailable[id] == true {
+                verifiedAt[id] = Date()
+                message = "Device assignments verified with the server."
+                return true
+            }
+            verifiedAt.removeValue(forKey: id)
+            message = "The server has not enabled encrypted device signing for this account database. No signing was completed."
+            return false
         } catch {
-            message = errorMessage(error)
+            if owner == GDRedXAIAuthSession.shared.receiverID {
+                verifiedAt.removeValue(forKey: id); signingAvailable[id] = false
+                message = errorMessage(error)
+            }
+            return false
         }
     }
     func register(_ id: String) async {
         guard ensureCurrent(), !busy.contains(id) else { return }
-        await refresh(id)
-        guard ensureCurrent(), !busy.contains(id) else { return }
+        guard mountConfirmed(id) else { message = "Step 1: mount this workspace SSD before signing this Mac."; return }
+        guard await refresh(id), ensureCurrent(), !busy.contains(id), mountConfirmed(id) else { return }
         if local(id) != nil {
             message = "This Mac is already signed for that workspace."
             return
@@ -138,7 +182,7 @@ private enum GDDeviceKeychain {
             message = "Creating your encrypted Red-X device receipt…"
             let input = try await GDRedXAIAuthSession.shared.privateWorkerInput(workspaceID: id, constrained: true)
             let prepared = try await GDNativeHelper.invoke("gendragoon_signed_device", arguments: ["prepare"], timeout: 60, standardInput: input)
-            guard owner == GDRedXAIAuthSession.shared.receiverID,
+            guard owner == GDRedXAIAuthSession.shared.receiverID, mountConfirmed(id),
                   prepared["platform"] as? String == "macos",
                   let fingerprint = prepared["deviceFingerprint"] as? String,
                   fingerprint.range(of: "^[a-f0-9]{64}$", options: .regularExpression) != nil,
@@ -149,7 +193,7 @@ private enum GDDeviceKeychain {
                 path: path(id), method: "POST", json: ["name": name, "platform": "macos", "deviceFingerprint": fingerprint, "qr": qr])
             guard owner == GDRedXAIAuthSession.shared.receiverID,
                   result["workspace"] as? String == id,
-                  let entry = result["device"] as? [String: Any],
+                  let entry = result["device"] as? [String: Any], entry["signed"] as? Bool == true,
                   let deviceID = entry["id"] as? String,
                   let secret = result["credential"] as? String else {
                 throw GDTransferError(message: "The account changed during registration.", status: 401)
@@ -181,7 +225,7 @@ private enum GDDeviceKeychain {
             _ = try await GDRedXAIAuthSession.shared.serviceRequest(path: path(id) + "/" + device, method: "DELETE")
             guard owner == GDRedXAIAuthSession.shared.receiverID else { return }
             if GDDeviceKeychain.stored(owner,id) == device { GDDeviceKeychain.clear(owner,id) }
-            receiptImage = nil; showingReceipt = false
+            receiptImage = nil; showingReceipt = false; verifiedAt.removeValue(forKey: id)
             devices[id]?.removeAll(where: { $0.id == device })
             message = "Device unsigned. The registration, encrypted QR, and associated device data were removed from the live databases. Workspace files are unchanged."
         } catch {
@@ -210,10 +254,11 @@ private enum GDDeviceKeychain {
 @MainActor struct GDDeviceAssignmentsPanel: View {
     @ObservedObject private var model = GDDeviceAssignments.shared
     @ObservedObject private var auth = GDRedXAIAuthSession.shared
+    @ObservedObject private var mounts = GDWorkspaceMounts.shared
     var body: some View {
-        GroupBox("Signed devices · GDGSigned") {
+        GroupBox("Step 2 · Sign this Mac · GDGSigned") {
             VStack(alignment: .leading, spacing: 12) {
-                Text("Sign this Mac for your MachineNotes using an account-scoped device ID and your existing Red-SecretsXAI vault. The raw hardware ID is not uploaded. Device IDs can change after hardware or system changes; server account authorization remains required.")
+                Text("Mount a workspace SSD first, then sign this Mac for that workspace using an account-scoped device ID and your existing Red-SecretsXAI vault. The raw hardware ID is not uploaded. Device IDs can change after hardware or system changes; server account authorization remains required.")
                     .font(.caption).foregroundStyle(.secondary)
                 ForEach(auth.readableProjects.flatMap({ $0.buckets }), id: \.id) { workspace in
                     VStack(alignment: .leading, spacing: 8) {
@@ -226,10 +271,15 @@ private enum GDDeviceKeychain {
                                     .font(.caption).foregroundStyle(.green)
                             } else {
                                 Button("Sign this Mac") { Task { await model.register(workspace.id) } }
-                                    .disabled(model.busy.contains(workspace.id))
+                                    .disabled(model.busy.contains(workspace.id) || !model.mountConfirmed(workspace.id))
+                                    .help(model.mountConfirmed(workspace.id) ? "Verify the live server and sign this mounted workspace" : "Complete Step 1: mount this workspace first")
                             }
-                            Button("Refresh") { Task { await model.refresh(workspace.id) } }
-                                .disabled(model.busy.contains(workspace.id))
+                            Button("Check signing service") { Task { await model.refresh(workspace.id) } }
+                                .disabled(model.busy.contains(workspace.id) || !model.mountConfirmed(workspace.id))
+                        }
+                        if !model.mountConfirmed(workspace.id) {
+                            Label("Mount this workspace in Step 1 to enable signing.", systemImage: "lock.fill")
+                                .font(.caption).foregroundStyle(.orange)
                         }
                         ForEach(model.devices[workspace.id] ?? []) { device in
                             HStack {
@@ -275,9 +325,10 @@ private enum GDDeviceKeychain {
                 Button("Close") { model.showingReceipt = false; model.receiptImage = nil }
             }.padding(24)
         }
-        .onChange(of: auth.subject) { _, _ in model.showingReceipt = false; model.receiptImage = nil }
-        .task {
-            for workspace in auth.readableProjects.flatMap({ $0.buckets }) {
+        .onChange(of: auth.subject) { _, _ in model.resetForAccountChange() }
+        .task(id: auth.receiverID + ":" + mounts.mounts.filter({ $0.state == "mounted" }).map(\.id).sorted().joined(separator: ",")) {
+            model.invalidateUnmounted()
+            for workspace in auth.readableProjects.flatMap({ $0.buckets }) where model.mountConfirmed(workspace.id) {
                 await model.refresh(workspace.id)
             }
         }

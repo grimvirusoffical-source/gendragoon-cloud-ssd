@@ -230,6 +230,10 @@ jobs:
           python-version: '3.13'
       - name: Compile all active native sources
         run: xcrun swiftc -parse-as-library -target arm64-apple-macosx14.0 -framework SwiftUI -framework AppKit -o "$RUNNER_TEMP/GenDragoon" native/Sources/*.swift
+      - name: Enforce Mount then Sign before workspace navigation
+        run: |
+          xcrun swiftc native/Sources/GDWorkspaceSetupPolicy.swift native/Tests/WorkspaceSetupPolicyTests.swift -o "$RUNNER_TEMP/gd-setup-policy-tests"
+          "$RUNNER_TEMP/gd-setup-policy-tests"
       - name: Preserve compiled Mac preview binary for isolated local verification
         uses: actions/upload-artifact@v4
         with:

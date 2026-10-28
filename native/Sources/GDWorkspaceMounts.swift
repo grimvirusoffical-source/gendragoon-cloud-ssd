@@ -34,6 +34,10 @@ struct GDWorkspaceMountRecord: Identifiable {
         }
     }
     private var running: [String: Running] = [:]
+    func confirmed(receiver: String, workspace: String) -> Bool {
+        !unknownMounts && !preparing.contains(receiver + ":" + workspace)
+            && mounts.contains { $0.receiverID == receiver && $0.workspaceID == workspace && $0.state == "mounted" }
+    }
     private init() {
         Task {
             await refresh()
@@ -148,10 +152,11 @@ struct GDWorkspaceMountRecord: Identifiable {
 }
 
 struct GDWorkspaceMountsPanel: View {
+    @ObservedObject private var signing = GDDeviceAssignments.shared
     @ObservedObject private var model = GDWorkspaceMounts.shared
     @ObservedObject private var auth = GDRedXAIAuthSession.shared
     var body: some View {
-        GroupBox("Finder drives") {
+        GroupBox("Step 1 · Mount your SSD") {
             VStack(alignment: .leading, spacing: 10) {
                 Text("Mount several MachineNotes as separate read-only Finder drives. Changes stay in GenDragoon. File reads stream authenticated chunks from Kamatera into bounded memory; they do not restore complete archives onto this Mac.")
                     .font(.caption).foregroundStyle(.secondary)
@@ -161,7 +166,8 @@ struct GDWorkspaceMountsPanel: View {
                         Spacer()
                         if let mounted = model.mounts.first(where: { $0.receiverID == auth.receiverID && $0.workspaceID == note.id && $0.mounted }) {
                             Text(mounted.state.capitalized).font(.caption).foregroundStyle(.secondary)
-                            Button("Open") { model.open(mounted) }.disabled(mounted.state != "mounted")
+                            Button("Open") { model.open(mounted) }.disabled(!signing.isConfirmed(note.id))
+                                .help("Mount and sign this workspace first")
                             Button("Unmount") { Task { await model.unmount(mounted) } }
                         } else {
                             Button("Mount read-only") { Task { await model.mount(workspaceID: note.id, name: note.displayName) } }
