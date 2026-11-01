@@ -31,6 +31,8 @@ def build(app):
         from gui_onboarding import update_navigation
         update_navigation(app)
         app.status.set("Step 2 complete. This PC is server-confirmed as signed." if app.signing_verified else "No server-confirmed local signing exists for the mounted MachineNote.")
+        if app.signing_verified and hasattr(app,"refresh_after_setup"):
+            app.root.after(25,app.refresh_after_setup)
     def begin_check():
         relock()
         if not mounted():
