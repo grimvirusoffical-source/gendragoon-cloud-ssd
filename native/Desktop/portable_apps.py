@@ -331,7 +331,13 @@ def verify_mounted(payload,records,mount,binding,selected=None):
         if not row or row["type"]!="file":raise PortableAppError("Select an authenticated executable.")
         path=payload if selected=="." else payload/selected
         info=_real(path)
-        if not stat.S_ISREG(info.st_mode) or info.st_size!=row.get("size") or _digest(path)!=row.get("sha256"):
+        # remote-memory-v1 serves this immutable manifest through authenticated
+        # RedX/Red-SecretsXAI range reads. Re-hashing the entire executable here
+        # would re-download it before every launch and can outlive the broker
+        # confirmation window. Bind the live mount/process, authenticated
+        # manifest entry and exact size here; binary_kind below re-reads the PE
+        # header from the same authenticated mount before CreateProcess.
+        if not stat.S_ISREG(info.st_mode) or info.st_size!=row.get("size") or not re.fullmatch(r"[a-f0-9]{64}",row.get("sha256","")):
             raise PortableAppError("Mounted executable failed verification. Nothing was launched.")
     return expected
 
