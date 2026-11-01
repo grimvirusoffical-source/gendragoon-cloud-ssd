@@ -30,7 +30,7 @@ from machinenotes_client import MachineNotesClient,DesktopReceiver,storage,safe_
 from redx_session import SessionError
 import mount_platform as platform_api
 import gendragoon_device_origin as device_origin
-from gendragoon_remote_archive import open_member
+from gendragoon_remote_archive import open_member,VerifiedBlockCache
 
 class MountError(RuntimeError):pass
 
@@ -87,8 +87,17 @@ class WorkspaceTree:
         self.model.selected_note=note;self.model.notes=list(model.notes)
         self.cache=private.private_directory(cache);self.lock=threading.RLock()
         self.active=0;self.closing=False;self.items={};self.manifests={};self.generations={}
+        # Shared bounded RAM only. Every open still authenticates the current
+        # catalog identity; immutable verified RedX blocks can be reused across
+        # WinFsp opens so PE paging/header checks do not re-download/decrypt.
+        self.block_cache=VerifiedBlockCache(limit=32*1024*1024,max_entries=512,ttl=120)
         self.loader=manifest_loader or metadata;self.reader=reader or open_member
         self.authorize()
+
+    def remote_client(self):
+        client=DesktopReceiver(self.model.config())
+        client.mount_block_cache=self.block_cache
+        return client
 
     def authorize(self):
         if self.session.receiver!=self.owner or not self.session.token():raise SessionError("The drive account is no longer connected.",401)
@@ -122,7 +131,7 @@ class WorkspaceTree:
             previous=self.generations.setdefault(item["key"],key)
             if previous!=key:raise MountError("The remote archive changed. Remount this workspace to use the new generation.")
             if key not in self.manifests:
-                self.manifests[key]=self.loader(DesktopReceiver(self.model.config()),item)
+                self.manifests[key]=self.loader(self.remote_client(),item)
             return self.manifests[key]
 
     def resolve(self,parts):
@@ -161,7 +170,7 @@ class WorkspaceTree:
         with self.lock:
             item=node["item"]
             if identity(self.items.get(item["key"],{}))!=identity(item):raise FileNotFoundError()
-            client=DesktopReceiver(self.model.config())
+            client=self.remote_client()
         # No download_archive, payload directory or extracted local file.
         with self.reader(client,item,node["relative"],node) as source:
             yield source
@@ -363,6 +372,7 @@ class WorkspaceMountManager:
                 if platform_api.mounted(record) is not False or process.poll() is None:
                     raise MountError("The drive or its filesystem process is still active; the session was retained.")
                 server.shutdown();server.server_close();thread.join(timeout=2)
+                tree.block_cache.clear()
                 # We hold the actual owned Popen and have confirmed both exit
                 # and volume absence. A later lookup of this dead/reused PID
                 # must not convert a completed session back into an orphan.
