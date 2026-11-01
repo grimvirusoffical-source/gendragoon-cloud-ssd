@@ -3,7 +3,7 @@ from gui_access import selected_mount_ready, workspace_ready
 from tkinter import ttk
 
 def build_home(app):
-    from gui_theme import TEXT,ACCENT,scroll_page
+    from gui_theme import TEXT,ACCENT,scroll_page,status_card
     tk=app.tk
     body=scroll_page(app.home);app.home_body=body
     hero=tk.Frame(body,bg="#281A49",highlightthickness=1,highlightbackground="#4B3476")
@@ -14,6 +14,21 @@ def build_home(app):
     tk.Label(copy,text="Private Kamatera-backed storage, mounted as a real read-only SSD. Cloud files stay remote until you explicitly download them.",
              bg="#281A49",fg="#D8D1E8",font=("Segoe UI",10),wraplength=720,justify="left").pack(anchor="w")
     tk.Label(hero,text="CLOUD",bg="#281A49",fg=ACCENT,font=("Consolas",16,"bold")).pack(side="right",padx=28)
+
+    cards=tk.Frame(body,bg="#0E0C17");cards.pack(fill="x",pady=(0,18))
+    app.home_account_state=tk.StringVar(value="Not connected")
+    app.home_storage_state=tk.StringVar(value="RedX / Red-SecretsXAI")
+    app.home_workspace_state=tk.StringVar(value="Not mounted")
+    app.home_app_state=tk.StringVar(value="Portable apps ready")
+    for index,(title,var,detail) in enumerate((
+        ("Red-XAI",app.home_account_state,"Quick Login with OS-protected trusted sessions"),
+        ("Storage",app.home_storage_state,"Kamatera Receiver using your RedX storage engine"),
+        ("Workspace",app.home_workspace_state,"Mount, sign, then cloud pages refresh automatically"),
+        ("Apps",app.home_app_state,"Play portable Windows/Linux apps from the mounted drive"),
+    )):
+        card=status_card(cards,title,var,detail);card.grid(row=0,column=index,sticky="nsew",padx=(0 if index==0 else 5,0 if index==3 else 5))
+        cards.grid_columnconfigure(index,weight=1,uniform="home-cards")
+
     ttk.Label(body,text="SETUP IN ORDER",style="Kicker.TLabel").pack(anchor="w")
     ttk.Label(body,text="Mount your SSD, then sign this PC",style="Title.TLabel").pack(anchor="w",pady=(4,5))
     ttk.Label(body,text="Home and Account remain available. Files, Teams, and storage controls unlock only after this MachineNote is mounted and the live server confirms this PC is signed.",
@@ -54,7 +69,7 @@ def build_account(app):
     for label,action in (("Connect Red-XAI",app.login),("Disconnect",app.disconnect),("Go Home",lambda:app.tabs.select(app.home))):
         ttk.Button(bar,text=label,command=action).pack(side="left",padx=4)
     setup=ttk.LabelFrame(body,text="Storage vault setup - available before mounting",padding=12);setup.pack(fill="x",pady=16)
-    ttk.Label(setup,text="This PC securely keeps the local storage secret in Windows DPAPI or Linux Secret Service. Export a portable vault before uploading so another device can recover encrypted data.",
+    ttk.Label(setup,text="This PC securely keeps its storage secret in Windows DPAPI or Linux Secret Service and restores it automatically on launch. Exporting a portable vault is optional backup for another device; it no longer blocks normal use or quitting.",
               style="Panel.TLabel",wraplength=880).pack(fill="x",pady=(0,8))
     actions=ttk.Frame(setup,style="Panel.TFrame");actions.pack(fill="x")
     for title,action in (("Import encrypted vault",app.import_vault),("Export encrypted vault",app.export_vault),("Initialize empty account",app.initialize_vault)):
@@ -96,6 +111,14 @@ def update_navigation(app,records=None):
     app.home_access.configure(text=text)
     app.account_summary.configure(text=(("Connected: "+receiver[:12]+"...") if isinstance(receiver,str) and receiver else "Not signed in.")
                                   +(" | mounted + signed" if ready else " | mounted, signing required" if mounted else " | no confirmed mount"))
+    if hasattr(app,"home_account_state"):
+        app.home_account_state.set("Connected" if receiver else "Not connected")
+        fmt=getattr(app.model,"storage_format",None)
+        app.home_storage_state.set("RedX / "+("Red-SecretsXAI" if fmt=="redsecretsxai-png-v1" else "encrypted storage"))
+        if ready:app.home_workspace_state.set("Mounted + signed")
+        elif mounted:app.home_workspace_state.set("Mounted - sign PC")
+        else:app.home_workspace_state.set("Not mounted")
+        app.home_app_state.set("Play from mount" if ready else "Unlock after signing")
     from gui_theme import set_setup_message
     set_setup_message(app,text,ready)
     return ready
