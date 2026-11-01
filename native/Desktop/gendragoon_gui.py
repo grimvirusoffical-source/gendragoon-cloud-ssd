@@ -354,9 +354,12 @@ class GenDragoonGUI:
         if not self.can_switch():return
         session=RedXSession()
         def work():
-            session.login(lambda code:self.messages.put(lambda:self.status.set("Approve GenDragoon in your browser · code "+code)),webbrowser.open)
+            from quick_login_browser import open_approval
+            restored=session.resume_saved()
+            if restored is None:
+                session.login(lambda code:self.messages.put(lambda:self.status.set("Approve GenDragoon in your browser · code "+code)),open_approval)
             model=MachineNotesClient(session);model.refresh_notes();return model
-        self.run("Starting Red-XAI browser approval…",work,self.connected)
+        self.run("Restoring a trusted Red-XAI session or starting browser approval…",work,self.connected)
     def integration_login(self):
         from tkinter import simpledialog
         if not self.can_switch():return
@@ -375,7 +378,9 @@ class GenDragoonGUI:
         if not self.can_switch():return
         if self.model.keys and not self.model.vault_exported:
             messagebox.showwarning("Export your vault","Export your new vault before disconnecting, so its storage key is not lost.",parent=self.root);return
-        self.model.session.logout();self.model=MachineNotesClient();self.clear_transfer_view();self.note["values"]=[];self.note.set("");self.tree.delete(*self.tree.get_children());self.clipboard=None;self.team=None;self.companion_grants.clear();self.status.set("Disconnected. Account credentials are no longer held in this session.")
+        if hasattr(self.model.session,"disconnect"):self.model.session.disconnect()
+        else:self.model.session.logout()
+        self.model=MachineNotesClient();self.clear_transfer_view();self.note["values"]=[];self.note.set("");self.tree.delete(*self.tree.get_children());self.clipboard=None;self.team=None;self.companion_grants.clear();self.status.set("Disconnected. This app session and its saved Quick Login trust were revoked.")
         self.display_notes();self.refresh_drives();self.tabs.select(self.home)
     def can_switch(self):
         from tkinter import messagebox
@@ -978,7 +983,7 @@ def main(argv=None):
                 rsx.decrypt_file(session,str(encrypted),out_path=str(restored),aad=b"gendragoon.desktop.runtime-check/v1")
             if restored.read_bytes()!=probe:raise RuntimeError("The native Unicode-path encrypted roundtrip failed.")
             private.protect_generated_tree(directory)
-        print(json.dumps({"ok":True,"protocol":"MachineNotes-v1","gui":"tkinter","encryptedTransfer":True,"accountTokens":"memory-only","teams":"server-relay"}))
+        print(json.dumps({"ok":True,"protocol":"MachineNotes-v1","gui":"tkinter","encryptedTransfer":True,"accountTokens":"access-memory_refresh-os-protected-when-trusted","teams":"server-relay"}))
         return
     root=create_root();GenDragoonGUI(root);root.mainloop()
 

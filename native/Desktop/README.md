@@ -13,9 +13,13 @@ sign, publish, install, or submit them to an app store.
 
 ## Current desktop behavior
 
-- Browser approval uses Red-XAI's PKCE approval flow. Access and refresh credentials
-  stay in process memory, with serialized renewal during long transfers. Closing
-  the app discards them; there are no plaintext token files or credential arguments.
+- Browser approval uses Red-XAI's PKCE approval flow. Access credentials stay in
+  process memory. When the user explicitly chooses a trusted-device duration,
+  Windows stores the rotating refresh credential with current-user DPAPI and Linux
+  stores it in Secret Service; otherwise refresh credentials remain memory-only.
+  GenDragoon resumes that trusted session on the next Connect action. Disconnect
+  revokes the app session and removes the OS-protected credential. No plaintext
+  token files or credential command arguments are used.
 - Files displays owned MachineNotes and their nested virtual folders. Create,
   rename, move, copy, paste, drag items into folders, and remove library references
   through the authenticated, revision-checked server operations. Folder backups
