@@ -302,6 +302,51 @@ enum GDProjectContent: String { case files, applications }
         guard panel.runModal() == .OK else { return }
         uploadFiles(panel.urls, content: content, replacing: replacing)
     }
+    private func quitSelectedApplications(_ sources: [URL]) async throws {
+        let bundles = Set(sources.filter { $0.pathExtension.lowercased() == "app" }
+            .map { $0.standardizedFileURL.path })
+        guard !bundles.isEmpty else { return }
+        // Resolve the actual installed bundle, never just its display name.
+        let running = NSWorkspace.shared.runningApplications.filter { process in
+            guard !process.isTerminated, let url = process.bundleURL else { return false }
+            return bundles.contains(url.standardizedFileURL.path)
+        }
+        guard !running.isEmpty else { return }
+        let warning = NSAlert()
+        warning.alertStyle = .warning
+        warning.messageText = "Quit selected applications before uploading?"
+        warning.informativeText = "\(running.count) selected application(s) are running. Save any work first. GenDragoon must verify an unchanged application before cloud offload."
+        warning.addButton(withTitle: "Quit and Continue")
+        warning.addButton(withTitle: "Cancel")
+        guard warning.runModal() == .alertFirstButtonReturn else {
+            throw GDTransferError(message: "Upload cancelled; originals were untouched.", status: 0)
+        }
+        for process in running { _ = process.terminate() }
+        for _ in 0..<25 {
+            if running.allSatisfy({ $0.isTerminated }) { break }
+            try? await Task.sleep(for: .milliseconds(200))
+        }
+        let stubborn = running.filter { !$0.isTerminated }
+        if !stubborn.isEmpty {
+            let confirm = NSAlert()
+            confirm.alertStyle = .critical
+            confirm.messageText = "Force quit \(stubborn.count) application(s)?"
+            confirm.informativeText = "These apps did not quit normally. Force quitting can discard unsaved changes. Cancel keeps all originals in place."
+            confirm.addButton(withTitle: "Force Quit and Continue")
+            confirm.addButton(withTitle: "Cancel")
+            guard confirm.runModal() == .alertFirstButtonReturn else {
+                throw GDTransferError(message: "Upload cancelled because a selected application is still running.", status: 0)
+            }
+            for process in stubborn { _ = process.forceTerminate() }
+            for _ in 0..<25 {
+                if running.allSatisfy({ $0.isTerminated }) { break }
+                try? await Task.sleep(for: .milliseconds(200))
+            }
+        }
+        guard running.allSatisfy({ $0.isTerminated }) else {
+            throw GDTransferError(message: "A selected app is still running. No upload or offload was started.", status: 0)
+        }
+    }
     func uploadFiles(_ urls: [URL], content: GDProjectContent, replacing: GDCloudItem? = nil) {
         guard !busy, available, GDUpdateActivity.shared.canStart(excluding: self), let client, !urls.isEmpty else { return }
         guard urls.allSatisfy({ $0.isFileURL }) else { status = "Drop files or folders from this Mac."; return }
@@ -318,6 +363,9 @@ enum GDProjectContent: String { case files, applications }
         let account = connectedID
         busy = true; uploadProgress = 0; canPause = true
         operation = Task { defer { finishOperation() }; do {
+            activityTitle = "Preparing selected applications"
+            try await quitSelectedApplications(selected)
+            try Task.checkCancellation()
             let fresh = try await client.configuration(workspace: workspace)
             workerCount = fresh.transfer.workers
             let verifiedWorkers = constrained ? 1 : fresh.transfer.workers
@@ -679,7 +727,7 @@ struct GenDragoonFreeCloudPanel: View {
                 }.font(.caption)
             }
             DisclosureGroup("Transfer details") {
-                Text("Complete folders are scanned locally, then uploaded with byte checksums, a folder manifest and a full restore check. Interrupted transfers resume from their prepared copy. Data saver limits transfers to one worker. Verified staging keeps at least 10 GiB free on this Mac. Project files are separate from any connected Google Cloud bucket library shown below.")
+                Text("Complete folders are scanned locally, then uploaded with byte checksums, a folder manifest and a full restore check. Interrupted transfers resume from their prepared copy. Data saver limits transfers to one worker. Keeping 10 GB free is recommended; each transfer checks its actual preparation and verification space.")
                     .font(.system(size: 11)).foregroundStyle(.secondary).padding(.top, 7)
             }.font(.system(size: 11)).tint(accent)
         }.padding(24).background(.white.opacity(0.035), in: RoundedRectangle(cornerRadius: 21))

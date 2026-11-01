@@ -266,40 +266,64 @@ import Foundation
 
 struct GenDragoonStartupRoot:View {
     @StateObject private var session=GDLoginSession()
+    @StateObject private var redX=GDRedXAIAuthSession.shared
+    private var redXStandalonePreview: Bool {
+        Bundle.main.object(forInfoDictionaryKey: "GDRXPreviewMode") as? Bool == true
+    }
+
     var body:some View {
         Group {
-            switch session.stage {
-            case .ready:
-                MainView().environmentObject(session)
-            case .terms:
-                GenDragoonTermsGate(authenticatedEmail:session.email,
-                    termsVersion:GDLoginSession.termsVersion,
-                    status:session.status,isBusy:session.busy,
-                    completion:{session.acceptTerms()},logout:{session.logout()})
-            case .login,.waiting,.verifying,.error:
+            if redXStandalonePreview {
+                RedXCloudPreview(close: {})
+            } else if redX.linked {
+                MainView().environmentObject(session).environmentObject(redX)
+            } else {
                 ZStack {
                     Color(red:0.055,green:0.048,blue:0.092).ignoresSafeArea()
                     VStack(spacing:19) {
-                        Image(systemName:"lock.shield.fill").font(.system(size:53))
+                        Image(systemName:"externaldrive.fill.badge.wifi").font(.system(size:53))
                             .foregroundStyle(.purple)
                         Text("GenDragoonSSD").font(.system(size:34,weight:.heavy,design:.rounded))
-                        Text("Google sign-in required").font(.system(size:20,weight:.semibold))
-                        Text("Sign in with Google to open your cloud drive, app library, plans and project workspaces.")
+                        Text("Connect your Red-XAI account").font(.system(size:20,weight:.semibold))
+                        Text("Keep files, folders and applications in encrypted MachineNotes on the Red-XAI server. Sign in once through the app or REDXAI Auth-CLI.")
                             .font(.system(size:13)).foregroundStyle(.gray).multilineTextAlignment(.center)
-                        if session.stage == .waiting || session.stage == .verifying {ProgressView().controlSize(.large)}
-                        Text(session.status).font(.system(size:12)).foregroundStyle(.orange)
-                            .multilineTextAlignment(.center)
-                        Button("Continue with Google") {session.login()}
-                            .disabled(session.stage == .waiting || session.stage == .verifying)
-                            .buttonStyle(.borderedProminent).tint(.purple).controlSize(.large)
-                        Text("A secure Google login window opens in your browser. No password is requested by GenDragoon.")
+                        if redX.busy {
+                            ProgressView().controlSize(.large)
+                        }
+                        VStack(spacing:8) {
+                            Text(redX.status).font(.system(size:12)).foregroundStyle(redX.state == .error ? .orange : .secondary)
+                                .multilineTextAlignment(.center)
+                            if !redX.approvalCode.isEmpty {
+                                Text("Approval code: " + redX.approvalCode)
+                                    .font(.system(size:14,weight:.bold,design:.monospaced)).textSelection(.enabled)
+                            }
+                        }
+                        HStack(spacing:12) {
+                            Button("Continue with Red-XAI") { redX.connect() }
+                                .disabled(redX.busy)
+                                .buttonStyle(.borderedProminent).tint(.purple).controlSize(.large)
+                        }
+                        Text("Red-XAI uses the same approval as REDXAI Auth-CLI and remembers it in macOS Keychain. GenDragoon never asks for your website password.")
                             .font(.system(size:10)).foregroundStyle(.gray).multilineTextAlignment(.center)
-                    }.frame(maxWidth:440).padding(40)
+                    }.frame(maxWidth:520).padding(40)
                 }
             }
         }
         .frame(minWidth:780,minHeight:660)
         .preferredColorScheme(.dark)
-        .onAppear { GDUpdateCoordinator.shared.start() }
+        .onOpenURL { url in
+            guard url.scheme == "gendragoon" else { return }
+            if url.host == "connect" { GDIntegrationsModel.shared.receiveConnectURL(url) }
+            else if url.host == "redx-callback" { GDIntegrationsModel.shared.receiveRedXCallback(url) }
+            if ["connect", "redx-callback"].contains(url.host ?? "") {
+                NotificationCenter.default.post(name: .init("GDIntegrationURLReceived"), object: nil)
+            }
+        }
+        .onAppear {
+            if !redXStandalonePreview {
+                GDUpdateCoordinator.shared.start()
+                Task { await redX.restore() }
+            }
+        }
     }
 }

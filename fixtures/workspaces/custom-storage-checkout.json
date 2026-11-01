@@ -20,7 +20,7 @@
     "body": {
       "isFree": false,
       "monthlyPriceCents": 0,
-      "oneTimeCents": 0,
+      "oneTimeCents": 500,
       "plans": {
         "interval": "month",
         "performanceTier": "lite",
@@ -38,7 +38,7 @@
           "performance"
         ],
         "defaultLimit": 10,
-        "feeIsOneTime": false,
+        "feeIsOneTime": true,
         "firstProjectFree": true,
         "firstWorkspaceIncludes": {
           "performanceTier": "free",
@@ -51,7 +51,7 @@
         "freeWorkspaces": 1,
         "grandfatheredProjects": 0,
         "locked": false,
-        "newProjectOneTimeCents": 0,
+        "newProjectOneTimeCents": 500,
         "overBy": 0,
         "ownerFeeWaived": false,
         "paymentAvailable": true,
@@ -68,7 +68,7 @@
         "unpaidWorkspaceIds": [],
         "uploadsBlocked": false,
         "usedProjectSlots": 1,
-        "workspaceFeeIncluded": true,
+        "workspaceFeeIncluded": false,
         "workspaceMonthlyCents": 0
       },
       "project": {
@@ -92,8 +92,8 @@
         "performanceTier": null,
         "plansStatus": "pending",
         "projectBillingVersion": 3,
-        "projectFeeCents": 0,
-        "projectFeeStatus": "included",
+        "projectFeeCents": 500,
+        "projectFeeStatus": "pending",
         "projectStatus": "pending_payment",
         "provisioned": false,
         "quotaGB": 0,
@@ -115,7 +115,7 @@
         "workspaceFeeModel": null
       },
       "resumed": false,
-      "totalCents": 300,
+      "totalCents": 800,
       "url": "https://checkout.stripe.com/c/pay/cs_fixture_plans",
       "workspaceId": "11111111-1111-4111-8111-000000000003"
     },

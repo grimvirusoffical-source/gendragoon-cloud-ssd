@@ -1,0 +1,83 @@
+{
+  "architecture": "x86_64",
+  "artifact": "linux-x86_64.zip",
+  "bytes": 531946,
+  "compiler": {
+    "name": "Zig",
+    "sha256": "02aa270f183da276e5b5920b1dac44a63f1a49e55050ebde3aecc9eb82f93239",
+    "url": "https://ziglang.org/download/0.15.2/zig-x86_64-linux-0.15.2.tar.xz",
+    "version": "0.15.2"
+  },
+  "compilerRuntimeLinkage": "static",
+  "cpuDetectionCompilerRuntime": {
+    "LLVM-20_1_8-LICENSE.txt": {
+      "bytes": 15141,
+      "sha256": "8d85c1057d742e597985c7d4e6320b015a9139385cff4cbae06ffc0ebe89afee",
+      "url": "https://raw.githubusercontent.com/llvm/llvm-project/llvmorg-20.1.8/llvm/LICENSE.TXT"
+    },
+    "cpu_model.h": {
+      "bytes": 1782,
+      "sha256": "4b374f7dcba5cbb9520b621ab596dc691af356772fc019246ab419f4c1c0f77c",
+      "url": "https://raw.githubusercontent.com/llvm/llvm-project/llvmorg-20.1.8/compiler-rt/lib/builtins/cpu_model/cpu_model.h"
+    },
+    "x86.c": {
+      "bytes": 35365,
+      "sha256": "961bcc58c10576374e4e59178b5d53b1bccf42601f85eb6034ae2466058d0735",
+      "url": "https://raw.githubusercontent.com/llvm/llvm-project/llvmorg-20.1.8/compiler-rt/lib/builtins/cpu_model/x86.c"
+    }
+  },
+  "entries": 40,
+  "nativeProof": {
+    "abi": 2,
+    "authenticatedRoundtrip": true,
+    "genuinePixelCarrier": true,
+    "originalRetained": true,
+    "plainBytes": 65536,
+    "pngBytes": 5833001,
+    "pngDimensions": [
+      1394,
+      1394
+    ],
+    "python": "3.14.4",
+    "seconds": 4.497,
+    "shippingStrippedLibrary": true,
+    "wrongContextOutputAbsent": true,
+    "wrongContextRejected": true
+  },
+  "pending": [
+    "Python3.13 packaged runtime CI load and genuine PNG integration test"
+  ],
+  "pinnedLibrary": "9235941b431bc1c23c34286b82052f845121592f",
+  "platform": "linux",
+  "privateSourceFiles": 0,
+  "pythonBytecodeFiles": 31,
+  "pythonMajorMinor": "3.13",
+  "schema": 1,
+  "sha256": "33ef7d8241e3cbf988bcd7ae98710ec9ab195a239d359baa65941955f8b4ad91",
+  "shippingTarget": "rsx",
+  "stripping": {
+    "bytes": 418368,
+    "debugSectionsRemoved": true,
+    "file": "librsx.so",
+    "sha256": "2d8f6d645daaa3e6df42695f92927ee78bea9e34a9fe7a06a1692a9be332309a",
+    "textBytesIdentical": true,
+    "textSHA256": "623f391513e6b7c0f4bfe14a9dfa80806a880a3e6ac21fd060b4e02fcc65e4de"
+  },
+  "target": "x86_64-linux-gnu.2.28",
+  "testHooks": false,
+  "verified": {
+    "bytecodeSourceFilenamesRelative": true,
+    "debugMetadataRemoved": true,
+    "machine": "ELF64 x86_64",
+    "maximumRequiredGLIBC": "2.25",
+    "neededLibraries": [
+      "ld-linux-x86-64.so.2",
+      "libc.so.6",
+      "libdl.so.2",
+      "libm.so.6",
+      "libpthread.so.0"
+    ],
+    "privateBuildPathsAbsent": true,
+    "vendorUnchanged": true
+  }
+}

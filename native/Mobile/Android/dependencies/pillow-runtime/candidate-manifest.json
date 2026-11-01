@@ -1,0 +1,247 @@
+{
+  "artifacts": [
+    {
+      "archive": "chaquopy_freetype-2.9.1-9016-py3-none-android_21_arm64_v8a.whl",
+      "bytes": 411370,
+      "proof": {
+        "abi": "arm64-v8a",
+        "apiLevel": 21,
+        "buildMethod": "unchanged-upstream-cmake",
+        "librarySHA256": "31c86a3c0cb4042a57df774fc08799adf2cf623fbad00bc8e362566888301ac4",
+        "loadAlignments": [
+          16384,
+          16384
+        ],
+        "missingOriginalAPIExports": [],
+        "ndkVersion": "28.2.13676358",
+        "needed": [
+          "libz.so",
+          "libm.so",
+          "libdl.so",
+          "libc.so"
+        ],
+        "officialRecipeCommit": "1f63c93d8beaf7062fbe51888ab9235475df3bb8",
+        "omittedOldLinkerSymbols": [],
+        "originalConfigurationSHA256": null,
+        "originalExportsPreserved": 199,
+        "package": "freetype",
+        "pending": [
+          "Android Pillow JPEG and FreeType font test",
+          "16 KiB device/emulator test",
+          "Full encrypted visual codec instrumentation"
+        ],
+        "privateEncryptionSourceChanged": false,
+        "profile": [
+          "-DBUILD_SHARED_LIBS=ON",
+          "-DFT_WITH_ZLIB=ON",
+          "-DCMAKE_DISABLE_FIND_PACKAGE_PNG=TRUE",
+          "-DCMAKE_DISABLE_FIND_PACKAGE_HarfBuzz=TRUE",
+          "-DCMAKE_DISABLE_FIND_PACKAGE_BZip2=TRUE"
+        ],
+        "referenceWheelSHA256": "7a8262dc69d1bbf7209b3b7576744743670bd5a8cba48c7d8f08c151943ccbc7",
+        "runtimeOnlyWheel": true,
+        "schema": 1,
+        "soname": "libfreetype.so",
+        "sourceSHA256": "ec391504e55498adceb30baceebd147a6e963f636eb617424bcfc47a169898ce",
+        "sourceURL": "https://download.savannah.gnu.org/releases/freetype/freetype-2.9.1.tar.gz",
+        "status": "candidate-device-tests-required",
+        "symbolVersionDefinitions": [],
+        "version": "2.9.1"
+      },
+      "sha256": "ce8b604c14d1cae5f5dcdebedb7f11d14118a54ab5ebbe0a3e0fb346b3ada1d3"
+    },
+    {
+      "archive": "chaquopy_freetype-2.9.1-9016-py3-none-android_21_x86_64.whl",
+      "bytes": 428321,
+      "proof": {
+        "abi": "x86_64",
+        "apiLevel": 21,
+        "buildMethod": "unchanged-upstream-cmake",
+        "librarySHA256": "cf8d338bb99b063b196deb50dfdb2cad6b26628ad36d799fd1369d46dc0212ba",
+        "loadAlignments": [
+          16384,
+          16384
+        ],
+        "missingOriginalAPIExports": [],
+        "ndkVersion": "28.2.13676358",
+        "needed": [
+          "libz.so",
+          "libm.so",
+          "libdl.so",
+          "libc.so"
+        ],
+        "officialRecipeCommit": "1f63c93d8beaf7062fbe51888ab9235475df3bb8",
+        "omittedOldLinkerSymbols": [],
+        "originalConfigurationSHA256": null,
+        "originalExportsPreserved": 199,
+        "package": "freetype",
+        "pending": [
+          "Android Pillow JPEG and FreeType font test",
+          "16 KiB device/emulator test",
+          "Full encrypted visual codec instrumentation"
+        ],
+        "privateEncryptionSourceChanged": false,
+        "profile": [
+          "-DBUILD_SHARED_LIBS=ON",
+          "-DFT_WITH_ZLIB=ON",
+          "-DCMAKE_DISABLE_FIND_PACKAGE_PNG=TRUE",
+          "-DCMAKE_DISABLE_FIND_PACKAGE_HarfBuzz=TRUE",
+          "-DCMAKE_DISABLE_FIND_PACKAGE_BZip2=TRUE"
+        ],
+        "referenceWheelSHA256": "831e0fd721d132b7b04946399d714de9945acc56dffa34f3c037592cb17c8de1",
+        "runtimeOnlyWheel": true,
+        "schema": 1,
+        "soname": "libfreetype.so",
+        "sourceSHA256": "ec391504e55498adceb30baceebd147a6e963f636eb617424bcfc47a169898ce",
+        "sourceURL": "https://download.savannah.gnu.org/releases/freetype/freetype-2.9.1.tar.gz",
+        "status": "candidate-device-tests-required",
+        "symbolVersionDefinitions": [],
+        "version": "2.9.1"
+      },
+      "sha256": "6cb6d585b1cc72cae12aba910d95c483e2563c7aed0a9a0913851a9e32ff50b6"
+    },
+    {
+      "archive": "chaquopy_libjpeg-1.5.3-9016-py3-none-android_21_arm64_v8a.whl",
+      "bytes": 181927,
+      "proof": {
+        "abi": "arm64-v8a",
+        "apiLevel": 21,
+        "buildMethod": "unchanged-autotools-source-list-with-original-wheel-config",
+        "librarySHA256": "96c5a2c354dd0901827d1344e754e96cd095c428c1f3db7754659af8e0cba0d6",
+        "loadAlignments": [
+          16384,
+          16384
+        ],
+        "missingOriginalAPIExports": [],
+        "ndkVersion": "28.2.13676358",
+        "needed": [
+          "libm.so",
+          "libdl.so",
+          "libc.so"
+        ],
+        "officialRecipeCommit": "1f63c93d8beaf7062fbe51888ab9235475df3bb8",
+        "omittedOldLinkerSymbols": [
+          "__bss_end__",
+          "__bss_start",
+          "__bss_start__",
+          "__end__",
+          "_bss_end__",
+          "_edata",
+          "_end"
+        ],
+        "originalConfigurationSHA256": "3de02362b7f485fc4678d617a762135804aa0622501a4f89550a15376fc611bf",
+        "originalExportsPreserved": 122,
+        "package": "libjpeg",
+        "pending": [
+          "Android Pillow JPEG and FreeType font test",
+          "16 KiB device/emulator test",
+          "Full encrypted visual codec instrumentation"
+        ],
+        "privateEncryptionSourceChanged": false,
+        "profile": [
+          "-DWITH_SIMD=OFF",
+          "-DWITH_TURBOJPEG=OFF",
+          "-DENABLE_STATIC=OFF",
+          "-DENABLE_SHARED=ON",
+          "-DWITH_JPEG7=OFF",
+          "-DWITH_JPEG8=OFF",
+          "-DWITH_12BIT=OFF",
+          "-DWITH_ARITH_ENC=ON",
+          "-DWITH_ARITH_DEC=ON",
+          "-DWITH_MEM_SRCDST=ON",
+          "-DBUILD=20171220"
+        ],
+        "referenceWheelSHA256": "5555be57a2633fb5a3c0c810e89c8b705c471e3dabd95aa596fc7fdd48322728",
+        "runtimeOnlyWheel": true,
+        "schema": 1,
+        "soname": "libjpeg_chaquopy.so",
+        "sourceSHA256": "b24890e2bb46e12e72a79f7e965f409f4e16466d00e1dd15d93d73ee6b592523",
+        "sourceURL": "https://downloads.sourceforge.net/project/libjpeg-turbo/1.5.3/libjpeg-turbo-1.5.3.tar.gz",
+        "status": "candidate-device-tests-required",
+        "symbolVersionDefinitions": [
+          "LIBJPEGTURBO_6.2",
+          "LIBJPEG_6.2",
+          "libjpeg_chaquopy.so"
+        ],
+        "version": "1.5.3"
+      },
+      "sha256": "850d74ca5c35dcf64f0457f107eaacdf93208904c1837c751d01f95f24a84b60"
+    },
+    {
+      "archive": "chaquopy_libjpeg-1.5.3-9016-py3-none-android_21_x86_64.whl",
+      "bytes": 188660,
+      "proof": {
+        "abi": "x86_64",
+        "apiLevel": 21,
+        "buildMethod": "unchanged-autotools-source-list-with-original-wheel-config",
+        "librarySHA256": "0a4d097d01e0dedd25e7edd8baa2768367bcf46d63c387f14bc88a01d80bac2c",
+        "loadAlignments": [
+          16384,
+          16384
+        ],
+        "missingOriginalAPIExports": [],
+        "ndkVersion": "28.2.13676358",
+        "needed": [
+          "libm.so",
+          "libdl.so",
+          "libc.so"
+        ],
+        "officialRecipeCommit": "1f63c93d8beaf7062fbe51888ab9235475df3bb8",
+        "omittedOldLinkerSymbols": [
+          "__bss_start",
+          "_edata",
+          "_end"
+        ],
+        "originalConfigurationSHA256": "3de02362b7f485fc4678d617a762135804aa0622501a4f89550a15376fc611bf",
+        "originalExportsPreserved": 122,
+        "package": "libjpeg",
+        "pending": [
+          "Android Pillow JPEG and FreeType font test",
+          "16 KiB device/emulator test",
+          "Full encrypted visual codec instrumentation"
+        ],
+        "privateEncryptionSourceChanged": false,
+        "profile": [
+          "-DWITH_SIMD=OFF",
+          "-DWITH_TURBOJPEG=OFF",
+          "-DENABLE_STATIC=OFF",
+          "-DENABLE_SHARED=ON",
+          "-DWITH_JPEG7=OFF",
+          "-DWITH_JPEG8=OFF",
+          "-DWITH_12BIT=OFF",
+          "-DWITH_ARITH_ENC=ON",
+          "-DWITH_ARITH_DEC=ON",
+          "-DWITH_MEM_SRCDST=ON",
+          "-DBUILD=20171220"
+        ],
+        "referenceWheelSHA256": "0ae61fe258eb17a34e66fb6b1c233eb6c5e6a8854e0900a1806422e9f5625a86",
+        "runtimeOnlyWheel": true,
+        "schema": 1,
+        "soname": "libjpeg_chaquopy.so",
+        "sourceSHA256": "b24890e2bb46e12e72a79f7e965f409f4e16466d00e1dd15d93d73ee6b592523",
+        "sourceURL": "https://downloads.sourceforge.net/project/libjpeg-turbo/1.5.3/libjpeg-turbo-1.5.3.tar.gz",
+        "status": "candidate-device-tests-required",
+        "symbolVersionDefinitions": [
+          "LIBJPEGTURBO_6.2",
+          "LIBJPEG_6.2",
+          "libjpeg_chaquopy.so"
+        ],
+        "version": "1.5.3"
+      },
+      "sha256": "3d5157541d74cefa14a7abecebdf483cc3ec5c620b42f29530cc976f1057780d"
+    }
+  ],
+  "buildScriptSHA256": "a0b2d1eee66486792fc7001ae1f52314abf5c3fdf42e6d70573bb5edb98fa9e7",
+  "localVerification": {
+    "allJPEGSymbolVersionDefinitionsPreserved": true,
+    "allLOAD16KiBAligned": true,
+    "allOriginalExportedAPIPreserved": true,
+    "allWheelRECORDHashes": true,
+    "androidExecutionPending": true,
+    "noDebugInfo": true,
+    "noSourceOrPrivatePaths": true,
+    "shippingInputsChanged": false
+  },
+  "schema": 1,
+  "status": "candidate-only-no-app-pin-changed"
+}

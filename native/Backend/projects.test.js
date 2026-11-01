@@ -20,7 +20,7 @@ function fixture({configured=true,ownerBenefits=false}={}){
    listLineItems:async id=>({has_more:false,data:sessions.get(id).line_items.map(line=>({price:{id:line.price},quantity:line.quantity}))})
  }},paymentIntents:{retrieve:async id=>structuredClone(intents.get(id))},charges:{retrieve:async()=>{throw Error("unexpected charge lookup");}}};
  const env={STRIPE_CHECKOUT_ENABLED:configured?"true":"false",STRIPE_ENVIRONMENT:"test",PUBLIC_URL:"https://billing.example"};
- const prices={"storage|standard|100GB|month":"price_s100","performance|boost|month":"price_boost",...(configured?{}:{})};
+ const prices={"storage|standard|100GB|month":"price_s100","performance|boost|month":"price_boost",...(configured?{"one_time|project_creation":"price_project"}:{})};
  const service=createProjectService({db,stamp:()=>123,hash:uid=>uid==="other"?other:owner,stripe,env,prices,ensureCustomer:async()=>"cus_own"});
  const req={user:{uid:"owner"},ownerBenefits};
  const path=id=>id==="free"?"tenants/"+owner+"/workspaces/free":"gd_accounts/"+owner+"/workspaces/"+id;
@@ -49,7 +49,7 @@ test("parallel creation reserves at most10 slots and grants exactly one lifetime
  assert.equal(results.filter(x=>x.status==="rejected"&&x.reason.code==="PROJECT_LIMIT_REACHED").length,22);
  const list=await f.service.inventory(f.req);assert.equal(list.policy.usedProjectSlots,10);
  assert.equal(list.records.filter(w=>w.data.projectFeeStatus==="free").length,1);
- assert.equal(list.records.filter(w=>w.data.projectFeeStatus==="included").length,9);
+ assert.equal(list.records.filter(w=>w.data.projectFeeStatus==="pending").length,9);
  assert.equal(f.calls.length,0);assert.equal(list.policy.freeProjectAvailable,false);
 });
 test("the upper cap requires both active qualifying entitlements on the same project",()=>{
@@ -74,7 +74,7 @@ test("archiving cannot reset the free allowance, including the legacy/v1 creatio
  const f=fixture();await f.create(1);f.db.rows.set(f.path(idFor(1))+"/files/file1",{name:"kept.bin",sizeBytes:7});
  await f.service.archive(f.req,idFor(1),{confirmName:"Project 1"});
  assert.equal(f.record(idFor(1)).dataRetained,true);assert.equal(f.db.rows.get(f.path(idFor(1))+"/files/file1").sizeBytes,7);
- const next=await f.create(2);assert.equal(next.project.data.projectFeeStatus,"included");
+ const next=await f.create(2);assert.equal(next.project.data.projectFeeStatus,"pending");
  await assert.rejects(f.service.create(f.req,{name:"A second free project",legacyFree:true}),{code:"FREE_PROJECT_ALREADY_CLAIMED"});
  const restored=await f.service.restore(f.req,idFor(1));assert.equal(restored.newProjectFeeCharged,false);
  assert.equal(f.record(idFor(1)).projectFeeStatus,"free");assert.equal(effectiveStorageQuota(f.record(idFor(1))),2e9);
@@ -84,7 +84,7 @@ test("a migrated legacy free project consumes the lifetime allowance and can qua
    storageActive:true,storageTier:"2TB",performanceActive:true,performanceTier:"turbo"});
  const list=await f.service.inventory(f.req);assert.equal(list.policy.freeProjectAvailable,false);assert.equal(list.policy.projectLimit,20);
  assert.equal(effectiveStorageQuota(f.record("free")),2e12);assert.equal(effectiveWorkers(f.record("free")),8);
- assert.equal((await f.create(2)).project.data.projectFeeStatus,"included");
+ assert.equal((await f.create(2)).project.data.projectFeeStatus,"pending");
 });
 test("new storage subscriptions omit recurring workspace fees while legacy quotes remain exact",()=>{
  for(const interval of ["month","year"]){
@@ -112,9 +112,9 @@ test("the first free project works without payment configuration; additional pro
 test("plans Checkout is one subscription with the storage and performance prices and repeated requests reuse the session",async()=>{
  const f=fixture();await f.create(1);await f.create(2);
  const first=await f.service.checkout(f.req,idFor(2)),retry=await f.service.checkout(f.req,idFor(2));
- assert.equal(first.totalCents,640+600);assert.equal(retry.resumed,true);assert.equal(f.calls.length,1);
+ assert.equal(first.totalCents,640+600+500);assert.equal(retry.resumed,true);assert.equal(f.calls.length,1);
  const args=f.calls[0].args;assert.equal(args.mode,"subscription");
- assert.deepEqual(args.line_items,[{price:"price_s100",quantity:1},{price:"price_boost",quantity:1}]);
+ assert.deepEqual(args.line_items,[{price:"price_s100",quantity:1},{price:"price_boost",quantity:1},{price:"price_project",quantity:1}]);
  assert.equal(args.metadata.kind,"workspace_plans");assert.equal(args.subscription_data.metadata.kind,"workspace_plans");
  assert.equal(f.record(idFor(2)).provisioned,false);assert.equal(f.record(idFor(2)).checkoutLease,null);
 });
@@ -205,7 +205,7 @@ test("archive expires only the owned unpaid plans session and refuses an unsettl
  await assert.rejects(f.service.archive(f.req,idFor(2),{confirmName:"Project 2"}),{code:"PAYMENT_PENDING"});
  f.sessions.get(sessionId).status="open";
  await f.service.archive(f.req,idFor(2),{confirmName:"Project 2"});assert.deepEqual(f.expired,[sessionId]);
- assert.equal(f.record(idFor(2)).projectStatus,"archived");assert.equal(f.record(idFor(2)).projectFeeStatus,"included");
+ assert.equal(f.record(idFor(2)).projectStatus,"archived");assert.equal(f.record(idFor(2)).projectFeeStatus,"pending");
 });
 test("restore cannot exceed the cap or manufacture a paid activation for an unpaid archived project",async()=>{
  const f=fixture();await f.create(1);await f.create(2);await f.service.archive(f.req,idFor(2),{confirmName:"Project 2"});

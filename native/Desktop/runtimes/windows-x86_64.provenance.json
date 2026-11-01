@@ -1,0 +1,47 @@
+{
+  "architecture": "x86_64",
+  "artifact": "windows-x86_64.zip",
+  "bytes": 552772,
+  "compiler": {
+    "name": "llvm-mingw",
+    "sha256": "55064b60b991a1e1e8090b8c2f84e82b22cfe5903d12c159d65064cf5e8ae335",
+    "url": "https://github.com/mstorsjo/llvm-mingw/releases/download/20261020/llvm-mingw-20261020-ucrt-ubuntu-22.04-x86_64.tar.xz",
+    "version": "20261020"
+  },
+  "compilerRuntimeLinkage": "static",
+  "entries": 37,
+  "pending": [
+    "Python3.13 packaged runtime CI load and genuine PNG integration test"
+  ],
+  "pinnedLibrary": "9235941b431bc1c23c34286b82052f845121592f",
+  "platform": "windows",
+  "privateSourceFiles": 0,
+  "pythonBytecodeFiles": 31,
+  "pythonMajorMinor": "3.13",
+  "schema": 1,
+  "sha256": "c830aa3a531f3031d196dfa16f2bda8da83918c3fe494b9c18d779e466b36fff",
+  "shippingTarget": "rsx",
+  "stripping": {
+    "bytes": 512512,
+    "debugSectionsRemoved": true,
+    "file": "librsx.dll",
+    "sha256": "d8dfb1c26ec80319373393e749a2d5c318a454ba1ba6907a3408602d5dc4afb7",
+    "textBytesIdentical": true,
+    "textSHA256": "09f7aadfaf8e43d270a59eb16a52f91e52facc382f82c5a0885ce99f23df12e4"
+  },
+  "target": "x86_64-w64-mingw32 UCRT",
+  "testHooks": false,
+  "verified": {
+    "bytecodeSourceFilenamesRelative": true,
+    "debugMetadataRemoved": true,
+    "exportCount": 137,
+    "exportedEntryPoints": [
+      "rsx_abi_version",
+      "rsx_session_open"
+    ],
+    "machine": "PE32+ x86_64",
+    "privateBuildPathsAbsent": true,
+    "systemDependenciesOnly": true,
+    "vendorUnchanged": true
+  }
+}

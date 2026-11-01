@@ -87,13 +87,13 @@ test("cap: paid storage route denies access to workspaces over the cap after dow
 
 // ---- 2. Billing ($5/month, FREE_WORKSPACES) ----
 test("billing: no separate workspace fee; additional workspaces need storage + performance plans",async()=>{
-  const p=policyFor({},[]);assert.equal(p.feeIsOneTime,false);assert.equal(p.workspaceMonthlyCents,0);assert.equal(p.newProjectOneTimeCents,0);
+  const p=policyFor({},[]);assert.equal(p.feeIsOneTime,true);assert.equal(p.workspaceMonthlyCents,0);assert.equal(p.newProjectOneTimeCents,500);
   assert.deepEqual(p.additionalWorkspaceRequires,["storage","performance"]);assert.deepEqual(p.customStorageRequires,["performance"]);
   const {createProjectService}=require("./projects");
   const calls=[];
   const stripe={checkout:{sessions:{create:async args=>{calls.push(args);return {id:"cs_plans",url:"https://checkout.stripe.com/c/pay/cs_plans",status:"open"};},retrieve:async()=>{throw Error("none");}}}};
   const env={STRIPE_CHECKOUT_ENABLED:"true",STRIPE_ENVIRONMENT:"test",PUBLIC_URL:"https://billing.example"};
-  const prices={"storage|standard|100GB|month":"price_s100","performance|boost|month":"price_boost","workspace|month":"price_fee"};
+  const prices={"storage|standard|100GB|month":"price_s100","performance|boost|month":"price_boost","workspace|month":"price_fee","one_time|project_creation":"price_project"};
   const service=createProjectService({db:memoryFirestore([["gd_accounts/"+owner,{stripeCustomerId:"cus_test"}]]),stamp:()=>1,hash:()=>owner,stripe,env,prices,ensureCustomer:async()=>"cus_test"});
   const req={user:{uid:"owner"}};
   assert.equal((await service.create(req,{name:"First Project",intentId:idFor(1)})).project.data.projectFeeStatus,"free");
@@ -101,9 +101,9 @@ test("billing: no separate workspace fee; additional workspaces need storage + p
   const second=await service.create(req,{name:"Second Project",intentId:idFor(2),plans:{storageTier:"100GB",performanceTier:"boost",interval:"month"}});
   assert.equal(second.project.data.workspaceFeeModel,undefined);assert.equal(second.project.data.workspaceFeeCents,0);
   const session=await service.checkout(req,idFor(2));
-  assert.equal(session.totalCents,640+600);assert.equal(calls[0].mode,"subscription");
-  assert.deepEqual(calls[0].line_items,[{price:"price_s100",quantity:1},{price:"price_boost",quantity:1}]);assert.equal(calls[0].metadata.kind,"workspace_plans");
-  assert.ok(!calls[0].line_items.some(x=>x.price==="price_fee"));
+  assert.equal(session.totalCents,640+600+500);assert.equal(calls[0].mode,"subscription");
+  assert.deepEqual(calls[0].line_items,[{price:"price_s100",quantity:1},{price:"price_boost",quantity:1},{price:"price_project",quantity:1}]);assert.equal(calls[0].metadata.kind,"workspace_plans");
+  assert.ok(!calls[0].line_items.some(x=>x.price==="price_fee"));assert.equal(calls[0].line_items.filter(x=>x.price==="price_project").length,1);
 });
 test("billing: FREE_WORKSPACES defaults to 1",()=>{
   assert.equal(require("./projects").FREE_WORKSPACES,1);
@@ -123,7 +123,7 @@ test("byo: BYO workspaces count toward the same 10 cap",async()=>{
 test("byo: no workspace fee for managed or custom storage",()=>{
   const managed=policyFor({},[base]),own=policyFor({},[{...base,...byo(1)}]);
   assert.equal(own.workspaceMonthlyCents,0);assert.equal(own.workspaceMonthlyCents,managed.workspaceMonthlyCents);
-  assert.equal(own.feeIsOneTime,false);assert.equal(managed.feeIsOneTime,false);
+  assert.equal(own.feeIsOneTime,true);assert.equal(managed.feeIsOneTime,true);
 });
 test("byo secrets: plan-selection payload drops provider secrets",()=>{
   const out=validateSelection({storageTier:"2TB",secretAccessKey:"FAKE-NOT-A-KEY",password:"x",privateKey:"x"});

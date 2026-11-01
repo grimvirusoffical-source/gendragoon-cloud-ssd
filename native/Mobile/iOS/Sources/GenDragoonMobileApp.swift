@@ -65,7 +65,7 @@ private let canvas=GDTheme.bg
 private let panel=GDTheme.surface
 @main struct GenDragoonMobileApp:App {
     @StateObject private var session=MobileSession()
-    var body:some Scene{WindowGroup{MobileRoot().environmentObject(session).preferredColorScheme(.dark).tint(violet).onOpenURL{_ = GIDSignIn.sharedInstance.handle($0)}}}
+    var body:some Scene{WindowGroup{MobileRoot().environmentObject(session).preferredColorScheme(.dark).tint(violet).onOpenURL{url in if url.scheme == "gendragoon" { MobileLauncherInbox.shared.receive(url) } else { _ = GIDSignIn.sharedInstance.handle(url) }}}}
 }
 struct MobileRoot:View {
     @EnvironmentObject private var session:MobileSession
@@ -159,6 +159,8 @@ private struct MobileLibrary:View {
     @EnvironmentObject private var session:MobileSession
     @Environment(\.scenePhase) private var phase
     @StateObject private var cloud=MobileCloudModel()
+    @ObservedObject private var launcher=MobileLauncherInbox.shared
+    @State private var launcherHelp:MobileLauncherHelpItem?
     @State private var search=""
     @State private var importing=false
     @State private var importFolders=false
@@ -168,6 +170,7 @@ private struct MobileLibrary:View {
     @State private var confirmReset=false
     @State private var settings=false
     @State private var grid=false
+    @State private var workspaceActivated=false
     @State private var removing:GDCloudItem?
     @State private var deleteAccount=false
     private func size(_ n:Int64)->String{ByteCountFormatter.string(fromByteCount:n,countStyle:.file)}
@@ -188,19 +191,48 @@ private struct MobileLibrary:View {
         HStack(spacing:13){Image(systemName:icon(file.name)).font(.system(size:22,weight:.medium)).foregroundStyle(violet).frame(width:44,height:51).background(violet.opacity(0.10),in:RoundedRectangle(cornerRadius:12))
             VStack(alignment:.leading,spacing:7){Text(file.name).font(.subheadline.weight(.semibold)).lineLimit(2);Text(size(file.sizeBytes)).font(.caption2).foregroundStyle(.secondary)}
             Spacer(minLength:4)
-            Menu{Button{cloud.restore(file)}label:{Label("Restore and share",systemImage:"arrow.down.to.line")};Button(role:.destructive){removing=file}label:{Label("Delete cloud copy",systemImage:"trash")}}label:{Image(systemName:"ellipsis").frame(width:42,height:44)}.disabled(cloud.busy || !cloud.actionsEnabled).accessibilityLabel("Actions for "+file.name)
+            Menu{
+                if MobileLaunchTarget.supports(file) {
+                    Button { launcher.pending=MobileLaunchTarget(owner:GDTransferClient.digest(Data(session.uid.utf8)),workspace:cloud.selected,key:file.id) } label: { Label("Play · send start signal",systemImage:"play.fill") }
+                    Button {
+                        let target=MobileLaunchTarget(owner:GDTransferClient.digest(Data(session.uid.utf8)),workspace:cloud.selected,key:file.id)
+                        launcherHelp=MobileLauncherHelpItem(name:file.name,url:target.url)
+                    } label: { Label("Create Home Screen launcher…",systemImage:"plus.app") }
+                }
+                Button{cloud.restore(file)}label:{Label("Restore and share",systemImage:"arrow.down.to.line")};Button(role:.destructive){removing=file}label:{Label("Delete cloud copy",systemImage:"trash")}}label:{Image(systemName:"ellipsis").frame(width:42,height:44)}.disabled(cloud.busy || !cloud.actionsEnabled).accessibilityLabel("Actions for "+file.name)
         }.padding(14).background(panel,in:RoundedRectangle(cornerRadius:15))
     }
     var body:some View{NavigationStack{
         ScrollView{VStack(alignment:.leading,spacing:20){
             HStack{VStack(alignment:.leading,spacing:7){Text("YOUR DIGITAL SPACE").font(.system(size:9,weight:.bold,design:.monospaced)).tracking(2).foregroundStyle(violet);Text("My cloud").font(.largeTitle.weight(.bold)).tracking(-1);Text("Everything you need. Nothing in your way.").font(.caption).foregroundStyle(.secondary)};Spacer();Image(systemName:"cloud.fill").font(.system(size:37)).foregroundStyle(violet).padding(15).background(violet.opacity(0.12),in:RoundedRectangle(cornerRadius:21))}
+            Text((UIDevice.current.userInterfaceIdiom == .pad ? "iPad · iPadOS " : "iPhone · iOS ")+UIDevice.current.systemVersion)
+                .font(.caption).foregroundStyle(GDTheme.muted)
             Picker("Workspace",selection:$cloud.selected){Text(cloud.freePickerLabel).tag("free");ForEach(cloud.choices){Text($0.pickerLabel).tag($0.id)}}.pickerStyle(.menu).frame(maxWidth:.infinity,alignment:.leading).padding(8).background(panel,in:RoundedRectangle(cornerRadius:11)).disabled(cloud.busy)
             if cloud.paymentDueBanner {
                 PaymentDueBanner(text:cloud.paymentDueText){
                     if let url=cloud.paymentCheckout {UIApplication.shared.open(url)} else {cloud.status=WorkspacePolicy.paymentDue}
                 }
             }
-            if let c=cloud.config{
+            if !workspaceActivated {
+                VStack(alignment:.leading,spacing:14){
+                    Label("Connect your workspace",systemImage:"externaldrive.badge.plus")
+                        .font(.title2.bold()).foregroundStyle(GDTheme.kicker)
+                    Text("Choose your MachineNote above, then open it to access your library. iOS uses a secure in-app connection, not a mounted desktop filesystem.")
+                        .font(.subheadline).foregroundStyle(GDTheme.muted)
+                    if cloud.config == nil {
+                        Text("Your first workspace includes 2 GB and the free performance tier. Additional plans are checked by the server.")
+                            .font(.caption).foregroundStyle(GDTheme.muted)
+                        Button("Create free workspace"){cloud.create()}
+                            .buttonStyle(GDButtonStyle()).disabled(cloud.busy)
+                    } else {
+                        Button("Open selected workspace"){workspaceActivated=true}
+                            .buttonStyle(GDButtonStyle()).disabled(cloud.busy || cloud.selectedLocked)
+                    }
+                    Text("Account and settings stay available before opening a workspace.")
+                        .font(.caption).foregroundStyle(GDTheme.muted)
+                }.frame(maxWidth:.infinity,alignment:.leading).padding(20)
+                    .background(GDTheme.surface,in:RoundedRectangle(cornerRadius:18))
+            } else if let c=cloud.config{
                 HStack(spacing:12){metric("Used / total",size(c.usedBytes)+" / "+size(c.quotaBytes));metric("Parallel transfers",String((cloud.dataSaver||cloud.constrainedNetwork) ? 1:min(4,c.transfer.workers)))}
                 ProgressView(value:min(1,Double(c.usedBytes+c.reservedBytes)/Double(max(1,c.quotaBytes)))).tint(violet)
                 VStack(alignment:.leading,spacing:12){
@@ -226,11 +258,23 @@ private struct MobileLibrary:View {
         .background(canvas).navigationBarTitleDisplayMode(.inline).searchable(text:$search,prompt:"Find a file…")
         .toolbar{ToolbarItem(placement:.topBarLeading){Text("GENDRAGOON").font(.system(size:10,weight:.bold,design:.monospaced)).tracking(1.4)};ToolbarItem(placement:.topBarTrailing){Button{settings=true}label:{Image(systemName:"person.crop.circle")}.accessibilityLabel("Account and settings")}}
         .refreshable{await cloud.refreshAndWait()}.task{await cloud.connect(session)}
-        .onChange(of:cloud.selected){_ in cloud.refresh()}
+        .onChange(of:cloud.selected){_ in workspaceActivated=false;cloud.refresh()}
         .onChange(of:phase){value in if value == .background{cloud.pause()}}
         .fileImporter(isPresented:$importing,allowedContentTypes:importFolders ? [.folder] : [.item],allowsMultipleSelection:true){result in switch result{case .success(let urls):if cloud.removeOriginals{pendingUpload=urls;confirmOriginalRemoval=true}else{cloud.upload(urls)};case .failure(let error):cloud.status=error.localizedDescription}}
         .confirmationDialog("Upload and remove originals?",isPresented:$confirmOriginalRemoval,titleVisibility:.visible){Button("Verify then remove \(pendingUpload.count) selected items",role:.destructive){cloud.upload(pendingUpload);pendingUpload=[]};Button("Keep originals and upload"){cloud.removeOriginals=false;cloud.upload(pendingUpload);pendingUpload=[]};Button("Cancel",role:.cancel){pendingUpload=[]}}message:{Text("Originals are removed only after a complete cloud read-back and archive restore check. Some providers delete permanently.")}
         .sheet(item:$cloud.export){value in NativeShare(url:value.url).presentationDetents([.medium,.large])}
+        .sheet(item:$launcherHelp){item in MobileLauncherHelp(item:item).presentationDetents([.medium,.large])}
+        .alert("Start cloud application?",isPresented:Binding(get:{launcher.pending != nil},set:{if !$0{launcher.pending=nil}})) {
+            Button("Send start signal") {
+                if let target=launcher.pending {
+                    if target.owner == GDTransferClient.digest(Data(session.uid.utf8)) { cloud.requestLaunch(target) }
+                    else { cloud.status="Sign in to the account that owns this launcher. No signal was sent." }
+                }
+                launcher.pending=nil
+            }
+            Button("Cancel",role:.cancel){launcher.pending=nil}
+        } message: { Text("Send an authenticated iOS launch request. This small shortcut is not an installed app copy. A compatible execution service must confirm that the app started.") }
+
         .sheet(isPresented:$settings){NavigationStack{AccountSettingsForm(confirmReset:$confirmReset,close:{settings=false},delete:{settings=false;DispatchQueue.main.async{deleteAccount=true}}).alert("Reset App?",isPresented:$confirmReset){Button("Reset",role:.destructive){cloud.resetLocalState();settings=false};Button("Cancel",role:.cancel){}}message:{Text("Clear local transfer cache and selected workspace. Cloud files and exported documents stay in place.")}.toolbar{ToolbarItem(placement:.confirmationAction){Button("Done"){settings=false}}}}}
         .fullScreenCover(isPresented:$deleteAccount){DeleteAccountView().environmentObject(session).environmentObject(cloud)}
         .sheet(item:$cloud.workspaceLock,onDismiss:{cloud.afterLockDismissed()}){lock in WorkspaceLockView(lock:lock).environmentObject(session).environmentObject(cloud)}
@@ -241,4 +285,51 @@ struct NativeShare:UIViewControllerRepresentable {
     let url:URL
     func makeUIViewController(context:Context)->UIActivityViewController{UIActivityViewController(activityItems:[url],applicationActivities:nil)}
     func updateUIViewController(_ uiViewController:UIActivityViewController,context:Context){}
+}
+
+struct MobileLaunchTarget:Identifiable {
+    let id=UUID()
+    let owner:String
+    let workspace:String
+    let key:String
+    static func supports(_ file:GDCloudItem)->Bool { file.name.lowercased().hasSuffix(".ipa") }
+    var url:URL {
+        var c=URLComponents();c.scheme="gendragoon";c.host="launch"
+        c.queryItems=[URLQueryItem(name:"owner",value:owner),URLQueryItem(name:"workspace",value:workspace),URLQueryItem(name:"key",value:key),URLQueryItem(name:"platform",value:"ios")]
+        return c.url!
+    }
+    static func parse(_ url:URL)->MobileLaunchTarget? {
+        guard url.absoluteString.utf8.count<=1024,let c=URLComponents(url:url,resolvingAgainstBaseURL:false),
+              c.scheme=="gendragoon",c.host=="launch",c.port==nil,c.user==nil,c.password==nil,c.path.isEmpty,c.fragment==nil,
+              let q=c.queryItems,q.count==4,Set(q.map(\.name))==["owner","workspace","key","platform"] else{return nil}
+        let values=Dictionary(uniqueKeysWithValues:q.map{($0.name,$0.value ?? "")})
+        guard values["platform"]=="ios",let owner=values["owner"],owner.range(of:"^[a-f0-9]{64}$",options:.regularExpression) != nil,
+              let workspace=values["workspace"],workspace=="free" || UUID(uuidString:workspace) != nil,
+              let key=values["key"],UUID(uuidString:key) != nil else{return nil}
+        return MobileLaunchTarget(owner:owner,workspace:workspace.lowercased(),key:key.lowercased())
+    }
+}
+@MainActor final class MobileLauncherInbox:ObservableObject {
+    static let shared=MobileLauncherInbox()
+    @Published var pending:MobileLaunchTarget?
+    func receive(_ url:URL){pending=MobileLaunchTarget.parse(url)}
+}
+struct MobileLauncherHelpItem:Identifiable {let id=UUID();let name:String;let url:URL}
+struct MobileLauncherHelp:View {
+    let item:MobileLauncherHelpItem
+    @Environment(\.dismiss) private var dismiss
+    var body:some View {
+        NavigationStack { ScrollView { VStack(alignment:.leading,spacing:18) {
+            Label(item.name,systemImage:"app.badge.fill").font(.title2.bold())
+            Text("Keep a lightweight launcher on your Home Screen. Tapping it opens GenDragoon and sends the start request after account verification.")
+            Text("Copy this launcher link. In Shortcuts, create a shortcut with a URL action containing the link, then an Open URLs action. Use the shortcut's Details menu to Add to Home Screen and choose its name and icon.")
+                .font(.subheadline).foregroundStyle(.secondary)
+            Button("Copy launcher link"){UIPasteboard.general.url=item.url}.buttonStyle(GDButtonStyle())
+            ShareLink("Share launcher link",item:item.url).buttonStyle(GDButtonStyle(tone:.secondary))
+            Text("No account password or access token is stored in this link. The icon does not install, execute, or replace another developer's iOS app by itself.")
+                .font(.caption).foregroundStyle(.secondary)
+        }.padding(24) }.navigationTitle("Home Screen launcher")
+            .toolbar{ToolbarItem(placement:.confirmationAction){Button("Done"){dismiss()}}}
+        }
+    }
 }

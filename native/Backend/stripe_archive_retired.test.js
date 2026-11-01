@@ -19,18 +19,18 @@ test("the retired list matches the bootstrap's retired keys and amounts",()=>{
 });
 test("dry run is read-only; apply needs --live --confirm-archive; test keys refused",async()=>{
  const f=fake([...RETIRED.map(r=>price(r)),{id:"price_storage",active:true,metadata:{service:"GenDragoonSSD",catalogKey:"storage|standard|100GB|month"}}]);
- const dry=await run([],f);assert.equal(dry.out.prices.filter(p=>p.action==="archive").length,5);assert.equal(f.state.updates.length,0);
+ const dry=await run([],f);assert.equal(dry.out.prices.filter(p=>p.action==="archive").length,4);assert.equal(f.state.updates.length,0);
  assert.equal((await run(["--apply","--live"],f)).code,2);assert.equal(f.state.updates.length,0);
  await assert.rejects(run([],f,{STRIPE_SECRET_KEY:"sk_test_x1"}),/LIVE key/);
  const done=await run(["--apply","--live","--confirm-archive"],f);
- assert.deepEqual(f.state.updates.sort(),RETIRED.map(r=>price(r).id).sort(),"only the five retired Prices");
+ assert.deepEqual(f.state.updates.sort(),RETIRED.map(r=>price(r).id).sort(),"only the four retired recurring Prices");
  assert.equal(f.state.prices.find(p=>p.id==="price_storage").active,true);
  assert.ok(done.out.prices.every(p=>p.action==="archived"));
  const again=await run(["--apply","--live","--confirm-archive"],f);
- assert.ok(again.out.prices.every(p=>p.action==="already_archived"));assert.equal(f.state.updates.length,5,"idempotent");
+ assert.ok(again.out.prices.every(p=>p.action==="already_archived"));assert.equal(f.state.updates.length,4,"idempotent");
 });
 test("an unexpected amount or a duplicate aborts before archiving anything",async()=>{
- const f=fake(RETIRED.map((r,i)=>price(r,i===4?{unit_amount:999}:{})));
+ const f=fake(RETIRED.map((r,i)=>price(r,i===3?{unit_amount:999}:{})));
  await assert.rejects(run(["--apply","--live","--confirm-archive"],f),/does not match/);assert.equal(f.state.updates.length,0);
  const g=fake([...RETIRED.map(r=>price(r)),price(RETIRED[0],{id:"price_dup"})]);
  await assert.rejects(run(["--apply","--live","--confirm-archive"],g),/2 Prices match/);assert.equal(g.state.updates.length,0);

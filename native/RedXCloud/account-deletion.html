@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Delete your GenDragoon Cloud SSD account</title>
+<style>body{font:17px/1.6 system-ui,sans-serif;max-width:780px;margin:40px auto;padding:0 24px;color:#eee;background:#10131d}h1,h2{line-height:1.2}a{color:#ff8ca8}strong{color:#fff}.request{border:2px solid #ff567c;padding:24px;border-radius:14px}li{margin:10px 0}code{overflow-wrap:anywhere}small{color:#bcc5d8}</style></head><body>
+<main><h1>Delete your GenDragoon Cloud SSD account</h1>
+<p>This page explains how to request deletion of your <strong>GenDragoon MachineNotes account and its associated GenDragoon cloud data</strong>. Disconnecting, signing out, or uninstalling an app does not delete that account.</p>
+<section class="request"><h2>Request deletion without installing the app</h2>
+<p><a href="mailto:support@infected-nation.com?subject=GenDragoon%20account%20deletion%20request">Email a GenDragoon account deletion request to support@infected-nation.com</a>.</p>
+<p>Use the subject <strong>GenDragoon account deletion request</strong> and identify the Red-XAI sign-in email or subject you use for GenDragoon. State that you want the GenDragoon account and associated cloud data deleted. Support will verify account ownership before acting. You do not need to reinstall GenDragoon to submit this request.</p>
+<p><strong>Do not send passwords, API keys, storage secrets, keymaps, recovery files, or payment card details.</strong> No completion time or automatic refund is promised. The request is complete only after cleanup has been verified.</p></section>
+<h2>Request deletion from a supported current app</h2>
+<ol><li>Restore any cloud-only files you want to keep and verify that those copies open. Stop your own uploads, restores, launch sessions, and mounted drives normally. The deletion flow does not force-stop them.</li>
+<li>Open the account settings and choose the current <strong>Delete GenDragoon account</strong> flow. Confirm the account and the scope below, then type <code>DELETE GENDRAGOON</code> when asked.</li>
+<li>Keep the deletion receipt and follow its status. <strong>Queued</strong>, <strong>running</strong>, and <strong>failed</strong> do not mean that deletion finished. A failed request can be retried with the same receipt. Only <strong>completed</strong> confirms verified service cleanup.</li></ol>
+<p>Older releases may have Disconnect or an older, separate account system. Those controls do not perform deletion of the current MachineNotes account. Use the email request above if your app does not show the current deletion flow or cannot finish it.</p>
+<h2>What the current deletion removes</h2>
+<ul><li>Your GenDragoon Receiver cloud files, encrypted PNG objects, archive indexes, MachineNotes, and account plan records.</li>
+<li>Your scoped GenDragoon integration keys, unused connection grants, and saved BYO connection metadata. Keys stop working while deletion is pending.</li>
+<li>Your developer username claims, GenDragoon Teams profile and memberships, your server-relayed messages and presence, and pending signaling to or from your removed memberships. Teams owned by your deleted MachineNotes close; their record no longer identifies you as owner.</li>
+<li>Open GenDragoon Stripe Checkout sessions are closed and subscriptions recorded in the GenDragoon ledger are cancelled after ownership is verified. An unresolved billing/provider problem leaves the request pending or failed; it does not produce a completed receipt.</li></ul>
+<h2>What deletion does not delete</h2>
+<ul><li>Your external Red-XAI identity or accounts in other Red-XAI programs.</li>
+<li>Files or archives on a Red-XAI-DB host you provide yourself. GenDragoon removes its saved connection metadata, not the contents of that external host.</li>
+<li>Your original local files, applications, folders, exported recovery files, or copies saved by you or other people. A supported app may clear its own private session and staging after a verified completed receipt.</li>
+<li>Other members' accounts, independent MachineNotes, files, and other Teams. Their own relay messages or copies already received remain theirs; closing your Team does not erase copies from their devices.</li></ul>
+<h2>Activity checks and retained information</h2>
+<p>The server refuses to start deletion when it can observe active operations for the account. It cannot detect an offline mounted drive, an offline client, or a copy already downloaded. Close those normally before confirming. A pending deletion blocks new service access; it does not stop local programs or erase local originals.</p>
+<p>After completion, GenDragoon retains a minimal tombstone containing the pseudonymous account identifier, receipt identifier, idempotency hash, timestamps, and cleanup counts. It contains no file names, file contents, access tokens, keymaps, integration secrets, username, or billing customer pointer. This tombstone currently has no automatic expiry: it prevents old credentials or late checkout results from silently recreating deleted service data and allows you to check the receipt.</p>
+<p>Stripe may retain historical payment, invoice, and transaction records under its own retention obligations; GenDragoon account deletion does not promise to erase those processor records or issue a refund. External identity providers and BYO hosts have their own deletion processes. This receipt verifies removal from the active GenDragoon service; it does not certify deletion of independent copies or operator-managed backups outside that service.</p>
+<p>If you cannot authenticate, a provider is unavailable, or a retry remains failed, use the email request above. Include the receipt identifier if you have one, without secrets. Support must still verify ownership.</p>
+<p><a href="privacy">GenDragoon privacy notice</a></p>
+<p><small>This resource describes the current MachineNotes deletion API. Availability in a particular installed app depends on its version; publishing this page alone does not add an in-app deletion control.</small></p>
+</main></body></html>

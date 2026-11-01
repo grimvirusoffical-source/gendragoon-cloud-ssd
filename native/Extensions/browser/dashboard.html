@@ -1,0 +1,11 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>GenDragoon</title><link rel="stylesheet" href="dashboard.css"></head>
+<body><main><header><img src="icons/128.png" width="52" height="52" alt=""><div><p class="eyebrow">GENDRAGOON</p><h1>Your MachineNotes.</h1></div></header>
+<p class="help">Use your locally approved GenDragoon app to browse your own file metadata, queue an upload, and collaborate with developer peers. Account credentials stay in the app.</p>
+<p id="device" class="help" aria-live="polite"></p>
+<p id="status" role="status" aria-live="polite">Open GenDragoon, connect your account, then refresh.</p>
+<nav><button id="refresh" type="button">Refresh connection</button><a href="dashboard.html" target="_blank" rel="noopener">Open full page</a></nav>
+<section><h2>Choose your MachineNote</h2><label for="notes">MachineNote</label><select id="notes"><option value="">Connect to load your MachineNotes</option></select><p id="note-detail" class="help"></p><div class="row"><button id="upload-file" disabled>Select file in GenDragoon…</button><button id="upload-folder" disabled>Select folder in GenDragoon…</button></div><p class="help">A native picker asks you to choose the original. Offload stays off. A queued upload is complete only after GenDragoon verifies it and shows Succeeded.</p></section>
+<section><h2>Your stored file metadata</h2><p class="help">This view contains names and sizes for the selected note. Open the native Files view to restore, offload, organize, or delete stored data.</p><ul id="files"></ul></section>
+<section><h2>Developer Teams</h2><p class="help">Teams offer chat, presence, and WebRTC signaling. Joining never grants access to another person's files. Direct peer chat depends on both clients and the network.</p><button id="teams" disabled>Open Teams</button></section>
+</main><script src="rpc.js"></script><script src="native-client.js"></script><script src="platform.js"></script><script src="dashboard.js"></script></body></html>

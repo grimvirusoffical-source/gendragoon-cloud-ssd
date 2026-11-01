@@ -19,7 +19,7 @@ SPEC.loader.exec_module(updater)
 class Channel(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
-        self.root = Path(self.tmp.name)
+        self.root = Path(self.tmp.name).resolve()
         self.app = self.root / updater.APP_NAME
         (self.app / "Contents").mkdir(parents=True)
         self.dist_file = self.root / "gendragoon_distribution.json"

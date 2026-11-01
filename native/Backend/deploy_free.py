@@ -14,10 +14,10 @@ RUNTIME_FILES = (
     "free_server.js", "free_performance.js", "billing_bootstrap.js",
     "billing_gateway.js", "billing_v2.js", "projects.js", "workspace_policy.js", "locked_write.js", "catalog.js", "performance.js", "performance_profiles.json",
     "gpu_catalog.js", "owner_benefits.js", "api_keys.js", "paid_storage.js",
-    "transfer_v3.js", "range_download.js", "account_delete.js", "key_envelope.js", "storage_urls.js", "package.json", "package-lock.json",
+    "transfer_v3.js", "app_launch_intents.js", "range_download.js", "account_delete.js", "key_envelope.js", "storage_urls.js", "package.json", "package-lock.json",
     # Loaded by free_server.js / billing_v2.js / transfer_v3.js / account_delete.js at start or during deletion jobs.
     # provider_v1.js is shipped because account deletion calls it; its routes stay off unless PROVIDER_V1_ENABLED=true.
-    "login_gate.js", "v2_errors.js", "teams.js", "teams_account.js", "team_storage.js", "provider_v1.js", "provider_blobstore.js",
+    "login_gate.js", "redx_app_auth.js", "v2_errors.js", "teams.js", "teams_account.js", "team_storage.js", "provider_v1.js", "provider_blobstore.js",
     "support_email.js",
 )
 

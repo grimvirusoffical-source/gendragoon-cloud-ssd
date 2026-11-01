@@ -1,0 +1,26 @@
+'use strict';
+const {test}=require('node:test');
+const assert=require('node:assert/strict');
+const http=require('node:http');
+const {createIntegrations}=require('../integrations.cjs');
+const {IntegrationClient,pkce}=require('../integration-sdk.cjs');
+const {digest}=require('../redx-state.cjs');
+test('SDK uses exact provider grant/S256 wire contracts and keeps management outside delegated keys',async t=>{
+ const issuer='https://accounts.fixture',subject='fixture',actor={issuer,subject,owner:digest(JSON.stringify(['red-xai-receiver/v1',issuer,subject]))};
+ const states=new Map(),pointers=new Map(),grants=new Map();
+ const metadata={account:async id=>structuredClone(states.get(id)||{keys:{},byo:{}}),update:async(id,fn)=>{const v=structuredClone(states.get(id)||{keys:{},byo:{}});fn(v);states.set(id,v);return v;},linkKey:async(id,owner)=>pointers.set(id,owner),ownerForKey:async id=>pointers.get(id),createGrant:async(id,v)=>grants.set(id,structuredClone(v)),grant:async id=>structuredClone(grants.get(id)),consumeGrant:async(id,verify,at)=>{const g=grants.get(id);if(!g||g.usedAtMs!==null||g.expiresAtMs<=at||!verify(g))throw Object.assign(Error('invalid_grant'),{status:400});g.usedAtMs=at;return structuredClone(g);}};
+ const workspace='a'.repeat(32),api=createIntegrations({metadata,authorizeWorkspace:async()=>({id:workspace,active:true,readOnly:false,quotaBytes:1000,workers:1,checkedAtMs:Date.now()})});
+ const server=http.createServer(async(req,res)=>{try{const u=new URL(req.url,'http://127.0.0.1');let result;if(api.matchesPublic(u.pathname))result=await api.handlePublic(req,u);else{const identity=api.isAPIKey(req)?await api.authenticateAPIKey(req,u.pathname):req.headers.authorization==='Bearer fixture-session'?actor:null;result=await api.handle(req,u,identity);}res.writeHead(result.status,{'content-type':'application/json'});res.end(JSON.stringify(result.body));}catch(e){res.writeHead(e.status||500,{'content-type':'application/json'});res.end(JSON.stringify({error:'safe_failure'}));}});
+ await new Promise(r=>server.listen(0,'127.0.0.1',r));t.after(()=>new Promise(r=>server.close(r)));
+ const baseURL='http://127.0.0.1:'+server.address().port,management=new IntegrationClient({baseURL,development:true,token:async()=> 'fixture-session'});
+ const publicClient=new IntegrationClient({baseURL,development:true,token:async()=>{throw Error('public exchange must not read a key');}});
+ const input={service:'quick-launcher',workspaceId:workspace,name:'SDK fixture',scopes:['files:read','files:write']};
+ assert((await management.services()).services.some(s=>s.id==='quick-launcher'));
+ const grant=await management.createGrant(input),bound=await publicClient.redeem(grant.grant,{label:'Fixture',platform:'darwin'});assert.match(bound.key,/^gdpk_/);assert.equal(bound.binding.workspaceId,workspace);
+ await assert.rejects(publicClient.redeem(grant.grant),e=>e.status===400);
+ const delegated=new IntegrationClient({baseURL,development:true,token:async()=>bound.key});assert.equal((await delegated.health()).ok,true);await assert.rejects(delegated.keys(),e=>e.status===403);
+ const challenge=pkce(),code=await management.authorize({...input,codeChallenge:challenge.challenge}),exchanged=await publicClient.exchange(code.code,challenge.verifier);assert.match(exchanged.key,/^gdpk_/);
+ assert(!(JSON.stringify(await management.keys())).includes(bound.key));await management.revokeKey(bound.keyId);await assert.rejects(delegated.health(),e=>e.status===401);
+ const byo=await management.registerBYO({name:'BYO',origin:'https://host.fixture',database:'own_db'});assert.equal(byo.workspace.hostingFeeCents,0);assert.equal((await management.disconnectBYO(byo.workspace.id)).externalDataDeleted,false);
+ assert.throws(()=>new IntegrationClient({baseURL:'https://host.fixture/path',token:()=>bound.key}));assert.throws(()=>new IntegrationClient({baseURL:'https://host.fixture',token:bound.key}));
+});

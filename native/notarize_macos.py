@@ -27,7 +27,7 @@ BUNDLE_ID = "app.gendragoon.cloudssd"
 TEAM_ID = "NZPU8H843J"
 APP_NAME = "GenDragoon Cloud SSD.app"
 EXECUTABLE = "GenDragoon Cloud SSD"
-RESERVE = 10 * 1024**3
+RESERVE = 64 * 1024**2
 RECEIPT_NAME = "gendragoon-notarization-receipt.json"
 MAX_RECEIPT_BYTES = 64 * 1024
 MAX_BUNDLE_ENTRIES = 100000
@@ -301,7 +301,7 @@ def notarize(app, profile, check_only=False, receipt=None, wait_seconds=60):
     app_bytes = sum(p.stat().st_size for p in app.rglob("*") if p.is_file())
     required = RESERVE + max(256 * 1024**2, app_bytes * 2)
     if shutil.disk_usage(app.parent).free < required:
-        raise NotarizationError("Notarization postponed: insufficient free storage above 10 GiB reserve")
+        raise NotarizationError("Notarization postponed: insufficient free storage for the measured submission archive and staging allowance")
     with receipt_lock(receipt):
         record = read_receipt(receipt)
         if record is not None:

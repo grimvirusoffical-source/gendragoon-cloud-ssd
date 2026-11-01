@@ -1,18 +1,55 @@
 # GenDragoon native applications
 
+> **0.22.2 storage update:** mounted reads and normal Open/Play no longer restore full archives automatically. See [Kamatera streaming notes](KAMATERA-STREAMING.md). Older local-cache behavior described below applies only to explicit offline/legacy paths.
+
 This tree contains the macOS app, the iOS and Android clients, the cloud backend and the upload, cleanup, reset and update features.
 The previous `GenDragoonFreeCloud.swift` is kept under `Legacy`; the current app uses `GenDragoonCustomerCloud.swift` and the v3 transfer client.
 
 ## macOS application behavior
 
-The signed-in native workspace owns one persistent upload selection. Google
-Cloud discovery verifies the actual project ID and the bucket's owning project
-number before committing the selected project, bucket, remote, and prefix.
-The top selector, upload tree, and upload panel use that committed state. An
-account lacking account-wide discovery permission can retain an explicitly
-verified destination. Legacy 16- and 18-character app keys keep their original
-cache paths and are adopted only into a matching verified workspace.
+The signed-in macOS app offers only MachineNotes on the Red-XAI server. Its
+persistent upload selection is populated from the authenticated Receiver's
+active MachineNotes, with no Google project or bucket discovery. A saved
+legacy provider destination remains preserved locally but cannot run an upload;
+select an available MachineNote instead. Queued legacy uploads can be cancelled
+without touching source files or remote objects. The selected MachineNote is
+shared by the upload tree and library, and queued jobs retain their own frozen
+MachineNote context, including the chosen library folder for each source.
 
+The common **Select Apps, Files or Folders** picker accepts multiple complete
+application bundles, arbitrary files and folders together. Picker selections,
+Finder drops and clipboard file URLs go directly into the selection; **Upload**
+starts the batch without an intermediate add-to-tree action. The optional local
+browser selects items with checkboxes. Offload remains off by default.
+
+The storage browser is a native macOS outline with multiple selection, nested
+library folders, drag/drop move, Option-drag copy, contextual menus, and
+Command-C/X/V, Return-to-rename and Delete shortcuts. Folder creation, rename,
+move, copy and deletion use authenticated, atomic, revision-checked Receiver
+operations. Sibling collisions and folder cycles are rejected; stale views
+refresh rather than overwriting concurrent changes. Copies preserve immutable
+archive identity and encryption associated data. Operations stay inside one
+MachineNote. A complete uploaded folder remains a folder backup; library folders
+organize those backups. Deleting library entries retains shared encrypted
+archive objects and does not reclaim their storage quota.
+
+Upload progress is persisted by the worker and refreshed while its child runs.
+It reports a monotonic 0–100 work estimate, actual encoded network byte/object
+counts, current preparation/encoding/transfer/readback/verification activity,
+and observed ETA estimates when enough progress has been measured. Background
+and Show/Hide progress controls change presentation; the upload continues while
+the app stays open. The tier comparison estimates the network time saved versus
+serial requests from observed request durations; it excludes encoding and
+verification and is not a guarantee of speed or a billing entitlement source.
+
+Users can list only their own MachineNotes. The verified service owner can list
+all account and library metadata through a separately authorized server API;
+the server rechecks the verified owner email for every request. This inventory
+does not provide other users' encryption secrets or decrypted archive contents.
+The client integrates the pinned Red-SecretsXAI public encryption and visual
+barcode APIs without modifying its repository. Existing compact PNG archives
+remain readable. New barcode carriers have storage overhead, and quotas count
+the actual encoded bytes stored on the server.
 The upload tree makes Applications a first-class source, alongside individual
 files and complete folders. A macOS `.app` is treated as one application bundle.
 The optional removal checkbox is off by default. Removal requires an immutable
@@ -57,7 +94,7 @@ idle app. Replacement keeps a rollback copy and checks the restarted process.
 
 ## Build and installation
 
-Requirements: Apple Silicon Mac, macOS 14+, Xcode, a supported Python runtime,
+Requirements: Apple Silicon Mac, macOS 14+, Xcode, Python 3.13,
 and a valid existing GenDragoon bundle containing the vendor rclone/Node
 executables and artwork. The build never replaces that base bundle.
 
@@ -66,7 +103,9 @@ python3 native/build_macos.py --output /path/to/fresh-build-directory
 ```
 
 All `Sources/*.swift` are compiled. Resource helpers come from this checkout.
-The script signs with the existing Developer ID identity. Private signing keys
+The build bundles the visual codec's pinned NumPy and Pillow wheels for the
+matching Python ABI and signs their native extensions. The script signs with
+the existing Developer ID identity. Private signing keys
 and owner API credentials are not copied into the app or repository.
 
 Refresh the copied vendor Node runtime in the stopped staging bundle before

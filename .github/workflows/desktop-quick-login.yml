@@ -1,0 +1,29 @@
+name: Desktop Quick Login
+
+on:
+  push:
+    branches:
+      - "fix/desktop-quick-login-*"
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  quick-login:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Test trusted-session storage and live Quick Login start contract
+        env:
+          GD_LIVE_QUICK_LOGIN_TEST: "1"
+        run: python -B native/Desktop/tests/test_quick_login.py

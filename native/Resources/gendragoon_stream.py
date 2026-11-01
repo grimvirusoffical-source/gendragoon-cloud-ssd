@@ -13,7 +13,7 @@ LIB=SUPPORT/"app-library.json"
 CONFIG=SUPPORT/"gendragoon-rclone.conf"
 RCLONE=HOME/"Applications/GenDragoon Cloud SSD.app/Contents/Resources/rclone"
 MOUNT=HOME/"GenDragoon Cloud SSD"
-RESERVE=10*1024**3
+RESERVE=64*1024**2
 def out(**kw): print(json.dumps({"ok":True,**kw}),flush=True)
 def err(e): print(json.dumps({"ok":False,"message":str(e)[-700:]}),flush=True);sys.exit(1)
 def call(args,timeout=1800):
@@ -33,7 +33,7 @@ def item(key):
 def free(): return shutil.disk_usage(str(HOME)).free
 def reserve(extra=0):
  actual=free();need=RESERVE+extra
- if actual<need:raise RuntimeError(f"Insufficient SSD space. Free {actual/1024**3:.1f} GiB; need {need/1024**3:.1f} GiB to keep 10 GiB available.")
+ if actual<need:raise RuntimeError(f"Insufficient SSD space for this operation. Free {actual/1024**3:.1f} GiB; need {need/1024**3:.1f} GiB for staging and filesystem work.")
  return actual
 def mount_ready():
  if not os.path.ismount(MOUNT):raise RuntimeError("Mount GenDragoon SSD in Finder before Smart Launch")
@@ -74,7 +74,7 @@ def restore_capacity(key):
  factor=2.5 if data.get("format")!="raw" else 1.25
  overhead=int(raw*factor)+512*1024**2
  reserve(overhead)
- out(message="Sufficient SSD space for a local restore, with 10 GiB reserve.",estimatedRequiredGiB=round((overhead+RESERVE)/1024**3,2))
+ out(message="Sufficient SSD space for this local restore. Keeping 10 GB free is recommended.",estimatedRequiredGiB=round((overhead+RESERVE)/1024**3,2))
 def bundle_size(root):
  return sum(f.stat().st_size for f in root.rglob("*") if f.is_file() and not f.is_symlink())
 def upload_stream(source,remote,folder,offload=False):

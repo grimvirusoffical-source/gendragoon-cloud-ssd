@@ -1,0 +1,243 @@
+{
+  "abis": [
+    "arm64-v8a",
+    "x86_64"
+  ],
+  "artifact": "gendragoon-android-runtime-9235941b431b.zip",
+  "buildScriptSHA256": "df4964de1affbfe062f4e0e94ecf6f1de7ee2ee994db64cd1089292c023e2337",
+  "bytes": 777660,
+  "contents": {
+    "licenseFiles": 4,
+    "manifestFiles": 1,
+    "nativeLibraries": 2,
+    "privateSourceFiles": 0,
+    "pythonBytecodeFiles": 31
+  },
+  "coreABI": 2,
+  "files": {
+    "jniLibs/arm64-v8a/librsx.so": {
+      "bytes": 500712,
+      "sha256": "635df55d7b1a6ba514fa6240ac2e80492da278d7712f646698852d77c4c7c4b4"
+    },
+    "jniLibs/x86_64/librsx.so": {
+      "bytes": 510576,
+      "sha256": "fc9b0d76301ff2c722a0e773a625479da8b0b2bb7e4280d4a9b232c0d5fb583e"
+    },
+    "licenses/Android-NDK-r28c-LLVM-NOTICE.txt": {
+      "bytes": 130424,
+      "sha256": "f96f763beb66a7ba7a667647fc64c0226ace875e590c831fdd9579ec1c1d91e1"
+    },
+    "licenses/Android-NDK-r28c-NOTICE.txt": {
+      "bytes": 516438,
+      "sha256": "faf0dc52cf6ce9ab09a04b0c074a378dd2565ee1ed9bc1179d83793bcdba012e"
+    },
+    "licenses/Red-SecretsXAI-LICENSE.txt": {
+      "bytes": 11519,
+      "sha256": "75ad7d1891402da9ac7403aa08e67d4513d2df9926eb98423b39b3e1f87696bc"
+    },
+    "licenses/Red-SecretsXAI-NOTICE.txt": {
+      "bytes": 3676,
+      "sha256": "49f3f2fd67cb1841385d390bc392117b2146fa5a48ff8a67c889309473bfe9a5"
+    },
+    "python/redsecretsxai/__init__.pyc": {
+      "bytes": 6953,
+      "sha256": "de496ceed971080fadb8f1e5b61844715a8f5e7c1564b8e2ba9d885a45174bc6"
+    },
+    "python/redsecretsxai/__main__.pyc": {
+      "bytes": 268,
+      "sha256": "1f5c03f3ae78632f34c8c80db1b7799dea2d6dc20851e1ca882d393d3fea1fb6"
+    },
+    "python/redsecretsxai/_image.pyc": {
+      "bytes": 85242,
+      "sha256": "0d4e3bb333980d92bb67e642c867dca52c3a4fc5059dfbb984fb38475f9651e5"
+    },
+    "python/redsecretsxai/_librsx.pyc": {
+      "bytes": 87087,
+      "sha256": "3e798c42d03eec0c8b81370799d0d93818e4d3a88e9684e1ca638c06621a50cd"
+    },
+    "python/redsecretsxai/capacity.pyc": {
+      "bytes": 10696,
+      "sha256": "581cedfc15c30d0b152dca6f3f2aff02d689ba07e8017abcbbcab51f6117cfac"
+    },
+    "python/redsecretsxai/chaff.pyc": {
+      "bytes": 22720,
+      "sha256": "ff6b6d37a9846504a74ea053b46e5876943c889a196b02bab9531d109ee58b9a"
+    },
+    "python/redsecretsxai/chromatic.pyc": {
+      "bytes": 11381,
+      "sha256": "8392a43e887414da2336059f72ed56a3251857f8a3cce0bf08b997ae06207986"
+    },
+    "python/redsecretsxai/cli.pyc": {
+      "bytes": 35502,
+      "sha256": "19c4f18f6036020b68574650dfcbc97094c0112bf0010e11346deb329a9414b0"
+    },
+    "python/redsecretsxai/confidence_map.pyc": {
+      "bytes": 8949,
+      "sha256": "fba2ce31019d872d86514aae6bef2c74cfe9e614adcb620890091e6422cee238"
+    },
+    "python/redsecretsxai/convert.pyc": {
+      "bytes": 8119,
+      "sha256": "19a54b4c382dd3ca46ea434c839972170ee272544dec5da91591cb3c2f64cdff"
+    },
+    "python/redsecretsxai/ct_sample.pyc": {
+      "bytes": 8448,
+      "sha256": "408177e619a6a9a7acebc4e67b7f46e2453cf62d30183376b4b54145e80cb1ab"
+    },
+    "python/redsecretsxai/damage_recover.pyc": {
+      "bytes": 16566,
+      "sha256": "cbe6f5d2b9109915da7617e09b45fc0e3c66b9cf06e4b324bdde8b0dceea5e19"
+    },
+    "python/redsecretsxai/decode_math.pyc": {
+      "bytes": 40971,
+      "sha256": "3e0d41357b30c7f9b06a9d90560c63ad9c3cdc0c884fee5801b888721519340f"
+    },
+    "python/redsecretsxai/fountain_encode.pyc": {
+      "bytes": 26786,
+      "sha256": "77d7af1c56541a6593435e6d3827629b1f735cc7263ffe0de0e760ec1e0ecd55"
+    },
+    "python/redsecretsxai/geom_sync.pyc": {
+      "bytes": 15989,
+      "sha256": "170d6cc24edaff1f483c38048a3ca7d03c1cae9d8c5dbd2a88118f3ae36d1851"
+    },
+    "python/redsecretsxai/glyphs.pyc": {
+      "bytes": 18168,
+      "sha256": "14104fcc7dc02b34a95dcfa3ea22c092c9c4b982e931333bf284c1575d5a0a2c"
+    },
+    "python/redsecretsxai/keycards.pyc": {
+      "bytes": 5661,
+      "sha256": "2f33ce28097f85dd329ca6fad4a98dedbc7ec781f092eb029b6af237c56b264c"
+    },
+    "python/redsecretsxai/look.pyc": {
+      "bytes": 19872,
+      "sha256": "2ab8aac3ce49b06fa5656b9cd175bfc95c269dea11e1f8c0c56d8136a1d00fb6"
+    },
+    "python/redsecretsxai/operators.pyc": {
+      "bytes": 7255,
+      "sha256": "ca722f7f14bc05e8c8ba22f65e0dd6b0083bf948923d44fbd82f7ca2eaf00a76"
+    },
+    "python/redsecretsxai/pyramid.pyc": {
+      "bytes": 13803,
+      "sha256": "a70ec13afea66be40120610aee85f44d89f2e65e5628083d22c4ea9aeb594f62"
+    },
+    "python/redsecretsxai/rs.pyc": {
+      "bytes": 14044,
+      "sha256": "47f01506d6ba2d29f4b1b00ee31995a1290ebbdb55276333ebd892ef3f7f58d2"
+    },
+    "python/redsecretsxai/rsx_crypto.pyc": {
+      "bytes": 45827,
+      "sha256": "d48b22d7e186cf78159de9d70910c7eca04945dba01fd9e66d96bb8b59aa905f"
+    },
+    "python/redsecretsxai/rsx_keymap.pyc": {
+      "bytes": 47782,
+      "sha256": "e353dc875d6c772c74f8b22a28f0edffff2abacf9ef5988f0011daa4149fca60"
+    },
+    "python/redsecretsxai/safe_names.pyc": {
+      "bytes": 6665,
+      "sha256": "3f0f2bec6d5eda1d080a301887ecebd1d27757974462c81e55d610bdd2bcdfbc"
+    },
+    "python/redsecretsxai/spread_spectrum.pyc": {
+      "bytes": 6004,
+      "sha256": "86e20c4bf22be5d7121d63e914a5e71c369c283153ff16c13b7a14c70f97c599"
+    },
+    "python/redsecretsxai/stencil_decode.pyc": {
+      "bytes": 26843,
+      "sha256": "3f696da056eccc0c40be96be318fae0fed4ee148efc47922027da919105a7856"
+    },
+    "python/redsecretsxai/storage_image.pyc": {
+      "bytes": 11854,
+      "sha256": "000aade077ea7a3a67d47f64bcc67ff67f07756a0b158a66a6464cf2d1a62cfa"
+    },
+    "python/redsecretsxai/visual_seed.pyc": {
+      "bytes": 12673,
+      "sha256": "ebe9729462c5ab6d97766174764bef19074adcc507a4e7211996ccf8dc4a1ab3"
+    },
+    "python/redxai/__init__.pyc": {
+      "bytes": 1424,
+      "sha256": "6fa31bddd75a13f78c633065e99be9b518620d5c4c12f9810d80fa6a2302788e"
+    },
+    "python/redxai/_easy.pyc": {
+      "bytes": 30848,
+      "sha256": "96555ecac146ca1fa2fb07ee67c2a9033bfded681a7aef6a9d2c04bec2d50fbf"
+    },
+    "python/redxai/_librsx.pyc": {
+      "bytes": 87080,
+      "sha256": "e75c8ab82805f6636893666c49939089ae91240ec3bc3a713bc0c1c1e03bd3f5"
+    }
+  },
+  "ndkVersion": "28.2.13676358",
+  "pending": [
+    "Android instrumented ABI2 load and authenticated visual PNG roundtrip",
+    "Android APK/AAB build and tests"
+  ],
+  "pythonVersion": "3.13",
+  "redistributionNoticeUpdate": {
+    "change": "Added unchanged official NDK r28c root and LLVM notices; compiled libraries and private bytecode unchanged",
+    "noticeSource": "Verified Android NDK r28c archive",
+    "officialNoticesSHA256": {
+      "licenses/Android-NDK-r28c-LLVM-NOTICE.txt": "f96f763beb66a7ba7a667647fc64c0226ace875e590c831fdd9579ec1c1d91e1",
+      "licenses/Android-NDK-r28c-NOTICE.txt": "faf0dc52cf6ce9ab09a04b0c074a378dd2565ee1ed9bc1179d83793bcdba012e"
+    },
+    "previousArtifactSHA256": "a22b03d605a36e465a8c7ef1e6fb571e5755ed4a76bfd63dab394db5372a559f"
+  },
+  "schema": 1,
+  "sha256": "47883fd5535bae569c7fe7bb9cfac2092fa8ab2ec83c4c39e4fd5e9c363ffa2f",
+  "shippingDebugRemoval": {
+    "libraries": {
+      "arm64-v8a": {
+        "bytes": 500712,
+        "sha256": "635df55d7b1a6ba514fa6240ac2e80492da278d7712f646698852d77c4c7c4b4"
+      },
+      "x86_64": {
+        "bytes": 510576,
+        "sha256": "fc9b0d76301ff2c722a0e773a625479da8b0b2bb7e4280d4a9b232c0d5fb583e"
+      }
+    },
+    "previousArtifactSHA256": "a9807f48747017a742e18ad4b6dce10a7d8bb22b93f5a4b5bf94ee39bc2aceaf",
+    "privateBuildPathsPresent": false,
+    "privateDebugSectionsPresent": false,
+    "textSectionsByteIdentical": true,
+    "tool": "official NDK r28c llvm-strip --strip-unneeded"
+  },
+  "toolchains": {
+    "cmake": {
+      "sha256": "73565c72355c6652e9db149249af36bcab44d9d478c5546fd926e69ad6b43640",
+      "url": "https://github.com/Kitware/CMake/releases/download/v3.22.1/cmake-3.22.1-linux-x86_64.tar.gz",
+      "version": "3.22.1"
+    },
+    "ndk": {
+      "checksumSource": "https://github.com/android/ndk/releases/tag/r28c",
+      "officialSHA1": "a7b54a5de87fecd125a17d54f73c446199e72a64",
+      "sha256": "dfb20d396df28ca02a8c708314b814a4d961dc9074f9a161932746f815aa552f",
+      "url": "https://dl.google.com/android/repository/android-ndk-r28c-linux.zip",
+      "version": "28.2.13676358"
+    },
+    "ninja": {
+      "sha256": "0830252db77884957a1a4b87b05a1e2d9b5f658b8367f82999a941884cbe0238",
+      "url": "https://github.com/ninja-build/ninja/releases/download/v1.13.1/ninja-linux.zip",
+      "version": "1.13.1"
+    }
+  },
+  "vendorCommit": "9235941b431bc1c23c34286b82052f845121592f",
+  "verified": {
+    "allMemberSHA256": true,
+    "allPTLOADAlignmentBytes": 16384,
+    "allPTLOADOffsetVirtualAddressCongruence": true,
+    "artifactSHA256": true,
+    "dynamicDependencies": [
+      "libm.so",
+      "libdl.so",
+      "libc.so"
+    ],
+    "elfMachines": {
+      "arm64-v8a": 183,
+      "x86_64": 62
+    },
+    "exactPython313Magic": "f30d0d0a",
+    "existingSyncRuntimeVerifier": "passed",
+    "exportedEntryPoints": [
+      "rsx_abi_version",
+      "rsx_session_open"
+    ],
+    "strictCompiledOnlyAllowlist": true
+  }
+}

@@ -1,0 +1,113 @@
+{
+  "schema": 1,
+  "shipping": false,
+  "notice": "Explicit isolated app-ID profile using the same reviewed durable wheels as the normal app. Candidate and normal-profile acceptance remain separate.",
+  "files": [
+    {
+      "name": "chaquopy_freetype-2.9.1-9016-py3-none-android_21_arm64_v8a.whl",
+      "bytes": 411370,
+      "sha256": "ce8b604c14d1cae5f5dcdebedb7f11d14118a54ab5ebbe0a3e0fb346b3ada1d3",
+      "source": {
+        "kind": "bundled",
+        "path": "../runtime/wheels/chaquopy_freetype-2.9.1-9016-py3-none-android_21_arm64_v8a.whl"
+      },
+      "origin": {
+        "kind": "bundled",
+        "path": "candidate-inputs/chaquopy_freetype-2.9.1-9016-py3-none-android_21_arm64_v8a.whl"
+      }
+    },
+    {
+      "name": "chaquopy_freetype-2.9.1-9016-py3-none-android_21_x86_64.whl",
+      "bytes": 428321,
+      "sha256": "6cb6d585b1cc72cae12aba910d95c483e2563c7aed0a9a0913851a9e32ff50b6",
+      "source": {
+        "kind": "bundled",
+        "path": "../runtime/wheels/chaquopy_freetype-2.9.1-9016-py3-none-android_21_x86_64.whl"
+      },
+      "origin": {
+        "kind": "bundled",
+        "path": "candidate-inputs/chaquopy_freetype-2.9.1-9016-py3-none-android_21_x86_64.whl"
+      }
+    },
+    {
+      "name": "chaquopy_libjpeg-1.5.3-9016-py3-none-android_21_arm64_v8a.whl",
+      "bytes": 181927,
+      "sha256": "850d74ca5c35dcf64f0457f107eaacdf93208904c1837c751d01f95f24a84b60",
+      "source": {
+        "kind": "bundled",
+        "path": "../runtime/wheels/chaquopy_libjpeg-1.5.3-9016-py3-none-android_21_arm64_v8a.whl"
+      },
+      "origin": {
+        "kind": "bundled",
+        "path": "candidate-inputs/chaquopy_libjpeg-1.5.3-9016-py3-none-android_21_arm64_v8a.whl"
+      }
+    },
+    {
+      "name": "chaquopy_libjpeg-1.5.3-9016-py3-none-android_21_x86_64.whl",
+      "bytes": 188660,
+      "sha256": "3d5157541d74cefa14a7abecebdf483cc3ec5c620b42f29530cc976f1057780d",
+      "source": {
+        "kind": "bundled",
+        "path": "../runtime/wheels/chaquopy_libjpeg-1.5.3-9016-py3-none-android_21_x86_64.whl"
+      },
+      "origin": {
+        "kind": "bundled",
+        "path": "candidate-inputs/chaquopy_libjpeg-1.5.3-9016-py3-none-android_21_x86_64.whl"
+      }
+    },
+    {
+      "name": "numpy-2.5.4-cp313-cp313-android_28_arm64_v8a.whl",
+      "bytes": 7876897,
+      "sha256": "4fb6f9d6ae88e51c6810856ab01ec24b71d4be6a815d35aa7f4b0fd140e9c2d0",
+      "source": {
+        "kind": "bundled",
+        "path": "../runtime/wheels/numpy-2.5.4-cp313-cp313-android_28_arm64_v8a.whl"
+      },
+      "origin": {
+        "kind": "actions",
+        "run": 40282484235,
+        "head": "793603cfb0a2ffb39ed4aa5adf1a43f0ae02cf19"
+      }
+    },
+    {
+      "name": "numpy-2.5.4-cp313-cp313-android_28_x86_64.whl",
+      "bytes": 9321343,
+      "sha256": "5074af4b1f83ea7660603f24e8a5f695b61c3d96d5888136191fc9be6341ffc4",
+      "source": {
+        "kind": "bundled",
+        "path": "../runtime/wheels/numpy-2.5.4-cp313-cp313-android_28_x86_64.whl"
+      },
+      "origin": {
+        "kind": "actions",
+        "run": 40282484235,
+        "head": "793603cfb0a2ffb39ed4aa5adf1a43f0ae02cf19"
+      }
+    },
+    {
+      "name": "pillow-11.0.0-0-cp313-cp313-android_24_arm64_v8a.whl",
+      "bytes": 582449,
+      "sha256": "0d380685ae11d55ab6ac8152b1eb79999913c458f412fa50d7cc9157558bd174",
+      "source": {
+        "kind": "bundled",
+        "path": "../runtime/wheels/pillow-11.0.0-0-cp313-cp313-android_24_arm64_v8a.whl"
+      },
+      "origin": {
+        "kind": "official",
+        "url": "https://chaquo.com/pypi-13.1/pillow/pillow-11.0.0-0-cp313-cp313-android_24_arm64_v8a.whl"
+      }
+    },
+    {
+      "name": "pillow-11.0.0-0-cp313-cp313-android_24_x86_64.whl",
+      "bytes": 603290,
+      "sha256": "5a9a22a405d55126efa6dad46d700e118ec2ff177d9a793050336d54fc0ed55b",
+      "source": {
+        "kind": "bundled",
+        "path": "../runtime/wheels/pillow-11.0.0-0-cp313-cp313-android_24_x86_64.whl"
+      },
+      "origin": {
+        "kind": "official",
+        "url": "https://chaquo.com/pypi-13.1/pillow/pillow-11.0.0-0-cp313-cp313-android_24_x86_64.whl"
+      }
+    }
+  ]
+}

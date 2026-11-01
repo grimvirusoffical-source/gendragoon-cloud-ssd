@@ -1,0 +1,138 @@
+name: Android dependency candidate device gates
+
+on:
+  push:
+    paths:
+      - 'native/Mobile/Android/app/**'
+      - 'native/Mobile/Android/dependencies/candidate*'
+      - 'native/Mobile/Android/runtime/**'
+      - 'native/Mobile/Android/dependencies/run_instrumentation.sh'
+      - '.github/workflows/android-candidate-device.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: android-candidate-devices-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  packaged-runtime:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        include:
+          - pages: 4096
+            target: google_apis
+            ram: 2048M
+          - pages: 16384
+            target: google_apis_ps16k
+            ram: 4096M
+    env:
+      GENDRAGOON_ANDROID_CANDIDATE_WHEELS: ${{ github.workspace }}/.gendragoon-reviewed-candidates
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: '3.13'
+      - uses: android-actions/setup-android@be39fa834029ff78f1a44aa3bb0819b8fc2bd8fd # v4.0.4
+        with:
+          packages: 'platform-tools platforms;android-36 build-tools;35.0.0'
+      - uses: gradle/actions/setup-gradle@07d1f8453baaff67fb503883367f8b13e6158a54 # v6
+        with:
+          gradle-version: '8.13'
+      - name: Hash-verify all eight wheels and every dependency ELF before offline installation
+        run: python -B native/Mobile/Android/dependencies/candidate_profile.py --directory "$GENDRAGOON_ANDROID_CANDIDATE_WHEELS" --prepare
+      - name: Compile isolated candidate APKs and run all lint and JVM gates
+        working-directory: native/Mobile/Android
+        run: gradle :app:assembleDebug :app:assembleRelease :app:bundleRelease :app:lint :app:testDebugUnitTest --no-daemon --console=plain --stacktrace
+      - name: Require release APK to exclude all owned acceptance harness components
+        working-directory: native/Mobile/Android
+        shell: bash
+        run: |
+          python -B - <<'PYRELEASE'
+          import io, pathlib, subprocess, zipfile
+          apk=pathlib.Path('app/build/outputs/apk/release/app-release-unsigned.apk')
+          assert apk.is_file(), 'Actual release APK is required'
+          forbidden=(b'TransferAcceptanceApplication',b'TransferAcceptanceActivity',b'FixtureDocumentsProvider',b'FixtureGrantActivity')
+          def inspect(archive,depth=0):
+              assert depth<=4, 'Unexpected nested application archive'
+              for entry in archive.infolist():
+                  assert 'gendragoon_android_fixture' not in entry.filename
+                  assert 'gendragoon_dependency_fixture' not in entry.filename
+                  if entry.filename.endswith('.dex'):
+                      raw=archive.read(entry)
+                      assert not any(name in raw for name in forbidden), 'Debug class in actual release DEX'
+                  if entry.filename.endswith(('.imy','.zip')):
+                      raw=archive.read(entry)
+                      if zipfile.is_zipfile(io.BytesIO(raw)):
+                          with zipfile.ZipFile(io.BytesIO(raw)) as nested: inspect(nested,depth+1)
+          with zipfile.ZipFile(apk) as archive: inspect(archive)
+          sdk=pathlib.Path(__import__('os').environ['ANDROID_HOME'])
+          manifest=subprocess.run([str(sdk/'build-tools/35.0.0/aapt2'),'dump','xmltree',str(apk),'--file','AndroidManifest.xml'],check=True,capture_output=True).stdout
+          assert not any(name in manifest for name in forbidden)
+          assert b'android.permission.MANAGE_DOCUMENTS' not in manifest
+          print('Actual unsigned release APK excludes debug harness, test provider and fixture Python modules; no signing/store claim.')
+          PYRELEASE
+      - name: Audit every ELF in the actual complete candidate APK
+        working-directory: native/Mobile/Android
+        run: python -B check_native_pages.py app/build/outputs/apk/debug/app-debug.apk --output app/build/reports/native-pages-candidate.json
+      - name: Enable hardware acceleration for bounded device fixtures
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+      - name: Exercise actual crypto, strict SAF, foreground Worker, owned lifecycle and verified export
+        uses: ReactiveCircus/android-emulator-runner@a421e43855164a8197daf9d8d40fe71c6996bb0d # v2.38.0
+        timeout-minutes: 15
+        with:
+          working-directory: native/Mobile/Android
+          api-level: 36
+          target: ${{ matrix.target }}
+          arch: x86_64
+          cores: 2
+          ram-size: ${{ matrix.ram }}
+          disk-size: 4096M
+          emulator-boot-timeout: 300
+          disable-animations: true
+          script: bash dependencies/run_instrumentation.sh '${{ matrix.pages }}'
+      - name: Require all original runtime cases and new real Worker cases without skips
+        working-directory: native/Mobile/Android
+        shell: bash
+        run: |
+          python -B - <<'PYCASES'
+          import pathlib, xml.etree.ElementTree as ET
+          expected={
+              'PinnedRuntimeTest': {'completeNumericalJpegAndFontDependenciesWorkOnDevice','macProducedVisualCarrierDecryptsOnAndroidWithAadIsolation','actualPinnedNativeCryptoAndVisualRendererRoundtripOnDevice','full64KiBVisualChunkRoundtripFitsActualCarrierBoundOnDevice','actualArchiveIndexMetadataReadbackAndAadIsolationRoundtripOnDevice','macPortableVaultJceInteropAndReadonlyCoreAuthenticationWorkOnDevice'},
+              'TransferAcceptanceTest': {'incompleteProviderListingsNeverReachBackend','unsafeCollidingAndExcessivelyDeepSelectionsAreRetained','completeNestedAndEmptyFoldersRoundtripThroughActualWorker','foregroundWorkerSurvivesActivityRecreationWithPersistedGrantAndVerifiedExport','revokedReadAndForeignWorkspaceFailWithoutPublishing','damagedCarrierDownloadFailsAndRetainsItsPrivateJob','failedPredecessorPropagatesToAlreadyQueuedSelections'},
+          }
+          seen={name:set() for name in expected}
+          for path in pathlib.Path('app/build/outputs/androidTest-results').rglob('*.xml'):
+              root=ET.parse(path).getroot()
+              for case in root.iter('testcase'):
+                  group=case.attrib.get('classname','').rsplit('.',1)[-1]
+                  if group in expected:
+                      assert not any(case.find(tag) is not None for tag in ('skipped','failure','error')), (path,case.attrib)
+                      seen[group].add(case.attrib['name'])
+          for group,names in expected.items(): assert seen[group]==names, (group,seen[group],names)
+          print('All 6 existing runtime and 7 actual Worker/provider acceptance methods passed, no skips. Fixture consent and in-memory Receiver remain scoped evidence.')
+          PYCASES
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        if: ${{ !cancelled() }}
+        with:
+          name: Android-test-only-runtime-${{ matrix.pages }}
+          path: |
+            native/Mobile/Android/app/build/reports/
+            native/Mobile/Android/app/build/outputs/apk/**/*.apk
+            native/Mobile/Android/app/build/outputs/bundle/**/*.aab
+          if-no-files-found: error
+          retention-days: 7

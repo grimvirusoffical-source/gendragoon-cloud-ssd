@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 "use strict";
-/* Archive (active:false) the retired fee Prices once the new revision is live and smoke-tested:
-   workspace|month, workspace|year, byo|month, byo|year (the old $5 / $50 fee) and the one-time
-   $5 project activation Price. Archiving never touches existing subscriptions; Stripe keeps billing
+/* Archive (active:false) the retired recurring fee Prices once the new revision is live and smoke-tested:
+   workspace|month, workspace|year, byo|month, byo|year (the old $5 / $50 recurring fee).
+   The $5 one-time project activation Price is active again and MUST NOT be archived.
+   Archiving never touches existing subscriptions; Stripe keeps billing
    them and the live bootstrap still resolves these IDs for reconciliation (billing_bootstrap.js).
 
    Default / --dry-run: read-only, prints what would be archived.
@@ -14,7 +15,6 @@ const RETIRED=[
  {catalogKey:"workspace|year",lookupKey:"gdssd_workspace_year_v1",cents:5000,interval:"year"},
  {catalogKey:"byo|month",lookupKey:"gdssd_byo_month_v1",cents:500,interval:"month"},
  {catalogKey:"byo|year",lookupKey:"gdssd_byo_year_v1",cents:5000,interval:"year"},
- {catalogKey:"one_time|project_creation",lookupKey:"gdssd_one_time_project_creation_v2",cents:500,interval:null},
 ];
 async function run({key,Stripe,apply=false}){
  if(!/^(sk|rk)_live_[A-Za-z0-9]+$/.test(key||""))throw Error("Refusing: needs a Stripe LIVE key (sk_live_/rk_live_) in STRIPE_SECRET_KEY");

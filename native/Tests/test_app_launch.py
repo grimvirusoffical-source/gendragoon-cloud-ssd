@@ -28,7 +28,7 @@ with patch.dict(sys.modules, {"gendragoon_library": library}):
 class AppLaunchTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory(prefix="gd-launch-")
-        self.home = Path(self.temporary.name)
+        self.home = Path(self.temporary.name).resolve()
         self.home.chmod(0o700)
         self.support = self.home / "Library/Application Support/GenDragoon Cloud SSD"
         self.support.mkdir(parents=True, mode=0o700)
@@ -38,7 +38,8 @@ class AppLaunchTests(unittest.TestCase):
         self.original = self.home / "original-user-file.txt"
         self.original.write_text("Preserve original user data")
         self.stack = []
-        dependencies = patch.dict(sys.modules, {"gendragoon_upload_workspace": workspace})
+        dependencies = patch.dict(sys.modules, {"gendragoon_upload_workspace": workspace,
+                                                "gendragoon_app_launch": launch})
         dependencies.start()
         self.stack.append(dependencies)
         self.real_process_identity = launch.process_identity
@@ -52,6 +53,11 @@ class AppLaunchTests(unittest.TestCase):
         self.handles = self.add_patch(launch, "open_files", return_value=[])
         self.commands = self.add_patch(library, "run", return_value='{"ok":true}')
         self.add_patch(library, "is_running", return_value=False)
+        # These fixtures model Mac .app lifecycle independently of the host.
+        self.add_patch(library.device_origin, "current_platform", return_value="macos")
+        # Lifecycle fixtures must not depend on the developer machine's free
+        # space. Dedicated low-space cases override this same dependency.
+        self.add_patch(library.shutil, "disk_usage", return_value=shutil._ntuple_diskusage(200*1024**3,100*1024**3,100*1024**3))
         self.add_patch(library, "reply")
         self.spawn = self.add_patch(launch.subprocess, "Popen", side_effect=AssertionError("Unexpected real process"))
         self.signals = self.add_patch(launch.os, "kill", side_effect=AssertionError("Unexpected real signal"))
@@ -131,6 +137,7 @@ class AppLaunchTests(unittest.TestCase):
         record, app = self.fixture()
         for update in ({"name": "../Other.app"}, {"name": "Other.app"}, {"mode": "arbitrary"},
                        {"project": "project-two"}, {"cachePath": str(self.home)},
+                       {"cacheName": "../Other.app"}, {"cacheName": "Other.txt"},
                        {"watcherPid": -1}, {"keepCache": "false"}):
             with self.subTest(update=update):
                 launch.save(dict(record, **update))
@@ -385,7 +392,7 @@ class AppLaunchTests(unittest.TestCase):
         with patch.object(launch.sys, "platform", "darwin"), \
                 patch.object(launch, "prepare_stream", return_value=None), \
                 patch.object(launch, "stop_mount") as stop:
-            result = launch.launch(record["key"], record["project"], record["bucket"], record["remote"])
+            result = launch.launch(record["key"], record["project"], record["bucket"], record["remote"], allow_local_copy=True)
         self.assertEqual(result["state"], "launching")
         self.assertIn("still opening", result["message"])
         receipt = next(launch.ROOT.glob("*.json"))
@@ -393,6 +400,219 @@ class AppLaunchTests(unittest.TestCase):
         self.assertEqual(launch.read(receipt.stem)["state"], "launching")
         stop.assert_not_called()
         self.assertTrue(app.exists())
+
+    def test_renamed_and_copied_apps_launch_the_actual_verified_cache_path(self):
+        original_record, original_app = self.fixture()
+        launch.receipt_path(original_record["id"]).unlink()
+        for key, display_name, copied in (("1" * 18, "Renamed.app", False),
+                                           ("2" * 18, "Fixture copy.app", True)):
+            with self.subTest(copied=copied):
+                if copied:
+                    record, old_path = self.fixture(key=key)
+                    launch.receipt_path(record["id"]).unlink()
+                else:
+                    record, old_path = original_record, original_app
+                entry = library.load()[key]
+                entry.update(displayName=display_name, cacheName="Fixture.app")
+                if copied:
+                    entry["archiveKey"] = original_record["key"]
+                library.store(key, entry)
+                expected = library.CACHE / key / display_name
+                self.spawn.side_effect = None
+                watcher = Mock(pid=700, poll=Mock(return_value=None))
+                launch.process_identity.side_effect = lambda pid: self.identity(pid)
+                def spawn(args, **kwargs):
+                    latest = launch.read(args[-1])
+                    self.assertEqual(latest["cachePath"], str(expected))
+                    self.assertEqual(latest["cacheName"], display_name)
+                    latest.update(state="running", watcherPid=700, watcherIdentity=self.identity(700))
+                    launch.save(latest)
+                    return watcher
+                self.spawn.side_effect = spawn
+                with patch.object(launch.sys, "platform", "darwin"), \
+                        patch.object(launch, "prepare_stream", return_value=None), \
+                        patch.object(launch, "compatible", wraps=launch.compatible) as compatible:
+                    result = launch.launch(key, record["project"], record["bucket"], record["remote"], allow_local_copy=True)
+                compatible.assert_called_once_with(expected)
+                self.assertEqual(result["cachePath"], str(expected))
+                self.assertEqual(result["name"], display_name)
+                self.assertTrue(expected.is_dir())
+                self.assertFalse(old_path.exists())
+                entry = library.load()[key]
+                self.assertEqual(entry["name"], "Fixture.app")
+                self.assertEqual(entry["cacheName"], display_name)
+                if copied:
+                    self.assertEqual(entry["archiveKey"], original_record["key"])
+                    self.assertTrue((library.CACHE / original_record["key"] / "Renamed.app").is_dir())
+                preload = next(call for call in self.commands.call_args_list
+                               if "gendragoon_preload.py" in str(call.args[0]))
+                self.assertIn(expected, preload.args[0])
+                self.commands.reset_mock()
+                # Retire this mocked watcher before testing a separate launch.
+                for receipt in launch.ROOT.glob("*.json"):
+                    receipt.unlink()
+
+    def test_metadata_rename_retains_cache_used_by_an_app_or_open_resource(self):
+        record, app = self.fixture()
+        entry = library.load()[record["key"]]
+        entry.update(displayName="Renamed.app", cacheName="Fixture.app")
+        library.store(record["key"], entry)
+        for executable in (True, False):
+            with self.subTest(executable=executable):
+                self.processes.return_value = ({811: str(app / "Contents/MacOS/Fixture")} if executable else {})
+                self.handles.return_value = ([] if executable else [(812, str(app / "Contents/Resources/data.db"))])
+                with self.assertRaisesRegex(RuntimeError, "still use this cache"):
+                    library.stage_item(record["key"], False, record["project"], record["bucket"], record["remote"])
+                self.assertTrue(app.is_dir())
+                self.assertFalse((app.parent / "Renamed.app").exists())
+
+    def test_app_rename_without_bundle_extension_does_not_create_invalid_receipt(self):
+        record, app = self.fixture()
+        launch.receipt_path(record["id"]).unlink()
+        entry = library.load()[record["key"]]
+        entry["displayName"] = "Renamed without extension"
+        library.store(record["key"], entry)
+        with patch.object(launch.sys, "platform", "darwin"), patch.object(library, "stage_item") as stage:
+            with self.assertRaisesRegex(ValueError, "retain the .app extension"):
+                launch.launch(record["key"], record["project"], record["bucket"], record["remote"])
+        stage.assert_not_called()
+        self.assertEqual(list(launch.ROOT.glob("*.json")), [])
+        self.assertTrue(app.exists())
+
+    def test_renamed_cache_evict_checks_actual_open_resource_path(self):
+        record, app = self.fixture()
+        launch.receipt_path(record["id"]).unlink()
+        renamed = app.with_name("Renamed.app")
+        app.rename(renamed)
+        entry = library.load()[record["key"]]
+        entry.update(displayName="Renamed.app", cacheName="Renamed.app")
+        library.store(record["key"], entry)
+        self.handles.return_value = [(812, str(renamed / "Contents/Resources/data.db"))]
+        with self.assertRaisesRegex(RuntimeError, "resources are still open"):
+            launch.evict(record["key"], record["project"], record["bucket"], record["remote"])
+        self.assertTrue(renamed.is_dir())
+        self.handles.return_value = []
+        result = launch.evict(record["key"], record["project"], record["bucket"], record["remote"])
+        self.assertTrue(result["evicted"])
+        self.assertFalse(renamed.exists())
+
+    def test_virtual_folder_cache_retains_running_descendant_and_open_resources(self):
+        key = "3" * 18
+        library.store(key, {"name": "Apps", "kind": "folder", "virtualFolder": True,
+                            "remote": "gendragoon", "project": "project-one", "bucket": "bucket-one",
+                            "folder": "bucket-one/Archive"})
+        library.prepare_cache()
+        folder = library.CACHE / key / "Apps"
+        descendant = folder / "Nested/Fixture.app/Contents/MacOS/Fixture"
+        descendant.parent.mkdir(parents=True)
+        descendant.write_bytes(b"retained executable")
+        library.cache_record(folder.parent, library.snapshot(folder)["manifest"])
+        for executable in (True, False):
+            with self.subTest(executable=executable):
+                self.processes.return_value = ({811: str(descendant)} if executable else {})
+                self.handles.return_value = ([] if executable else [(812, str(descendant.with_name("data.db")))])
+                with self.assertRaisesRegex(RuntimeError, "managed files were retained"):
+                    library.clear_cache(key, "project-one", "bucket-one", "gendragoon")
+                self.assertEqual(descendant.read_bytes(), b"retained executable")
+        self.processes.return_value = {}; self.handles.return_value = []
+        library.clear_cache(key, "project-one", "bucket-one", "gendragoon")
+        self.assertFalse(folder.exists())
+
+    def test_another_app_does_not_authorize_local_download_fallback(self):
+        launch.process_identity.side_effect = lambda pid: self.identity(pid)
+        first, first_app = self.fixture(state="running")
+        second, second_app = self.fixture(key="2" * 18, cache=False)
+        self.processes.return_value = {811: str(first_app / "Contents/MacOS/Fixture")}
+        with patch.object(launch.sys, "platform", "darwin"), \
+                patch.object(launch, "prepare_stream", return_value=None) as stream, \
+                patch.object(library, "stage_item") as stage:
+            with self.assertRaisesRegex(RuntimeError, "No full app download"):
+                launch.launch(second["key"], second["project"], second["bucket"], second["remote"])
+        stream.assert_called_once()
+        stage.assert_not_called()
+        self.spawn.assert_not_called()
+        self.signals.assert_not_called()
+        self.assertTrue(first_app.exists())
+        self.assertFalse(second_app.exists())
+        self.assert_original_intact()
+
+    def test_other_workspace_cannot_enable_a_silent_local_copy(self):
+        launch.process_identity.side_effect = lambda pid: self.identity(pid)
+        first, first_app = self.fixture(state="running")
+        second, _ = self.fixture(key="2" * 18, cache=False)
+        entry = library.load()[second["key"]]
+        entry.update(project="project-two", bucket="bucket-two", folder="bucket-two/Archive",
+                     cloudPath="bucket-two/Archive/Fixture.app")
+        library.store(second["key"], entry)
+        launch.receipt_path(second["id"]).unlink()
+        self.processes.return_value = {811: str(first_app / "Contents/MacOS/Fixture")}
+        with patch.object(launch.sys, "platform", "darwin"), \
+                patch.object(library, "stage_item") as stage:
+            with self.assertRaisesRegex(RuntimeError, "No full app download"):
+                launch.launch(second["key"], "project-two", "bucket-two", "gendragoon")
+        stage.assert_not_called()
+        self.assert_original_intact()
+
+    def test_local_fallback_bigger_than_cache_budget_is_refused(self):
+        record, app = self.fixture(cache=False)
+        data = {"manifest": [{"size": 3 * 1024 ** 3}]}
+        with patch.object(library.performance, "current", return_value={"cacheGiB": 2}), \
+                patch.object(library, "require_space") as free:
+            with self.assertRaisesRegex(RuntimeError, "cache budget"):
+                launch.local_cache_preflight(data, app)
+        free.assert_not_called()
+        self.assertFalse(app.exists())
+        self.assert_original_intact()
+
+    def test_local_fallback_accounts_for_other_retained_apps(self):
+        _, first = self.fixture()
+        _, second = self.fixture(key="2" * 18, cache=False)
+        # Exactly the cap would fit alone, but not with the first app retained.
+        data = {"manifest": [{"size": 1024 ** 3}]}
+        with patch.object(library.performance, "current", return_value={"cacheGiB": 1}):
+            with self.assertRaisesRegex(RuntimeError, "cache budget"):
+                launch.local_cache_preflight(data, second)
+        self.assertTrue(first.exists())
+        self.assertFalse(second.exists())
+        self.assert_original_intact()
+
+    def test_existing_app_is_not_counted_twice(self):
+        _, app = self.fixture()
+        with patch.object(library.performance, "current", return_value={"cacheGiB": 1}), \
+                patch.object(library, "require_space") as free:
+            result = launch.local_cache_preflight({}, app)
+        self.assertEqual(result["additionalBytes"], 0)
+        self.assertGreater(result["existingCacheBytes"], 0)
+        free.assert_called_once_with(64 * 1024 ** 2)
+        self.assertTrue(app.exists())
+
+    def test_unknown_fallback_size_is_not_an_unbounded_download(self):
+        _, app = self.fixture(cache=False)
+        for data in [{}, {"manifest": []}, {"manifest": [{"size": -1}]}]:
+            with self.subTest(data=data):
+                with self.assertRaises(RuntimeError):
+                    launch.local_cache_preflight(data, app)
+        self.assertFalse(app.exists())
+
+    def test_small_copy_is_allowed_below_ten_gib_but_actual_staging_must_fit(self):
+        _, app = self.fixture(cache=False)
+        with patch.object(library.shutil, "disk_usage", return_value=Mock(free=1024 ** 3)):
+            launch.local_cache_preflight({"manifest": [{"size": 1024}]}, app)
+        with patch.object(library.shutil, "disk_usage", return_value=Mock(free=1024)):
+            with self.assertRaisesRegex(RuntimeError, "local space"):
+                launch.local_cache_preflight({"manifest": [{"size": 1024}]}, app)
+        self.assertFalse(app.exists())
+        self.assert_original_intact()
+
+    def test_unreadable_cache_inventory_blocks_new_download(self):
+        _, app = self.fixture(cache=False)
+        def unreadable(*args, **kwargs):
+            kwargs["onerror"](PermissionError("fixture inventory denied"))
+        with patch.object(launch.os, "walk", side_effect=unreadable):
+            with self.assertRaisesRegex(RuntimeError, "measured safely"):
+                launch.local_cache_preflight({"manifest": [{"size": 32}]}, app)
+        self.assertFalse(app.exists())
+        self.assert_original_intact()
 
     def test_invalid_platform_and_cross_bucket_stream_never_launch(self):
         record, app = self.fixture()

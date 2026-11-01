@@ -15,12 +15,12 @@ and refuses installed/system locations, symlinks, shared hard links, a bundle
 with the wrong identity, a folder writable by other users, or any process using
 files in the bundle. It does not stop programs or replace an installed app.
 
-The helper downloads only the official Node 24.22.0 Apple Silicon archive:
+The helper downloads only the official Node 24.22.1 Apple Silicon archive:
 
-- Archive: <https://nodejs.org/dist/v24.22.0/node-v24.22.0-darwin-arm64.tar.gz>
-- SHA-256: `6a9724d9b50a5f22b4816cded441b5a8d9ddae546191a5e5b7efa5a5e2ee26d5`
+- Archive: <https://nodejs.org/dist/v24.22.1/node-v24.22.1-darwin-arm64.tar.gz>
+- SHA-256: `89c682593d76cd44233fa53b1563264e7de9cbb189cad169135c5b4fadfbc0a7`
 - Checksum provenance: the signed **SHASUMS** section of
-  <https://nodejs.org/en/blog/release/v24.22.0#shasums>, retrieved October 17, 2026.
+  <https://nodejs.org/en/blog/release/v24.22.1#shasums>, verified October 26, 2026.
 
 TLS uses macOS `/etc/ssl/cert.pem`; certificate and hostname verification remain
 enabled. Redirects and environment proxy substitution are rejected. The archive
@@ -61,14 +61,12 @@ submission and new package checksum.
 
 ## Known upstream security limit
 
-Node 24.22.0 was released October 14, 2026 and includes the
-[HMAC stream/digest memory fix](https://github.com/nodejs/node/pull/65112).
-Separately, the Node project announced HIGH-severity fixes for 24.x scheduled
-on or shortly after October 21, 2026. As of October 17, its
-[official notice](https://nodejs.org/en/blog/vulnerability/october-2026-security-releases)
-does not publish a fixed version or vulnerability details. This refresh cannot
-claim to include those unreleased fixes; update the pin and repeat the release
-verification when the official fixed release is available.
+Node 24.22.1 was released October 21, 2026 as a security update and contains
+the high-severity DNS, TLS, and Brotli fixes for the 24.x release line.
+See the [official release notes](https://nodejs.org/en/blog/release/v24.22.1)
+and [security notice](https://nodejs.org/en/blog/vulnerability/october-2026-security-releases).
+This helper pins the exact official Apple Silicon archive hash; the source
+repository's Red-SecretsXAI encryption implementation remains untouched.
 
 Portable fixture checks run with:
 

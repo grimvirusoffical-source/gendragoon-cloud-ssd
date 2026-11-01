@@ -53,7 +53,7 @@ ARCHIVE_BYTES = 109663181
 ARCHIVE_SHA256 = "02f238beb8614f27fa6b943ed9c79a4d23faa9ce1b65e125cb4cbd28b50ab144"
 MAX_ENTRIES = 40000
 MAX_UNPACKED = 5 * 1024 ** 3
-MINIMUM_FREE = 10 * 1024 ** 3
+MINIMUM_FREE = 64 * 1024 ** 2
 INFO_MEMBER = APP_NAME + "/Contents/Info.plist"
 EXECUTABLE_MEMBER = APP_NAME + "/Contents/MacOS/" + EXECUTABLE
 
@@ -503,7 +503,7 @@ def install(archive, directory, reinstall=False, restart=False, mount_paths=()):
         ensure_no_active_mount(mount_paths)
         required = MINIMUM_FREE + details["archive_bytes"] + details["expanded_bytes"]
         if shutil.disk_usage(app.parent).free < required:
-            raise InstallError("Insufficient staging space while preserving 10 GiB free")
+            raise InstallError("Insufficient space for the verified archive and extracted app plus filesystem staging allowance")
         with tempfile.TemporaryDirectory(prefix=".gendragoon-install-", dir=app.parent) as work:
             work = Path(work)
             local_archive = work / "release.zip"

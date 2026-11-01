@@ -53,11 +53,12 @@ test("without STRIPE_ACCOUNT_ID, and for a customer already in the configured ac
 
 test("--full plans every non-retired key the live bootstrap validates, plus teams, RedX Storage and master tiers",()=>{
  const p=plan({full:true}),keys=new Set(p.map(x=>x.catalogKey));
- assert.equal(p.length,70);assert.equal(new Set(p.map(x=>x.lookupKey)).size,70);
+ assert.equal(p.length,71);assert.equal(new Set(p.map(x=>x.lookupKey)).size,71);
  for(const [k,e] of Object.entries(expectedCatalog())){
   if(isRetired(k)){assert.ok(!keys.has(k),"retired "+k+" is never created");continue;}
   const x=p.find(x=>x.catalogKey===k);assert.ok(x,k);assert.equal(x.unitAmount,e.cents);assert.equal(x.recurring?.interval??null,e.interval);
-  assert.equal(x.service,"GenDragoonSSD");assert.equal(x.lookupKey,"gdssd_"+k.split("|").join("_")+"_v1");
+  assert.equal(x.service,"GenDragoonSSD");
+  assert.equal(x.lookupKey,k==="one_time|project_creation"?"gdssd_one_time_project_creation_v2":"gdssd_"+k.split("|").join("_")+"_v1");
  }
  for(const k of Object.keys(optionalTeamCatalog()))assert.ok(keys.has(k));
  assert.equal(plan().length,19,"the default plan is unchanged");

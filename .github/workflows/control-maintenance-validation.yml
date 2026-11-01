@@ -1,0 +1,60 @@
+name: Control maintenance validation
+
+on:
+  pull_request:
+    paths:
+      - 'native/Tests/ControlMaintenance/**'
+      - '.github/workflows/control-maintenance-validation.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: control-maintenance-validation-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  disposable-proof:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
+        with:
+          node-version: '20.20.2'
+      - name: Assert exact runtime and old source provenance
+        run: |
+          node -e "require('node:assert/strict').equal(process.version, 'v20.20.2')"
+          git show f01e25b63ea87b2d0d0892bfd910683e2d94ff84:native/RedXCloud/control-server.cjs | sha256sum | awk '$1 != "176ebea80c72bb6ae73017d58829fdde50489164a1a26319fb49699424e391d2" { exit 1 }'
+      - name: Disposable exact-source inspector and asynchronous drain proof
+        run: node native/Tests/ControlMaintenance/control33-drain-local-proof.cjs
+      - name: Disposable original Receiver counters, decoders and writer-lock ordering
+        run: node native/Tests/ControlMaintenance/receiver35-drain-local-proof.cjs
+      - name: Injected Receiver stage-one failure drains and closes naturally
+        timeout-minutes: 1
+        run: node native/Tests/ControlMaintenance/receiver35-drain-local-proof.cjs --fail-after-stage-one
+      - name: Coupled original Control and Receiver dependency handoff
+        run: node --experimental-websocket native/Tests/ControlMaintenance/control33-receiver35-coupled-drain-local-proof.cjs
+      - name: Disposable external inspector and implementation admission fence
+        run: node --experimental-websocket --test native/Tests/ControlMaintenance/external-inspector-boundary.test.cjs
+      - name: Controller phase failures and fresh Mac admission gate
+        env:
+          PYTHONDONTWRITEBYTECODE: '1'
+        run: python3 -B native/Tests/ControlMaintenance/test-activation-state-machine-36.py
+      - name: Install isolated kernel-test prerequisites on the CI runner
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y nftables iproute2 util-linux
+      - name: Mandatory isolated Linux kernel boundary proof
+        env:
+          PYTHONDONTWRITEBYTECODE: '1'
+        run: sudo env PYTHONDONTWRITEBYTECODE=1 GD36_REQUIRE_NETNS=1 python3 -B native/Tests/ControlMaintenance/test-network-boundary-36.py
+      - name: Disposable deletion, preservation, proxy and redirect proof
+        env:
+          PYTHONDONTWRITEBYTECODE: '1'
+        run: python3 -B native/Tests/ControlMaintenance/test-server-activation-36.py

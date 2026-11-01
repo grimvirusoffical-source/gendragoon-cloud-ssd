@@ -83,6 +83,30 @@ class RestartWorkerTests(unittest.TestCase):
             worker.verify_snapshot(directory)
         self.assertEqual(auto.version_of(self.app), "0.17.0")
 
+    def test_cold_snapshot_loads_transitive_helpers_after_original_resources_are_removed(self):
+        directory, _ = self.snapshot()
+        self.resources.rename(self.app / "Contents/RetiredResources")
+        code = '''
+import sys,pathlib,json,importlib
+directory=pathlib.Path(sys.argv[1])
+sys.path.insert(0,str(directory))
+import gendragoon_update_restart as worker
+worker.verify_snapshot(directory)
+worker.load_runtime(directory)
+names=[name[:-3] for name in worker.DEPENDENCIES if name.endswith('.py')]
+for name in names:
+    module=importlib.import_module(name)
+    assert pathlib.Path(module.__file__).parent==directory,name
+print(json.dumps({'loaded':len(names),'allFromSnapshot':True}))
+'''
+        result = subprocess.run([sys.executable, "-I", "-B", "-c", code, str(directory)],
+            capture_output=True, text=True, timeout=15)
+        self.assertEqual(result.returncode, 0, result.stderr[-3000:])
+        self.assertEqual(json.loads(result.stdout), {"loaded": len(worker.DEPENDENCIES)-1, "allFromSnapshot": True})
+        (directory / "gendragoon_device_origin.py").write_text("tampered snapshot")
+        with self.assertRaisesRegex(RuntimeError, "changed"):
+            worker.verify_snapshot(directory)
+
     def test_missing_or_linked_worker_dependency_is_rejected(self):
         directory, _ = self.snapshot()
         helper = directory / "gendragoon_performance_profiles.json"
@@ -227,6 +251,15 @@ class RestartWorkerTests(unittest.TestCase):
         spec=importlib.util.spec_from_file_location("fixture_package",RESOURCE.parent/"package_macos.py")
         package=importlib.util.module_from_spec(spec);spec.loader.exec_module(package)
         (self.resources/"gendragoon_project_files.py").write_text("fixture required project browser")
+        # Model the complete staged bundle, including Teams and the private
+        # transfer helpers, before exercising the missing-resource rejection.
+        for name in (*package.REQUIRED_RESOURCES, *package.RED_SECRETS_RESOURCES):
+            target=self.resources/name
+            target.parent.mkdir(parents=True,exist_ok=True)
+            if not target.exists():target.write_bytes(b"fixture runtime resource")
+        try:from .macos_runtime_fixture import seed_compiled_runtime
+        except ImportError:from macos_runtime_fixture import seed_compiled_runtime
+        seed_compiled_runtime(package,self.resources)
         package.require_runtime_resources(self.app)
         (self.resources/"gendragoon_update_restart.py").unlink()
         with self.assertRaisesRegex(RuntimeError,"gendragoon_update_restart.py"):

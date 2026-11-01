@@ -19,7 +19,7 @@ library=importlib.util.module_from_spec(spec);spec.loader.exec_module(library)
 class LibraryTests(unittest.TestCase):
     def setUp(self):
         self.temporary=tempfile.TemporaryDirectory(prefix="gd-library-")
-        self.home=Path(self.temporary.name);self.home.chmod(0o700)
+        self.home=Path(self.temporary.name).resolve();self.home.chmod(0o700)
         self.support=self.home/"Library/Application Support/GenDragoon Cloud SSD"
         self.support.mkdir(parents=True,mode=0o700)
         self.config=self.support/"gendragoon-rclone.conf";self.config.write_text("[fixture]\ntype = gcs\n");self.config.chmod(0o600)

@@ -2,7 +2,7 @@
 const crypto=require("node:crypto");
 const {STORAGE,PERFORMANCE,validateWorkspaceName}=require("./catalog");
 const {GPU,GPU_READY,gpuQuote,tripleBundleQuote}=require("./gpu_catalog");
-const {createProjectService,ProjectError,projectStatus,activatedBasicProject,effectiveStorageQuota,safeProjectId,hasContinuingBilling,isGrandfathered,evaluateLapse,workspacePrice,byoLapsed}=require("./projects");
+const {createProjectService,ProjectError,projectStatus,activatedBasicProject,effectiveStorageQuota,safeProjectId,hasContinuingBilling,isGrandfathered,evaluateLapse,workspacePrice,byoLapsed,PROJECT_FEE_CENTS}=require("./projects");
 const {rejectProviderSecrets,isPlansWorkspace,plansEntitled}=require("./workspace_policy");
 const FREE_GB=2,FREE_WORKERS=1,REMOVE_ADS_CENTS=499;
 const VALID_INTERVALS=new Set(["month","year"]);
@@ -147,7 +147,7 @@ function registerBillingV2({app,db,stripe,admin,auth,agreed,hash,prices,env=proc
    workspaceFeeMonthlyCents:0,workspaceFeeIncluded:true,
    projects:{firstFree:true,firstFreeIncludes:{storageGB:FREE_GB,performanceTier:"free",workers:FREE_WORKERS},
      additionalRequires:["storage","performance"],customStorageRequires:["performance"],
-     additionalOneTimeCents:0,workspaceMonthlyCents:0,feeIsOneTime:false,freeWorkspaces:1,defaultLimit:10,qualifiedLimit:20,
+     additionalOneTimeCents:PROJECT_FEE_CENTS,workspaceMonthlyCents:0,feeIsOneTime:true,freeWorkspaces:1,defaultLimit:10,qualifiedLimit:20,
      qualifyingStorageTier:"2TB",qualifyingPerformanceTier:"turbo",qualifyingWorkers:8,
      qualificationLabel:"2 TB storage AND Turbo (8 workers) or higher on the same active project; equivalent bundles qualify",
      paymentAvailable:projects.paymentAvailable(),archiveRetainsData:true},
@@ -188,6 +188,24 @@ function registerBillingV2({app,db,stripe,admin,auth,agreed,hash,prices,env=proc
      projects:result.records.filter(w=>req.query.includeArchived==="true"||projectStatus(w.data)!=="archived").map(w=>publicWorkspace(w,result.policy.freeWorkspaceId))});}
    catch(error){projectError(res,error);}
  });
+ app.get("/v2/receiver-entitlements",auth,agreed,async(req,res)=>{
+   try{
+     const result=await projects.inventory(req);
+     const receiverId=id=>crypto.createHash("sha256").update("gendragoon-receiver-workspace/v1\0"+id).digest("hex").slice(0,32);
+     const workspaces=result.records.filter(w=>!isPlansWorkspace(w.data)||w.data.customStorage!==true)
+       .filter(w=>w.data.kind!=="byo"&&projectStatus(w.data)!=="merged")
+       .map(w=>{
+         const quota=effectiveStorageQuota(w.data),workers=effectiveWorkers(w.data),status=projectStatus(w.data);
+         return {projectId:w.id,id:receiverId(w.id),name:w.data.name||"GenDragoon Workspace",
+           active:status==="active"&&quota>0&&workers>0,readOnly:status!=="active"||quota<=0||workers<=0,
+           quotaBytes:quota,workers,status,storageTier:w.data.storageTier||null,
+           performanceTier:w.data.performanceTier||null,entitlementSource:w.data.entitlementSource||"subscription"};
+       });
+     res.setHeader("Cache-Control","private, no-store");
+     res.json({schema:1,ownerBenefits:req.ownerBenefits===true,projectLimit:result.policy.projectLimit,
+       usedProjectSlots:result.policy.usedProjectSlots,workspaces});
+   }catch(error){projectError(res,error);}
+ });
  app.post("/v2/projects",auth,agreed,async(req,res)=>{
    try{
      const result=await projects.create(req,{name:req.body?.name,intentId:req.body?.intentId,
@@ -196,7 +214,7 @@ function registerBillingV2({app,db,stripe,admin,auth,agreed,hash,prices,env=proc
      if(isPlansWorkspace(result.project.data)&&result.project.data.projectStatus==="pending_payment")payment=await projects.checkout(req,result.project.id);
      const project=publicWorkspace(result.project,result.policy.freeWorkspaceId);
      res.status(result.resumed?200:201).json({project,workspaceId:result.project.id,isFree:project.isFree,monthlyPriceCents:0,
-       policy:result.policy,resumed:result.resumed,oneTimeCents:0,...payment});
+       policy:result.policy,resumed:result.resumed,oneTimeCents:project.isFree?0:projects.PROJECT_FEE_CENTS,...payment});
    }catch(error){projectError(res,error);}
  });
  app.get("/v2/projects/:id",auth,agreed,async(req,res)=>{

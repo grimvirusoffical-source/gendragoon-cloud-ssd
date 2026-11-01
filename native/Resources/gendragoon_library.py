@@ -10,6 +10,8 @@ from contextlib import contextmanager
 import ctypes, errno, fcntl, posixpath, stat, time, unicodedata, uuid, zipfile
 from pathlib import Path
 import gendragoon_performance as performance
+import gendragoon_progress as progress
+import gendragoon_device_origin as device_origin
 HOME=Path.home()
 def rclone_path(helper=__file__):
     helper=Path(helper).absolute()
@@ -25,7 +27,12 @@ DEFAULT_ROOT="gen-dragoon-ssd"
 ARCHIVE_DIR="GenDragoon-App-Library"
 STREAM_MIN_BYTES=512*1024**2
 def reply(**v): print(json.dumps(dict(ok=True,**v)),flush=True)
-def fail(e): print(json.dumps(dict(ok=False,message=str(e)[-650:])),flush=True);sys.exit(1)
+def fail(e):
+    from gendragoon_transfer_errors import failure_for, MESSAGES
+    failure=failure_for(e)
+    value=dict(ok=False,message=MESSAGES[failure["code"]] if failure else str(e)[-650:])
+    if failure:value["failure"]=failure
+    print(json.dumps(value),flush=True);sys.exit(1)
 def run(cmd,timeout=1800):
     if str(cmd[0])==str(RCLONE) and any(str(x) in {"copy", "copyto", "check"} for x in cmd[1:]):
         cmd=[cmd[0],*performance.rclone_arguments(),*cmd[1:]]
@@ -95,6 +102,66 @@ def store_revision(key,entry,expected):
         data=_load()
         if data.get(key)!=expected:raise RuntimeError("Library entry changed during upload; original retained")
         data[key]=entry;_save(data)
+def _offload_receipt(path, value):
+    """Durable intent/result, independent of replaceable library-list metadata."""
+    root=SUPPORT/"OffloadReceipts"
+    safe_path(root,directory=True);root.mkdir(mode=0o700,exist_ok=True)
+    if path.parent!=root or not re.fullmatch(r"[a-f0-9]{16}(?:[a-f0-9]{2})?-[a-f0-9]{32}\.json",path.name):
+        raise ValueError("Invalid offload receipt path")
+    safe_path(path)
+    descriptor,name=tempfile.mkstemp(prefix=".offload-",dir=root)
+    try:
+        with os.fdopen(descriptor,"w",encoding="utf8") as output:
+            json.dump(value,output);output.flush();os.fsync(output.fileno())
+        os.replace(name,path)
+    finally:
+        if os.path.exists(name):os.unlink(name)
+
+
+def verified_offload(key,src,entry,baseline):
+    """Move only a verified, unchanged original; never confuse receipt failure with a failed move."""
+    src=Path(src)
+    identity=("source","name","project","bucket","remote","format","file","sha256","redxManifestId")
+    receipt_path=SUPPORT/"OffloadReceipts"/(key+"-"+uuid.uuid4().hex+".json")
+    receipt={"schema":1,"key":key,"source":str(src),"archiveSha256":entry.get("sha256"),
+             "manifestId":entry.get("redxManifestId"),"state":"prepared","createdAt":time.time()}
+    with library_lock():
+        entries=_load();current=entries.get(key)
+        if not current or any(current.get(field)!=entry.get(field) for field in identity):
+            raise RuntimeError("The verified cloud archive changed; no original was moved")
+        unchanged(src,baseline)
+        if is_running(src):raise RuntimeError("Application started during upload; original retained")
+        # Saving the intent must succeed before the reversible OS Trash action.
+        _offload_receipt(receipt_path,receipt)
+        try:
+            trash(src)
+        except Exception:
+            missing=not src.exists() and not src.is_symlink()
+            receipt.update(state="unconfirmed" if missing else "retained",updatedAt=time.time())
+            try:_offload_receipt(receipt_path,receipt)
+            except OSError:pass
+            return {"offloaded":False,"originalMissing":missing,
+                    "message":"Cloud backup verified. OS Trash did not confirm the result; inspect Trash before retrying." if missing else
+                              "Cloud backup verified. The original is still present because OS Trash did not finish."}
+        if src.exists() or src.is_symlink():
+            receipt.update(state="retained",updatedAt=time.time());_offload_receipt(receipt_path,receipt)
+            return {"offloaded":False,"originalMissing":False,
+                    "message":"Cloud backup verified. The original is still present; no successful offload was recorded."}
+        moved_at=time.time();receipt.update(state="trashed",updatedAt=moved_at)
+        recorded=True
+        try:_offload_receipt(receipt_path,receipt)
+        except Exception:recorded=False
+        # Preserve refreshed catalog fields rather than comparing the entire
+        # pre-upload dictionary after Finder has already moved the original.
+        current.update(offloaded=True,trashedAt=moved_at,offloadReceipt=receipt_path.name)
+        entries[key]=current
+        try:_save(entries)
+        except Exception:recorded=False
+        return {"offloaded":True,"offloadRecorded":recorded,
+                "message":"Verified cloud backup; original moved to Trash." if recorded else
+                          "Verified cloud backup; original moved to Trash. Local receipt repair is pending; do not upload it again."}
+
+
 @contextmanager
 def upload_lease(key):
     prepare_cache()
@@ -133,6 +200,7 @@ def maintenance_lock(inherited=None):
             os.close(descriptor)
 def check_remote(s):
     if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]{0,49}",s or ""):raise ValueError("Invalid cloud remote")
+    if s=="redxai":return s
     safe_path(CONFIG)
     if not CONFIG.exists():raise ValueError("No GenDragoon cloud configuration")
     if any(path.is_symlink() for path in (RCLONE,*RCLONE.parents)):raise ValueError("Unsafe linked bundled cloud tool")
@@ -187,9 +255,12 @@ def ensure_not_cloud(src):
         if src.is_dir() and src in Path(bad).parents:raise ValueError("Selected folder contains protected cloud, cache or application paths; choose a smaller folder")
     if src in (Path("/"),HOME,HOME/"Library",HOME/"Applications",Path("/Applications"),Path("/Library")):
         raise ValueError("Select individual files, folders or app bundles rather than an entire protected root")
-def keyfor(remote,folder,name,project=None,bucket=None):
+def keyfor(remote,folder,name,project=None,bucket=None,parent_key=None):
     context=selected_context(project,bucket,remote,folder)
     parts=([project,bucket] if context else [])+[remote,folder,name]
+    if parent_key is not None:
+        if remote!="redxai" or not re.fullmatch(r"[a-f0-9]{18}",parent_key):raise ValueError("Invalid MachineNote folder")
+        parts += ["parent",parent_key]
     return hashlib.sha256("|".join(parts).encode()).hexdigest()[:18]
 def remote_list():
     if not CONFIG.exists():return reply(remotes=[])
@@ -219,11 +290,87 @@ def scan(remote,root,project=None,bucket=None):
         if discovered:_save(entries)
     reply(message=f"Found {discovered} new cloud items",discovered=discovered,items=present(entries,context))
 def present(entries,context):
-    return [dict(key=k,kind=v.get("kind","app"),format=v.get("format","archive"),previousVersionCount=len(v.get("previousVersions",[])),**{a:b for a,b in v.items() if a not in ("kind","format","manifest","previousVersions","previousVersionCount")}) for k,v in sorted(entries.items()) if in_context(v,context)]
+    return [dict(key=k,kind=v.get("kind","app"),format=v.get("format","archive"),previousVersionCount=len(v.get("previousVersions",[])),**{a:b for a,b in v.items() if a not in ("kind","format","manifest","previousVersions","previousVersionCount")}) for k,v in sorted(entries.items()) if in_context(v,context) and not(v.get("format")=="redxai" and v.get("cloudMissing"))]
+def redx_module():
+    import gendragoon_storage_mode
+    return gendragoon_storage_mode
+
+def redx_config():
+    value=performance.private_payload()
+    return redx_module().validate_config(value)
+
+def sync_redx_library(project,bucket,remote,cloud_snapshot=None):
+    if remote!="redxai":return
+    context=selected_context(project,bucket,remote)
+    config=redx_config()
+    if config["workspaceId"]!=bucket:raise ValueError("Red-XAI workspace changed; refresh the destination")
+    client=redx_module().RedXReceiver(config)
+    if cloud_snapshot is None:client.verified_workers()
+    snapshot=client.library_snapshot() if cloud_snapshot is None else cloud_snapshot
+    cloud_items=snapshot["items"]
+    with library_lock():
+        entries=_load();changed=False;seen=set()
+        for item in cloud_items:
+            if item.get("workspace")!=bucket:continue
+            key=item["key"];seen.add(key);existing=entries.get(key,{})
+            virtual=item.get("virtualFolder") is True
+            same=existing.get("redxManifestId")==item.get("manifestId")
+            base={"name":item["name"],"kind":item["kind"],"format":"redxai","archiveLayout":existing.get("archiveLayout",""),
+                  "displayName":item.get("displayName",item["name"]),"parentKey":item.get("parentKey"),"virtualFolder":virtual,"archiveKey":item.get("archiveKey",key),
+                  "origin":device_origin.validate_origin(item.get("origin")),"applicationPlatform":device_origin.validate_application_platform(item.get("applicationPlatform")),
+                  "remote":"redxai","folder":bucket+"/Library","file":item.get("manifestId","")+".png" if not virtual else "","sha256":item.get("archiveSha256",""),
+                  "source":existing.get("source",""),"offloaded":existing.get("offloaded",True),
+                  "verified":existing.get("verified",False) if same else False,"verifiedAt":existing.get("verifiedAt",0) if same else 0,
+                  "manifest":existing.get("manifest",[]) if same else [],"sizeBytes":item.get("archiveBytes",0),
+                  "redxManifestId":item.get("manifestId"),"redxGeneration":item.get("generation",1),"redxTreeRevision":snapshot["revision"],
+                  "cacheTreeRevision":existing.get("cacheTreeRevision"),**context}
+            if existing.get("cacheName"):base["cacheName"]=existing["cacheName"]
+            if same:
+                for field in ("trashedAt","offloadReceipt"):
+                    if field in existing:base[field]=existing[field]
+            if existing!=base:
+                if existing.get("previousVersions"):base["previousVersions"]=existing["previousVersions"]
+                entries[key]=base;changed=True
+        for key,entry in entries.items():
+            if in_context(entry,context) and entry.get("format")=="redxai" and key not in seen and not entry.get("cloudMissing"):
+                entry["cloudMissing"]=True;changed=True
+        if changed:_save(entries)
+    return snapshot["revision"]
+
 def listing(project=None,bucket=None,remote="gendragoon"):
     context=selected_context(project,bucket,remote);adopt_legacy_context(context)
-    reply(items=present(load(),context))
+    revision=sync_redx_library(project,bucket,remote) if remote=="redxai" else None
+    reply(items=present(load(),context),revision=revision)
 def remotes():remote_list()
+
+def organize(operation,keys,name=None,parent_key=None,expected_revision=None,project=None,bucket=None,remote="redxai"):
+    if remote!="redxai":raise ValueError("Library organization requires a Red-XAI MachineNote")
+    context=selected_context(project,bucket,remote);config=redx_config()
+    if config["workspaceId"]!=bucket:raise ValueError("MachineNote changed; refresh the folder")
+    if operation not in {"create-folder","rename","move","copy","delete"}:raise ValueError("Invalid library operation")
+    if (not isinstance(keys,list) or len(keys)>100 or len(set(keys))!=len(keys)
+            or any(not isinstance(key,str) or not re.fullmatch(r"[a-f0-9]{18}",key) for key in keys)):
+        raise ValueError("Invalid library selection")
+    if parent_key is not None and not re.fullmatch(r"[a-f0-9]{18}",parent_key):raise ValueError("Invalid destination folder")
+    if type(expected_revision) is not int or expected_revision<0:raise ValueError("Refresh the folder before organizing its items")
+    if name is not None:check_name(name)
+    client=redx_module().RedXReceiver(config);client.verified_workers(write=True)
+    snapshot=client.library_snapshot();by_key={item["key"]:item for item in snapshot["items"]}
+    if snapshot["revision"]!=expected_revision:raise RuntimeError("Library changed. Refresh the folder and try again.")
+    if any(key not in by_key for key in keys):raise ValueError("Selected item is not in this MachineNote")
+    if parent_key is not None and (parent_key not in by_key or by_key[parent_key].get("virtualFolder") is not True):
+        raise ValueError("Choose an existing library folder as the destination")
+    if operation=="move":
+        visited=set();ancestor=parent_key
+        while ancestor:
+            if ancestor in keys:raise ValueError("A folder cannot be moved inside itself or one of its children")
+            if ancestor in visited or ancestor not in by_key:raise ValueError("Invalid library folder hierarchy")
+            visited.add(ancestor);ancestor=by_key[ancestor].get("parentKey")
+    result=client.organize(operation,keys,parent_key=parent_key,name=name,expected_revision=expected_revision)
+    revision=sync_redx_library(project,bucket,remote,result)
+    message="Removed from the library. Encrypted archive data is retained until the MachineNote is deleted." if operation=="delete" else "Library updated."
+    reply(message=message,revision=revision,items=present(load(),context),changedKeys=result.get("changedKeys",[]),
+          deletedKeys=result.get("deletedKeys",[]),freedBytes=result.get("freedBytes",0),retainedArchiveData=result.get("retainedArchiveData",False))
 def is_running(app):
     # Compare executable's app bundle path; don't infer process identity from app name alone.
     result=run(["/bin/ps","-axo","command"],timeout=20)
@@ -369,9 +516,11 @@ def verify_restored(path,manifest):
     return verified
 def require_space(extra,root=None):
     free=shutil.disk_usage(root or CACHE).free
-    reserve=10*1024**3
-    if extra<0 or free<reserve+extra:
-        raise RuntimeError("Not enough local space for a verified restore while retaining 10 GiB free. Original and cloud copies were preserved.")
+    # 10 GB is guidance, not an admission threshold. The caller measures its
+    # staging requirement; leave a small bounded allowance for filesystem work.
+    margin=max(64*1024**2,min(512*1024**2,max(0,extra)//20))
+    if extra<0 or free<margin+extra:
+        raise RuntimeError("Not enough local space for this operation's verified staging copy. Original and cloud copies were preserved.")
 
 # Darwin copyfile.h: metadata only, AppleDouble serialization, exclusive output,
 # and no following source/destination symlinks. No data-fork copy is requested.
@@ -493,13 +642,13 @@ def validate_archive(path,name):
                     if hops>40:raise ValueError("Archive symlink loop")
                     resolved.pop();pending=links[candidate].split("/")+pending
             if not resolved or resolved[0]!=expected_root:raise ValueError("Archive symlink escapes its bundle")
-def upload(source,remote,folder,offload=False,project=None,bucket=None):
+def upload(source,remote,folder,offload=False,project=None,bucket=None,parent_key=None,encryption=True,encryption_mode=None):
     original=Path(source).expanduser().absolute()
     resolved=original.resolve(strict=True)
     ensure_not_cloud(resolved)
-    key=keyfor(remote,pathpart(folder),resolved.name,project,bucket)
-    with upload_lease(key):return _upload(original,remote,folder,offload,project,bucket)
-def _upload(source,remote,folder,offload=False,project=None,bucket=None):
+    key=keyfor(remote,pathpart(folder),resolved.name,project,bucket,parent_key)
+    with upload_lease(key):return _upload(original,remote,folder,offload,project,bucket,parent_key,encryption,encryption_mode)
+def _upload(source,remote,folder,offload=False,project=None,bucket=None,parent_key=None,encryption=True,encryption_mode=None):
     original=Path(source).expanduser().absolute()
     src=original.resolve(strict=True)
     ensure_not_cloud(src)
@@ -509,11 +658,25 @@ def _upload(source,remote,folder,offload=False,project=None,bucket=None):
     if typ=="app" and not (src/"Contents/Info.plist").is_file():raise ValueError("Not a valid macOS .app bundle")
     if offload and is_running(src):raise ValueError("Quit this application before offloading it")
     folder=pathpart(folder);check_remote(remote)
+    if type(encryption) is not bool or (not encryption and remote!="redxai"):
+        raise ValueError("Unencrypted uploads are available only for Red-XAI MachineNotes")
+    if encryption_mode not in (None,"standard","fast","off") or (encryption_mode in ("fast","off") and remote!="redxai"):
+        raise ValueError("Choose a supported encryption mode for this MachineNote")
     context=selected_context(project,bucket,remote,folder)
-    key=keyfor(remote,folder,src.name,project,bucket)
+    redx=redx_config() if remote=="redxai" else None
+    if redx and redx["workspaceId"]!=bucket:raise ValueError("Red-XAI workspace changed; refresh the destination")
+    key=keyfor(remote,folder,src.name,project,bucket,parent_key)
+    if redx:
+        client=redx_module().RedXReceiver(redx);client.verified_workers(write=True)
+        cloud_items=client.library_snapshot()["items"];items_by_key={item["key"]:item for item in cloud_items}
+        if parent_key is not None and (parent_key not in items_by_key or items_by_key[parent_key].get("virtualFolder") is not True):
+            raise ValueError("Selected upload folder is unavailable in this MachineNote")
+        if key in items_by_key and items_by_key[key].get("parentKey")!=parent_key:
+            raise RuntimeError("This item moved to a different folder. Refresh before uploading another version.")
     previous=load().get(key)
     if previous and previous.get("source")!=str(src):raise RuntimeError("A different same-name source already owns this library item. Choose a different cloud folder or source name; existing backups were retained.")
     prepare_cache()
+    progress.phase("preparing")
     baseline=snapshot(src)
     zipped=src.is_dir() or bool(baseline["manifest"][0].get("xattrs"))
     extension=".zip" if zipped else (src.suffix if src.suffix else ".bin")
@@ -522,6 +685,7 @@ def _upload(source,remote,folder,offload=False,project=None,bucket=None):
     require_space(total_bytes*3+64*1024**2)
     with tempfile.TemporaryDirectory(prefix="gd-upload-",dir=CACHE) as tmp:
         archive=Path(tmp)/fname
+        progress.phase("archiving",total_bytes=total_bytes)
         if zipped:
             package(src,archive)
         else:shutil.copy2(src,archive)
@@ -531,26 +695,44 @@ def _upload(source,remote,folder,offload=False,project=None,bucket=None):
         # Each verified revision has an immutable cloud object. A failed new
         # upload cannot overwrite the only backup of an offloaded original.
         fname=key+"-"+original_hash+"-"+uuid.uuid4().hex+extension
-        dest=cloud(remote,folder,fname)
-        run([RCLONE,"--config",CONFIG,"copyto",archive,dest,"--retries","3"],timeout=2400)
-        # Re-download and compare full bytes before offering an offload.
         verified=Path(tmp)/("verified-"+fname)
-        run([RCLONE,"--config",CONFIG,"copyto",dest,verified,"--retries","3"],timeout=2400)
+        redx_result=None
+        if remote=="redxai":
+            origin=device_origin.current_origin(redx["receiverId"],state_dir=SUPPORT/"DeviceOrigins")
+            options={"origin":origin,**({"parent_key":parent_key} if parent_key is not None else {})}
+            redx_result=redx_module().upload_archive(redx,archive,key,src.name,typ,
+                "zip-root" if zipped else "flat",original_hash,baseline["manifest"],encryption=encryption,**({"encryption_mode":encryption_mode} if encryption_mode is not None else {}),**options)
+            cloud_item={"key":key,"name":src.name,"kind":typ,"workspace":bucket,
+                "manifestId":redx_result["manifestId"],"archiveBytes":archive.stat().st_size,
+                "archiveSha256":original_hash}
+            progress.phase("readback",total_bytes=archive.stat().st_size)
+            restored=redx_module().download_archive(redx,cloud_item,verified)
+            if restored["manifest"]!=baseline["manifest"]:
+                raise RuntimeError("Encrypted cloud metadata read-back differs from the source; original retained")
+        else:
+            dest=cloud(remote,folder,fname)
+            run([RCLONE,"--config",CONFIG,"copyto",archive,dest,"--retries","3"],timeout=2400)
+            # Re-download and compare full bytes before offering an offload.
+            run([RCLONE,"--config",CONFIG,"copyto",dest,verified,"--retries","3"],timeout=2400)
         if sha(verified)!=original_hash:raise RuntimeError("Cloud read-back did not match uploaded archive; original retained")
+        progress.phase("restoring",total_bytes=total_bytes)
         if zipped:
             testdir=Path(tmp)/"restorecheck";testdir.mkdir()
             run(["/usr/bin/ditto","-x","-k",verified,testdir],timeout=900)
             if not (testdir/src.name).exists():raise RuntimeError("Restored archive is missing its item; original retained")
+            progress.phase("verifying",total_bytes=total_bytes)
             verify_restored(testdir/src.name,baseline["manifest"])
         else:
             os.chmod(verified,0o600|baseline["manifest"][0]["executable"])
+            progress.phase("verifying",total_bytes=total_bytes)
             verify_restored(verified,baseline["manifest"])
         unchanged(src,baseline)
-    entry={"name":src.name,"kind":typ,"format":"archive","archiveLayout":"zip-root" if zipped else "flat","remote":remote,"folder":folder,"file":fname,"sha256":original_hash,"source":str(src),"offloaded":False,"verified":True,"verifiedAt":time.time(),"manifest":baseline["manifest"],"sizeBytes":total_bytes,**(context or {})}
+    entry={"name":src.name,"kind":typ,"format":"redxai" if remote=="redxai" else "archive","archiveLayout":"zip-root" if zipped else "flat","remote":remote,"folder":folder,"file":(redx_result["manifestId"]+".png") if remote=="redxai" else fname,"sha256":original_hash,"source":str(src),"offloaded":False,"verified":True,"verifiedAt":time.time(),"manifest":baseline["manifest"],"sizeBytes":total_bytes,**({"redxManifestId":redx_result["manifestId"],"redxGeneration":1,"parentKey":parent_key,"virtualFolder":False,"archiveKey":key,"displayName":previous.get("displayName",src.name) if previous else src.name} if remote=="redxai" else {}),**(context or {})}
+    if remote=="redxai":entry.update(origin=redx_result.get("origin"),applicationPlatform=redx_result.get("applicationPlatform"))
     # Raw copy/check validates data bytes, not Darwin resource forks or xattrs.
     # Only metadata-compatible apps receive this optional streaming layout;
     # every app retains its fully verified metadata-preserving archive.
-    if typ=="app" and context and total_bytes>=STREAM_MIN_BYTES:
+    if typ=="app" and context and total_bytes>=STREAM_MIN_BYTES and remote!="redxai":
         reason=stream_metadata_reason(baseline["manifest"])
         if reason:entry["streamIneligibleReason"]=reason
         else:
@@ -563,24 +745,20 @@ def _upload(source,remote,folder,offload=False,project=None,bucket=None):
     if previous:
         entry["previousVersions"]=[*previous.get("previousVersions",[]),{k:v for k,v in previous.items() if k!="previousVersions"}]
     store_revision(key,entry,previous)
-    result={"key":key,"verified":True,"project":project,"bucket":bucket,"remote":remote,"folder":folder,"source":str(src),"kind":typ,"name":src.name}
+    result={"key":key,"verified":True,"project":project,"bucket":bucket,"remote":remote,"folder":folder,"source":str(src),"kind":typ,"name":src.name,"parentKey":parent_key}
     if offload:
         # Full restore has passed. Re-read every source immediately before Finder
         # Trash; a mutation aborts without touching the original. Other writers
         # should remain quiescent during this user-authorized offload.
         unchanged(src,baseline)
         if is_running(src):raise RuntimeError("Application started during upload; original retained")
-        try:
-            trash(src)
-            prior=json.loads(json.dumps(entry))
-            entry["offloaded"]=True;entry["trashedAt"]=time.time();store_revision(key,entry,prior)
-            reply(message=f"Verified cloud backup of {src.name}; moved original to Trash. Empty Trash to reclaim space.",offloaded=True,**result)
-        except Exception as exc:
-            reply(message=f"Cloud backup verified. Finder could not confirm moving the original to Trash; inspect it before retrying.",offloaded=False,**result)
+        progress.phase("offloading")
+        outcome=verified_offload(key,src,entry,baseline)
+        reply(**outcome,**result)
     else:
         reply(message=f"Verified cloud copy of {src.name}. Original kept locally.",offloaded=False,**result)
 def check_name(name):
-    if not name or name in (".","..") or "/" in name or "\\" in name:raise ValueError("Invalid item name")
+    if not isinstance(name,str) or not name or len(name)>255 or name in (".","..") or "/" in name or "\\" in name or any(ord(c)<32 or ord(c)==127 for c in name):raise ValueError("Invalid item name")
 def item_path(data):
     if data.get("format")=="raw":return cloud(data["remote"],data["cloudPath"])
     return cloud(data["remote"],data["folder"],data["file"])
@@ -602,12 +780,101 @@ def cache_record(path,data):
         safe_path(destination);os.replace(temporary,destination)
     finally:
         if os.path.exists(temporary):os.unlink(temporary)
-def stage_item(key,open_after=False,project=None,bucket=None,remote="gendragoon"):
+def _cache_display_destination(key,data):
+    name=data.get("displayName") or data["name"];check_name(name)
+    destination=CACHE/key/name
+    old_name=data.get("cacheName") or data["name"];check_name(old_name)
+    old=CACHE/key/old_name
+    if old!=destination and old.exists() and not destination.exists():
+        if cache_in_use(old):raise RuntimeError("Application or open resources still use this cache; close them before applying the renamed item")
+        record=safe_path(old.parent/"cache-manifest.json")
+        if not record.is_file():raise RuntimeError("Existing cache needs review before applying the renamed library item")
+        verify_restored(old,json.loads(record.read_text()))
+        os.replace(old,destination)
+        with library_lock():
+            entries=_load()
+            if key in entries:entries[key]["cacheName"]=name;_save(entries)
+    return destination
+
+def cache_in_use(path):
+    # The launch helper checks actual executable paths and open resources,
+    # including applications nested anywhere below a restored virtual folder.
+    import gendragoon_app_launch
+    return bool(gendragoon_app_launch.cache_users(path))
+
+def stage_virtual_folder(key,data,open_after,project,bucket,remote,emit=True):
+    if remote!="redxai":raise ValueError("Virtual folders require a Red-XAI MachineNote")
+    context=selected_context(project,bucket,remote);config=redx_config()
+    if config["workspaceId"]!=bucket:raise ValueError("MachineNote changed; refresh before restoring")
+    prepare_cache();destination=_cache_display_destination(key,data);safe_path(destination.parent,directory=True)
+    if destination.exists() and data.get("cacheTreeRevision")!=data.get("redxTreeRevision"):
+        raise RuntimeError("This folder changed in the cloud. Clear its managed cache before restoring the current tree; local changes are retained.")
+    if not destination.exists():
+        entries={k:v for k,v in load().items() if in_context(v,context) and not v.get("cloudMissing")}
+        children={}
+        for child_key,item in entries.items():children.setdefault(item.get("parentKey"),[]).append((child_key,item))
+        visited=set()
+        with tempfile.TemporaryDirectory(prefix="gd-folder-restore-",dir=CACHE) as temporary:
+            root=Path(temporary)/(data.get("displayName") or data["name"]);root.mkdir(mode=0o700)
+            def materialize(parent_key,target,depth=0):
+                if depth>100 or parent_key in visited or len(visited)>1000:raise ValueError("Invalid or overly deep library folder tree")
+                visited.add(parent_key);seen_names=set()
+                for child_key,item in children.get(parent_key,[]):
+                    child_name=item.get("displayName") or item["name"];check_name(child_name)
+                    folded=unicodedata.normalize("NFKC",child_name).casefold()
+                    if folded in seen_names:raise ValueError("Library folder contains colliding item names")
+                    seen_names.add(folded);out=target/child_name
+                    if item.get("virtualFolder") is True:
+                        out.mkdir(mode=0o700);materialize(child_key,out,depth+1)
+                    else:
+                        cached=Path(stage_item(child_key,False,project,bucket,remote,emit=False))
+                        baseline=snapshot(cached)
+                        require_space(sum(entry.get("size",0) for entry in baseline["manifest"])+64*1024**2)
+                        run(["/usr/bin/ditto",cached,out],timeout=1800)
+                        verify_restored(out,baseline["manifest"]);unchanged(cached,baseline)
+                visited.remove(parent_key)
+            materialize(key,root)
+            current=redx_module().RedXReceiver(config).library_snapshot()
+            if current["revision"]!=data.get("redxTreeRevision"):
+                raise RuntimeError("Library changed while restoring the folder. Refresh and try again; local files were retained.")
+            actual=snapshot(root)["manifest"]
+            destination.parent.mkdir(parents=True,exist_ok=True,mode=0o700);safe_path(destination.parent,directory=True)
+            if destination.exists():raise RuntimeError("Managed folder cache already exists; retained for review")
+            os.replace(root,destination);cache_record(destination.parent,actual)
+            with library_lock():
+                entries=_load()
+                if key in entries:
+                    entries[key]["cacheTreeRevision"]=data.get("redxTreeRevision");entries[key]["cacheName"]=destination.name;_save(entries)
+    record=safe_path(destination.parent/"cache-manifest.json")
+    if not record.is_file():raise RuntimeError("Managed folder cache has no verification record")
+    verify_restored(destination,json.loads(record.read_text()))
+    if open_after:run(["/usr/bin/open",destination],timeout=35)
+    if emit:reply(message="Restored library folder and its nested items into a verified local cache.",localPath=str(destination))
+    return str(destination)
+
+def assert_restore_compatible(key,data,project=None,bucket=None,remote="gendragoon"):
+    device_origin.ensure_restore_compatible(data)
+    if data.get("virtualFolder") is not True:return
+    context=selected_context(project,bucket,remote)
+    children={}
+    for child_key,item in load().items():
+        if in_context(item,context) and not item.get("cloudMissing"):children.setdefault(item.get("parentKey"),[]).append((child_key,item))
+    pending=[key];visited=set()
+    while pending:
+        parent=pending.pop()
+        if parent in visited or len(visited)>=1000:raise ValueError("Invalid library folder hierarchy.")
+        visited.add(parent)
+        for child_key,item in children.get(parent,[]):
+            device_origin.ensure_restore_compatible(item)
+            if item.get("virtualFolder") is True:pending.append(child_key)
+
+def stage_item(key,open_after=False,project=None,bucket=None,remote="gendragoon",emit=True):
     idx=load()
     data=selected_entry(key,project,bucket,remote);name=data["name"]
+    assert_restore_compatible(key,data,project,bucket,remote)
+    if data.get("virtualFolder") is True:return stage_virtual_folder(key,data,open_after,project,bucket,remote,emit)
     kind=data.get("kind","app")
-    dest=CACHE/key/name
-    prepare_cache();safe_path(dest.parent,directory=True)
+    prepare_cache();dest=_cache_display_destination(key,data);safe_path(dest.parent,directory=True)
     if dest.is_symlink():raise ValueError("Unsafe linked local cache")
     if not dest.exists():
         expected=sum(x.get("size",0) for x in data.get("manifest",[]))
@@ -623,8 +890,18 @@ def stage_item(key,open_after=False,project=None,bucket=None,remote="gendragoon"
                     run([RCLONE,"--config",CONFIG,"copy",item_path(data),p,"--links","--create-empty-src-dirs"],timeout=2400)
             else:
                 check_name(data["file"])
-                archive=temp/data["file"]
-                run([RCLONE,"--config",CONFIG,"copyto",item_path(data),archive],timeout=2400)
+                if data.get("format")=="redxai":
+                    config=redx_config()
+                    if config["workspaceId"]!=bucket:raise RuntimeError("Red-XAI workspace changed; refresh before restoring")
+                    item=redx_module().find_item(config,key)
+                    archive=temp/(key+".archive")
+                    restored=redx_module().download_archive(config,item,archive)
+                    root=restored["root"];data["archiveLayout"]=root["archiveLayout"]
+                    data["manifest"]=restored["manifest"];data["sha256"]=root["archiveSha256"]
+                    data["redxManifestId"]=item["manifestId"];data["redxGeneration"]=item.get("generation",1)
+                else:
+                    archive=temp/data["file"]
+                    run([RCLONE,"--config",CONFIG,"copyto",item_path(data),archive],timeout=2400)
                 if sha(archive)!=data.get("sha256"):raise RuntimeError("Downloaded cloud archive failed SHA-256 verification")
                 if kind=="file" and data.get("archiveLayout")!="zip-root":
                     p=archive
@@ -640,14 +917,19 @@ def stage_item(key,open_after=False,project=None,bucket=None,remote="gendragoon"
             safe_path(dest.parent,directory=True);dest.parent.mkdir(parents=True,exist_ok=True,mode=0o700)
             os.replace(p,dest)
             cache_record(dest.parent,actual)
+            if data.get("format")=="redxai":
+                data["verified"]=True;data["verifiedAt"]=time.time();data["cloudMissing"]=False
+                with library_lock():
+                    entries=_load();data["cacheName"]=dest.name;entries[key]=data;_save(entries)
     snapshot(dest)  # Refuse an escaping symlink even for a previously retained cache.
     record=dest.parent/"cache-manifest.json"
     if record.exists():
         safe_path(record);verify_restored(dest,json.loads(record.read_text()))
     if open_after:
         run(["/usr/bin/open",str(dest)],timeout=35)
-        reply(message=f"Opened local cached {name}; app uses local storage while running.",localPath=str(dest))
-    else:reply(message=f"Restored {name} into local cache.",localPath=str(dest))
+        if emit:reply(message=f"Opened local cached {data.get('displayName') or name}; app uses local storage while running.",localPath=str(dest))
+    elif emit:reply(message=f"Restored {data.get('displayName') or name} into local cache.",localPath=str(dest))
+    return str(dest)
 def _remove_verified_cache_item(path,verified):
     """Remove only verified entries, retaining late arrivals at every depth."""
     flags=os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW
@@ -697,8 +979,10 @@ def clear_cache(key,project=None,bucket=None,remote="gendragoon"):
     loc=CACHE/key
     safe_path(loc,directory=True)
     if not loc.exists():return reply(message="No local cached copy to remove")
-    child=loc/data["name"]
+    cache_name=data.get("cacheName") or data.get("displayName") or data["name"];check_name(cache_name)
+    child=loc/cache_name
     if child.is_symlink():raise ValueError("Unsafe linked local cache")
+    if cache_in_use(child):raise RuntimeError("Application or open resources still use this cache; managed files were retained")
     if data.get("kind","app")=="app" and is_running(child):raise RuntimeError("Quit the app before removing its local cache")
     # Only delete a dedicated, generated cache folder, never an original user folder.
     if loc.parent.resolve()!=CACHE.resolve():raise RuntimeError("Unsafe cache path")
@@ -706,7 +990,7 @@ def clear_cache(key,project=None,bucket=None,remote="gendragoon"):
     if not record.is_file():raise RuntimeError("Legacy cache has no ownership/integrity record; retained for manual review")
     # The manifest covers the selected item, not new siblings beside it. Never
     # recursively remove user-created files, folders or links with the cache.
-    if any(sibling.name not in {data["name"],"cache-manifest.json"} for sibling in loc.iterdir()):
+    if any(sibling.name not in {cache_name,"cache-manifest.json"} for sibling in loc.iterdir()):
         raise RuntimeError("Managed cache contains unexpected files; retained for review")
     verified=verify_restored(child,json.loads(record.read_text()))
     # Unexpected nested arrivals must survive too; never recursively delete
@@ -718,9 +1002,38 @@ def clear_cache(key,project=None,bucket=None,remote="gendragoon"):
         if error.errno!=errno.ENOTEMPTY:raise
         raise RuntimeError("Application cache removed; unexpected files were retained for review") from None
     reply(message=f"Deleted local cached copy of {data['name']}; cloud copy remains.")
+def open_cloud_item(key,project,bucket,remote):
+    """Open the owned mounted file; only explicit Restore creates an offline copy."""
+    if remote!="redxai":raise RuntimeError("Choose a Kamatera MachineNote. Legacy destinations require an explicit offline download.")
+    context=selected_context(project,bucket,remote)
+    if context is None:raise ValueError("Choose a verified MachineNote")
+    config=redx_config()
+    if config["workspaceId"]!=bucket:raise ValueError("Workspace changed")
+    client=redx_module().RedXReceiver(config);client.verified_workers()
+    items={item["key"]:item for item in client.library_snapshot()["items"]}
+    item=items.get(key)
+    if not item or item.get("workspace")!=bucket:raise ValueError("The cloud item is no longer available")
+    if item.get("kind")=="app":raise ValueError("Use Play for applications")
+    import gendragoon_workspace_mount as mounts
+    root=mounts.ROOT/config["receiverId"]/bucket;registry=mounts.read_registry(root)
+    if registry.get("payloadMode")!="remote-memory-v1" or not os.path.ismount(root/"mount") or not mounts.owned_daemon(registry):
+        raise RuntimeError("Mount this MachineNote with the updated client first. No full local copy was downloaded.")
+    parts=[];seen=set();current=item
+    while current:
+        if current["key"] in seen or len(parts)>=128:raise ValueError("Invalid cloud folder hierarchy")
+        seen.add(current["key"]);name=current.get("displayName") or current["name"];check_name(name);parts.append(name)
+        parent=current.get("parentKey")
+        if not parent:break
+        current=items.get(parent)
+        if not current or not current.get("virtualFolder"):raise ValueError("Invalid cloud folder parent")
+    path=(root/"mount").joinpath(*reversed(parts))
+    run(["/usr/bin/open",path],timeout=30)
+    return reply(mountPath=str(path),payloadStorage="kamatera",localPayloadCache=False,
+                 message="Opened from the Kamatera-backed workspace without creating an offline copy.")
+
 def main():
     p=argparse.ArgumentParser()
-    p.add_argument("action",choices=["remotes","list","scan","upload","launch","restore","evict"])
+    p.add_argument("action",choices=["remotes","list","scan","upload","launch","restore","evict","organize"])
     p.add_argument("--source",default="")
     p.add_argument("--app",default="")
     p.add_argument("--remote",default="gendragoon")
@@ -729,7 +1042,14 @@ def main():
     p.add_argument("--project")
     p.add_argument("--bucket")
     p.add_argument("--offload",action="store_true")
+    p.add_argument("--no-encryption",action="store_true")
+    p.add_argument("--encryption-mode",choices=("standard","fast","off"))
     p.add_argument("--key",default="")
+    p.add_argument("--operation",choices=["create-folder","rename","move","copy","delete"])
+    p.add_argument("--keys-json",default="[]")
+    p.add_argument("--name")
+    p.add_argument("--parent-key")
+    p.add_argument("--expected-revision",type=int)
     p.add_argument("--maintenance-fd",type=int)
     p.add_argument("--performance-stdin",action="store_true")
     a=p.parse_args()
@@ -741,10 +1061,11 @@ def main():
     if a.action=="list":return listing(a.project,a.bucket,a.remote)
     with maintenance_lock(a.maintenance_fd):
         if a.action=="scan":scan(a.remote,a.root or DEFAULT_ROOT,a.project,a.bucket)
-        elif a.action=="upload":upload(a.source or a.app,a.remote,a.folder or DEFAULT_ROOT+"/"+ARCHIVE_DIR,a.offload,a.project,a.bucket)
-        elif a.action=="launch":stage_item(a.key,True,a.project,a.bucket,a.remote)
+        elif a.action=="upload":upload(a.source or a.app,a.remote,a.folder or DEFAULT_ROOT+"/"+ARCHIVE_DIR,a.offload,a.project,a.bucket,a.parent_key,encryption=not a.no_encryption,encryption_mode=a.encryption_mode)
+        elif a.action=="launch":open_cloud_item(a.key,a.project,a.bucket,a.remote)
         elif a.action=="restore":stage_item(a.key,False,a.project,a.bucket,a.remote)
         elif a.action=="evict":clear_cache(a.key,a.project,a.bucket,a.remote)
+        elif a.action=="organize":organize(a.operation,json.loads(a.keys_json),a.name,a.parent_key,a.expected_revision,a.project,a.bucket,a.remote)
 if __name__=="__main__":
     try:main()
     except Exception as e:fail(e)

@@ -10,9 +10,9 @@ const {FREE_WORKSPACES,WORKSPACE_FEE_CENTS,BASE_CAP,RAISED_CAP,QUALIFYING_STORAG
  issueChallenge,verifyChallenge,collisionName,fileDigest,storedChecksums,checksumsAgree,invoicePaidThroughMs,isPrivateAddress,
  listAccountProjects,BYO_CHALLENGE_TTL_MS,isByoWorkspace,subscriptionActive,byoLapsed,
  chooseFreeWorkspaceId,freeWorkspaceId,workspacePrice,PLANS_BILLING_VERSION,isPlansWorkspace,plansEntitled}=policy;
-// Legacy one-time/monthly workspace fee. New workspaces never pay it: the fee is
-// included in storage plans. Kept only to read and reconcile existing records.
-const PROJECT_FEE_CENTS=WORKSPACE_FEE_CENTS,DEFAULT_PROJECT_LIMIT=BASE_CAP,QUALIFIED_PROJECT_LIMIT=RAISED_CAP;
+// The first project is free. Every additional project has one $5 activation
+// charge; storage and performance remain recurring subscriptions.
+const PROJECT_FEE_CENTS=500,DEFAULT_PROJECT_LIMIT=BASE_CAP,QUALIFIED_PROJECT_LIMIT=RAISED_CAP;
 const BASIC_QUOTA_BYTES=2_000_000_000;
 const UUID=/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
 const INTENT=/^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i;
@@ -46,10 +46,10 @@ function policyFor(account,projects,{ownerBenefits=false,paymentAvailable=false}
  // Archive keeps the stored id, so deleting is what releases the slot.
  const freeClaimed=!!freeId;
  return {firstProjectFree:true,freeProjectClaimed:freeClaimed,freeProjectAvailable:!freeId,freeWorkspaceId:freeId,
-   newProjectOneTimeCents:0,workspaceMonthlyCents:0,workspaceFeeIncluded:true,freeWorkspaces:FREE_WORKSPACES,
+   newProjectOneTimeCents:PROJECT_FEE_CENTS,workspaceMonthlyCents:0,workspaceFeeIncluded:false,freeWorkspaces:FREE_WORKSPACES,
    firstWorkspaceIncludes:{storageGB:BASIC_QUOTA_BYTES/1e9,performanceTier:"free",workers:1},
    additionalWorkspaceRequires:["storage","performance"],customStorageRequires:["performance"],
-   currency:"usd",feeIsOneTime:false,
+   currency:"usd",feeIsOneTime:true,
    defaultLimit:DEFAULT_PROJECT_LIMIT,qualifiedLimit:QUALIFIED_PROJECT_LIMIT,
    qualifyingStorageTier:"2TB",qualifyingStorageGB:QUALIFYING_STORAGE_GB,
    qualifyingPerformanceTier:"turbo",qualifyingWorkers:QUALIFYING_WORKERS,
@@ -119,9 +119,12 @@ function createProjectService({db,stamp,hash,stripe,env={},prices={},ensureCusto
    return id==="free"?legacyRef(owner):collection(owner).doc(id);
  }
  function owned(data,owner,id){return !!data&&(id==="free"?data.accountKey===owner:data.accountHash===owner);}
- // New workspaces pay only for plans (storage + performance); checkout availability
- // is the Stripe switch. The retired $5 fee prices are no longer used for new charges.
- function paymentAvailable(){return env.STRIPE_CHECKOUT_ENABLED==="true";}
+ // New additional workspaces use one Checkout: $5 one-time activation plus
+ // recurring storage/performance. The first managed workspace remains free.
+ function paymentAvailable(){
+   return env.STRIPE_CHECKOUT_ENABLED==="true" &&
+     typeof prices["one_time|project_creation"]==="string";
+ }
  async function snapshot(owner,tx=null){
    const read=ref=>tx?tx.get(ref):ref.get();
    const [account,docs,legacy]=await Promise.all([read(accountRef(owner)),read(collection(owner).limit(201)),read(legacyRef(owner))]);
@@ -176,7 +179,7 @@ function createProjectService({db,stamp,hash,stripe,env={},prices={},ensureCusto
      const ownerBenefit=req.ownerBenefits===true;
      // The first managed workspace is free: 2 GB plus the free performance plan.
      // Custom storage never takes the free slot.
-     const takesFree=!custom&&p.freeProjectAvailable;
+     const takesFree=!ownerBenefit&&!custom&&p.freeProjectAvailable;
      let data;
      if(takesFree){
        data={name,kind:legacyFree?"free":"paid",accountHash:owner,...(legacyFree?{accountKey:owner}:{}),
@@ -186,14 +189,16 @@ function createProjectService({db,stamp,hash,stripe,env={},prices={},ensureCusto
          intendedSelection:intended,creationSelection:intended,
          provisioned:true,quotaBytes:BASIC_QUOTA_BYTES,usedBytes:0,reservedBytes:0,createdAt:stamp(),updatedAt:stamp()};
      }else{
-       // Every additional workspace: storage plan + performance plan, or for
-       // custom storage a performance plan only. No separate workspace fee.
-       const required=supplied||validatePlans(null,{custom});
+       // Every additional workspace: one $5 activation plus storage+performance,
+       // or for custom storage one $5 activation plus performance.
+       const ownerDefaults={storage:"managed",storageTier:"6TB",performanceTier:"max",interval:"year"};
+       const required=supplied||validatePlans(ownerBenefit?(custom?{storage:"custom",performanceTier:"max",interval:"year"}:ownerDefaults):null,{custom});
        if(!ownerBenefit&&!plansCheckoutAvailable())throw new ProjectError(503,"Plan checkout is not available yet. Your existing workspaces remain available.","PLANS_CHECKOUT_UNAVAILABLE");
        const managed=required.storage==="managed";
        data={name,kind:managed?"paid":"byo",accountHash:owner,customStorage:!managed,
          projectBillingVersion:PLANS_BILLING_VERSION,projectStatus:ownerBenefit?"active":"pending_payment",
-         projectFeeStatus:ownerBenefit?"owner":"included",projectFeeCents:0,workspaceFeeCents:0,
+         projectFeeStatus:ownerBenefit?"owner":"pending",projectFeeCents:ownerBenefit?0:PROJECT_FEE_CENTS,
+         projectActivationPaid:ownerBenefit,projectActivationRequired:!ownerBenefit,workspaceFeeCents:0,
          requiredPlans:required,plansStatus:ownerBenefit?"owner":"pending",
          storageBillingVersion:2,storageTier:ownerBenefit&&managed?required.storageTier:null,storageMode:"standard",
          storageInterval:required.interval,storageActive:ownerBenefit&&managed,
@@ -239,6 +244,11 @@ function createProjectService({db,stamp,hash,stripe,env={},prices={},ensureCusto
    }
  }
  function plansCheckoutAvailable(){return paymentAvailable();}
+ function projectPriceId(){
+   const id=prices["one_time|project_creation"];
+   if(typeof id!=="string"||!/^price_[A-Za-z0-9]+$/.test(id))throw new ProjectError(503,"Project activation price is not configured yet","PROJECT_PRICE_UNCONFIGURED");
+   return id;
+ }
  function plansPriceIds(plans){
    return planPriceKeys(plans).map(key=>{
      const id=prices[key];
@@ -257,10 +267,13 @@ function createProjectService({db,stamp,hash,stripe,env={},prices={},ensureCusto
    if(!plansCheckoutAvailable())throw new ProjectError(503,"Plan checkout is not available yet","PLANS_CHECKOUT_UNAVAILABLE");
    const state=await inventory(req);
    if(state.policy.usedProjectSlots>state.policy.projectLimit)throw new ProjectError(409,"Archive projects before paying: the current account limit is "+state.policy.projectLimit,"PROJECT_LIMIT_REACHED");
-   const lineItems=plansPriceIds(plans).map(price=>({price,quantity:1}));
+   const recurring=plansPriceIds(plans);
+   const needsActivation=w.data.projectActivationRequired===true&&w.data.projectActivationPaid!==true;
+   const lineItems=[...recurring.map(price=>({price,quantity:1})),...(needsActivation?[{price:projectPriceId(),quantity:1}]:[])];
    const customer=await ensureCustomer(req),origin=new URL(env.PUBLIC_URL);
    if(origin.protocol!=="https:")throw new ProjectError(503,"HTTPS Checkout return address required");
-   const totalCents=plansMonthlyCents(plans)*(plans.interval==="year"?10:1);
+   const recurringCents=plansMonthlyCents(plans)*(plans.interval==="year"?10:1);
+   const totalCents=recurringCents+(needsActivation?PROJECT_FEE_CENTS:0);
    const priorId=w.data.plansCheckoutSessionId;
    if(priorId){
      const prior=await stripe.checkout.sessions.retrieve(priorId);
@@ -273,7 +286,7 @@ function createProjectService({db,stamp,hash,stripe,env={},prices={},ensureCusto
      success_url:origin.origin+"/billing/success?session_id={CHECKOUT_SESSION_ID}",cancel_url:origin.origin+"/billing/cancel"
    },{idempotencyKey:"gd-plans-"+hash(req.user.uid)+"-"+id+"-"+planPriceKeys(plans).join("+")+"-"+(priorId||"first")});
    await w.ref.update({plansCheckoutSessionId:session.id,plansStatus:"pending",updatedAt:stamp()});
-   return {url:session.url,workspaceId:id,plans,totalCents};
+   return {url:session.url,workspaceId:id,plans,totalCents,oneTimeCents:needsActivation?PROJECT_FEE_CENTS:0};
  }
  async function checkout(req,id,body={}){
    return withLease(req,id,async w=>{
@@ -324,7 +337,9 @@ function createProjectService({db,stamp,hash,stripe,env={},prices={},ensureCusto
      const matches=items.length===expected.length&&items.every(x=>x.quantity===undefined||x.quantity===1)&&
        expected.every(price=>items.filter(x=>x.price?.id===price).length===1);
      const status=String(sub.status||"");
-     const entitled=matches&&["active","trialing","past_due"].includes(status);
+     const subscribed=matches&&["active","trialing","past_due"].includes(status);
+     const activationOkay=current.data.projectActivationRequired!==true||current.data.projectActivationPaid===true||current.data.entitlementSource==="owner";
+     const entitled=subscribed&&activationOkay;
      const managed=plans.storage==="managed";
      const patch={plansSubscriptionId:sub.id,plansStatus:matches?status:"mismatch",updatedAt:stamp(),
        storageActive:entitled&&managed,performanceActive:entitled,
@@ -341,6 +356,22 @@ function createProjectService({db,stamp,hash,stripe,env={},prices={},ensureCusto
      tx.update(ref,patch);
      return true;
    });
+ }
+ async function reconcilePlansCheckout(session){
+   if(session?.metadata?.kind!=="workspace_plans"||session.mode!=="subscription"||session.payment_status!=="paid")return false;
+   const owner=session.metadata.accountHash,id=session.metadata.workspaceId;
+   if(!/^[a-f0-9]{64}$/.test(owner||"")||!safeProjectId(id)||id==="free")return false;
+   const ref=refFor(owner,id),[account,w]=await Promise.all([accountRef(owner).get(),ref.get()]);
+   if(!account.exists||!w.exists||!owned(w.data(),owner,id)||account.data().stripeCustomerId!==session.customer)return false;
+   const data=w.data();
+   if(!isPlansWorkspace(data)||data.entitlementSource==="owner"||data.projectActivationRequired!==true)return true;
+   const expected=[...plansPriceIds(data.requiredPlans),projectPriceId()];
+   const lines=await stripe.checkout.sessions.listLineItems(session.id,{limit:10});
+   const ids=(lines.data||[]).filter(x=>x.quantity===undefined||x.quantity===1).map(x=>x.price?.id).filter(Boolean);
+   if(lines.has_more||ids.length!==expected.length||expected.some(price=>ids.filter(id=>id===price).length!==1))return false;
+   await ref.update({projectActivationPaid:true,projectFeeStatus:"paid",projectFeeCents:PROJECT_FEE_CENTS,
+     projectPaidAt:stamp(),updatedAt:stamp()});
+   return true;
  }
  async function archive(req,id,{confirmName,acknowledgeBillingContinues}={}){
    const w=await get(req,id),owner=hash(req.user.uid);
@@ -805,7 +836,7 @@ function createProjectService({db,stamp,hash,stripe,env={},prices={},ensureCusto
    for(const id of ids)await cancel(id,{},{idempotencyKey:"gd-merge-"+mergeId+"-cancel-"+id});
  }
  return {inventory,get,create,setSelection,checkout,archive,restore,remove,withLease,reconcilePayment,revokePayment,
-   registerByo,issueByoChallenge,verifyByo,reconcileWorkspaceFee,reconcilePlans,plansCheckoutAvailable,mergePreview,merge,
+   registerByo,issueByoChallenge,verifyByo,reconcileWorkspaceFee,reconcilePlans,reconcilePlansCheckout,plansCheckoutAvailable,mergePreview,merge,
    paymentAvailable,refFor,legacyRef,policy,hasContinuingBilling};
 }
 module.exports={createProjectService,ProjectError,projectStatus,activatedBasicProject,effectiveStorageQuota,

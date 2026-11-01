@@ -51,6 +51,21 @@ class PerformanceTests(unittest.TestCase):
         self.assertIn("--constrained", perf.preload_arguments(p))
         self.assertEqual(perf.rclone_arguments(p)[1], "1")
 
+    def test_large_app_warms_more_without_more_workers_or_unbounded_cache(self):
+        p = perf.for_workers(20)
+        def options(size):
+            args = perf.preload_arguments(p, app_bytes=size)
+            return {args[i]: args[i+1] for i in range(0, len(args), 2)}
+        small, medium, large = [options(n) for n in (10*1024**2, 512*1024**2, 2*1024**3)]
+        self.assertLess(int(small['--budget-mb']), int(medium['--budget-mb']))
+        self.assertLess(int(medium['--budget-mb']), int(large['--budget-mb']))
+        self.assertLessEqual(int(large['--budget-mb']), 512)
+        self.assertLessEqual(float(large['--seconds']), 8)
+        self.assertEqual(large['--workers'], small['--workers'])
+        for invalid in (True, '99999999999', None, -1):
+            self.assertEqual(options(invalid), small)
+        self.assertIn('--constrained', perf.preload_arguments(perf.for_workers(20, True), app_bytes=99*1024**3))
+
     def test_server_allowance_not_client_tier_drives_native_policy(self):
         response = Response({"protocol": 3, "workspaceId": "free", "transfer": {"workers": 4}})
         with patch.object(perf.urllib.request, "build_opener") as opener:

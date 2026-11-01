@@ -26,9 +26,9 @@ function expectedCatalog(){
  }
  out['one_time|remove_ads']={cents:499,interval:null};return out;
 }
-// Retired for new charges ($5 workspace/BYO fee, one-time project activation). They may be archived in
-// Stripe; their IDs are still needed to reconcile in-flight legacy subscriptions and payments.
-const isRetired=key=>key.startsWith('workspace|')||key.startsWith('byo|')||key==='one_time|project_creation';
+// The old recurring workspace/BYO management fees remain retired. The $5
+// one-time project activation is active again for every project after the first.
+const isRetired=key=>key.startsWith('workspace|')||key.startsWith('byo|');
 // Team tiers: optional. Added when the Price exists, so teams become purchasable only after it is created.
 function optionalTeamCatalog(){
  const {TEAM_TIERS,teamPriceKey,teamCents}=require('./teams'),out={};
@@ -66,12 +66,12 @@ function validateCatalog(prices,products,{projectPriceId}={}){
   checkValue(key,p,expected);
   out[key]=p.id;
  }
- // Add the new one-time project Price only when explicitly configured or
- // uniquely tagged. Missing configuration must not break legacy subscriptions.
+ // The one-time project Price is required for new additional workspaces.
+ // It uses the v2 lookup key because v1 represented the retired billing generation.
  const projectMatches=pick('one_time|project_creation',prices.filter(p=>projectPriceId?p.id===projectPriceId:
    p.metadata?.service==='GenDragoonSSD'&&(p.metadata.catalogKey==='one_time|project_creation'||p.lookup_key==='gdssd_one_time_project_creation_v2')));
- if(projectPriceId||projectMatches.length){
-   if(projectMatches.length!==1)throw Error('CATALOG_COUNT:one_time|project_creation');
+ if(projectMatches.length!==1)throw Error('CATALOG_COUNT:one_time|project_creation');
+ {
    const p=projectMatches[0],product=productMap.get(typeof p.product==='string'?p.product:p.product?.id);
    const archived=p.active!==true;
    if(!p.livemode||p.type!=='one_time'||p.recurring||p.currency!=='usd'||p.unit_amount!==500||
@@ -93,10 +93,12 @@ async function validateUnpaidCheckoutTemplates(stripe,catalog){
  // Workspace plans: storage + performance on one subscription (no workspace fee),
  // and custom storage with a performance plan only. The legacy workspace|/byo|
  // prices stay in expectedCatalog() so in-flight legacy subscriptions still reconcile.
- const scenarios=[['one_time|remove_ads'],['storage|standard|100GB|month','performance|boost|month'],
-  ['storage|standard|1TB|year','performance|turbo|year'],['performance|lite|month']];
+ const scenarios=[['one_time|remove_ads'],
+  ['storage|standard|100GB|month','performance|boost|month','one_time|project_creation'],
+  ['storage|standard|1TB|year','performance|turbo|year','one_time|project_creation'],
+  ['performance|lite|month','one_time|project_creation']];
  for(const keys of scenarios){
-  const session=await stripe.checkout.sessions.create({mode:keys[0].startsWith('one_time')?'payment':'subscription',
+  const session=await stripe.checkout.sessions.create({mode:keys.some(key=>expected[key].interval)?'subscription':'payment',
    line_items:keys.map(key=>({price:catalog[key],quantity:1})),success_url:PUBLIC+'/billing/success',cancel_url:PUBLIC+'/billing/cancel',
    metadata:{service:'GenDragoonSSD',purpose:'unpaid_setup_validation'}});
   try{

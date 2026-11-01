@@ -1,0 +1,58 @@
+{
+  "name": "gendragoon",
+  "displayName": "GenDragoon MachineNotes",
+  "publisher": "redxai",
+  "version": "0.22.0",
+  "description": "Use your locally approved GenDragoon app for your MachineNotes, explicit uploads and developer Teams.",
+  "engines": {
+    "vscode": "^1.96.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "extensionKind": [
+    "ui"
+  ],
+  "main": "./vscode/extension.cjs",
+  "icon": "icons/128.png",
+  "activationEvents": [
+    "onCommand:gendragoon.status",
+    "onCommand:gendragoon.machineNotes",
+    "onCommand:gendragoon.uploadFiles",
+    "onCommand:gendragoon.uploadFolder",
+    "onCommand:gendragoon.teams"
+  ],
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": false
+    },
+    "virtualWorkspaces": {
+      "supported": false
+    }
+  },
+  "contributes": {
+    "commands": [
+      {
+        "command": "gendragoon.status",
+        "title": "GenDragoon: Check Local Companion"
+      },
+      {
+        "command": "gendragoon.machineNotes",
+        "title": "GenDragoon: Browse My MachineNotes"
+      },
+      {
+        "command": "gendragoon.uploadFiles",
+        "title": "GenDragoon: Select Files to Upload"
+      },
+      {
+        "command": "gendragoon.uploadFolder",
+        "title": "GenDragoon: Select Folder to Upload"
+      },
+      {
+        "command": "gendragoon.teams",
+        "title": "GenDragoon: Open Developer Teams"
+      }
+    ]
+  },
+  "license": "UNLICENSED"
+}

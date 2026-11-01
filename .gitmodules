@@ -1,0 +1,3 @@
+[submodule "native/vendor/Red-SecretsXAI"]
+	path = native/vendor/Red-SecretsXAI
+	url = https://github.com/grimvirusoffical-source/Red-SecretsXAI.git

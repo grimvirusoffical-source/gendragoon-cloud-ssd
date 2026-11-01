@@ -14,7 +14,7 @@ from pathlib import Path
 SUPPORT=Path.home()/"Library/Application Support/GenDragoon Cloud SSD"
 LIB=SUPPORT/"app-library.json"
 MOUNT=Path.home()/"GenDragoon Cloud SSD"
-MIN_FREE=10*1024**3
+MIN_FREE=64*1024**2  # Small working allowance; the 10 GB recommendation is advisory.
 BLOCK=256*1024
 
 def bundle(key):
@@ -73,7 +73,10 @@ def plan(app,budget,deadline):
     while left>0 and time.monotonic()<deadline:
         changed=False
         for path,size in sizes.items():
-            cap=min(size,16*1024*1024)
+            # Continue prioritizing headers across files, then warm more of a
+            # large executable when the caller has a larger startup budget.
+            per_file_cap=min(128*1024*1024,max(16*1024*1024,budget//4))
+            cap=min(size,per_file_cap)
             amount=min(1024*1024,max(0,cap-offsets[path]),left)
             if amount:
                 ranges.append((path,offsets[path],amount));offsets[path]+=amount;left-=amount;changed=True
@@ -83,7 +86,7 @@ def plan(app,budget,deadline):
 
 def warm(app,mb=64,limit=8,workers=2,constrained=False):
     started=time.monotonic();deadline=started+max(0.1,min(20,float(limit)))
-    budget=max(1,min(256,int(mb)))*1024**2
+    budget=max(1,min(512,int(mb)))*1024**2
     if constrained:return {"ok":True,"bytesWarmed":0,"filesWarmed":0,"errors":0,"skipped":"data-saver","seconds":0}
     if shutil.disk_usage(Path.home()).free<MIN_FREE+budget:
         return {"ok":True,"bytesWarmed":0,"filesWarmed":0,"errors":0,"skipped":"low-disk-space","seconds":0}

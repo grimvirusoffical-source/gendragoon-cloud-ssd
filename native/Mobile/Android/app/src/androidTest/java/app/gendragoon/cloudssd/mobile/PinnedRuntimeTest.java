@@ -1,0 +1,37 @@
+package app.gendragoon.cloudssd.mobile;
+import androidx.test.ext.junit.runners.AndroidJUnit4;
+import androidx.test.platform.app.InstrumentationRegistry;
+import android.content.Context;
+import android.app.ActivityManager;
+import android.os.Debug;
+import org.json.*;
+import org.junit.Test;
+import org.junit.runner.RunWith;
+import java.io.*;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.util.Arrays;
+import static org.junit.Assert.*;
+
+@RunWith(AndroidJUnit4.class)
+public final class PinnedRuntimeTest {
+    private static byte[] publicAsset(Context tests,String name)throws Exception{try(InputStream input=tests.getAssets().open(name);ByteArrayOutputStream out=new ByteArrayOutputStream()){byte[] buffer=new byte[4096];int n;while((n=input.read(buffer))!=-1){if(out.size()+n>1024*1024)throw new IOException("Public test fixture exceeds bound");out.write(buffer,0,n);}return out.toByteArray();}}
+    @Test public void completeNumericalJpegAndFontDependenciesWorkOnDevice()throws Exception{Context context=InstrumentationRegistry.getInstrumentation().getTargetContext();CryptoRuntime.module(context);JSONObject result=new JSONObject(com.chaquo.python.Python.getInstance().getModule("gendragoon_dependency_fixture").callAttr("dependencies").toString());assertTrue(result.getBoolean("ok"));assertTrue(result.getBoolean("jpeg"));assertTrue(result.getBoolean("font"));assertTrue(result.getBoolean("lapackLite"));}
+    @Test public void macProducedVisualCarrierDecryptsOnAndroidWithAadIsolation()throws Exception{Context target=InstrumentationRegistry.getInstrumentation().getTargetContext(),tests=InstrumentationRegistry.getInstrumentation().getContext();CryptoRuntime.module(target);File root=new File(target.getCacheDir(),"test-mac-visual-"+java.util.UUID.randomUUID());assertTrue(root.mkdir());for(String name:new String[]{"mac-visual-v1.png","mac-visual-v1.json"})try(InputStream input=tests.getAssets().open(name)){Files.copy(input,new File(root,name).toPath());}JSONObject vector=new JSONObject(new String(publicAsset(tests,"portable-vault-v1.json"),StandardCharsets.UTF_8));PortableVault.Keys keys=PortableVault.open(vector.getJSONObject("envelope").toString().getBytes(StandardCharsets.UTF_8),vector.getString("password").toCharArray(),vector.getString("receiverId"));Files.write(new File(root,"public.keymap").toPath(),keys.keymap);try{JSONObject result=new JSONObject(com.chaquo.python.Python.getInstance().getModule("gendragoon_dependency_fixture").callAttr("cross_platform",root.getCanonicalPath(),keys.secret).toString());assertTrue(result.getBoolean("verified"));assertTrue(result.getBoolean("crossPlatform"));assertTrue(result.getBoolean("wrongAadRejected"));}finally{Arrays.fill(keys.keymap,(byte)0);}}
+    @Test public void actualPinnedNativeCryptoAndVisualRendererRoundtripOnDevice()throws Exception{Context context=InstrumentationRegistry.getInstrumentation().getTargetContext();File root=new File(context.getCacheDir(),"test-codec-"+java.util.UUID.randomUUID());JSONObject result=new JSONObject(CryptoRuntime.module(context).callAttr("codec_selftest",root.getCanonicalPath()).toString());assertTrue(result.getBoolean("ok"));assertTrue(result.getInt("pngBytes")>result.getInt("plainBytes"));assertEquals("android",result.getString("sourcePlatform"));assertTrue(result.getBoolean("originStable"));}
+    private static void memoryEvidence(Context context,String phase)throws Exception{
+        Debug.MemoryInfo own=new Debug.MemoryInfo();Debug.getMemoryInfo(own);
+        ActivityManager.MemoryInfo system=new ActivityManager.MemoryInfo();((ActivityManager)context.getSystemService(Context.ACTIVITY_SERVICE)).getMemoryInfo(system);
+        JSONObject record=new JSONObject().put("phase",phase).put("elapsedMs",android.os.SystemClock.elapsedRealtime()).put("processPssKiB",own.getTotalPss()).put("nativePssKiB",own.nativePss).put("dalvikPssKiB",own.dalvikPss).put("systemAvailableBytes",system.availMem).put("systemTotalBytes",system.totalMem).put("systemThresholdBytes",system.threshold).put("systemLowMemory",system.lowMemory);
+        try(BufferedReader input=new BufferedReader(new FileReader("/proc/self/status"))){String line;int lines=0;while((line=input.readLine())!=null&&++lines<256){if(line.startsWith("VmHWM:")||line.startsWith("VmRSS:")){String[] fields=line.trim().split("\\s+");record.put(line.startsWith("VmHWM:")?"processPeakRssKiB":"processRssKiB",Long.parseLong(fields[1]));}}}
+        android.util.Log.i("GenDragoonMemory",record.toString());
+    }
+    @Test public void full64KiBVisualChunkRoundtripFitsActualCarrierBoundOnDevice()throws Exception{
+        Context context=InstrumentationRegistry.getInstrumentation().getTargetContext();File root=new File(context.getCacheDir(),"test-full-chunk-"+java.util.UUID.randomUUID());
+        com.chaquo.python.PyObject runtime=CryptoRuntime.module(context);memoryEvidence(context,"before64KiB");
+        try{JSONObject result=new JSONObject(runtime.callAttr("codec_selftest",root.getCanonicalPath(),65536).toString());assertTrue(result.getBoolean("ok"));assertEquals(65536,result.getInt("plainBytes"));assertTrue(result.getInt("pngBytes")>result.getInt("plainBytes"));assertTrue(result.getInt("pngBytes")<=8*1024*1024);assertTrue(result.getBoolean("failedOperationsPublishNothing"));}
+        finally{memoryEvidence(context,"after64KiB");}
+    }
+    @Test public void actualArchiveIndexMetadataReadbackAndAadIsolationRoundtripOnDevice()throws Exception{Context context=InstrumentationRegistry.getInstrumentation().getTargetContext();CryptoRuntime.module(context);File root=new File(context.getCacheDir(),"test-graph-"+java.util.UUID.randomUUID());JSONObject result=new JSONObject(com.chaquo.python.Python.getInstance().getModule("gendragoon_android_fixture").callAttr("roundtrip",root.getCanonicalPath()).toString());assertTrue(result.getBoolean("verified"));assertTrue(result.getBoolean("crossWorkspaceRejected"));assertTrue(result.getInt("pngObjects")>=4);assertEquals(2*1024*1024,result.getInt("legacyCompactBytes"));assertTrue(result.getBoolean("legacyBadAuthNoOutput"));}
+    @Test public void macPortableVaultJceInteropAndReadonlyCoreAuthenticationWorkOnDevice()throws Exception{Context target=InstrumentationRegistry.getInstrumentation().getTargetContext(),tests=InstrumentationRegistry.getInstrumentation().getContext();byte[] raw;try(InputStream input=tests.getAssets().open("portable-vault-v1.json");ByteArrayOutputStream out=new ByteArrayOutputStream()){byte[] buffer=new byte[4096];int n;while((n=input.read(buffer))!=-1)out.write(buffer,0,n);raw=out.toByteArray();}JSONObject f=new JSONObject(new String(raw,StandardCharsets.UTF_8));PortableVault.Keys keys=PortableVault.open(f.getJSONObject("envelope").toString().getBytes(StandardCharsets.UTF_8),f.getString("password").toCharArray(),f.getString("receiverId"));File keymap=new File(target.getCacheDir(),"test-portable-"+java.util.UUID.randomUUID());Files.write(keymap.toPath(),keys.keymap);try{CryptoRuntime.verifyKeymap(target,keymap,keys.secret);assertTrue(Arrays.equals(keys.keymap,Files.readAllBytes(keymap.toPath())));}finally{keymap.delete();Arrays.fill(keys.keymap,(byte)0);}}
+}

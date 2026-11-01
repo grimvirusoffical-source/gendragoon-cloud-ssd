@@ -11,10 +11,8 @@
      --apply --confirm-test-mode      create missing prices in TEST mode (sk_test_/rk_test_ only).
      --apply --live --confirm-live    create missing prices in LIVE mode (sk_live_/rk_live_ only).
                                       Needs Josh's go-ahead; both flags are required.
-     --full                           also plan the base catalog the live bootstrap validates (storage, performance,
-                                      Remove Ads: every non-retired key of billing_bootstrap.expectedCatalog()). Use it
-                                      when setting up a new Stripe account. The retired workspace/BYO fee and project
-                                      activation prices are never created.
+     --full                           also plan the base GenDragoon catalog plus the active $5 one-time
+                                      project activation Price. Retired recurring workspace/BYO fees are not created.
      --account acct_...               refuse unless STRIPE_SECRET_KEY belongs to this Stripe account.
    Idempotent: a price whose lookup_key already exists is reused when amount, currency,
    interval and active state match, and refused (nothing created) when they don't.
@@ -50,6 +48,8 @@ function plan({full=false}={}){
      if(isRetired(key))continue;
      recurring("GenDragoonSSD",product(key),key,e.cents,e.interval);
    }
+   out.push({service:"GenDragoonSSD",product:"GenDragoon Project Activation",catalogKey:"one_time|project_creation",
+     lookupKey:"gdssd_one_time_project_creation_v2",unitAmount:500,currency:"usd",recurring:null});
  }
  return out;
 }
