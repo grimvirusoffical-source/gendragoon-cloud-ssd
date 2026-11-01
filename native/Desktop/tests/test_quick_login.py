@@ -76,4 +76,18 @@ class SessionResumeTests(unittest.TestCase):
             self.assertIsNone(session.resume_saved())
         clear.assert_called_once()
 
+
+class LiveQuickLoginTests(unittest.TestCase):
+    @unittest.skipUnless(os.environ.get("GD_LIVE_QUICK_LOGIN_TEST")=="1","Explicit live Quick Login contract check")
+    def test_live_start_contract_without_consent(self):
+        import base64,hashlib,secrets,urllib.parse
+        verifier=secrets.token_urlsafe(32)
+        challenge=base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).decode().rstrip("=")
+        job=redx_session.http_json(redx_session.ISSUER,"/redxai-connect/start","POST",
+            {"client_id":"gendragoon","code_challenge":challenge,"code_challenge_method":"S256"})
+        self.assertRegex(job.get("device_code",""),r"^[A-Za-z0-9_-]{43}$")
+        self.assertRegex(job.get("user_code",""),r"^[A-Za-z0-9]{8}$")
+        self.assertEqual(browser.validate(job.get("verification_uri","")),job["verification_uri"])
+        self.assertGreater(job.get("expires_in",0),0)
+
 if __name__=="__main__":unittest.main()
