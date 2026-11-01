@@ -96,6 +96,16 @@ def scroll_page(parent):
     canvas.bind("<Leave>",lambda _:canvas.unbind_all("<MouseWheel>"))
     return inner
 
+def status_card(parent,title,variable,detail):
+    import tkinter as tk
+    card=tk.Frame(parent,bg=SURFACE,highlightthickness=1,highlightbackground=BORDER)
+    tk.Label(card,text=title.upper(),bg=SURFACE,fg=ACCENT,font=("Consolas",8,"bold")).pack(anchor="w",padx=14,pady=(12,2))
+    tk.Label(card,textvariable=variable,bg=SURFACE,fg=TEXT,font=("Segoe UI",13,"bold"),
+             wraplength=250,justify="left").pack(anchor="w",padx=14)
+    tk.Label(card,text=detail,bg=SURFACE,fg=MUTED,font=("Segoe UI",8),
+             wraplength=250,justify="left").pack(anchor="w",padx=14,pady=(3,12))
+    return card
+
 def _select(app,name,panel):
     try:
         if str(app.tabs.tab(panel,"state"))=="disabled":return
