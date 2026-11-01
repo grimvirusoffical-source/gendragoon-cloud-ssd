@@ -33,7 +33,7 @@ class MixedSourcePicker:
         self.after=None;self.closed=False;self.nodes={};self.sequence=0;self.loading_count=0;self.results=queue.Queue();self.executor=concurrent.futures.ThreadPoolExecutor(max_workers=1,thread_name_prefix="gendragoon-picker")
         self.status=app.tk.StringVar(value="Select files and folders together with Ctrl/Shift. Expand folders to browse; originals are retained.")
         app.ttk.Label(self.window,text="Upload to "+context['noteName']+" / "+context['folderName'],wraplength=800,padding=10).pack(fill="x")
-        app.ttk.Label(self.window,text="Application files or folders are backups here. Managed app launch and original offload are not enabled.",wraplength=800,padding=6).pack(fill="x")
+        app.ttk.Label(self.window,text="Portable Windows/Linux apps can be played after upload once this MachineNote is mounted and signed. Installers stay as backups and are never auto-installed.",wraplength=800,padding=6).pack(fill="x")
         frame=app.ttk.Frame(self.window);frame.pack(fill="both",expand=True,padx=10)
         self.tree=app.ttk.Treeview(frame,columns=("kind",),selectmode="extended");self.tree.heading("#0",text="This PC  -  local files and folders");self.tree.heading("kind",text="Type");self.tree.column("#0",width=600);self.tree.column("kind",width=160)
         scroll=app.ttk.Scrollbar(frame,orient="vertical",command=self.tree.yview);self.tree.configure(yscrollcommand=scroll.set);scroll.pack(side="right",fill="y");self.tree.pack(fill="both",expand=True)
@@ -180,20 +180,24 @@ class GenDragoonGUI:
         future.add_done_callback(lambda _:self.messages.put(finished))
     def _files(self):
         from tkinter import ttk
-        bar=ttk.Frame(self.files);bar.pack(fill="x")
+        ttk.Label(self.files,text="CLOUD LIBRARY",style="Kicker.TLabel").pack(anchor="w")
+        ttk.Label(self.files,text="Files and portable apps",style="Title.TLabel").pack(anchor="w",pady=(3,3))
+        ttk.Label(self.files,text="Upload normal files, folders, Windows .exe apps, Linux AppImages, or portable app folders. Mount + sign once, then Play launches compatible portable apps directly from the cloud-backed drive.",style="Muted.TLabel",wraplength=980).pack(fill="x",pady=(0,12))
+        bar=ttk.Frame(self.files,style="Panel.TFrame",padding=10);bar.pack(fill="x")
+        ttk.Label(bar,text="MachineNote",style="Panel.TLabel").pack(side="left",padx=(0,8))
         self.note=ttk.Combobox(bar,state="readonly");self.note.pack(side="left",fill="x",expand=True)
         self.note.bind("<<ComboboxSelected>>",self.note_changed)
-        ttk.Button(bar,text="Refresh",command=self.refresh).pack(side="left",padx=4)
-        filters=ttk.Frame(self.files);filters.pack(fill="x",pady=4)
+        ttk.Button(bar,text="Refresh",command=self.refresh).pack(side="left",padx=(8,0))
+        filters=ttk.Frame(self.files,style="Panel.TFrame",padding=(10,6));filters.pack(fill="x",pady=(6,4))
         ttk.Label(filters,text="Artifact OS hint").pack(side="left")
         self.artifact_choice=ttk.Combobox(filters,state="readonly",values=('All items','Documents / folders','macOS','Windows','Linux','Android','iOS'),width=21);self.artifact_choice.current(0);self.artifact_choice.pack(side="left",padx=4)
         ttk.Label(filters,text="Uploaded from").pack(side="left",padx=(12,0))
         self.source_choice=ttk.Combobox(filters,state="readonly",values=('All source devices',),width=45);self.source_choice.current(0);self.source_choice.pack(side="left",fill="x",expand=True)
         self.source_choices={'All source devices':'all'}
         for chooser in (self.artifact_choice,self.source_choice):chooser.bind('<<ComboboxSelected>>',lambda _:self.display_tree(refresh_snapshot=False))
-        toolbar=ttk.Frame(self.files);toolbar.pack(fill="x",pady=8)
-        for title,command in (("New folder",self.new_folder),("Upload selected...",self.upload),("Transfers...",self.show_transfers),("Download...",self.download),("Play / Stop app",self.toggle_app),("Rename",self.rename),("Delete",self.delete)):
-            ttk.Button(toolbar,text=title,command=command).pack(side="left",padx=2)
+        toolbar=ttk.Frame(self.files,style="Panel.TFrame",padding=8);toolbar.pack(fill="x",pady=8)
+        for title,command,style in (("Upload",self.upload,"Primary.TButton"),("Play / Stop",self.toggle_app,"Primary.TButton"),("Download",self.download,None),("New folder",self.new_folder,None),("Transfers",self.show_transfers,None),("Rename",self.rename,None),("Delete",self.delete,None)):
+            ttk.Button(toolbar,text=title,command=command,**({"style":style} if style else {})).pack(side="left",padx=3)
         protection=ttk.Frame(self.files);protection.pack(fill="x",pady=6)
         ttk.Label(protection,text="Upload protection").pack(side="left")
         self.upload_mode=self.tk.StringVar(value="Standard encrypted")
@@ -306,11 +310,11 @@ class GenDragoonGUI:
     def _settings(self):
         from tkinter import ttk
         ttk.Label(self.settings,text="Portable encrypted storage vault",font=("TkDefaultFont",15,"bold")).pack(anchor="w")
-        ttk.Label(self.settings,text="Import the vault exported by the device that encrypted your files. Account sign-in and scoped keys cannot recover encryption keys. Vault passphrases and account credentials are held only in memory while this client is open.",wraplength=900).pack(fill="x",pady=12)
+        ttk.Label(self.settings,text="Windows protects the local storage secret with DPAPI; Linux uses Secret Service. GenDragoon restores those local keys automatically on launch. Portable vault export is optional recovery backup for another device, not a requirement to close or reopen the app.",wraplength=900).pack(fill="x",pady=12)
         for title,command in (("Import encrypted vault...",self.import_vault),("Export encrypted vault...",self.export_vault),("Initialize a new empty account...",self.initialize_vault)):
             ttk.Button(self.settings,text=title,command=command).pack(anchor="w",pady=5)
-        ttk.Label(self.settings,text="The exported file uses AES-256-GCM and PBKDF2-HMAC-SHA256 (600,000 iterations). Keep it and its passphrase safe. Different local keys are never replaced. New keys must be exported before uploading.",wraplength=900).pack(fill="x",pady=12)
-        ttk.Label(self.settings,text="Windows/Linux supports portable files and folder archives. Read-only drives need existing GenDragoon Mount Host with WinFsp on Windows, or rclone with FUSE on Linux. Backups containing macOS apps, extended attributes, or symbolic links must be restored on their original platform. Drives do not provide writeback or managed app launch.",wraplength=900).pack(fill="x",pady=12)
+        ttk.Label(self.settings,text="Optional portable backups use AES-256-GCM and PBKDF2-HMAC-SHA256 (600,000 iterations). Keep a backup if you want recovery on another computer; normal use relies on the operating system's protected local secret.",wraplength=900).pack(fill="x",pady=12)
+        ttk.Label(self.settings,text="Windows/Linux read-only drives use GenDragoon Mount Host + WinFsp on Windows or rclone + FUSE on Linux. Compatible portable Windows/Linux apps can Play from the mounted cloud drive using local CPU/RAM; installers and macOS bundles remain backup-only.",wraplength=900).pack(fill="x",pady=12)
         ttk.Separator(self.settings).pack(fill="x",pady=10)
         ttk.Label(self.settings,text="Browser and VS Code companion",font=("TkDefaultFont",13,"bold")).pack(anchor="w")
         ttk.Label(self.settings,text="Enable only your exact installed extension IDs. Each extension still needs native approval for the connected account. Account tokens and storage keys are never sent to a browser or editor.",wraplength=900).pack(fill="x",pady=8)
@@ -380,8 +384,6 @@ class GenDragoonGUI:
     def disconnect(self):
         from tkinter import messagebox
         if not self.can_switch():return
-        if self.model.keys and not self.model.vault_exported:
-            messagebox.showwarning("Export your vault","Export your new vault before disconnecting, so its storage key is not lost.",parent=self.root);return
         if hasattr(self.model.session,"disconnect"):self.model.session.disconnect()
         else:self.model.session.logout()
         self.model=MachineNotesClient();self.clear_transfer_view();self.note["values"]=[];self.note.set("");self.tree.delete(*self.tree.get_children());self.clipboard=None;self.team=None;self.companion_grants.clear();self.status.set("Disconnected. This app session and its saved Quick Login trust were revoked.")
@@ -394,8 +396,6 @@ class GenDragoonGUI:
         try:self.model.portable_apps.assert_safe("disconnect or change accounts")
         except PortableAppError as error:
             messagebox.showwarning("Portable app lease active",str(error),parent=self.root);return False
-        if self.model.keys and not self.model.vault_exported:
-            messagebox.showwarning("Export your vault","Export your new vault before changing accounts, so its storage key is not lost.",parent=self.root);return False
         return True
     def display_notes(self):
         names=[str(n.get("name") or "MachineNote")+("  -  read only" if not n.get("active") or n.get("readOnly") else "") for n in self.model.notes]
@@ -411,6 +411,17 @@ class GenDragoonGUI:
             self.model.selected_note=self.model.notes[index]["id"];self.visible_note=self.model.selected_note;self.visible_items={};self.tree.delete(*self.tree.get_children());self.model.selected_parent=None;self.refresh_tree()
     def refresh(self):
         self.run("Refreshing owned MachineNotes...",self.model.refresh_notes,lambda _:(self.display_notes(),self.refresh_tree() if self.model.selected_note else None))
+    def refresh_after_setup(self):
+        if self.busy or not self.model.session.receiver:return
+        def work():
+            self.model.refresh_notes()
+            return self.model.refresh_tree() if self.model.selected_note else None
+        def done(_):
+            self.display_notes();self.refresh_drives()
+            if self.model.selected_note:self.display_tree()
+            update_navigation(self)
+            self.status.set("Workspace refreshed. RedX storage, signing, files, and app controls are current.")
+        self.run("Refreshing workspace after setup...",work,done)
     def create_free_workspace(self):
         from tkinter import simpledialog
         if self.busy or not self.model.session.receiver or self.model.session.integration_mode:
@@ -567,7 +578,7 @@ class GenDragoonGUI:
                 return None
         job=self.model.enqueue_selection(context['workspaceId'],context['parentKey'],paths,encryption_mode=mode,offload=offload)
         self.status.set(str(len(paths))+(" source(s) queued for verified offload to Trash." if offload else " source(s) queued. Originals are retained."));self.refresh_jobs();self.show_transfers();self.drain_queue()
-        if self.model.keys is None or not self.model.vault_exported:self.status.set("Sources queued. Import or export this account's portable vault in Storage keys before transfers can start.")
+        if self.model.keys is None:self.status.set("Sources queued. Initialize this empty account or import a recovery vault before transfers can start.")
         return job
     def review_dropped_sources(self,paths):
         # Native-drop integration calls this only after its COPY-only path guard.
@@ -584,7 +595,7 @@ class GenDragoonGUI:
             self.source_picker=MixedSourcePicker(self,self.upload_context(),self.queue_sources)
         except Exception as error:self.status.set(self._error(error))
     def drain_queue(self):
-        if self.busy or self.model.keys is None or not self.model.vault_exported:return
+        if self.busy or self.model.keys is None:return
         try:
             queued=next((j for j in self.model.jobs() if j["state"]=="queued"),None)
             if queued is None:return
@@ -758,8 +769,9 @@ class GenDragoonGUI:
         from tkinter import messagebox
         if self.busy:return
         if self.mounts.has_mounts:self.status.set("Unmount every workspace drive before initializing storage keys.");return
-        if not messagebox.askyesno("Initialize empty storage?","This is for a new, empty account. Existing encrypted storage requires the vault from its original device. Export your new vault before uploading.",parent=self.root):return
-        self.run("Verifying the account is empty before creating keys...",self.model.initialize_empty_vault,lambda _:self.export_vault())
+        if not messagebox.askyesno("Initialize empty storage?","Create fresh account-bound encryption keys for this empty RedX workspace? Windows protects the storage secret with DPAPI and Linux uses Secret Service. Portable export is optional backup.",parent=self.root):return
+        self.run("Verifying the account is empty before creating keys...",self.model.initialize_empty_vault,
+                 lambda _:(self.status.set("Fresh local vault created and protected by the operating system. Portable export is optional backup."),self.refresh_after_setup()))
     def username(self):
         from tkinter import simpledialog
         if self.busy:return
@@ -920,8 +932,6 @@ class GenDragoonGUI:
             messagebox.showwarning("Operation active","Wait for the transfer or account operation to finish. Active writers are not terminated.",parent=self.root);return
         if self.mounts.has_mounts:
             messagebox.showwarning("Workspace drives active","Unmount every workspace drive before quitting. Mounted, orphaned, or uncertain drives keep this account session protected.",parent=self.root);return
-        if self.model.keys and not self.model.vault_exported:
-            messagebox.showwarning("Export your vault","Export your new vault before quitting, so its storage key is not lost.",parent=self.root);return
         if self.source_picker is not None and not self.source_picker.closed:self.source_picker.close()
         self.transfers_window.destroy()
         if self.companion:self.companion.close()
