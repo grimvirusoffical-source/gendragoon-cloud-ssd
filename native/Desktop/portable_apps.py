@@ -552,10 +552,19 @@ class PortableApps:
         expected_parent=self._parent(prepared.identity)
         if prepared.directory.parent!=expected_parent:raise PortableAppError("The launch belongs to a different account or archive generation.")
         if sys.platform=="win32":_binding(expected_parent,prepared.identity)
-        if prepared.mounted:verify_mounted(prepared.payload,prepared.records,prepared.mounted,prepared.identity,selected)
-        else:verify_payload(prepared.payload,prepared.records)
+        if prepared.mounted:
+            # prepare_mounted already selected this candidate through a strict
+            # PE/ELF header check on the authenticated live mount. Recheck the
+            # mount/catalog binding here without repeating the remote header
+            # read; the detached broker is the final authority and repeats the
+            # selected-file size + PE/ELF header validation immediately before
+            # process creation.
+            verify_mounted(prepared.payload,prepared.records,prepared.mounted,prepared.identity)
+        else:
+            verify_payload(prepared.payload,prepared.records)
         executable=prepared.payload if selected=="." else prepared.payload/selected
-        if binary_kind(executable)!=host():raise PortableAppError("The selected bytes are not a matching native executable.")
+        if not prepared.mounted and binary_kind(executable)!=host():
+            raise PortableAppError("The selected bytes are not a matching native executable.")
         _check_working_directory(executable)
         control=prepared.directory/"control";_real(control);private.verify(control)
         launch_id=uuid.uuid4().hex;lease=control/("lease-"+launch_id+".json");spec=control/("launch-"+launch_id+".json")
