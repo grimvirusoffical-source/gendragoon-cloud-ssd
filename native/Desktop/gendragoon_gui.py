@@ -200,7 +200,7 @@ class GenDragoonGUI:
             ttk.Button(toolbar,text=title,command=command,**({"style":style} if style else {})).pack(side="left",padx=3)
         protection=ttk.Frame(self.files);protection.pack(fill="x",pady=6)
         ttk.Label(protection,text="Upload protection").pack(side="left")
-        self.upload_mode=self.tk.StringVar(value="Standard encrypted")
+        self.upload_mode=self.tk.StringVar(value="Fast encrypted")
         ttk.Combobox(protection,textvariable=self.upload_mode,state="readonly",width=27,
                      values=("Standard encrypted","Fast encrypted","Off  -  not encrypted")).pack(side="left",padx=8)
         ttk.Label(protection,text="Fast retains encryption; Off exposes stored contents.").pack(side="left")
