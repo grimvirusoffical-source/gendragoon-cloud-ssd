@@ -17,7 +17,7 @@ ID=re.compile(r'[a-f0-9]{32}\Z')
 TOKEN=re.compile(r'[A-Za-z0-9_-]{43}\Z')
 
 class SignedDevices:
-    def __init__(self,model):self.model=model
+    def __init__(self,model,mounts=None):self.model=model;self.mounts=mounts
     def context(self):
         model=self.model
         if model.session.integration_mode:raise ValueError('Sign in with your account; API keys cannot manage device registrations.')
@@ -32,6 +32,13 @@ class SignedDevices:
     def _client(self,config):
         from machinenotes_client import DesktopReceiver
         return DesktopReceiver(config)
+    def mounted(self,owner,workspace):
+        from workspace_mount import WorkspaceMountManager
+        manager=self.mounts or WorkspaceMountManager(self.model.root)
+        return any(
+            row.get("receiverId")==owner and row.get("workspaceId")==workspace and row.get("state")=="mounted"
+            for row in manager.refresh()
+        )
     def local(self,config,owner,workspace):
         path=self.file(owner,workspace)
         if not path.exists():return None
@@ -50,7 +57,8 @@ class SignedDevices:
         result=self.model.session.request(self.route(workspace))
         if self.model.session.receiver!=owner or self.model.selected_note!=workspace:raise ValueError('The account or workspace changed.')
         rows=result.get('devices')
-        if result.get('workspace')!=workspace or not isinstance(rows,list) or len(rows)>20:raise ValueError('Invalid device list.')
+        if result.get('workspace')!=workspace or result.get('hardwareSigningAvailable') is not True or not isinstance(rows,list) or len(rows)>20:
+            raise ValueError('The live signing service is not available for this workspace.')
         for row in rows:
             if not isinstance(row,dict) or not ID.fullmatch(row.get('id','')) or not isinstance(row.get('name'),str) or len(row['name'])>80:raise ValueError('Invalid device entry.')
         local=self.local(config,owner,workspace)
@@ -58,15 +66,20 @@ class SignedDevices:
             path=self.file(owner,workspace);private_fs.verify(path);path.unlink();local=None
         return {'workspace':workspace,'devices':rows,'local':local['id'] if local else None}
     def sign(self):
-        config,owner,workspace=self.context();existing=self.list()
+        config,owner,workspace=self.context()
+        if not self.mounted(owner,workspace):
+            raise ValueError('Step 1: mount this MachineNote SSD before signing this PC.')
+        existing=self.list()
         if existing['local']:return existing
-        prepared=identity.prepare_receipt(config)
+        worker=dict(config);worker.pop('_session',None);worker['bearerToken']=self.model.session.token()
+        prepared=identity.prepare_receipt(worker)
         result=self.model.session.request(self.route(workspace),'POST',{
             'name':(platform.node() or 'This computer')[:80],'platform':prepared['platform'],
             'deviceFingerprint':prepared['deviceFingerprint'],'qr':prepared['qr']})
         if self.model.session.receiver!=owner or self.model.selected_note!=workspace:raise ValueError('The account or workspace changed; review the server registration.')
         device=result.get('device',{});secret=result.get('credential','')
-        if result.get('workspace')!=workspace or not ID.fullmatch(device.get('id','')) or not TOKEN.fullmatch(secret):raise ValueError('Invalid device registration response.')
+        if result.get('workspace')!=workspace or device.get('signed') is not True or not ID.fullmatch(device.get('id','')) or not TOKEN.fullmatch(secret):
+            raise ValueError('The server did not confirm a signed device registration.')
         try:
             plain=json.dumps({'id':device['id'],'credential':secret},separators=(',',':')).encode()
             with crypto.Codec(self._client(config)) as codec:sealed=codec.seal(plain,crypto.object_id('signed-device-local',owner,workspace))

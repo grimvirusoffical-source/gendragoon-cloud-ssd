@@ -35,7 +35,7 @@ class MixedSourcePicker:
         app.ttk.Label(self.window,text="Upload to "+context['noteName']+" / "+context['folderName'],wraplength=800,padding=10).pack(fill="x")
         app.ttk.Label(self.window,text="Application files or folders are backups here. Managed app launch and original offload are not enabled.",wraplength=800,padding=6).pack(fill="x")
         frame=app.ttk.Frame(self.window);frame.pack(fill="both",expand=True,padx=10)
-        self.tree=app.ttk.Treeview(frame,columns=("kind",),selectmode="extended");self.tree.heading("#0",text="This PC · local files and folders");self.tree.heading("kind",text="Type");self.tree.column("#0",width=600);self.tree.column("kind",width=160)
+        self.tree=app.ttk.Treeview(frame,columns=("kind",),selectmode="extended");self.tree.heading("#0",text="This PC  -  local files and folders");self.tree.heading("kind",text="Type");self.tree.column("#0",width=600);self.tree.column("kind",width=160)
         scroll=app.ttk.Scrollbar(frame,orient="vertical",command=self.tree.yview);self.tree.configure(yscrollcommand=scroll.set);scroll.pack(side="right",fill="y");self.tree.pack(fill="both",expand=True)
         self.file_drop=bind_file_drop(self.tree,self.stage_paths,self.status.set)
         self.tree.bind("<<TreeviewOpen>>",self.expand);self.tree.bind("<Double-1>",self.activate);self.tree.bind("<Return>",self.activate);self.tree.bind("<<TreeviewSelect>>",self.selection_changed)
@@ -68,7 +68,7 @@ class MixedSourcePicker:
     def insert(self,parent,value):
         self.sequence+=1;key="local-"+str(self.sequence);self.nodes[key]=dict(value)
         self.tree.insert(parent,"end",iid=key,text=value['name'],values=(value.get('label',''),))
-        if value.get('expandable'):self.tree.insert(key,"end",text="Expand to load…")
+        if value.get('expandable'):self.tree.insert(key,"end",text="Expand to load...")
         return key
     def expand(self,_=None):
         key=self.tree.focus();node=self.nodes.get(key,{})
@@ -81,7 +81,7 @@ class MixedSourcePicker:
         node=self.nodes[key]
         if node.get('loading'):return
         if self.loading_count>=8:self.status.set('Wait for the current directory pages to finish.');return
-        self.loading_count+=1;node['loading']=True;self.status.set("Reading one directory page…")
+        self.loading_count+=1;node['loading']=True;self.status.set("Reading one directory page...")
         future=self.executor.submit(self.lister,node['path'],offset)
         future.add_done_callback(lambda f:self.results.put((key,more_key,f)))
     def pump(self):
@@ -96,7 +96,7 @@ class MixedSourcePicker:
                 elif not node.get('loaded'):
                     for child in self.tree.get_children(key):self.tree.delete(child)
                 for item in page['entries']:self.insert(key,item)
-                if page['nextOffset'] is not None:self.insert(key,{'name':'Load more… (double-click)','label':'More entries','more':True,'parent':key,'offset':page['nextOffset']})
+                if page['nextOffset'] is not None:self.insert(key,{'name':'Load more... (double-click)','label':'More entries','more':True,'parent':key,'offset':page['nextOffset']})
                 node['loaded']=True;self.tree.item(key,open=True);self.selection_changed()
             except (OSError,ValueError) as error:self.status.set("This folder could not be listed. Choose another folder. "+str(error)[:160])
         self.after=self.window.after(50,self.pump)
@@ -134,22 +134,13 @@ class GenDragoonGUI:
         self.visible_items={};self.visible_note=None;self.source_picker=None;self.active_job=None;self.transfer_presentations={};self.transfer_rows={};self.last_transfer=None;self.next_jobs_refresh=0;self.operation_job=None
         self.companion_grants=set();self.companion=None;self.companion_completed={}
         self.portable_lease_id=None;self.portable_lease_state=None;self.app_sessions=[]
-        root.title("GenDragoon · MachineNotes");root.geometry("1060x760");root.minsize(800,600)
-        self.status=tk.StringVar(value="Connect Red-XAI to browse your MachineNotes.")
-        header=ttk.Frame(root,padding=12);header.pack(fill="x")
-        ttk.Label(header,text="GenDragoon",font=("TkDefaultFont",19,"bold")).pack(side="left")
-        ttk.Button(header,text="Connect Red-XAI…",command=self.login).pack(side="right",padx=3)
-        ttk.Button(header,text="Integration key…",command=self.integration_login).pack(side="right",padx=3)
-        ttk.Button(header,text="Disconnect",command=self.disconnect).pack(side="right",padx=3)
-        self.tabs=ttk.Notebook(root);self.tabs.pack(fill="both",expand=True,padx=12)
-        self.home=ttk.Frame(self.tabs,padding=16);self.account=ttk.Frame(self.tabs,padding=16)
-        self.files=ttk.Frame(self.tabs,padding=10);self.teams=ttk.Frame(self.tabs,padding=10);self.settings=ttk.Frame(self.tabs,padding=10)
-        for name,panel in (("Home",self.home),("Files",self.files),("Teams",self.teams),("Storage keys",self.settings),("Account",self.account)):
-            self.tabs.add(panel,text=name)
+        root.title("GenDragoon - MachineNotes");root.geometry("1180x800");root.minsize(900,620)
+        self.status=tk.StringVar(value="Restoring your trusted Red-XAI session...")
+        from gui_theme import build_shell
+        build_shell(self,root)
         build_home(self);self._files();self._teams();self._settings();build_account(self);self._transfers()
         update_navigation(self, [])
-        ttk.Label(root,textvariable=self.status,wraplength=1000,padding=12).pack(fill="x")
-        root.protocol("WM_DELETE_WINDOW",self.close);root.after(40,self.pump)
+        root.protocol("WM_DELETE_WINDOW",self.close);root.after(40,self.pump);root.after(250,self.resume_trusted_session)
         try:
             from companion_server import CompanionServer
             self.companion=CompanionServer(self.companion_dispatch,socket_directory=companion_directory);self.companion.start()
@@ -201,13 +192,13 @@ class GenDragoonGUI:
         self.source_choices={'All source devices':'all'}
         for chooser in (self.artifact_choice,self.source_choice):chooser.bind('<<ComboboxSelected>>',lambda _:self.display_tree(refresh_snapshot=False))
         toolbar=ttk.Frame(self.files);toolbar.pack(fill="x",pady=8)
-        for title,command in (("New folder",self.new_folder),("Upload selected…",self.upload),("Transfers…",self.show_transfers),("Download…",self.download),("Play / Stop app",self.toggle_app),("Rename",self.rename),("Delete",self.delete)):
+        for title,command in (("New folder",self.new_folder),("Upload selected...",self.upload),("Transfers...",self.show_transfers),("Download...",self.download),("Play / Stop app",self.toggle_app),("Rename",self.rename),("Delete",self.delete)):
             ttk.Button(toolbar,text=title,command=command).pack(side="left",padx=2)
         protection=ttk.Frame(self.files);protection.pack(fill="x",pady=6)
         ttk.Label(protection,text="Upload protection").pack(side="left")
         self.upload_mode=self.tk.StringVar(value="Standard encrypted")
         ttk.Combobox(protection,textvariable=self.upload_mode,state="readonly",width=27,
-                     values=("Standard encrypted","Fast encrypted","Off — not encrypted")).pack(side="left",padx=8)
+                     values=("Standard encrypted","Fast encrypted","Off  -  not encrypted")).pack(side="left",padx=8)
         ttk.Label(protection,text="Fast retains encryption; Off exposes stored contents.").pack(side="left")
         self.upload_offload=self.tk.BooleanVar(value=False)
         ttk.Checkbutton(self.files,text="Move selected originals to OS Trash only after full cloud readback and restore verification",variable=self.upload_offload).pack(anchor="w",pady=5)
@@ -226,7 +217,7 @@ class GenDragoonGUI:
         ttk.Label(self.files,text="Folders organize archive items. Folder backups keep their archived contents together. Uploads retain your originals; library deletion retains encrypted payload bytes and does not reclaim quota.",wraplength=980).pack(fill="x",pady=8)
         drives=ttk.LabelFrame(self.files,text="Read-only workspace drives",padding=6);drives.pack(fill="x")
         actions=ttk.Frame(drives);actions.pack(fill="x")
-        for title,command in (("Mount selected MachineNote",self.mount_drive),("Open drive",self.open_drive),("Unmount selected drive",self.unmount_drive),("Choose mount helper…",self.choose_rclone)):
+        for title,command in (("Mount selected MachineNote",self.mount_drive),("Open drive",self.open_drive),("Unmount selected drive",self.unmount_drive),("Choose mount helper...",self.choose_rclone)):
             ttk.Button(actions,text=title,command=command).pack(side="left",padx=3)
         self.drive_list=ttk.Treeview(drives,columns=("state","path"),height=3,selectmode="browse")
         self.drive_list.heading("#0",text="MachineNote");self.drive_list.heading("state",text="Status");self.drive_list.heading("path",text="Actual mount path")
@@ -251,7 +242,7 @@ class GenDragoonGUI:
             self.jobs_tree.heading(column,text=label);self.jobs_tree.column(column,width=width)
         self.jobs_tree.pack(fill="both",expand=True,padx=10)
         actions=self.ttk.Frame(self.transfers_window,padding=10);actions.pack(fill="x")
-        for label,command in (("Resume queued / retry failed",self.resume_queue),("Hide transfers",self.hide_transfers),("Minimize · keep running",self.minimize_background)):
+        for label,command in (("Resume queued / retry failed",self.resume_queue),("Hide transfers",self.hide_transfers),("Minimize  -  keep running",self.minimize_background)):
             self.ttk.Button(actions,text=label,command=command).pack(side="left",padx=4)
         self.ttk.Label(self.transfers_window,text="Queued jobs keep their original account and destination. Quit still waits for active transfers and mounted drives; hiding or minimizing never stops a writer.",wraplength=950,padding=10).pack(fill="x")
     def show_transfers(self):
@@ -267,7 +258,7 @@ class GenDragoonGUI:
         existing=set(self.jobs_tree.get_children());notes={n['id']:n.get('name','MachineNote') for n in self.model.notes}
         for index,job in enumerate(visible):
             key=job['id'];state=job['state'];completed=len(job.get('completedSources') or []);count=len(job['sources'])
-            if state=='running' and key!=self.active_job:state='Interrupted · resume required'
+            if state=='running' and key!=self.active_job:state='Interrupted  -  resume required'
             percent=100 if job['state']=='completed' else self.transfer_presentations.get(key).percent if key in self.transfer_presentations else min(99,100*completed/max(1,count))
             values=(notes.get(job['workspaceId'],job['workspaceId'][:8]),f'{completed} / {count}',state,f'{percent:.1f}%')
             title=Path(job['sources'][0]).name or 'Root folder'
@@ -285,12 +276,12 @@ class GenDragoonGUI:
         presenter=self.transfer_presentations.get(self.active_job) if self.active_job else getattr(self,'operation_progress',None)
         if presenter is None:return
         value=presenter.snapshot(job,progress.snapshot(),finished=finished);self.last_transfer=value
-        summary=f"{value['percent']:.1f}% overall estimate · source {value['sourceIndex']} / {value['sourceCount']} · {value['phase']}"
-        counters=f"Phase work {format_bytes(value['completedBytes'])} / {format_bytes(value['totalBytes']) if value['totalBytes'] else 'measuring'} · source carrier sent {format_bytes(value['uploadedBytes'])} · received {format_bytes(value['downloadedBytes'])}"
-        eta=f"Estimated remaining: {format_eta(value['overallETA'])} overall · {format_eta(value['phaseETA'])} current phase"
-        if value['objectsTotal']:counters+=f" · carrier chunks {value['objectsDone']} / {value['objectsTotal']}"
+        summary=f"{value['percent']:.1f}% overall estimate  -  source {value['sourceIndex']} / {value['sourceCount']}  -  {value['phase']}"
+        counters=f"Phase work {format_bytes(value['completedBytes'])} / {format_bytes(value['totalBytes']) if value['totalBytes'] else 'measuring'}  -  source carrier sent {format_bytes(value['uploadedBytes'])}  -  received {format_bytes(value['downloadedBytes'])}"
+        eta=f"Estimated remaining: {format_eta(value['overallETA'])} overall  -  {format_eta(value['phaseETA'])} current phase"
+        if value['objectsTotal']:counters+=f"  -  carrier chunks {value['objectsDone']} / {value['objectsTotal']}"
         self.progress_bar['value']=value['percent'];self.transfer_bar['value']=value['percent'];self.progress_text.set(summary);self.transfer_detail.set(summary+'\n'+counters+'\n'+eta)
-        if self.busy:self.status.set(value['phase']+' · '+counters)
+        if self.busy:self.status.set(value['phase']+'  -  '+counters)
     def finish_transfer(self,success):
         self.refresh_jobs();self.update_transfer_progress(finished=success);self.active_job=None;self.operation_job=None
     def _teams(self):
@@ -299,12 +290,12 @@ class GenDragoonGUI:
                   "each shared MachineNote needs its own storage and performance plan. Personal files remain private unless explicitly shared.",
                   wraplength=940,padding=10).pack(fill="x")
         bar=ttk.Frame(self.teams);bar.pack(fill="x")
-        for title,command in (("Set username…",self.username),("Refresh teams",self.refresh_teams),("More teams",self.more_teams),("Create note team…",self.create_team),("Join invitation…",self.join_team)):
+        for title,command in (("Set username...",self.username),("Refresh teams",self.refresh_teams),("More teams",self.more_teams),("Create note team...",self.create_team),("Join invitation...",self.join_team)):
             ttk.Button(bar,text=title,command=command).pack(side="left",padx=2)
         self.team_list=ttk.Combobox(self.teams,state="readonly");self.team_list.pack(fill="x",pady=8);self.team_list.bind("<<ComboboxSelected>>",self.team_changed)
         actions=ttk.Frame(self.teams);actions.pack(fill="x")
-        ttk.Button(actions,text="Create invitation…",command=self.invite).pack(side="left")
-        ttk.Button(actions,text="Members…",command=self.members).pack(side="left",padx=4)
+        ttk.Button(actions,text="Create invitation...",command=self.invite).pack(side="left")
+        ttk.Button(actions,text="Members...",command=self.members).pack(side="left",padx=4)
         ttk.Button(actions,text="Refresh chat",command=self.refresh_chat).pack(side="left")
         ttk.Button(actions,text="More messages",command=self.more_chat).pack(side="left",padx=4)
         self.chat=self.tk.Text(self.teams,wrap="word",state="disabled",height=18);self.chat.pack(fill="both",expand=True,pady=8)
@@ -316,14 +307,14 @@ class GenDragoonGUI:
         from tkinter import ttk
         ttk.Label(self.settings,text="Portable encrypted storage vault",font=("TkDefaultFont",15,"bold")).pack(anchor="w")
         ttk.Label(self.settings,text="Import the vault exported by the device that encrypted your files. Account sign-in and scoped keys cannot recover encryption keys. Vault passphrases and account credentials are held only in memory while this client is open.",wraplength=900).pack(fill="x",pady=12)
-        for title,command in (("Import encrypted vault…",self.import_vault),("Export encrypted vault…",self.export_vault),("Initialize a new empty account…",self.initialize_vault)):
+        for title,command in (("Import encrypted vault...",self.import_vault),("Export encrypted vault...",self.export_vault),("Initialize a new empty account...",self.initialize_vault)):
             ttk.Button(self.settings,text=title,command=command).pack(anchor="w",pady=5)
         ttk.Label(self.settings,text="The exported file uses AES-256-GCM and PBKDF2-HMAC-SHA256 (600,000 iterations). Keep it and its passphrase safe. Different local keys are never replaced. New keys must be exported before uploading.",wraplength=900).pack(fill="x",pady=12)
         ttk.Label(self.settings,text="Windows/Linux supports portable files and folder archives. Read-only drives need existing GenDragoon Mount Host with WinFsp on Windows, or rclone with FUSE on Linux. Backups containing macOS apps, extended attributes, or symbolic links must be restored on their original platform. Drives do not provide writeback or managed app launch.",wraplength=900).pack(fill="x",pady=12)
         ttk.Separator(self.settings).pack(fill="x",pady=10)
         ttk.Label(self.settings,text="Browser and VS Code companion",font=("TkDefaultFont",13,"bold")).pack(anchor="w")
         ttk.Label(self.settings,text="Enable only your exact installed extension IDs. Each extension still needs native approval for the connected account. Account tokens and storage keys are never sent to a browser or editor.",wraplength=900).pack(fill="x",pady=8)
-        ttk.Button(self.settings,text="Configure browser/editor access…",command=self.configure_companion).pack(anchor="w")
+        ttk.Button(self.settings,text="Configure browser/editor access...",command=self.configure_companion).pack(anchor="w")
         ttk.Button(self.settings,text="Clear this session's extension approvals",command=lambda:(self.companion_grants.clear(),self.companion_completed.clear(),self.status.set("Extension approvals cleared. Each client must be approved again."))).pack(anchor="w",pady=5)
     def configure_companion(self):
         if self.busy:return
@@ -348,8 +339,21 @@ class GenDragoonGUI:
                 return module.install(platform=sys.platform,home=Path.home(),helper=storage.RESOURCE/"gendragoon_native_bridge.py",
                     python=Path(sys.executable),browser_ids=ids,firefox=ff,vscode=vs,
                     host_executable=host if sys.platform=="win32" or getattr(sys,"frozen",False) else None)
-            self.run("Installing only the selected current-user extension allowlist…",work,lambda _:self.status.set("Companion allowlist installed. Open your extension and approve it in this GenDragoon session."))
+            self.run("Installing only the selected current-user extension allowlist...",work,lambda _:self.status.set("Companion allowlist installed. Open your extension and approve it in this GenDragoon session."))
         self.ttk.Button(window,text="Enable selected extensions",command=install).grid(row=5,column=0,columnspan=2,pady=12)
+    def resume_trusted_session(self):
+        if self.busy or self.model.session.receiver or self.mounts.has_mounts:return
+        session=RedXSession()
+        def work():
+            restored=session.resume_saved()
+            if restored is None:return None
+            model=MachineNotesClient(session);model.refresh_notes();return model
+        def done(model):
+            if model is None:
+                self.status.set("Connect Red-XAI to browse your MachineNotes.")
+                return
+            self.connected(model);self.status.set("Trusted Red-XAI session restored.")
+        self.run("Restoring trusted Red-XAI session...",work,done)
     def login(self):
         if not self.can_switch():return
         session=RedXSession()
@@ -357,17 +361,17 @@ class GenDragoonGUI:
             from quick_login_browser import open_approval
             restored=session.resume_saved()
             if restored is None:
-                session.login(lambda code:self.messages.put(lambda:self.status.set("Approve GenDragoon in your browser · code "+code)),open_approval)
+                session.login(lambda code:self.messages.put(lambda:self.status.set("Approve GenDragoon in your browser  -  code "+code)),open_approval)
             model=MachineNotesClient(session);model.refresh_notes();return model
-        self.run("Restoring a trusted Red-XAI session or starting browser approval…",work,self.connected)
+        self.run("Restoring a trusted Red-XAI session or starting browser approval...",work,self.connected)
     def integration_login(self):
         from tkinter import simpledialog
         if not self.can_switch():return
-        key=simpledialog.askstring("Scoped integration key","Enter a key issued by GenDragoon for one MachineNote. Teams requires browser approval.",show="•",parent=self.root)
+        key=simpledialog.askstring("Scoped integration key","Enter a key issued by GenDragoon for one MachineNote. Teams requires browser approval.",show="*",parent=self.root)
         if not key:return
         def work():
             model=MachineNotesClient(IntegrationSession(key));model.refresh_notes();return model
-        self.run("Verifying the scoped integration key…",work,self.connected)
+        self.run("Verifying the scoped integration key...",work,self.connected)
     def connected(self,model):
         self.model.session.logout();self.model=model;self.clear_transfer_view();self.clipboard=None;self.team=None;self.team_values=[];self.companion_grants.clear();self.companion_completed.clear()
         self.team_list["values"]=[];self.team_list.set("");self.display_notes()
@@ -394,7 +398,7 @@ class GenDragoonGUI:
             messagebox.showwarning("Export your vault","Export your new vault before changing accounts, so its storage key is not lost.",parent=self.root);return False
         return True
     def display_notes(self):
-        names=[str(n.get("name") or "MachineNote")+(" · read only" if not n.get("active") or n.get("readOnly") else "") for n in self.model.notes]
+        names=[str(n.get("name") or "MachineNote")+("  -  read only" if not n.get("active") or n.get("readOnly") else "") for n in self.model.notes]
         self.note["values"]=names;self.home_note["values"]=names
         for i,n in enumerate(self.model.notes):
             if n["id"]==(self.visible_note if self.busy and self.visible_note else self.model.selected_note):
@@ -406,19 +410,19 @@ class GenDragoonGUI:
         if index>=0:
             self.model.selected_note=self.model.notes[index]["id"];self.visible_note=self.model.selected_note;self.visible_items={};self.tree.delete(*self.tree.get_children());self.model.selected_parent=None;self.refresh_tree()
     def refresh(self):
-        self.run("Refreshing owned MachineNotes…",self.model.refresh_notes,lambda _:(self.display_notes(),self.refresh_tree() if self.model.selected_note else None))
+        self.run("Refreshing owned MachineNotes...",self.model.refresh_notes,lambda _:(self.display_notes(),self.refresh_tree() if self.model.selected_note else None))
     def create_free_workspace(self):
         from tkinter import simpledialog
         if self.busy or not self.model.session.receiver or self.model.session.integration_mode:
             self.status.set("Connect your account before creating a workspace.");return
-        name=simpledialog.askstring("Create free workspace","Name your first 2 GB workspace (3–80 characters):",parent=self.root,initialvalue="My Free Cloud")
+        name=simpledialog.askstring("Create free workspace","Name your first 2 GB workspace (3-80 characters):",parent=self.root,initialvalue="My Free Cloud")
         if name is None:return
         name=name.strip()
-        if not 3<=len(name)<=80:self.status.set("Choose a name with 3–80 characters.");return
-        self.run("Creating your free 2 GB workspace…",lambda:self.model.session.request(
+        if not 3<=len(name)<=80:self.status.set("Choose a name with 3-80 characters.");return
+        self.run("Creating your free 2 GB workspace...",lambda:self.model.session.request(
             "/gendragoon/v2/machinenotes","POST",{"name":name,"storageTier":"free2GB","performanceTier":"free"}),
             lambda _:self.refresh())
-    def refresh_tree(self):self.run("Loading the current library…",self.model.refresh_tree,lambda _:self.display_tree())
+    def refresh_tree(self):self.run("Loading the current library...",self.model.refresh_tree,lambda _:self.display_tree())
     def display_tree(self,*,refresh_snapshot=True):
         if refresh_snapshot:
             self.visible_note=self.model.selected_note;self.visible_items={i['key']:dict(i,applicationPlatform=application_platform(i.get('name'),i.get('kind'),i.get('applicationPlatform'))) for i in self.model.items}
@@ -460,12 +464,16 @@ class GenDragoonGUI:
     def mount_drive(self):
         if self.busy or not self.model.selected_note:return
         model=self.model;note=model.selected_note;binary=self.rclone_path
-        self.run("Preparing an authenticated read-only filesystem drive…",lambda:self.mounts.mount(model,note,binary),lambda _:(self.refresh_drives(),self.status.set("Read-only filesystem drive mounted. Unmount every drive before changing accounts or quitting.")),lambda _:self.refresh_drives())
+        def mounted_done(_):
+            self.refresh_drives()
+            self.status.set("Step 1 complete. Verifying this PC's live signing record...")
+            if hasattr(self,"refresh_signing"):self.refresh_signing()
+        self.run("Preparing an authenticated read-only filesystem drive...",lambda:self.mounts.mount(model,note,binary),mounted_done,lambda _:self.refresh_drives())
     def unmount_drive(self):
         selected=drive_selection(self)
         if self.busy or len(selected)!=1:return
         key=selected[0]
-        self.run("Requesting normal filesystem unmount…",lambda:self.mounts.unmount(key),lambda _:(self.refresh_drives(),self.status.set("The drive was normally unmounted. Its verified private cache was retained.")),lambda _:self.refresh_drives())
+        self.run("Requesting normal filesystem unmount...",lambda:self.mounts.unmount(key),lambda _:(self.refresh_drives(),self.status.set("The drive was normally unmounted. Its verified private cache was retained.")),lambda _:self.refresh_drives())
     def open_drive(self):
         import os,subprocess
         selected=drive_selection(self)
@@ -482,7 +490,7 @@ class GenDragoonGUI:
             return item.get("parentKey")
         return None
     def mutate(self,operation,keys=(),name=None,parent=None):
-        self.run("Updating the library…",lambda:self.model.organize(operation,keys,name,parent),lambda _:self.display_tree())
+        self.run("Updating the library...",lambda:self.model.organize(operation,keys,name,parent),lambda _:self.display_tree())
     def new_folder(self):
         from tkinter import simpledialog
         if self.busy:return
@@ -513,7 +521,7 @@ class GenDragoonGUI:
         key=self.tree.identify_row(event.y)
         if key and key not in self.selected():self.tree.selection_set(key)
         menu=self.tk.Menu(self.root,tearoff=False)
-        for title,command in (("New folder",self.new_folder),("Rename",self.rename),("Copy",lambda:self.copy(False)),("Cut / move",lambda:self.copy(True)),("Paste here",self.paste),("Download…",self.download),("Play / Stop app",self.toggle_app),("Delete",self.delete)):
+        for title,command in (("New folder",self.new_folder),("Rename",self.rename),("Copy",lambda:self.copy(False)),("Cut / move",lambda:self.copy(True)),("Paste here",self.paste),("Download...",self.download),("Play / Stop app",self.toggle_app),("Delete",self.delete)):
             menu.add_command(label=title,command=command)
         menu.tk_popup(event.x_root,event.y_root)
     def drag_start(self,event):self.drag=(event.x,event.y,self.tree.identify_row(event.y))
@@ -552,14 +560,14 @@ class GenDragoonGUI:
                 if request_close(remaining,force=True,approved=True):raise ValueError("A selected app is still running; no upload was queued.")
         offload=self.upload_offload.get()
         if offload and not messagebox.askyesno("Verified offload to Trash?","After full cloud upload and restore verification, move only these selected originals to OS Trash? Other files and cloud backups are unchanged.",parent=self.root):return None
-        mode={"Standard encrypted":"standard","Fast encrypted":"fast","Off — not encrypted":"off"}[self.upload_mode.get()]
+        mode={"Standard encrypted":"standard","Fast encrypted":"fast","Off  -  not encrypted":"off"}[self.upload_mode.get()]
         if mode=="off":
             from tkinter import messagebox
             if not messagebox.askyesno("Upload without encryption?","Server storage access can reveal these files. Continue without encryption?",parent=self.root):
                 return None
         job=self.model.enqueue_selection(context['workspaceId'],context['parentKey'],paths,encryption_mode=mode,offload=offload)
         self.status.set(str(len(paths))+(" source(s) queued for verified offload to Trash." if offload else " source(s) queued. Originals are retained."));self.refresh_jobs();self.show_transfers();self.drain_queue()
-        if self.model.keys is None or not self.model.vault_exported:self.status.set("Sources queued. Import or export this account’s portable vault in Storage keys before transfers can start.")
+        if self.model.keys is None or not self.model.vault_exported:self.status.set("Sources queued. Import or export this account's portable vault in Storage keys before transfers can start.")
         return job
     def review_dropped_sources(self,paths):
         # Native-drop integration calls this only after its COPY-only path guard.
@@ -586,7 +594,7 @@ class GenDragoonGUI:
             self.finish_transfer(True)
             if any(j["state"]=="queued" for j in self.model.jobs()):self.drain_queue()
             else:self.refresh_tree()
-        self.run("Encrypting queued files, uploading, and verifying readback…",self.model.run_next_job,completed,lambda _:self.finish_transfer(False))
+        self.run("Encrypting queued files, uploading, and verifying readback...",self.model.run_next_job,completed,lambda _:self.finish_transfer(False))
     def resume_queue(self):
         if self.busy:return
         try:self.model.retry_jobs();self.drain_queue()
@@ -596,7 +604,7 @@ class GenDragoonGUI:
         return [v for v in values if key is None or v["key"]==key and v["workspaceId"]==self.model.selected_note]
     def app_label(self,item):
         running=any(v.get("key")==item.get("key") and v.get("workspaceId")==self.model.selected_note for v in self.app_sessions)
-        return "■ Stop" if running else "▶ Play" if playable(item) else ""
+        return "Stop" if running else "Play" if playable(item) else ""
     def app_cell(self,event):
         if self.tree.identify_column(event.x)!="#4":return
         key=self.tree.identify_row(event.y)
@@ -642,7 +650,7 @@ class GenDragoonGUI:
         record=next((r for r in self.mounts.refresh() if r.get("receiverId")==owner and r.get("workspaceId")==note and r.get("state")=="mounted"),None)
         if not record:
             self.status.set("Mount the selected workspace on Home first. No local app copy was downloaded.");return
-        self.run("Verifying the application on its Kamatera-backed drive…",lambda:self.model.prepare_portable_app(selected[0],mount_record=record),self.review_portable)
+        self.run("Verifying the application on its Kamatera-backed drive...",lambda:self.model.prepare_portable_app(selected[0],mount_record=record),self.review_portable)
     def review_portable(self,prepared):
         from tkinter import messagebox
         window=self.tk.Toplevel(self.root);window.title("Choose a verified portable executable");window.geometry("720x430");window.transient(self.root)
@@ -674,7 +682,7 @@ class GenDragoonGUI:
                         if time.monotonic()>deadline:raise PortableAppError("Other apps have not stopped; the new app was not launched.")
                         time.sleep(.1)
                 return self.model.launch_portable_app(prepared,relative,approved=True)
-            self.run("Starting the approved portable app…",start,self.portable_launched)
+            self.run("Starting the approved portable app...",start,self.portable_launched)
         self.ttk.Button(window,text="Launch selected app",command=launch).pack(side="right",padx=12,pady=10)
         self.ttk.Button(window,text="Keep cache and close",command=window.destroy).pack(side="right",pady=10)
     def portable_launched(self,receipt):
@@ -713,25 +721,25 @@ class GenDragoonGUI:
             for index,key in enumerate(selected):
                 results.append(self.model.download(key,Path(destination)));operation['completedSources'].append(index)
             return results
-        self.run("Downloading, decrypting, and verifying selected items…",work,transfer_job=operation)
+        self.run("Downloading, decrypting, and verifying selected items...",work,transfer_job=operation)
     def import_vault(self):
         from tkinter import filedialog,simpledialog
         if self.busy:return
         if self.mounts.has_mounts:self.status.set("Unmount every workspace drive before importing storage keys.");return
         path=filedialog.askopenfilename(parent=self.root,title="Import encrypted vault",filetypes=[("GenDragoon vault","*.gdvault"),("JSON","*.json"),("All files","*")])
         if not path:return
-        password=simpledialog.askstring("Vault passphrase","Enter this vault's passphrase",show="•",parent=self.root)
+        password=simpledialog.askstring("Vault passphrase","Enter this vault's passphrase",show="*",parent=self.root)
         if password is None:return
         def work():
             with open(path,"rb") as source:envelope=source.read(ENVELOPE_LIMIT+1)
             self.model.import_vault(envelope,password)
-        self.run("Verifying the vault and unlocking its encrypted keymap…",work,lambda _:(self.status.set("Portable vault verified. Encrypted transfers are ready."),self.drain_queue()))
+        self.run("Verifying the vault and unlocking its encrypted keymap...",work,lambda _:(self.status.set("Portable vault verified. Encrypted transfers are ready."),self.drain_queue()))
     def export_vault(self):
         from tkinter import filedialog,simpledialog
         if self.busy:return
-        password=simpledialog.askstring("Export vault","Use a passphrase with at least 12 characters",show="•",parent=self.root)
+        password=simpledialog.askstring("Export vault","Use a passphrase with at least 12 characters",show="*",parent=self.root)
         if password is None:return
-        confirmation=simpledialog.askstring("Confirm vault passphrase","Repeat the passphrase",show="•",parent=self.root)
+        confirmation=simpledialog.askstring("Confirm vault passphrase","Repeat the passphrase",show="*",parent=self.root)
         if password!=confirmation:self.status.set("The passphrases do not match.");return
         path=filedialog.asksaveasfilename(parent=self.root,title="Save encrypted vault",defaultextension=".gdvault",initialfile="GenDragoon-Storage.gdvault")
         if not path:return
@@ -745,27 +753,27 @@ class GenDragoonGUI:
                 with os.fdopen(fd,"wb") as output:output.write(data);output.flush();os.fsync(output.fileno())
                 os.replace(temp,path);self.model.vault_exported=True
             finally:Path(temp).unlink(missing_ok=True)
-        self.run("Encrypting the portable vault…",work,lambda _:self.status.set("Encrypted vault exported. Keep its passphrase separately."))
+        self.run("Encrypting the portable vault...",work,lambda _:self.status.set("Encrypted vault exported. Keep its passphrase separately."))
     def initialize_vault(self):
         from tkinter import messagebox
         if self.busy:return
         if self.mounts.has_mounts:self.status.set("Unmount every workspace drive before initializing storage keys.");return
         if not messagebox.askyesno("Initialize empty storage?","This is for a new, empty account. Existing encrypted storage requires the vault from its original device. Export your new vault before uploading.",parent=self.root):return
-        self.run("Verifying the account is empty before creating keys…",self.model.initialize_empty_vault,lambda _:self.export_vault())
+        self.run("Verifying the account is empty before creating keys...",self.model.initialize_empty_vault,lambda _:self.export_vault())
     def username(self):
         from tkinter import simpledialog
         if self.busy:return
-        name=simpledialog.askstring("Teams username","3–32 characters: a letter first, then letters, numbers, underscore, dot, or hyphen.",parent=self.root)
-        if name:self.run("Saving your Teams username…",lambda:self.model.team_request("/v1/receivers/me/dev-profile","PUT",{"username":name}))
+        name=simpledialog.askstring("Teams username","3-32 characters: a letter first, then letters, numbers, underscore, dot, or hyphen.",parent=self.root)
+        if name:self.run("Saving your Teams username...",lambda:self.model.team_request("/v1/receivers/me/dev-profile","PUT",{"username":name}))
     def refresh_teams(self):
         self.team_values=[];self.team_cursor=None
-        self.run("Loading your Teams…",lambda:self.model.teams(),self.display_teams)
+        self.run("Loading your Teams...",lambda:self.model.teams(),self.display_teams)
     def more_teams(self):
-        if self.team_cursor:self.run("Loading more Teams…",lambda:self.model.teams(self.team_cursor),self.display_teams)
+        if self.team_cursor:self.run("Loading more Teams...",lambda:self.model.teams(self.team_cursor),self.display_teams)
     def display_teams(self,value):
         for team in value.get("teams",[]):
             if team["id"] not in {t["id"] for t in self.team_values}:self.team_values.append(team)
-        self.team_cursor=value.get("nextCursor");self.team_list["values"]=[t["name"]+" · "+t["role"] for t in self.team_values]
+        self.team_cursor=value.get("nextCursor");self.team_list["values"]=[t["name"]+"  -  "+t["role"] for t in self.team_values]
         if self.team_values:self.team_list.current(0);self.team=self.team_values[0]["id"];self.refresh_chat()
     def team_changed(self,_=None):
         if self.busy:return
@@ -775,18 +783,18 @@ class GenDragoonGUI:
         from tkinter import simpledialog
         if self.busy or not self.model.selected_note:return
         name=simpledialog.askstring("Create MachineNote team","Team display name",parent=self.root)
-        if name:self.run("Creating this MachineNote's team…",lambda:self.model.team_request("/v1/receivers/me/workspaces/"+self.model.selected_note+"/team","POST",{"name":name}),lambda _:self.refresh_teams())
+        if name:self.run("Creating this MachineNote's team...",lambda:self.model.team_request("/v1/receivers/me/workspaces/"+self.model.selected_note+"/team","POST",{"name":name}),lambda _:self.refresh_teams())
     def join_team(self):
         from tkinter import simpledialog
         if self.busy:return
-        token=simpledialog.askstring("Join team","Paste the single-use invitation",show="•",parent=self.root)
-        if token:self.run("Accepting the team invitation…",lambda:self.model.team_request("/v1/receivers/teams/join","POST",{"token":token}),lambda _:self.refresh_teams())
+        token=simpledialog.askstring("Join team","Paste the single-use invitation",show="*",parent=self.root)
+        if token:self.run("Accepting the team invitation...",lambda:self.model.team_request("/v1/receivers/teams/join","POST",{"token":token}),lambda _:self.refresh_teams())
     def invite(self):
         from tkinter import simpledialog
         if self.busy or not self.team:return
         def show(value):
             simpledialog.askstring("Single-use invitation","Share this invitation with the intended teammate. It expires in 72 hours.",initialvalue=value["token"],parent=self.root)
-        self.run("Creating a single-use invitation…",lambda:self.model.team_request("/v1/receivers/teams/"+self.team+"/invites","POST",{"expiresInHours":72}),show)
+        self.run("Creating a single-use invitation...",lambda:self.model.team_request("/v1/receivers/teams/"+self.team+"/invites","POST",{"expiresInHours":72}),show)
     def members(self):
         from tkinter import messagebox
         if self.busy or not self.team:return
@@ -799,7 +807,7 @@ class GenDragoonGUI:
                 if cursor in seen:raise SessionError("The member page cursor repeated.")
                 seen.add(cursor)
             raise SessionError("The member list is too large for one desktop dialog.")
-        self.run("Loading team members…",work,lambda rows:messagebox.showinfo("Team members","\n".join(str(r.get("username") or "Username not set")+" · "+str(r["role"]) for r in rows),parent=self.root))
+        self.run("Loading team members...",work,lambda rows:messagebox.showinfo("Team members","\n".join(str(r.get("username") or "Username not set")+"  -  "+str(r["role"]) for r in rows),parent=self.root))
     def refresh_chat(self):
         if self.busy or not self.team:return
         self.chat_cursor=None;self.chat.configure(state="normal");self.chat.delete("1.0","end");self.chat.configure(state="disabled")
@@ -808,7 +816,7 @@ class GenDragoonGUI:
         if self.busy or not self.team or not first and not self.chat_cursor:return
         cursor=self.chat_cursor
         path="/v1/receivers/teams/"+self.team+"/messages"+("?cursor="+self.model._cursor(cursor) if cursor else "")
-        self.run("Loading team chat…",lambda:self.model.team_request(path),self.display_chat)
+        self.run("Loading team chat...",lambda:self.model.team_request(path),self.display_chat)
     def display_chat(self,value):
         self.chat_cursor=value.get("nextCursor");self.chat.configure(state="normal")
         for item in value.get("messages",[]):self.chat.insert("end",str(item.get("username") or "Teammate")+": "+("[removed]" if item.get("deleted") else str(item.get("text", "")))+"\n")
@@ -818,7 +826,7 @@ class GenDragoonGUI:
         text=self.message.get()
         if not text:return
         value={"text":text,"messageId":uuid.uuid4().hex}
-        self.run("Sending team message…",lambda:self.model.team_request("/v1/receivers/teams/"+self.team+"/messages","POST",value),lambda _:(self.message.delete(0,"end"),self.refresh_chat()))
+        self.run("Sending team message...",lambda:self.model.team_request("/v1/receivers/teams/"+self.team+"/messages","POST",value),lambda _:(self.message.delete(0,"end"),self.refresh_chat()))
     def companion_dispatch(self,request,done):
         """Thread-safe hook for the separately permissioned native companion server.
 
@@ -881,20 +889,20 @@ class GenDragoonGUI:
                             self.model.refresh_notes()
                             notes=[{k:n[k] for k in ("id","name","active","readOnly","workers","quotaBytes","usedBytes") if k in n} for n in self.model.notes]
                             return {"id":self.model.session.receiver,"state":"ready","workspaces":notes,"machineNotes":notes}
-                        return self.run("Refreshing browser workspace metadata…",inventory,respond,lambda _:reject("request_failed"))
+                        return self.run("Refreshing browser workspace metadata...",inventory,respond,lambda _:reject("request_failed"))
                     library_route=re.fullmatch(r"/v1/receivers/me/workspaces/([a-f0-9]{32})/library",path)
                     if library_route and verb=="GET" and library_route[1] in {n["id"] for n in self.model.notes}:
-                        return self.run("Loading browser library metadata…",lambda:self.model.session.request(path),respond,lambda _:reject("request_failed"))
+                        return self.run("Loading browser library metadata...",lambda:self.model.session.request(path),respond,lambda _:reject("request_failed"))
                     if not team_route_allowed(path) or verb not in ("GET","POST","PUT","DELETE","PATCH"):raise ValueError("Unsupported companion service request.")
-                    return self.run("Processing the authenticated Teams request…",lambda:self.model.team_request(path,verb,body),respond,lambda _:reject("request_failed"))
+                    return self.run("Processing the authenticated Teams request...",lambda:self.model.team_request(path,verb,body),respond,lambda _:reject("request_failed"))
                 if method not in ("selectUpload","uploadSelection","enqueue-selection"):raise ValueError("Unsupported desktop companion action.")
                 if self.busy:raise ValueError("The desktop is busy.")
                 note=params.get("workspaceId");parent=params.get("parentKey")
                 if method=="selectUpload":
                     from tkinter import filedialog
                     if params.get("kind")=="folder":
-                        chosen=filedialog.askdirectory(parent=self.root,title="Upload selected folder · original retained");paths=[chosen] if chosen else []
-                    elif params.get("kind")=="file":paths=list(filedialog.askopenfilenames(parent=self.root,title="Upload selected files · originals retained"))
+                        chosen=filedialog.askdirectory(parent=self.root,title="Upload selected folder  -  original retained");paths=[chosen] if chosen else []
+                    elif params.get("kind")=="file":paths=list(filedialog.askopenfilenames(parent=self.root,title="Upload selected files  -  originals retained"))
                     else:raise ValueError("Choose files or a folder.")
                     if not paths:return reject("user_cancelled")
                 else:

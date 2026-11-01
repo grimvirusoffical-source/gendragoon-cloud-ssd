@@ -46,12 +46,19 @@ def collect_id(system=None, run=subprocess.run, read=lambda p: Path(p).read_text
                 return normalized_id(root["IOPlatformUUID"]), "macos", "IOPlatformUUID"
     elif system == "win32":
         executable = str(Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32/WindowsPowerShell/v1.0/powershell.exe")
-        result = run([executable, "-NoLogo", "-NoProfile", "-NonInteractive", "-Command",
-                      "[Console]::Out.Write((Get-CimInstance -ClassName Win32_ComputerSystemProduct).UUID)"],
-                     capture_output=True, timeout=15, check=True)
-        if len(result.stdout) > 256:
-            raise ValueError("Device ID response exceeded its limit")
-        return normalized_id(result.stdout.decode("utf-8-sig")), "windows", "SMBIOS-UUID"
+        commands = (
+            ("[Console]::Out.Write((Get-CimInstance -ClassName Win32_ComputerSystemProduct).UUID)", "SMBIOS-UUID"),
+            ("[Console]::Out.Write((Get-ItemProperty -Path 'HKLM:\\SOFTWARE\\Microsoft\\Cryptography').MachineGuid)", "MachineGuid"),
+        )
+        for command, source in commands:
+            try:
+                result = run([executable, "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", command],
+                             capture_output=True, timeout=15, check=True)
+                if len(result.stdout) > 256:
+                    raise ValueError("Device ID response exceeded its limit")
+                return normalized_id(result.stdout.decode("utf-8-sig")), "windows", source
+            except (OSError, ValueError, subprocess.SubprocessError):
+                continue
     elif system.startswith("linux"):
         for path, source in (("/sys/class/dmi/id/product_uuid", "DMI-product-UUID"),
                              ("/etc/machine-id", "machine-id")):

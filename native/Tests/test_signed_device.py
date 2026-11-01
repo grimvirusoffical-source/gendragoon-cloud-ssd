@@ -33,6 +33,14 @@ class DeviceIdentityTests(unittest.TestCase):
         r=devices.fingerprint(OWNER,system='win32',run=run)
         self.assertEqual(r['platform'],'windows')
         self.assertIn('-NoProfile',calls[0]);self.assertIn('Win32_ComputerSystemProduct',calls[0][-1])
+    def test_windows_falls_back_to_machineguid_when_smbios_is_unusable(self):
+        calls=[];outputs=[b"00000000-0000-0000-0000-000000000000",RAW.encode()]
+        def run(args,**kwargs):
+            calls.append(args);return types.SimpleNamespace(stdout=outputs.pop(0))
+        r=devices.fingerprint(OWNER,system='win32',run=run)
+        self.assertEqual(r['platform'],'windows');self.assertEqual(r['source'],'MachineGuid')
+        self.assertEqual(len(calls),2);self.assertIn('MachineGuid',calls[1][-1])
+        self.assertNotIn(RAW,json.dumps(r))
     def test_linux_dmi_and_machine_id_fallback_are_both_explicit(self):
         raw=RAW.replace('-','')
         r=devices.fingerprint(OWNER,system='linux',read=lambda _:raw)

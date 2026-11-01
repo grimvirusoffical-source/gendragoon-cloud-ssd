@@ -26,6 +26,7 @@ from codec_loader import install_sourceless_runtime
 
 from redx_session import RedXSession, IntegrationSession, SessionError, API
 import portable_vault as vault
+import storage_secret_store as local_storage_secret
 from portable_apps import PortableApps, PortableAppError, identity as app_identity
 from gendragoon_desktop import safe_path
 
@@ -299,6 +300,25 @@ class MachineNotesClient:
         self.keys=None;self.keymap=None;self.vault_exported=False
         self.progress=None
         self.portable_apps=PortableApps(self.root/"portable-apps")
+    def _restore_local_vault(self):
+        receiver=self.session.receiver
+        if self.keys is not None or not storage.RECEIVER.fullmatch(receiver or ""):return False
+        secret=local_storage_secret.load(receiver)
+        if not secret:return False
+        directory=private.private_directory(self.root/"keys")
+        path=directory/(receiver+".keymap")
+        if not path.is_file() or path.is_symlink():return False
+        private.verify(path)
+        if path.stat().st_nlink!=1 or path.stat().st_size>vault.KEYMAP_LIMIT:raise vault.VaultError("The local keymap failed validation.")
+        data=path.read_bytes();vault.validate_keymap(data)
+        try:
+            with crypto_runtime().session_open(secret,str(path)):pass
+        except Exception:raise vault.VaultError("The OS-protected storage secret does not match this keymap.") from None
+        self.keys=dict(receiverId=receiver,storageSecret=secret,keymap=data);self.keymap=path
+        # This makes mount/sign persistent across restarts, but is not a portable
+        # recovery copy. Upload remains blocked until the user exports a vault.
+        self.vault_exported=False
+        return True
     def refresh_notes(self):
         value=self.session.request("/v1/receivers/me")
         notes=value.get("machineNotes",value.get("workspaces"))
@@ -310,6 +330,7 @@ class MachineNotesClient:
         self.session.receiver=value["id"];self.notes=notes
         if self.session.integration_mode and len(notes)!=1:raise SessionError("The integration key did not return exactly its bound MachineNote.")
         if self.selected_note not in {n["id"] for n in notes}:self.selected_note=notes[0]["id"] if notes else None;self.selected_parent=None
+        if not self.session.integration_mode:self._restore_local_vault()
         return notes
     def select_note(self,note):
         if note not in {n["id"] for n in self.notes}:raise SessionError("Choose a MachineNote owned by this session.")
@@ -351,6 +372,8 @@ class MachineNotesClient:
         if self.keys is not None and (self.keys["storageSecret"]!=keys["storageSecret"] or self.keys["keymap"]!=keys["keymap"]):
             raise vault.VaultError("This session already has different keys. They will not be replaced.")
         path=vault.install_keymap(keys,self.root/"keys",crypto_runtime())
+        try:local_storage_secret.save(self.session.receiver,keys["storageSecret"])
+        except local_storage_secret.StorageSecretError as error:raise vault.VaultError(str(error)) from None
         self.keys=keys;self.keymap=path;self.vault_exported=True
     def initialize_empty_vault(self):
         if self.session.integration_mode:raise vault.VaultError("Initialize new storage keys using a full Red-XAI account session.")
@@ -368,6 +391,10 @@ class MachineNotesClient:
             data=candidate.read_bytes();vault.validate_keymap(data)
         keys=dict(receiverId=self.session.receiver,storageSecret=secret,keymap=data)
         path=vault.install_keymap(keys,directory,rsx)
+        try:local_storage_secret.save(self.session.receiver,secret)
+        except local_storage_secret.StorageSecretError as error:
+            path.unlink(missing_ok=True)
+            raise vault.VaultError(str(error)) from None
         self.keys=keys;self.keymap=path;self.vault_exported=False
     def export_vault(self,password):
         if self.keys is None:raise vault.VaultError("Import or initialize storage keys first.")

@@ -93,6 +93,9 @@ def prerequisites(rclone=None):
     if sys.platform!="win32" and not sys.platform.startswith("linux"):
         raise PlatformMountError("Desktop drives require Windows with WinFsp or Linux with FUSE.")
     found=rclone or shutil.which("GenDragoonMountHost.exe" if sys.platform=="win32" else "rclone")
+    if sys.platform=="win32" and not found and os.environ.get("LOCALAPPDATA"):
+        candidate=Path(os.environ["LOCALAPPDATA"])/"Programs"/"GenDragoonMountHost"/"GenDragoonMountHost.exe"
+        if candidate.is_file() and not candidate.is_symlink():found=str(candidate)
     if sys.platform=="win32" and not found:
         raise PlatformMountError("Windows drives require the separately distributed open-source GenDragoon Mount Host and an existing WinFsp installation. The rclone command-line unmount path is unavailable because its busy-file safety gate did not pass.")
     if not found:raise PlatformMountError("Select an existing trusted rclone executable. GenDragoon does not install rclone or filesystem drivers.")
