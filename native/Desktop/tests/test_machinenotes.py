@@ -117,14 +117,17 @@ class VaultTests(unittest.TestCase):
 class SessionTests(unittest.TestCase):
     def test_browser_approval_pkce_receiver_identity_and_no_disk_credentials(self):
         calls=[];codes=[];opened=[];session=auth.RedXSession()
+        approval=auth.ISSUER+"/redxai-connectx#request=fixture"
         def http(origin,path,method="GET",value=None,token=None,transport=None):
             calls.append((origin,path,value,token))
-            if path.endswith("/start"):return dict(device_code="D"*43,user_code="ABCDEFGH",verification_uri=auth.ISSUER+"/redxai-connect",interval=2,expires_in=300)
+            if path.endswith("/start"):return dict(device_code="D"*43,user_code="ABCDEFGH",verification_uri=approval,interval=2,expires_in=300)
             if path.endswith("/token"):return token_set()
             return dict(id=auth.receiver_id("desktop-test"),state="ready")
-        with patch.object(auth,"http_json",side_effect=http),patch.object(auth.time,"sleep"):
+        with patch.object(auth,"http_json",side_effect=http),patch.object(auth.time,"sleep"), \
+             patch.object(auth.quick_login_store,"clear") as cleared,patch.object(auth.quick_login_store,"save") as saved:
             session.login(codes.append,opened.append)
-        self.assertEqual(codes,["ABCDEFGH"]);self.assertEqual(opened,[auth.ISSUER+"/redxai-connect"])
+        self.assertEqual(codes,["ABCDEFGH"]);self.assertEqual(opened,[approval])
+        cleared.assert_called_once();saved.assert_not_called()
         start=calls[0][2];exchange=calls[1][2]
         self.assertEqual(start["code_challenge_method"],"S256")
         self.assertEqual(start["code_challenge"],base64.urlsafe_b64encode(hashlib.sha256(exchange["code_verifier"].encode()).digest()).decode().rstrip("="))
