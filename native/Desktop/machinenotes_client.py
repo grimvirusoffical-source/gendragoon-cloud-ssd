@@ -297,6 +297,7 @@ class MachineNotesClient:
     def __init__(self,session=None,root=None):
         self.session=session or RedXSession();self.root=Path(root or state_root()).absolute()
         self.notes=[];self.selected_note=None;self.selected_parent=None;self.items=[];self.revision=None
+        self.storage_engine="redx";self.storage_format=None;self.account_used_bytes=0;self.library_items=0
         self.keys=None;self.keymap=None;self.vault_exported=False
         self.progress=None
         self.portable_apps=PortableApps(self.root/"portable-apps")
@@ -328,6 +329,9 @@ class MachineNotesClient:
             raise SessionError("The authenticated MachineNotes inventory failed validation.")
         if self.session.receiver is not None and self.session.receiver!=value["id"]:raise SessionError("The account identity changed.")
         self.session.receiver=value["id"];self.notes=notes
+        self.storage_format=value.get("storageFormat") if isinstance(value.get("storageFormat"),str) else None
+        self.account_used_bytes=value.get("usedBytes") if type(value.get("usedBytes")) is int else 0
+        self.library_items=value.get("libraryItems") if type(value.get("libraryItems")) is int else 0
         if self.session.integration_mode and len(notes)!=1:raise SessionError("The integration key did not return exactly its bound MachineNote.")
         if self.selected_note not in {n["id"] for n in notes}:self.selected_note=notes[0]["id"] if notes else None;self.selected_parent=None
         if not self.session.integration_mode:self._restore_local_vault()
@@ -402,14 +406,13 @@ class MachineNotesClient:
         return data
     def config(self):
         if self.keys is None or self.keymap is None or self.keys["receiverId"]!=self.session.receiver:
-            raise vault.VaultError("Import this account's portable vault before encrypted transfers.")
+            raise vault.VaultError("Storage keys are not available on this device. Initialize an empty account or import a recovery vault.")
         if self.selected_note not in {n["id"] for n in self.notes}:raise SessionError("Choose a current MachineNote.")
         return dict(provider="redxai",cloudApi=API,workspaceId=self.selected_note,receiverId=self.session.receiver,
             storageSecret=self.keys["storageSecret"],keymapPath=str(self.keymap),constrained=False,_session=self.session)
     @transfer_progress
     def upload(self,source,parent=None,*,encryption_mode="standard",offload=False,before_offload=None):
         storage.normalize_mode(encryption_mode=encryption_mode)
-        if not self.vault_exported:raise vault.VaultError("Export your new portable vault before uploading. This is the only recovery copy of its storage key.")
         if type(offload) is not bool:raise ValueError("Choose an explicit offload option.")
         source=Path(source).absolute();safe_path(source.name)
         if offload:
